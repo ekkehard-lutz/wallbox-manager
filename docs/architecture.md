@@ -1,0 +1,688 @@
+# Wallbox Manager architecture
+
+Status: proposed design, 2026-09-20. This document specifies future behavior;
+only the integration scaffold exists. No OCPP runtime is implemented here.
+The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
+and the exact upstream revision used. Implementation must update these documents
+and the README as decisions become operational.
+
+## Product and boundaries
+
+`wallbox_manager` is the Home Assistant integration domain. OCPP is an internal
+protocol implementation. A station contains EVSEs and connectors; preserve those
+identities rather than flattening them into an assumed single connector. Control
+is scoped to a controllable EVSE, with a station coordinator enforcing shared
+physical limits and serializing station-wide operations. An adapter must declare
+when a command affects the whole station. Such a command cannot override a
+sibling EVSE's owner.
+
+The first wallbox-stationary device is a reference fixture, not the model for all
+chargers. Its phase switching and local-authority signals need verified device
+contracts. Unknown capabilities disable the affected action; model names alone
+never authorize it. Non-OCPP adapters implement the same internal contracts.
+
+## Proposed package layout
+
+All paths below are proposed beneath `custom_components/wallbox_manager/`;
+this task does not create these runtime modules.
+
+```text
+__init__.py              HA setup/unload and config-entry runtime wiring
+config_flow.py           integration configuration, validation and migration
+const.py                 product identifiers, not protocol enums
+manifest.json            Wallbox Manager identity and explicit dependencies
+strings.json             canonical translatable UI messages
+translations/en.json     English strings
+translations/de.json     German strings
+sensor.py                metering, ownership, solver and capability diagnostics
+select.py                the five normal profile choices
+number.py                capability-derived product settings, no direct OCPP calls
+button.py                explicit supported maintenance actions
+entity.py                shared snapshot subscriptions and stable identities
+api.py                   versioned programmatic Energy Manager facade
+runtime.py               per-entry lifecycle, adapter registry and task cleanup
+core/
+  models.py              station/EVSE/connector IDs and immutable snapshots
+  capabilities.py        versioned capability evidence and operating envelopes
+  events.py              normalized telemetry, boot, authority and result events
+  coordinator.py         per-EVSE serialization and shared station constraints
+  persistence.py         desired ownership/profile, owner authorization and LOCAL latch
+control/
+  profiles.py            OFF/PV_SURPLUS/PV_OPTIMUM/PV_MAXIMUM/GRID policies
+  energy_inputs.py       normalized energy-input snapshots and validity rules
+  requests.py            PowerRequest and rounding direction
+  ownership.py           state transitions and command fencing
+  leases.py              authenticated owner leases and monotonic deadlines
+  controller.py          intent -> solve -> dispatch -> reconcile
+solver/
+  operating_point.py     feasible physical point and result reasons
+  power.py               pure constrained candidate selection
+  transitions.py         phase-switch hysteresis and dwell planning
+protocols/
+  base.py                adapter contracts, normalized results and events
+  ocpp/
+    common/
+      transport.py       WebSocket lifecycle and explicit subprotocol selection
+      metering.py        normalized samples, units, scope and timestamps
+      sessions.py        transaction identity and connection generations
+      profiles.py        owned OCPP profile IDs, purposes and expiration
+    v16/adapter.py       OCPP 1.6J mapping and configuration discovery
+    v201/adapter.py      OCPP 2.0.1 inventory and transaction mapping
+    v21/adapter.py       OCPP 2.1 schemas and independently tested behavior
+    extensions/
+      registry.py       vendor/message/version routing and validation
+      wallbox_stationary.py  verified first-device extension contract only
+  extensions.py          extension interface for future non-OCPP protocols
+```
+
+HA entities and the programmatic API call the same core command boundary. Neither
+may bypass ownership via an adapter reference. Core and solver modules must not
+import HA or OCPP types. Adapters translate protocol objects into immutable core
+events; entity updates subscribe to snapshots. Setup/unload owns all tasks,
+subscriptions, timers and connections. No server starts as a side effect of import.
+
+## Capability model
+
+A capability snapshot is scoped to station/EVSE, firmware and connection/boot
+generation, with a revision, timestamp, source and evidence state: unknown,
+advertised, verified, unsupported or degraded. Separate configuration overrides
+from observed support and retain the reason for each override. A timeout is not
+proof of unsupported functionality.
+
+Record supported phase modes, actual phase mapping, per-mode minimum/maximum
+current and step, electrical/site limits, supported power/current schedule units,
+profile purposes and stack constraints, stop/pause/start support, transaction
+scope, and metering channels. For example, 1P 6–32 A and 3P 6–16 A are separate
+envelopes, not a single 32 A number entity. Re-evaluate bounds whenever capability
+revision or operating mode changes; reject stale writes at the core boundary.
+
+Physical phase switching is a distinct capability with preconditions, safe
+sequence, feedback and timeout. `numberPhases`/`phaseToUse` schedule fields do not
+prove that a contactor changes the connected phases. Likewise, administrative
+availability, charge permission, CP signaling/relay and transaction lifecycle are
+separate capabilities. `ChangeAvailability` is not a universal CP relay switch.
+
+Prefer standard protocol operations. Use a vendor extension only for functionality
+that lacks an adequate standard mapping on that device. The registry keys handlers
+by protocol version, vendor, message and device/firmware applicability. Validate
+payloads, bound sizes and timeouts, reject unknown messages appropriately and
+normalize results. Extensions cannot bypass ownership or hard electrical limits.
+No arbitrary DataTransfer entity/service is an alternative control path.
+
+## Control and power solving
+
+```text
+Profile Controller (or validated Energy Manager request)
+  -> PowerRequest(target_w, direction, allowed)
+  -> OperatingPoint Solver
+  -> OperatingPoint(phases, current, offered_power)
+  -> Protocol Adapter
+  -> Wallbox
+```
+
+`target_w` is a finite, nonnegative charging target; bidirectional power is outside
+this initial contract. `direction` means rounding (`DOWN`, `NEAREST`, `UP`), not
+energy flow. `allowed=False` prohibits charging regardless of target. Attach
+request identity, ownership epoch, capability revision and observation generation
+to the command envelope. Requested, offered, acknowledged and measured power are
+different fields. A successful protocol response does not prove physical execution.
+
+### Standalone profiles and controller responsibilities
+
+Wallbox Manager deliberately provides useful standalone, current-day PV charging.
+It does not require the future Energy Manager. All PV profiles aim for approximately
+zero grid import attributable to vehicle charging; they do not have an intentional
+grid charging allowance. Numerical tuning remains implementation work.
+
+| Profile | Intent and independent parameters |
+| --- | --- |
+| OFF | Disallow charging; use a verified stop/pause operation, not assumed zero-amp support. |
+| PV_SURPLUS | Charge primarily from current PV surplus while preserving the house battery near a configurable high `battery_target_soc`; around 97% is a conceptual/default candidate, not a fixed requirement. Use SOC hysteresis around the target. |
+| PV_OPTIMUM | Use current PV and permitted battery energy with separate `minimum_battery_soc` and `evening_battery_soc`, a remaining-current-day PV forecast and a configurable forecast/safety reserve. Apply a simple linear current-day strategy, not an intentional grid contribution. |
+| PV_MAXIMUM | Maximize useful vehicle charging from current PV plus permitted battery discharge, respecting its own independent `minimum_battery_soc`; hold that lower limit when reached. No intentional grid import. |
+| GRID | Follow an explicitly configured grid charging budget, with DOWN to respect it. Configure that budget before activation. |
+
+`PV_OPTIMUM.minimum_battery_soc` and `PV_MAXIMUM.minimum_battery_soc` are independent:
+30% and 10%, respectively, are an example of a valid installation preference.
+Neither is an alias for the external battery reserve. PV_OPTIMUM's evening target
+is a separate objective, not a second name for its daytime minimum.
+
+The profile controller decides how much charging power is currently allowed from
+energy-system inputs and profile policy. It produces `PowerRequest`; it does not
+choose amps, phase count or vendor commands. PV requests normally use DOWN so a
+minimum charging step cannot justify deliberate grid charging. Pause if available
+power cannot sustain the minimum feasible point. The solver handles technical
+feasibility, rounding, phase transitions and electrical limits; it does not interpret
+battery forecasts or allocate household energy. REMOTE targets pass through the same
+technical solver but do not run a standalone PV profile in parallel.
+
+### Configured energy-system inputs
+
+Consume vendor-neutral Home Assistant entity values through the HA integration
+boundary and pass validated snapshots to the controller. No Fronius entity IDs,
+register addresses or vendor-specific sign conventions belong in the core.
+
+| Configurable HA input | Unit and semantics | Required use |
+| --- | --- | --- |
+| `grid_import_power` | W, finite and non-negative, power entering the installation from the grid. | All standalone PV profiles, for grid feedback and tolerance checks. |
+| `grid_export_power` | W, finite and non-negative, power leaving the installation toward the grid. | All standalone PV profiles, for currently exported surplus. |
+| `battery_charge_power` | W, finite and non-negative, power flowing into the house battery. | All standalone PV profiles, to distinguish battery charging from freely available export. |
+| `battery_discharge_power` | W, finite and non-negative, power flowing out of the house battery. | All standalone PV profiles, for battery-flow accounting and discharge-unavailable fallback. |
+| `battery_soc` | %, finite in [0, 100], observed house-battery state of charge. | All three battery-aware PV profiles. |
+| `battery_reserve_soc` | %, finite in [0, 100], known externally imposed reserve; observed/configured input, not owned by Wallbox Manager. | All battery-aware PV profiles; combines with the profile floor/target. |
+| `pv_forecast_remaining` | kWh, finite and non-negative, the total PV energy expected to be generated from now until the end of today's PV production period. It is not surplus after household consumption, vehicle-available energy or a full-day forecast including energy already generated. | PV_OPTIMUM only. |
+
+The battery-aware profiles described here require those battery inputs; absence does
+not imply a zero reserve or unrestricted battery energy. A battery-free variant is
+not specified by this design. OFF and GRID do not depend on PV-only inputs, and
+REMOTE does not require the standalone forecast; all still require their own
+technical control prerequisites.
+
+An installation whose source provides signed bidirectional power may use HA
+template/helper sensors to split it into separate positive import/export or
+charge/discharge entities. Wallbox Manager does not infer the source's sign
+convention. Unit validation/conversion must be explicit; do not silently read kW
+as W or a W forecast as kWh. Entity selection must identify the whole-installation
+grid measurement boundary and the house battery, not an unrelated meter.
+
+Each snapshot carries source identity, observation/update time and validity.
+Power/SOC inputs need freshness limits appropriate to their update cadence and a
+bounded observation skew for flow comparisons. A constant value is not inherently
+stale if the source continues reporting it. The forecast has separate update-age
+and current-day validity rules; yesterday's forecast must not survive midnight as
+today's remaining energy. A configured reserve may update infrequently, so its
+validity policy must distinguish a trustworthy stable setting from an unavailable
+source. Exact age limits and skew windows remain configurable/design tuning,
+not fixed numbers in this architecture.
+
+Missing, unknown, unavailable, nonfinite, negative or out-of-range required inputs
+make the dependent PV profile INHIBITED with a specific reason. Request a verified
+safe pause when still authorized; never continue an old target, substitute zero,
+choose GRID/PV_MAXIMUM or bypass LOCAL. Fresh valid inputs can automatically resume
+the persisted desired profile after reconciliation. Contradictory or asynchronous
+flow readings must not trigger an increase; refresh/cohere the snapshot first.
+Missing forecast inhibits PV_OPTIMUM without disabling otherwise valid PV_SURPLUS
+or PV_MAXIMUM. Input/configuration validity is separate from wallbox capabilities;
+both must be revalidated before dispatch, including after restart/reconnect.
+
+### Battery targets and simple PV_OPTIMUM forecast use
+
+PV_SURPLUS gives priority to keeping the battery approximately at its configured
+high SOC target. Below the target's hysteresis band, preserve energy for battery
+replenishment and reduce/pause vehicle charging as needed. Near/above the target,
+use current surplus while avoiding sustained battery depletion. Hysteresis prevents
+rapid on/off changes around the target; it does not permit ignoring a higher known
+reserve. The controller adjusts only vehicle demand, not battery charging settings.
+
+PV_OPTIMUM may use battery energy during the day down toward its configured minimum,
+subject to actual battery/inverter restrictions and the known reserve. Separately,
+it attempts to leave the battery at `evening_battery_soc` when PV production ends.
+Validate the configured evening objective against the daytime minimum; a forecast
+shortfall can make the evening objective unreachable and must be reported rather
+than met through unrequested grid charging.
+
+PV_OPTIMUM uses the following additional configuration and normalized time input:
+
+| Input/parameter | Unit and validation | Source |
+| --- | --- | --- |
+| `average_consumption_power` | W, finite and non-negative; assumed average household/site consumption for the remaining time until sunset. | User-configured constant, not a learned load profile. Household demand is accounted for separately from total PV generation. |
+| `battery_capacity` | kWh, finite and strictly positive; explicitly configured usable/nominal battery energy capacity consistent with the SOC conversion basis. | Validated configuration; never inferred from current SOC or power measurements. Exact config-flow presentation remains implementation work. |
+| `forecast_reserve` | kWh, finite and non-negative; conservative deduction from expected PV generation. | Existing configurable forecast/safety reserve. |
+| `hours_until_sunset` | Hours, finite and non-negative, remaining duration until today's sunset; zero after that sunset. | Normalized by the HA integration layer using HA's existing sun/location facilities, installation location and timezone. |
+
+The HA layer obtains today's local-date sunset; Wallbox Manager requires no separate
+latitude, longitude or sunset-sensor configuration. It supplies only the normalized
+duration to the pure controller, which imports no HA sun APIs. Do not blindly use
+a rolling “next sunset” value after today's sunset: it may refer to tomorrow and
+incorrectly create approximately 24 hours of remaining time. If today's solar timing
+cannot be established, inhibit the dependent calculation with a reason rather than
+substitute tomorrow or fabricate a duration.
+
+The finalized simple calculation is:
+
+```text
+remaining_consumption_kwh =
+    average_consumption_power_w / 1000 * hours_until_sunset
+
+usable_forecast_kwh =
+    max(0, pv_forecast_remaining_kwh - forecast_reserve_kwh)
+
+battery_energy_needed_kwh =
+    max(0, remaining_consumption_kwh - usable_forecast_kwh)
+
+additional_soc_needed_pct =
+    battery_energy_needed_kwh / battery_capacity_kwh * 100
+
+target_battery_soc = evening_battery_soc + additional_soc_needed_pct
+
+target_battery_soc = clamp(target_battery_soc, minimum_battery_soc, 100)
+```
+
+Here `clamp(value, lower, upper) = min(upper, max(lower, value))`; SOC quantities
+are percentage points on the 0–100 scale. Validate both configured SOC thresholds
+in that range and their minimum/evening relationship before calculating. Invalid
+capacity, consumption, reserve or timing inhibits PV_OPTIMUM under the same input
+validity rules as its required sensors.
+
+Expected household consumption is approximated linearly from average power and
+remaining time. Usable total PV generation first covers that consumption. Any
+predicted shortfall adds the corresponding battery SOC to preserve above the desired
+end-of-PV evening SOC. Surplus forecast cannot lower the target below the evening
+objective through a negative shortfall. Clamp the result to the configured minimum
+and 100%; if the unclamped requirement exceeds 100%, expose the planning shortfall
+rather than imply the evening goal is guaranteed. This equation adds no learned
+behavior, price optimization or sophisticated forecast model.
+
+For example, 500 W over four hours gives 2 kWh expected consumption. A 1.5 kWh
+remaining forecast less a 0.5 kWh reserve leaves 1 kWh usable forecast. The 1 kWh
+shortfall requires 10 SOC percentage points with a 10 kWh battery. An evening target
+of 60% and minimum of 30% therefore produce a planning target of 70%.
+
+`target_battery_soc` is a dynamic planning target, separate from the hard currently
+known `effective_discharge_floor` defined below. Compare current battery SOC to the
+planning target to preserve the planned battery energy when allocating vehicle
+power, while always respecting the effective floor. A higher known external reserve
+can constrain allocation even when the calculated planning target is lower. Neither
+a favorable forecast nor the planning target authorizes grid charging or overrides
+actual inverter limits; instantaneous grid/battery feedback still constrains power.
+
+Recalculate as current time/`hours_until_sunset`, remaining forecast, battery SOC,
+known reserve or configuration changes. SOC and reserve affect allocation and
+constraints even though they do not appear in the forecast arithmetic itself.
+Persist selected profile and configuration, never a calculated planning target as
+authoritative restart state. Recalculate from fresh inputs after recovery.
+
+After today's sunset, set `hours_until_sunset = 0` and treat the current-day forecast
+contribution as exhausted (zero for this calculation), even if a sensor retains a
+residual value. This intentional end-of-day normalization is not a generic fallback
+for missing/invalid daytime forecasts. Do not substitute tomorrow's sunset or consume
+a tomorrow forecast during this evening calculation. Expected remaining consumption
+and additional SOC needed then become zero, leaving the clamped evening target.
+Normal current-day input selection resumes for the new local date; no next-day
+optimization is introduced. Charging after sunset still respects that planning
+target, the profile minimum, known reserve, approximately zero grid import and
+observed energy flows; the equation is not permission for unrestricted discharge.
+
+PV_MAXIMUM does not need that forecast or an evening target. It seeks the greatest
+useful vehicle power available from PV and permitted battery discharge, constrained
+by observed flows and physical limits. At its effective minimum, remove the intended
+battery contribution and hold the floor while following available PV. House loads
+or inverter behavior may still move SOC; Wallbox Manager can reduce vehicle demand
+but cannot guarantee the SOC of a battery it does not control.
+
+For PV_OPTIMUM and PV_MAXIMUM, the effective discharge floor is
+`max(profile.minimum_battery_soc, battery_reserve_soc)`. If the known reserve is
+higher, report that the requested profile minimum is currently unreachable and
+respect the higher limit. PV_SURPLUS likewise respects the external reserve as
+well as its high-SOC preservation target. Observe reserve changes and re-evaluate;
+never write the reserve entity or assume ownership of it.
+
+### Grid feedback and battery-discharge-unavailable fallback
+
+Account for existing measured vehicle consumption in feedback: installation export
+is incremental surplus after current loads, not the total allowable vehicle power.
+Do not add battery discharge or vehicle demand twice when using grid readings.
+Battery charging power is not automatically free surplus under every profile.
+Use time-aligned wallbox consumption and grid/battery observations; exact controller
+gains and ramp scheduling remain undecided.
+
+Grid-import tolerance accommodates discrete current steps, measurement/controller
+latency and normal fluctuations around the approximately zero-import objective.
+For the current reference wallbox, approximately 250 W (roughly a 1 A step on one
+phase) is an acceptable example. It is not an intentional grid charging budget:
+never add tolerance to the PV target or deliberately consume that extra power.
+Make it configurable/derivable from current step, active phase mode, voltage and
+installation behavior; do not hard-code 250 W for every device. Whole-site import
+may come from house loads, so the controller reduces the controllable vehicle load
+without claiming it can eliminate all household import.
+
+The normal battery-limit algorithm uses SOC and the known reserve above. Separately,
+apply a generic **battery-discharge-unavailable fallback** when all these conditions
+persist across coherent observations or a short debounce window:
+
+- a PV profile currently permits/expects battery discharge;
+- the vehicle is actually charging;
+- grid import exceeds the allowed control tolerance;
+- battery discharge is below a configurable small power deadband.
+
+Do not compare discharge to exactly 0 W. Deadband, persistence window and clearing
+hysteresis are tuning parameters; a single transient sample is insufficient. Invalid
+or stale readings invoke input inhibition, not a battery-limit diagnosis. When the
+condition holds, regard battery contribution as currently unavailable and reduce
+vehicle demand toward currently available PV-only surplus, pausing below the
+minimum feasible charging point. Clear/reassess conservatively using fresh evidence;
+do not repeatedly ramp up into the same grid-import condition.
+
+Grid import above tolerance while the battery is still materially discharging is
+different: reduce vehicle demand through ordinary grid feedback as needed, but do
+not label this as unavailable discharge or infer a reserve. The fallback never
+estimates a hidden SOC percentage; inverter power limits, temperature or other
+restrictions can produce similar observed behavior.
+
+The motivating Fronius installation example supplied for this design has an internal
+web-interface reserve that can exceed the externally visible Modbus reserve, with
+the higher restriction taking effect. This explains the need for flow-based fallback;
+it is not a Fronius reserve detector or a vendor-specific control path. Other systems
+may expose all relevant restrictions and never require this fallback.
+
+### Boundary to battery integrations and the future Energy Manager
+
+Wallbox Manager reads configured HA entities and controls the wallbox. It does not
+write Fronius Modbus registers or embed Fronius PV Manager logic. If active battery
+control is later needed, use a defined programmatic interface of the responsible
+battery/inverter integration. That API is neither designed nor implemented here.
+
+Standalone Wallbox Manager owns simple current-day PV policy, configured sensor
+inputs, simple linear forecast use, current-flow feedback and technical wallbox
+operating-point solving. The future Energy Manager owns learned behavior, vehicle
+target SOC/departure requirements, expected vehicle/next-day use, electricity-price
+optimization, advanced weather/forecast modeling, long-term and cross-device/site
+optimization, and more sophisticated battery strategies. None of those prediction
+features belongs in standalone PV_OPTIMUM. REMOTE remains the programmatic boundary
+for supplying current charging intent/target power; wallbox capabilities, ownership
+and technical constraints remain enforced locally.
+
+### Operating-point solving
+
+The pure solver enumerates current steps for each physically feasible phase mode.
+Use integer step indices or decimal arithmetic, not float modulo. Intersect device,
+installation and shared station envelopes. For balanced AC current, estimate
+`offered_power = current * sum(active phase-to-neutral voltages)`; label this as an
+estimate with its voltage/assumed power-factor basis. Prefer fresh measured phase
+voltages. Nominal-voltage fallback is explicit and has a quality flag; line-to-line
+conversion requires a verified topology. Do not infer switchable modes from the
+number of nonzero meter readings.
+
+Include OFF as a separate zero-power candidate when stopping is supported.
+DOWN chooses the largest feasible offer at or below target; UP the smallest at or
+above target; NEAREST minimizes absolute error, breaking ties toward the current
+mode, then lower power. Hard safety limits always win. If the directional set is
+empty, return `unreachable` with bounds and a suggested feasible point, never
+silently claim that opposite rounding succeeded. A controller may request a new
+explicitly relaxed target; a hard budget cannot be relaxed. Below minimum, DOWN
+may select OFF, UP may select minimum if allowed, and NEAREST compares both.
+
+Example at 230 V, 1P 6–32 A, 3P 6–16 A, 1 A steps, both modes currently eligible:
+a 4,000 W request yields 1P/17 A/3,910 W with DOWN or NEAREST and
+1P/18 A/4,140 W with UP (tie against 3P/6 A favors current 1P mode).
+At 500 W, DOWN and NEAREST choose OFF and UP chooses 1P/6 A/1,380 W.
+Above 11,040 W, UP is unreachable in this envelope.
+
+Current operating state, switching hysteresis and minimum dwell time restrict
+eligible transitions. Return `deferred` and a retry deadline when an otherwise
+feasible mode is temporarily unavailable. Hard-limit reductions and emergency
+inhibition take precedence over dwell. Phase switching requires a verified
+stop/reduce, zero-current confirmation, switch, feedback and controlled resume
+sequence; a timeout inhibits further charging commands and reports uncertainty.
+
+EV consumption below offered power is normal. Expose requested/offered/measured
+values and sustained underconsumption; do not repeatedly increase the limit or
+switch phases just because the EV is full, tapering or internally constrained.
+Re-solve on relevant inputs with debouncing, never replay a stale solved point.
+
+## Ownership state machine
+
+A technical interruption must not erase an existing user control decision.
+Explicit local user takeover always takes priority over automatic recovery.
+Separate the following state dimensions rather than using one owner field:
+
+| Dimension | Meaning and lifetime |
+| --- | --- |
+| Persistent desired control | `desired_owner = LOCAL | WALLBOX_MANAGER | REMOTE`, selected normal profile (`OFF`, `PV_SURPLUS`, `PV_OPTIMUM`, `PV_MAXIMUM`, `GRID`), and the registered authorized Energy Manager owner when REMOTE is desired. Survives technical interruptions. |
+| Runtime active ownership | `active_owner = NONE | WALLBOX_MANAGER | REMOTE`; permission actually established for this runtime/device session. Never inferred solely from persisted intent. LOCAL is represented by the latch/device authority, with no active software owner. |
+| Runtime REMOTE lease | Owner-bound opaque token, ownership epoch and monotonic deadline. Process/session scoped; never persist or restore token/deadline. |
+| Device/local authority | Fresh device-reported authority evidence plus the durable deliberate-LOCAL latch. Connectivity, desired state and actual device authority are separate facts. |
+| Reconciliation/control status | `ACTIVE | ACQUIRING | INHIBITED | RECONCILING`, including pending recovery, unavailable telemetry and failure reasons. A remembered desired profile is not a claim that it is executing. |
+
+LOCAL and REMOTE are never profile-select options. Display desired ownership/profile,
+actual authority and control status separately, so REMOTE/RECONCILING cannot be
+mistaken for an active lease. A remembered normal profile while REMOTE or LOCAL is
+desired is historical preference, not an automatic fallback.
+
+### Persistence and the LOCAL latch
+
+Persist desired control, station/EVSE identity, authorized registered owner identity
+and authorization revision, profile settings, and the deliberate-local latch in a
+schema-versioned record. Commit explicit selections/takeovers and revocations at
+the serialized control boundary before treating the new authorization as usable.
+Persist no runtime lease credentials/deadlines, in-flight commands or solved
+operating points as executable recovery state. Lost/corrupt persistence or an
+identity mismatch leaves control inhibited, not implicitly authorized.
+
+A verified deliberate local takeover sets the durable latch, changes desired
+ownership to LOCAL, invalidates remote recovery authorization and removes active
+software ownership. Restore LOCAL after HA restart and retain it across OCPP
+reconnect and wallbox reboot. Disconnect, idle state, rejection and suspension do
+not themselves prove LOCAL. A fresh device report of LOCAL always wins, including
+when takeover occurred while HA was offline.
+
+After a wallbox reboot, verified device evidence may establish that physical local
+authority no longer exists. Update the observed authority accordingly, but retain
+the deliberate-LOCAL recovery block and desired LOCAL decision: that evidence alone
+is not a new user authorization to acquire control. Leaving the latched LOCAL state
+still requires a fresh explicit user action: either selecting a normal Wallbox
+Manager profile or choosing “Take control” in Energy Manager through the trusted
+user-action boundary below. The latter directly authorizes LOCAL -> REMOTE; no
+intermediate normal-profile selection is required. Energy Manager startup/reconnect,
+heartbeats, target updates, recovery handshakes, HA restart, OCPP reconnect, wallbox
+restart and background retries must never clear that block automatically. If
+authority cannot be determined reliably, remain inhibited; do not fabricate a standard OCPP authority signal.
+
+Every mutating request carries an ownership epoch and runtime/session generation.
+Under one serialization boundary, validate desired authorization revision, active
+ownership, lease, capabilities and connection generation before dispatch and again
+before committing a result. Authority-acquisition requests leaving LOCAL use the
+separately validated fresh explicit user-action authorization because active software
+ownership has not yet been established; this exception permits only the acquisition attempt,
+not charging targets or lease creation before confirmation. Local takeover advances
+the epoch, invalidates leases and recovery attempts, cancels queued work and wins over late acknowledgments.
+An already-transmitted command cannot be recalled; discard its late result and
+reconcile without automatically leaving LOCAL. The device must prioritize its local
+control signal for physical enforcement; document devices without that guarantee.
+
+### Transitions and recovery
+
+| Event/transition | Required behavior and failure handling |
+| --- | --- |
+| LOCAL -> normal profile | Only a new explicit user selection can attempt authority acquisition. Keep the local latch until acquisition is confirmed; refusal/timeout leaves LOCAL and a visible error. No background retry that could later leave LOCAL. On success persist the selected profile and WALLBOX_MANAGER desired ownership and clear the latch. |
+| REMOTE -> normal profile | Persist the new desired profile/WALLBOX_MANAGER ownership, revoke remote recovery authorization, invalidate the lease and fence pending targets/handshakes immediately. Activate only after validated execution; failure remains inhibited with the new desired profile and no revived lease. |
+| Normal profile -> LOCAL | Verified local takeover persists LOCAL and its latch, removes manager authority and cancels work. No automatic reacquire or availability command. |
+| REMOTE -> LOCAL | Atomically persist LOCAL, revoke remote recovery authorization and lease, advance epoch and cancel work. Old owner targets, heartbeats and recovery requests fail even before the old lease deadline. |
+| LOCAL -> REMOTE | A fresh explicit Energy Manager “Take control” user action, validated by the trusted HA/Wallbox Manager boundary, authorizes an authority-acquisition attempt directly. Keep desired LOCAL and its durable latch while ACQUIRING. Only after remote/OCPP authority is verified, and the attempt is still current, clear the latch and persist desired REMOTE/registered owner authorization, then issue a fresh lease. Require a fresh target before REMOTE/ACTIVE. Rejection, timeout or unverifiable authority leaves LOCAL latched, no usable lease and a visible failure; no delayed/background retry, and another attempt requires another fresh explicit user action. |
+| Initial REMOTE acquisition | A trusted fresh explicit Energy Manager takeover is allowed from LOCAL via the row above or from verified manager control. Reject competing owners. Establish/verify device authority before persisting desired REMOTE and allocating a fresh lease; remain ACQUIRING/inhibited until a fresh valid target is solved and applied. No initial takeover can be asserted by an ordinary background API call. |
+| REMOTE recovery | Recover only the persisted, still-authorized registered owner through the handshake below, after device reconciliation. Issue a new token/deadline and require a fresh target before REMOTE becomes ACTIVE. No new user click; no heartbeat-only acquisition. |
+| REMOTE heartbeat | Refresh only an unexpired matching runtime lease. A heartbeat never acquires authority, performs recovery or revives an expired lease. |
+| Active lease timeout | If no technical-recovery episode has been entered, revoke the lease and remote recovery authorization, persist WALLBOX_MANAGER/OFF intent and inhibit. Attempt verified stop only while authority is confirmed; report uncertainty on failure. Never resume an earlier profile. A new takeover needs explicit authorization. This is distinct from invalidating a lease because a technical interruption started recovery. |
+| Explicit remote release | Validate lease, revoke remote recovery authorization and lease, persist WALLBOX_MANAGER/OFF intent and inhibit. Do not automatically resume an earlier charging profile. |
+| HA restart/reload | Restore desired control and the LOCAL latch, never active ownership or old leases. Reconcile identity, boot/session generation, capabilities, fresh telemetry and authority. LOCAL remains blocked. Otherwise automatically re-establish safe control for the desired normal profile, or await the authorized REMOTE recovery handshake. |
+| OCPP disconnect/reconnect | Fence in-flight commands/results, invalidate their connection generation and any runtime lease, clear active ownership and enter RECONCILING/unavailable. Preserve desired profile/ownership and remote recovery authorization; do not infer LOCAL. On reconnect perform fresh reconciliation, then automatically recover the normal profile or use the REMOTE handshake. Verified LOCAL overrides both. |
+| Wallbox restart | Invalidate transaction/session-specific state, leases, commands and capability evidence, while preserving desired control authorization. Rediscover and verify actual authority; LOCAL wins. Otherwise automatically resume the desired normal profile or recover REMOTE by handshake. Inspect owned OCPP profiles/settings without assuming they survived or disappeared. |
+| Recovery timeout | End the bounded recovery attempt and fence provisional leases/targets. Stay INHIBITED with OFF safety intent and a visible failure; retain desired state for diagnosis/retry, not execution. Do not apply an old target or silently fall back to a historical normal profile. |
+| Command timeout/rejection | Report pending/unknown or refused result, not successful state. Inhibit the affected action and reconcile. Retry only with current authorization and freshly validated intent; failed attempts to leave LOCAL always need a new explicit user action. |
+
+Technical recovery begins with read-only identity and authority verification. A
+valid persisted normal-profile decision authorizes subsequent safe re-establishment
+of control without a new user selection, provided LOCAL is not active/latched and
+fresh device evidence permits it. Reconcile owned protocol profiles and settings,
+then rerun the profile controller and target-power solver against current telemetry,
+capabilities and installation limits. OFF also survives and resumes as OFF. Never
+replay a stored target/physical operating point or blindly enable availability.
+Unknown authority, incomplete discovery or stale inputs keep RECONCILING/INHIBITED;
+a normal profile may resume automatically when those prerequisites are satisfied.
+
+REMOTE uses a bounded recovery episode with a configurable timeout (value to be
+chosen during implementation), starting when technical recovery begins. Handshake
+and first fresh target must complete within that window; repeated heartbeats or
+connection flaps within an episode do not extend it. At expiry, report recovery
+failure and stay safely inhibited/OFF. Desired REMOTE authorization can remain
+recorded, but a late target/heartbeat cannot reactivate control. A new explicit
+recovery attempt by the same authenticated authorized owner can open a new bounded
+window without a user click; it must repeat all checks. LOCAL, user profile selection,
+release or active-lease expiry revokes that eligibility. Timer and disconnect events
+serialize: an already-expired active lease cannot be relabeled technical recovery
+to revive revoked authorization.
+
+OFF safety intent is not a guarantee that an unreachable charger stops. During
+active control use device-enforced expiring limits/watchdogs where verified, with
+an explicit end-of-validity behavior. Expiration alone might remove a limit and
+allow more charging. Devices lacking a verified fail-safe must expose that
+limitation; never promise software lease expiry or recovery timeout physically
+stops an offline wallbox. While actual authority is unknown or LOCAL, do not send
+an unauthorized stop command in the name of recovery.
+
+## Programmatic Energy Manager API
+
+An API handle is scoped to a runtime and EVSE; callers do not write HA entity states.
+Separate first-time takeover from recovery of an existing persisted authorization:
+
+```text
+async_acquire_remote_control(owner_id=...) -> Lease(token, epoch, expires_in)
+async_recover_remote_control(owner_id=..., recovery_id=...) -> Lease(token, epoch, expires_in)
+async_set_remote_target_power(owner_id=..., lease_token=..., watts=..., direction=...)
+    -> TargetResult(requested, offered, measured, status, reasons)
+async_remote_heartbeat(owner_id=..., lease_token=...) -> LeaseStatus
+async_release_remote_control(owner_id=..., lease_token=...) -> ReleaseResult
+```
+
+Bind `owner_id` to a registered authenticated caller; a string is not authentication.
+All calls serialize with user selections, local events, recovery and lease timers.
+Initial acquisition must be authorized by a trusted Wallbox Manager/Home Assistant
+mechanism that distinguishes a genuine fresh explicit user action from ordinary
+programmatic Energy Manager calls. Registered-caller authentication alone does not
+prove a user clicked “Take control”. A caller-controlled boolean such as
+`user_authorized=True`, a supplied context label or an old authorization record is
+not sufficient. Ordinary background API calls cannot claim that a user authorized
+LOCAL -> REMOTE. The exact HA implementation and how trusted authorization reaches
+`async_acquire_remote_control` remain implementation decisions; the conceptual
+signature above does not grant that authority merely by accepting `owner_id`.
+
+Bind the trusted user action to this owner, controlled device and acquisition
+attempt. It cannot be replayed for a failed, superseded or later attempt. While
+leaving LOCAL, retain the durable latch and desired LOCAL until device authority
+acquisition is actually confirmed. Request initiation alone must not clear it or
+create a usable lease. On rejection, timeout or unverifiable authority, report the
+failure, remain LOCAL and schedule no background retry. Late acknowledgments cannot
+complete the failed attempt; another attempt requires a fresh user action. A
+concurrent new local takeover wins, advances the ownership epoch and fences the
+attempt even if acquisition subsequently returns success. After verified success,
+persist the latch clear and desired REMOTE authorization together before issuing
+the fresh lease; activate REMOTE only after a fresh target is solved and applied.
+
+Recovery instead validates that desired ownership is still REMOTE for exactly this registered owner,
+station/EVSE and authorization revision. It cannot create authorization for a new
+owner. HA and Energy Manager restarts do not require a new user click when that
+persisted authorization is still valid. A deliberate LOCAL takeover after that
+authorization revokes it: neither a stale authorization nor the recovery handshake
+can leave LOCAL. A new explicit Energy Manager “Take control” action can establish
+new authorization through the initial-acquisition path, without first selecting a
+normal Wallbox Manager profile. Technical recovery behavior is otherwise unchanged.
+
+The recovery handshake obtains a current runtime recovery ID/challenge, authenticates
+the registered owner, verifies the persisted authorization and completes device
+reconciliation, including absence of a LOCAL block. Bind the response to the current
+runtime, recovery attempt and connection/boot generation; reject obsolete handshake
+responses and serialize concurrent attempts. Issue a fresh opaque lease token and
+fresh monotonic deadline. Do not reuse the old token, epoch/deadline or target.
+The owner must then submit a current target using that new token. Solve against fresh
+capabilities and telemetry and confirm the new command outcome before reporting
+REMOTE/ACTIVE. Until then charging control remains inhibited; heartbeat alone cannot
+complete this transition. A boot/disconnect/local event during any step fences the
+attempt and its results. Revoked/changed owner registration denies recovery.
+
+Proposed active lease TTL is 30 seconds with heartbeats at most 10 seconds apart,
+measured on a monotonic clock. Reject at `now >= deadline`; target changes do not
+extend it. Recovery timeout is separate and also bounds the provisional period
+between lease issuance and first valid target. No heartbeat may extend that recovery
+window. Tokens differ even for the same owner across attempts and are not persisted.
+API errors distinguish unauthorized owner, stale lease, stale recovery attempt,
+recovery timeout, local control, unavailable device, invalid input, unsupported
+capability and unreachable target. Tokens and credentials are redacted in diagnostics.
+
+## Metering and Home Assistant presentation
+
+Keep configured energy-system HA inputs separate from charger protocol metering;
+their non-negative directional semantics and freshness rules are defined above.
+Do not apply those input conventions to raw OCPP samples, whose signed/export
+meaning must still be preserved. Normalize periodic and transactional metering into
+samples containing station,
+EVSE, optional connector, transaction ID, source timestamp, received timestamp,
+sequence where available, measurand, phase, location, context, unit, multiplier,
+value and quality. Retain raw meaning alongside normalized units. EVSE-only or
+station-only readings must not be assigned arbitrarily to connector 1.
+
+Preserve per-phase samples as first-class channels and expose them as HA sensors
+alongside useful aggregates. Explicit totals and derived totals remain distinguishable;
+do not add a reported total to its phase readings. Sum compatible active-power or
+energy samples only across matching time/scope/context; voltage and current need
+explicitly named average/max diagnostics rather than misleading sums. Missing is
+not zero. Do not overwrite newer live state with delayed transaction samples;
+retain their historical meaning separately with bounded storage. Counter resets,
+signed/export values, duplicate events and out-of-order samples need explicit rules.
+
+Profile select contains only the five normal profiles; read-only sensors expose
+desired ownership/profile, active ownership, device authority, lease/recovery status,
+pending actions, capability limitations and solver reasons.
+Configuration selects the energy-input entities and exposes separate PV_SURPLUS
+battery target, PV_OPTIMUM minimum/evening SOC, forecast reserve, configured average
+consumption power and battery capacity, and PV_MAXIMUM minimum SOC. Solar timing
+comes from HA rather than additional user-configured location or sunset entities. Observe external battery reserve read-only. Present effective limits,
+input freshness/errors, forecast shortfall and active fallback reasons separately
+from configured desires. Tolerance/deadband/hysteresis settings must not appear as
+grid charging budgets. No profile controls or translations are implemented yet;
+add their localized strings with the eventual UI.
+Dynamic entity bounds come from snapshots and are revalidated on write. Preserve
+stable IDs across reconnects and discovered capability changes. UI text and errors
+use `strings.json` with matching `translations/en.json` and `translations/de.json`;
+keep machine-readable codes untranslated. Never expose lease credentials as entities.
+
+## Delivery and verification plan
+
+Implement pure capability, ownership and solver contracts first, with fake adapters;
+then versioned protocol adapters, HA presentation and device-specific extensions.
+Test each adapter against the same normalized contract suite. OCPP 2.1 needs its
+own schema/library compatibility proof; advertising its subprotocol is insufficient.
+No production code is adopted by this analysis and no changelog is created before
+v1.0.0.
+
+Required future tests include every transition above; stale same-owner tokens;
+local takeover during acquisition/dispatch; restart persistence and corrupt state;
+automatic resumption of each normal profile after HA restart, reconnect and reboot;
+REMOTE recovery with a fresh lease and fresh target; no activation from heartbeat
+alone; wrong/revoked registered owners; stale recovery challenges; local takeover
+during recovery or while offline; recovery timeout and late messages; lease-expiry
+versus disconnect ordering; heartbeat exactly at expiry; simultaneous owners;
+shared station constraints; solver rounding, min/max/step and different 1P/3P envelopes; stale voltages;
+phase-switch dwell/failure; EV underconsumption; and per-phase periodic and
+transactional readings, including duplicates, multipliers and scope ambiguity.
+
+Future ownership tests must explicitly cover successful LOCAL -> REMOTE takeover
+through the trusted user-action path; rejected, timed-out or unverifiable acquisition
+leaving LOCAL latched with no usable lease; no delayed/background retry or activation
+from a late response after failure; heartbeat and ordinary target requests unable to
+leave LOCAL; recovery and stale prior REMOTE authorization unable to leave LOCAL
+after a later local takeover; a fresh explicit takeover after LOCAL succeeding;
+and concurrent local takeover during acquisition winning and fencing the REMOTE
+attempt. Include background startup/reconnect calls and forged caller-controlled
+user-authorization claims, and verify that successful technical REMOTE recovery
+still needs no new user click when prior persisted authorization remains valid.
+
+Future standalone PV tests must cover independent profile minima and the separate
+PV_OPTIMUM evening target; PV_SURPLUS target hysteresis; higher/changing known
+reserve; the finalized forecast equation and its W/kWh/SOC conversions, positive
+capacity validation, safety-reserve subtraction, zero shortfall and both clamp
+bounds; the worked numerical example; today-versus-next sunset, timezone/local-day
+rollover, missing solar timing and after-sunset forecast exhaustion; fresh target
+recalculation after time/configuration changes and restart; unavailable/negative/nonfinite/wrong-unit/stale/skewed
+inputs; no intentional grid budget in PV profiles; no double-counting of current
+vehicle/battery flows; step/mode-dependent tolerance; deadband/debounce and fallback
+recovery; excess import with versus without material battery discharge; floor
+holding and pause below minimum; and fresh re-evaluation after technical recovery.
+Test that no battery reserve writes or inferred hidden reserve percentage occur.
+These are future controller acceptance cases, not tests implemented in this task.
+
+Current development gates are `ruff check`, `ruff format --check` and `pytest`
+(using `.venv/bin/` locally). A small scaffold test checks translation key and
+placeholder consistency now. Runtime tests and CI automation must arrive with the
+first runtime changes, not after release. These checks do not establish protocol
+conformance or hardware safety; device behavior requires simulator and hardware
+verification before enabling control.
