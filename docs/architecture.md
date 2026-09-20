@@ -460,16 +460,22 @@ After a wallbox reboot, verified device evidence may establish that physical loc
 authority no longer exists. Update the observed authority accordingly, but retain
 the deliberate-LOCAL recovery block and desired LOCAL decision: that evidence alone
 is not a new user authorization to acquire control. Leaving the latched LOCAL state
-still requires a new explicit user action, such as selecting a normal profile.
-Neither automatic reconciliation, a recovery handshake nor a heartbeat may clear
-that block. If authority cannot be determined reliably, remain inhibited; do not
-fabricate a standard OCPP authority signal.
+still requires a fresh explicit user action: either selecting a normal Wallbox
+Manager profile or choosing “Take control” in Energy Manager through the trusted
+user-action boundary below. The latter directly authorizes LOCAL -> REMOTE; no
+intermediate normal-profile selection is required. Energy Manager startup/reconnect,
+heartbeats, target updates, recovery handshakes, HA restart, OCPP reconnect, wallbox
+restart and background retries must never clear that block automatically. If
+authority cannot be determined reliably, remain inhibited; do not fabricate a standard OCPP authority signal.
 
 Every mutating request carries an ownership epoch and runtime/session generation.
 Under one serialization boundary, validate desired authorization revision, active
 ownership, lease, capabilities and connection generation before dispatch and again
-before committing a result. Local takeover advances the epoch, invalidates leases
-and recovery attempts, cancels queued work and wins over late acknowledgments.
+before committing a result. Authority-acquisition requests leaving LOCAL use the
+separately validated fresh explicit user-action authorization because active software
+ownership has not yet been established; this exception permits only the acquisition attempt,
+not charging targets or lease creation before confirmation. Local takeover advances
+the epoch, invalidates leases and recovery attempts, cancels queued work and wins over late acknowledgments.
 An already-transmitted command cannot be recalled; discard its late result and
 reconcile without automatically leaving LOCAL. The device must prioritize its local
 control signal for physical enforcement; document devices without that guarantee.
@@ -482,7 +488,8 @@ control signal for physical enforcement; document devices without that guarantee
 | REMOTE -> normal profile | Persist the new desired profile/WALLBOX_MANAGER ownership, revoke remote recovery authorization, invalidate the lease and fence pending targets/handshakes immediately. Activate only after validated execution; failure remains inhibited with the new desired profile and no revived lease. |
 | Normal profile -> LOCAL | Verified local takeover persists LOCAL and its latch, removes manager authority and cancels work. No automatic reacquire or availability command. |
 | REMOTE -> LOCAL | Atomically persist LOCAL, revoke remote recovery authorization and lease, advance epoch and cancel work. Old owner targets, heartbeats and recovery requests fail even before the old lease deadline. |
-| Initial REMOTE acquisition | Explicit authorized Energy Manager takeover while manager control is verified and active. Persist desired REMOTE and registered owner authorization; allocate a fresh lease. Remain ACQUIRING/inhibited until a fresh valid target is solved and applied. Reject competing owners and acquisition from LOCAL; a user must first select a normal profile. |
+| LOCAL -> REMOTE | A fresh explicit Energy Manager “Take control” user action, validated by the trusted HA/Wallbox Manager boundary, authorizes an authority-acquisition attempt directly. Keep desired LOCAL and its durable latch while ACQUIRING. Only after remote/OCPP authority is verified, and the attempt is still current, clear the latch and persist desired REMOTE/registered owner authorization, then issue a fresh lease. Require a fresh target before REMOTE/ACTIVE. Rejection, timeout or unverifiable authority leaves LOCAL latched, no usable lease and a visible failure; no delayed/background retry, and another attempt requires another fresh explicit user action. |
+| Initial REMOTE acquisition | A trusted fresh explicit Energy Manager takeover is allowed from LOCAL via the row above or from verified manager control. Reject competing owners. Establish/verify device authority before persisting desired REMOTE and allocating a fresh lease; remain ACQUIRING/inhibited until a fresh valid target is solved and applied. No initial takeover can be asserted by an ordinary background API call. |
 | REMOTE recovery | Recover only the persisted, still-authorized registered owner through the handshake below, after device reconciliation. Issue a new token/deadline and require a fresh target before REMOTE becomes ACTIVE. No new user click; no heartbeat-only acquisition. |
 | REMOTE heartbeat | Refresh only an unexpired matching runtime lease. A heartbeat never acquires authority, performs recovery or revives an expired lease. |
 | Active lease timeout | If no technical-recovery episode has been entered, revoke the lease and remote recovery authorization, persist WALLBOX_MANAGER/OFF intent and inhibit. Attempt verified stop only while authority is confirmed; report uncertainty on failure. Never resume an earlier profile. A new takeover needs explicit authorization. This is distinct from invalidating a lease because a technical interruption started recovery. |
@@ -539,11 +546,36 @@ async_release_remote_control(owner_id=..., lease_token=...) -> ReleaseResult
 
 Bind `owner_id` to a registered authenticated caller; a string is not authentication.
 All calls serialize with user selections, local events, recovery and lease timers.
-Initial acquisition records explicit takeover authorization. Recovery instead
-validates that desired ownership is still REMOTE for exactly this registered owner,
+Initial acquisition must be authorized by a trusted Wallbox Manager/Home Assistant
+mechanism that distinguishes a genuine fresh explicit user action from ordinary
+programmatic Energy Manager calls. Registered-caller authentication alone does not
+prove a user clicked “Take control”. A caller-controlled boolean such as
+`user_authorized=True`, a supplied context label or an old authorization record is
+not sufficient. Ordinary background API calls cannot claim that a user authorized
+LOCAL -> REMOTE. The exact HA implementation and how trusted authorization reaches
+`async_acquire_remote_control` remain implementation decisions; the conceptual
+signature above does not grant that authority merely by accepting `owner_id`.
+
+Bind the trusted user action to this owner, controlled device and acquisition
+attempt. It cannot be replayed for a failed, superseded or later attempt. While
+leaving LOCAL, retain the durable latch and desired LOCAL until device authority
+acquisition is actually confirmed. Request initiation alone must not clear it or
+create a usable lease. On rejection, timeout or unverifiable authority, report the
+failure, remain LOCAL and schedule no background retry. Late acknowledgments cannot
+complete the failed attempt; another attempt requires a fresh user action. A
+concurrent new local takeover wins, advances the ownership epoch and fences the
+attempt even if acquisition subsequently returns success. After verified success,
+persist the latch clear and desired REMOTE authorization together before issuing
+the fresh lease; activate REMOTE only after a fresh target is solved and applied.
+
+Recovery instead validates that desired ownership is still REMOTE for exactly this registered owner,
 station/EVSE and authorization revision. It cannot create authorization for a new
 owner. HA and Energy Manager restarts do not require a new user click when that
-persisted authorization is still valid.
+persisted authorization is still valid. A deliberate LOCAL takeover after that
+authorization revokes it: neither a stale authorization nor the recovery handshake
+can leave LOCAL. A new explicit Energy Manager “Take control” action can establish
+new authorization through the initial-acquisition path, without first selecting a
+normal Wallbox Manager profile. Technical recovery behavior is otherwise unchanged.
 
 The recovery handshake obtains a current runtime recovery ID/challenge, authenticates
 the registered owner, verifies the persisted authorization and completes device
@@ -622,6 +654,17 @@ versus disconnect ordering; heartbeat exactly at expiry; simultaneous owners;
 shared station constraints; solver rounding, min/max/step and different 1P/3P envelopes; stale voltages;
 phase-switch dwell/failure; EV underconsumption; and per-phase periodic and
 transactional readings, including duplicates, multipliers and scope ambiguity.
+
+Future ownership tests must explicitly cover successful LOCAL -> REMOTE takeover
+through the trusted user-action path; rejected, timed-out or unverifiable acquisition
+leaving LOCAL latched with no usable lease; no delayed/background retry or activation
+from a late response after failure; heartbeat and ordinary target requests unable to
+leave LOCAL; recovery and stale prior REMOTE authorization unable to leave LOCAL
+after a later local takeover; a fresh explicit takeover after LOCAL succeeding;
+and concurrent local takeover during acquisition winning and fencing the REMOTE
+attempt. Include background startup/reconnect calls and forged caller-controlled
+user-authorization claims, and verify that successful technical REMOTE recovery
+still needs no new user click when prior persisted authorization remains valid.
 
 Future standalone PV tests must cover independent profile minima and the separate
 PV_OPTIMUM evening target; PV_SURPLUS target hysteresis; higher/changing known

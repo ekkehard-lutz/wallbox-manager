@@ -78,7 +78,12 @@ normal Wallbox Manager profiles:
 - REMOTE: control was explicitly granted to an external Energy Manager.
 
 Selecting a normal Wallbox Manager profile is an explicit user action and may
-therefore acquire remote/OCPP authority from the wallbox.
+therefore acquire remote/OCPP authority from the wallbox. A fresh explicit “Take
+control” action in Energy Manager can also directly leave LOCAL and acquire REMOTE
+through a trusted HA/Wallbox Manager user-action mechanism; selecting a normal
+profile first is not required. Keep LOCAL latched until device authority is verified.
+Failure leaves LOCAL with no usable lease or background retry. On success, create
+a fresh lease and require a fresh target before REMOTE becomes ACTIVE.
 
 If the wallbox is switched to local control, Wallbox Manager must not
 automatically reacquire remote authority.
@@ -88,7 +93,8 @@ interruptions preserve the desired profile and existing owner authorization. Aft
 reconciliation, normal profiles resume automatically; REMOTE requires an
 authenticated recovery handshake, a fresh lease and a fresh target, without another
 user click. A deliberate LOCAL takeover blocks automatic recovery and requires
-a new explicit user action to leave LOCAL.
+a new explicit user action to leave LOCAL. Ordinary API calls, heartbeats and
+recovery handshakes cannot assert that authorization or bypass the LOCAL latch.
 
 ## Energy Manager interface
 
