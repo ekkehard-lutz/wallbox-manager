@@ -60,8 +60,12 @@ therefore acquire remote/OCPP authority from the wallbox.
 If the wallbox is switched to local control, Wallbox Manager must not
 automatically reacquire remote authority.
 
-REMOTE control uses an owner-specific lease and heartbeat. A new explicit user
-action is required to acquire REMOTE control after ownership is lost.
+REMOTE control uses an owner-specific runtime lease and heartbeat. Technical
+interruptions preserve the desired profile and existing owner authorization. After
+reconciliation, normal profiles resume automatically; REMOTE requires an
+authenticated recovery handshake, a fresh lease and a fresh target, without another
+user click. A deliberate LOCAL takeover blocks automatic recovery and requires
+a new explicit user action to leave LOCAL.
 
 ## Energy Manager interface
 

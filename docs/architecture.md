@@ -46,7 +46,7 @@ core/
   capabilities.py        versioned capability evidence and operating envelopes
   events.py              normalized telemetry, boot, authority and result events
   coordinator.py         per-EVSE serialization and shared station constraints
-  persistence.py         local-control latch and schema-versioned preferences
+  persistence.py         desired ownership/profile, owner authorization and LOCAL latch
 control/
   profiles.py            OFF/PV_SURPLUS/PV_OPTIMUM/MAXIMUM/GRID policies
   requests.py            PowerRequest and rounding direction
@@ -179,72 +179,149 @@ Re-solve on relevant inputs with debouncing, never replay a stale solved point.
 
 ## Ownership state machine
 
-Model `owner = LOCAL | WALLBOX_MANAGER | REMOTE` independently from
-`selected_profile = OFF | PV_SURPLUS | PV_OPTIMUM | MAXIMUM | GRID` and
-`control_status = ACTIVE | ACQUIRING | INHIBITED | RECONCILING`.
-An unknown owner during recovery is represented internally as no active owner and
-INHIBITED, not falsely as LOCAL. The effective display is LOCAL or REMOTE for
-those owners; otherwise it shows the selected profile plus control status.
-LOCAL and REMOTE are never profile-select options.
+A technical interruption must not erase an existing user control decision.
+Explicit local user takeover always takes priority over automatic recovery.
+Separate the following state dimensions rather than using one owner field:
 
-A durable local-control latch is set only by a verified local-takeover event.
-Disconnect, idle state, rejected command and charger suspension do not by themselves
-prove LOCAL. If a device cannot report ownership reliably, inhibit acquisition or
-recovery until verified; do not fabricate a standard OCPP authority signal.
+| Dimension | Meaning and lifetime |
+| --- | --- |
+| Persistent desired control | `desired_owner = LOCAL | WALLBOX_MANAGER | REMOTE`, selected normal profile (`OFF`, `PV_SURPLUS`, `PV_OPTIMUM`, `MAXIMUM`, `GRID`), and the registered authorized Energy Manager owner when REMOTE is desired. Survives technical interruptions. |
+| Runtime active ownership | `active_owner = NONE | WALLBOX_MANAGER | REMOTE`; permission actually established for this runtime/device session. Never inferred solely from persisted intent. LOCAL is represented by the latch/device authority, with no active software owner. |
+| Runtime REMOTE lease | Owner-bound opaque token, ownership epoch and monotonic deadline. Process/session scoped; never persist or restore token/deadline. |
+| Device/local authority | Fresh device-reported authority evidence plus the durable deliberate-LOCAL latch. Connectivity, desired state and actual device authority are separate facts. |
+| Reconciliation/control status | `ACTIVE | ACQUIRING | INHIBITED | RECONCILING`, including pending recovery, unavailable telemetry and failure reasons. A remembered desired profile is not a claim that it is executing. |
 
-Every mutating request carries an ownership epoch. Under one serialization boundary,
-validate ownership, lease, capabilities and connection generation before dispatch
-and again before committing a result. Local takeover increments the epoch,
-invalidates leases, cancels queued work and wins over late acknowledgments.
+LOCAL and REMOTE are never profile-select options. Display desired ownership/profile,
+actual authority and control status separately, so REMOTE/RECONCILING cannot be
+mistaken for an active lease. A remembered normal profile while REMOTE or LOCAL is
+desired is historical preference, not an automatic fallback.
+
+### Persistence and the LOCAL latch
+
+Persist desired control, station/EVSE identity, authorized registered owner identity
+and authorization revision, profile settings, and the deliberate-local latch in a
+schema-versioned record. Commit explicit selections/takeovers and revocations at
+the serialized control boundary before treating the new authorization as usable.
+Persist no runtime lease credentials/deadlines, in-flight commands or solved
+operating points as executable recovery state. Lost/corrupt persistence or an
+identity mismatch leaves control inhibited, not implicitly authorized.
+
+A verified deliberate local takeover sets the durable latch, changes desired
+ownership to LOCAL, invalidates remote recovery authorization and removes active
+software ownership. Restore LOCAL after HA restart and retain it across OCPP
+reconnect and wallbox reboot. Disconnect, idle state, rejection and suspension do
+not themselves prove LOCAL. A fresh device report of LOCAL always wins, including
+when takeover occurred while HA was offline.
+
+After a wallbox reboot, verified device evidence may establish that physical local
+authority no longer exists. Update the observed authority accordingly, but retain
+the deliberate-LOCAL recovery block and desired LOCAL decision: that evidence alone
+is not a new user authorization to acquire control. Leaving the latched LOCAL state
+still requires a new explicit user action, such as selecting a normal profile.
+Neither automatic reconciliation, a recovery handshake nor a heartbeat may clear
+that block. If authority cannot be determined reliably, remain inhibited; do not
+fabricate a standard OCPP authority signal.
+
+Every mutating request carries an ownership epoch and runtime/session generation.
+Under one serialization boundary, validate desired authorization revision, active
+ownership, lease, capabilities and connection generation before dispatch and again
+before committing a result. Local takeover advances the epoch, invalidates leases
+and recovery attempts, cancels queued work and wins over late acknowledgments.
 An already-transmitted command cannot be recalled; discard its late result and
-reconcile without reacquiring authority. The device must prioritize its local
+reconcile without automatically leaving LOCAL. The device must prioritize its local
 control signal for physical enforcement; document devices without that guarantee.
+
+### Transitions and recovery
 
 | Event/transition | Required behavior and failure handling |
 | --- | --- |
-| LOCAL -> normal profile | Only a new explicit user selection can attempt authority acquisition. Keep the local latch until acquisition is confirmed; refusal/timeout leaves LOCAL and a visible error. No background retry that could later acquire authority. |
-| REMOTE -> normal profile | Invalidate lease and fence pending targets immediately on explicit profile selection. Activate selected profile only after validated execution; failure stays inhibited with no revived lease. |
-| Normal profile -> LOCAL | Verified local takeover sets durable latch, removes manager authority and cancels work. Do not send an automatic reacquire or availability command. |
-| REMOTE -> LOCAL | Atomically revoke lease, advance epoch, set LOCAL and cancel work. All old owner heartbeats/targets fail, even before the old deadline. |
-| Acquire REMOTE | Explicit authorized Energy Manager takeover while manager control is verified and active. Allocate fresh owner-bound lease; enter REMOTE with charging inhibited until first valid target. Reject competing owners and acquisition from LOCAL; a user must first select a normal profile. |
-| REMOTE heartbeat | Refresh only the unexpired matching lease. A heartbeat never acquires authority or resurrects an expired lease. |
-| Lease timeout | Revoke immediately, fence pending work, select OFF intent and inhibit. Attempt verified stop only while authority is still confirmed; show unconfirmed physical outcome on failure. Never resume an earlier charging profile. Require explicit user action before new takeover. |
-| Explicit remote release | Validate lease; revoke and apply the same OFF/inhibit policy. Do not automatically resume the previous profile. |
-| HA restart/reload | Never restore leases. Restore local latch and preferences, but no active authority. Reconcile read-only; require fresh user selection before control, then fresh explicit Energy Manager takeover if wanted. Lost/corrupt persistence is inhibited, never permission to control. |
-| OCPP disconnect/reconnect | Disconnect fences commands and revokes any lease; retain local latch. Reconnect refreshes identity, capabilities and telemetry read-only. No automatic authority acquisition, availability enable or stale target replay; require explicit user selection for renewed control. |
-| Wallbox restart | Boot change invalidates transactions, leases, commands and capability evidence. Retain local latch; read-only reconciliation and explicit user selection required. Do not assume stored charging profiles disappeared. |
-| Command timeout/rejection | Report pending/unknown or refused result, not successful state. Inhibit the affected action and reconcile; retries require current ownership and a new validated request. |
+| LOCAL -> normal profile | Only a new explicit user selection can attempt authority acquisition. Keep the local latch until acquisition is confirmed; refusal/timeout leaves LOCAL and a visible error. No background retry that could later leave LOCAL. On success persist the selected profile and WALLBOX_MANAGER desired ownership and clear the latch. |
+| REMOTE -> normal profile | Persist the new desired profile/WALLBOX_MANAGER ownership, revoke remote recovery authorization, invalidate the lease and fence pending targets/handshakes immediately. Activate only after validated execution; failure remains inhibited with the new desired profile and no revived lease. |
+| Normal profile -> LOCAL | Verified local takeover persists LOCAL and its latch, removes manager authority and cancels work. No automatic reacquire or availability command. |
+| REMOTE -> LOCAL | Atomically persist LOCAL, revoke remote recovery authorization and lease, advance epoch and cancel work. Old owner targets, heartbeats and recovery requests fail even before the old lease deadline. |
+| Initial REMOTE acquisition | Explicit authorized Energy Manager takeover while manager control is verified and active. Persist desired REMOTE and registered owner authorization; allocate a fresh lease. Remain ACQUIRING/inhibited until a fresh valid target is solved and applied. Reject competing owners and acquisition from LOCAL; a user must first select a normal profile. |
+| REMOTE recovery | Recover only the persisted, still-authorized registered owner through the handshake below, after device reconciliation. Issue a new token/deadline and require a fresh target before REMOTE becomes ACTIVE. No new user click; no heartbeat-only acquisition. |
+| REMOTE heartbeat | Refresh only an unexpired matching runtime lease. A heartbeat never acquires authority, performs recovery or revives an expired lease. |
+| Active lease timeout | If no technical-recovery episode has been entered, revoke the lease and remote recovery authorization, persist WALLBOX_MANAGER/OFF intent and inhibit. Attempt verified stop only while authority is confirmed; report uncertainty on failure. Never resume an earlier profile. A new takeover needs explicit authorization. This is distinct from invalidating a lease because a technical interruption started recovery. |
+| Explicit remote release | Validate lease, revoke remote recovery authorization and lease, persist WALLBOX_MANAGER/OFF intent and inhibit. Do not automatically resume an earlier charging profile. |
+| HA restart/reload | Restore desired control and the LOCAL latch, never active ownership or old leases. Reconcile identity, boot/session generation, capabilities, fresh telemetry and authority. LOCAL remains blocked. Otherwise automatically re-establish safe control for the desired normal profile, or await the authorized REMOTE recovery handshake. |
+| OCPP disconnect/reconnect | Fence in-flight commands/results, invalidate their connection generation and any runtime lease, clear active ownership and enter RECONCILING/unavailable. Preserve desired profile/ownership and remote recovery authorization; do not infer LOCAL. On reconnect perform fresh reconciliation, then automatically recover the normal profile or use the REMOTE handshake. Verified LOCAL overrides both. |
+| Wallbox restart | Invalidate transaction/session-specific state, leases, commands and capability evidence, while preserving desired control authorization. Rediscover and verify actual authority; LOCAL wins. Otherwise automatically resume the desired normal profile or recover REMOTE by handshake. Inspect owned OCPP profiles/settings without assuming they survived or disappeared. |
+| Recovery timeout | End the bounded recovery attempt and fence provisional leases/targets. Stay INHIBITED with OFF safety intent and a visible failure; retain desired state for diagnosis/retry, not execution. Do not apply an old target or silently fall back to a historical normal profile. |
+| Command timeout/rejection | Report pending/unknown or refused result, not successful state. Inhibit the affected action and reconcile. Retry only with current authorization and freshly validated intent; failed attempts to leave LOCAL always need a new explicit user action. |
 
-These conservative restart/disconnect defaults are intentional proposed policy.
-OFF intent is not a guarantee that an unreachable charger stops. During active
-control use device-enforced expiring limits/watchdogs where verified, with an
-explicit end-of-validity behavior. Expiration alone might remove a limit and allow
-more charging. Devices lacking a verified fail-safe must expose that limitation;
-never promise software lease expiry physically stops an offline wallbox.
+Technical recovery begins with read-only identity and authority verification. A
+valid persisted normal-profile decision authorizes subsequent safe re-establishment
+of control without a new user selection, provided LOCAL is not active/latched and
+fresh device evidence permits it. Reconcile owned protocol profiles and settings,
+then rerun the profile controller and target-power solver against current telemetry,
+capabilities and installation limits. OFF also survives and resumes as OFF. Never
+replay a stored target/physical operating point or blindly enable availability.
+Unknown authority, incomplete discovery or stale inputs keep RECONCILING/INHIBITED;
+a normal profile may resume automatically when those prerequisites are satisfied.
+
+REMOTE uses a bounded recovery episode with a configurable timeout (value to be
+chosen during implementation), starting when technical recovery begins. Handshake
+and first fresh target must complete within that window; repeated heartbeats or
+connection flaps within an episode do not extend it. At expiry, report recovery
+failure and stay safely inhibited/OFF. Desired REMOTE authorization can remain
+recorded, but a late target/heartbeat cannot reactivate control. A new explicit
+recovery attempt by the same authenticated authorized owner can open a new bounded
+window without a user click; it must repeat all checks. LOCAL, user profile selection,
+release or active-lease expiry revokes that eligibility. Timer and disconnect events
+serialize: an already-expired active lease cannot be relabeled technical recovery
+to revive revoked authorization.
+
+OFF safety intent is not a guarantee that an unreachable charger stops. During
+active control use device-enforced expiring limits/watchdogs where verified, with
+an explicit end-of-validity behavior. Expiration alone might remove a limit and
+allow more charging. Devices lacking a verified fail-safe must expose that
+limitation; never promise software lease expiry or recovery timeout physically
+stops an offline wallbox. While actual authority is unknown or LOCAL, do not send
+an unauthorized stop command in the name of recovery.
 
 ## Programmatic Energy Manager API
 
 An API handle is scoped to a runtime and EVSE; callers do not write HA entity states.
-The conceptual calls are extended with an opaque lease token to prevent stale
-requests from a previous lease for the same `owner_id`:
+Separate first-time takeover from recovery of an existing persisted authorization:
 
 ```text
 async_acquire_remote_control(owner_id=...) -> Lease(token, epoch, expires_in)
+async_recover_remote_control(owner_id=..., recovery_id=...) -> Lease(token, epoch, expires_in)
 async_set_remote_target_power(owner_id=..., lease_token=..., watts=..., direction=...)
     -> TargetResult(requested, offered, measured, status, reasons)
 async_remote_heartbeat(owner_id=..., lease_token=...) -> LeaseStatus
 async_release_remote_control(owner_id=..., lease_token=...) -> ReleaseResult
 ```
 
-Bind `owner_id` to a registered authorized caller; a string is not authentication.
-All four calls serialize with user selections and local events. Acquisition requires
-an explicit takeover request, never a heartbeat side effect. Proposed initial TTL
-is 30 seconds with heartbeats at most 10 seconds apart, measured on a monotonic
-clock. Reject at `now >= deadline`. Target changes do not extend the deadline.
-Bounds are configuration policy, not protocol constants. New acquisition returns a
-new token even for the same owner. API errors distinguish unauthorized owner,
-stale lease, local control, unavailable device, invalid input, unsupported capability
-and unreachable target. Tokens and credentials must be redacted in diagnostics.
+Bind `owner_id` to a registered authenticated caller; a string is not authentication.
+All calls serialize with user selections, local events, recovery and lease timers.
+Initial acquisition records explicit takeover authorization. Recovery instead
+validates that desired ownership is still REMOTE for exactly this registered owner,
+station/EVSE and authorization revision. It cannot create authorization for a new
+owner. HA and Energy Manager restarts do not require a new user click when that
+persisted authorization is still valid.
+
+The recovery handshake obtains a current runtime recovery ID/challenge, authenticates
+the registered owner, verifies the persisted authorization and completes device
+reconciliation, including absence of a LOCAL block. Bind the response to the current
+runtime, recovery attempt and connection/boot generation; reject obsolete handshake
+responses and serialize concurrent attempts. Issue a fresh opaque lease token and
+fresh monotonic deadline. Do not reuse the old token, epoch/deadline or target.
+The owner must then submit a current target using that new token. Solve against fresh
+capabilities and telemetry and confirm the new command outcome before reporting
+REMOTE/ACTIVE. Until then charging control remains inhibited; heartbeat alone cannot
+complete this transition. A boot/disconnect/local event during any step fences the
+attempt and its results. Revoked/changed owner registration denies recovery.
+
+Proposed active lease TTL is 30 seconds with heartbeats at most 10 seconds apart,
+measured on a monotonic clock. Reject at `now >= deadline`; target changes do not
+extend it. Recovery timeout is separate and also bounds the provisional period
+between lease issuance and first valid target. No heartbeat may extend that recovery
+window. Tokens differ even for the same owner across attempts and are not persisted.
+API errors distinguish unauthorized owner, stale lease, stale recovery attempt,
+recovery timeout, local control, unavailable device, invalid input, unsupported
+capability and unreachable target. Tokens and credentials are redacted in diagnostics.
 
 ## Metering and Home Assistant presentation
 
@@ -264,7 +341,8 @@ retain their historical meaning separately with bounded storage. Counter resets,
 signed/export values, duplicate events and out-of-order samples need explicit rules.
 
 Profile select contains only the five normal profiles; read-only sensors expose
-ownership, lease status, pending actions, capability limitations and solver reasons.
+desired ownership/profile, active ownership, device authority, lease/recovery status,
+pending actions, capability limitations and solver reasons.
 Dynamic entity bounds come from snapshots and are revalidated on write. Preserve
 stable IDs across reconnects and discovered capability changes. UI text and errors
 use `strings.json` with matching `translations/en.json` and `translations/de.json`;
@@ -281,8 +359,12 @@ v1.0.0.
 
 Required future tests include every transition above; stale same-owner tokens;
 local takeover during acquisition/dispatch; restart persistence and corrupt state;
-heartbeat exactly at expiry; simultaneous owners; shared station constraints;
-solver rounding, min/max/step and different 1P/3P envelopes; stale voltages;
+automatic resumption of each normal profile after HA restart, reconnect and reboot;
+REMOTE recovery with a fresh lease and fresh target; no activation from heartbeat
+alone; wrong/revoked registered owners; stale recovery challenges; local takeover
+during recovery or while offline; recovery timeout and late messages; lease-expiry
+versus disconnect ordering; heartbeat exactly at expiry; simultaneous owners;
+shared station constraints; solver rounding, min/max/step and different 1P/3P envelopes; stale voltages;
 phase-switch dwell/failure; EV underconsumption; and per-phase periodic and
 transactional readings, including duplicates, multipliers and scope ambiguity.
 
