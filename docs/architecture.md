@@ -48,7 +48,8 @@ core/
   coordinator.py         per-EVSE serialization and shared station constraints
   persistence.py         desired ownership/profile, owner authorization and LOCAL latch
 control/
-  profiles.py            OFF/PV_SURPLUS/PV_OPTIMUM/MAXIMUM/GRID policies
+  profiles.py            OFF/PV_SURPLUS/PV_OPTIMUM/PV_MAXIMUM/GRID policies
+  energy_inputs.py       normalized energy-input snapshots and validity rules
   requests.py            PowerRequest and rounding direction
   ownership.py           state transitions and command fencing
   leases.py              authenticated owner leases and monotonic deadlines
@@ -126,20 +127,199 @@ request identity, ownership epoch, capability revision and observation generatio
 to the command envelope. Requested, offered, acknowledged and measured power are
 different fields. A successful protocol response does not prove physical execution.
 
-Proposed profile semantics (numerical tuning remains future product work):
+### Standalone profiles and controller responsibilities
 
-| Profile | Intent |
+Wallbox Manager deliberately provides useful standalone, current-day PV charging.
+It does not require the future Energy Manager. All PV profiles aim for approximately
+zero grid import attributable to vehicle charging; they do not have an intentional
+grid charging allowance. Numerical tuning remains implementation work.
+
+| Profile | Intent and independent parameters |
 | --- | --- |
 | OFF | Disallow charging; use a verified stop/pause operation, not assumed zero-amp support. |
-| PV_SURPLUS | Follow fresh available PV surplus with DOWN; pause below viable minimum. |
-| PV_OPTIMUM | Follow surplus with a configured minimum charging floor and bounded grid contribution; report that contribution. |
-| MAXIMUM | Request the highest feasible operating point under all device/site limits. |
-| GRID | Follow an explicitly configured grid charging budget, with DOWN to respect it. |
+| PV_SURPLUS | Charge primarily from current PV surplus while preserving the house battery near a configurable high `battery_target_soc`; around 97% is a conceptual/default candidate, not a fixed requirement. Use SOC hysteresis around the target. |
+| PV_OPTIMUM | Use current PV and permitted battery energy with separate `minimum_battery_soc` and `evening_battery_soc`, a remaining-current-day PV forecast and a configurable forecast/safety reserve. Apply a simple linear current-day strategy, not an intentional grid contribution. |
+| PV_MAXIMUM | Maximize useful vehicle charging from current PV plus permitted battery discharge, respecting its own independent `minimum_battery_soc`; hold that lower limit when reached. No intentional grid import. |
+| GRID | Follow an explicitly configured grid charging budget, with DOWN to respect it. Configure that budget before activation. |
 
-PV inputs need a defined sign convention, freshness and feedback accounting so
-charger consumption is not counted twice. Missing/stale required inputs inhibit
-the dependent profile and expose a reason; never silently fall back to MAXIMUM.
-PV_OPTIMUM grid allowance and GRID budget must be configured before activation.
+`PV_OPTIMUM.minimum_battery_soc` and `PV_MAXIMUM.minimum_battery_soc` are independent:
+30% and 10%, respectively, are an example of a valid installation preference.
+Neither is an alias for the external battery reserve. PV_OPTIMUM's evening target
+is a separate objective, not a second name for its daytime minimum.
+
+The profile controller decides how much charging power is currently allowed from
+energy-system inputs and profile policy. It produces `PowerRequest`; it does not
+choose amps, phase count or vendor commands. PV requests normally use DOWN so a
+minimum charging step cannot justify deliberate grid charging. Pause if available
+power cannot sustain the minimum feasible point. The solver handles technical
+feasibility, rounding, phase transitions and electrical limits; it does not interpret
+battery forecasts or allocate household energy. REMOTE targets pass through the same
+technical solver but do not run a standalone PV profile in parallel.
+
+### Configured energy-system inputs
+
+Consume vendor-neutral Home Assistant entity values through the HA integration
+boundary and pass validated snapshots to the controller. No Fronius entity IDs,
+register addresses or vendor-specific sign conventions belong in the core.
+
+| Configurable HA input | Unit and semantics | Required use |
+| --- | --- | --- |
+| `grid_import_power` | W, finite and non-negative, power entering the installation from the grid. | All standalone PV profiles, for grid feedback and tolerance checks. |
+| `grid_export_power` | W, finite and non-negative, power leaving the installation toward the grid. | All standalone PV profiles, for currently exported surplus. |
+| `battery_charge_power` | W, finite and non-negative, power flowing into the house battery. | All standalone PV profiles, to distinguish battery charging from freely available export. |
+| `battery_discharge_power` | W, finite and non-negative, power flowing out of the house battery. | All standalone PV profiles, for battery-flow accounting and discharge-unavailable fallback. |
+| `battery_soc` | %, finite in [0, 100], observed house-battery state of charge. | All three battery-aware PV profiles. |
+| `battery_reserve_soc` | %, finite in [0, 100], known externally imposed reserve; observed/configured input, not owned by Wallbox Manager. | All battery-aware PV profiles; combines with the profile floor/target. |
+| `pv_forecast_remaining` | kWh, finite and non-negative, expected remaining PV generation for the current day. It is energy, not instantaneous power or the full-day forecast. | PV_OPTIMUM only. |
+
+The battery-aware profiles described here require those battery inputs; absence does
+not imply a zero reserve or unrestricted battery energy. A battery-free variant is
+not specified by this design. OFF and GRID do not depend on PV-only inputs, and
+REMOTE does not require the standalone forecast; all still require their own
+technical control prerequisites.
+
+An installation whose source provides signed bidirectional power may use HA
+template/helper sensors to split it into separate positive import/export or
+charge/discharge entities. Wallbox Manager does not infer the source's sign
+convention. Unit validation/conversion must be explicit; do not silently read kW
+as W or a W forecast as kWh. Entity selection must identify the whole-installation
+grid measurement boundary and the house battery, not an unrelated meter.
+
+Each snapshot carries source identity, observation/update time and validity.
+Power/SOC inputs need freshness limits appropriate to their update cadence and a
+bounded observation skew for flow comparisons. A constant value is not inherently
+stale if the source continues reporting it. The forecast has separate update-age
+and current-day validity rules; yesterday's forecast must not survive midnight as
+today's remaining energy. A configured reserve may update infrequently, so its
+validity policy must distinguish a trustworthy stable setting from an unavailable
+source. Exact age limits and skew windows remain configurable/design tuning,
+not fixed numbers in this architecture.
+
+Missing, unknown, unavailable, nonfinite, negative or out-of-range required inputs
+make the dependent PV profile INHIBITED with a specific reason. Request a verified
+safe pause when still authorized; never continue an old target, substitute zero,
+choose GRID/PV_MAXIMUM or bypass LOCAL. Fresh valid inputs can automatically resume
+the persisted desired profile after reconciliation. Contradictory or asynchronous
+flow readings must not trigger an increase; refresh/cohere the snapshot first.
+Missing forecast inhibits PV_OPTIMUM without disabling otherwise valid PV_SURPLUS
+or PV_MAXIMUM. Input/configuration validity is separate from wallbox capabilities;
+both must be revalidated before dispatch, including after restart/reconnect.
+
+### Battery targets and simple PV_OPTIMUM forecast use
+
+PV_SURPLUS gives priority to keeping the battery approximately at its configured
+high SOC target. Below the target's hysteresis band, preserve energy for battery
+replenishment and reduce/pause vehicle charging as needed. Near/above the target,
+use current surplus while avoiding sustained battery depletion. Hysteresis prevents
+rapid on/off changes around the target; it does not permit ignoring a higher known
+reserve. The controller adjusts only vehicle demand, not battery charging settings.
+
+PV_OPTIMUM may use battery energy during the day down toward its configured minimum,
+subject to actual battery/inverter restrictions and the known reserve. Separately,
+it attempts to leave the battery at `evening_battery_soc` when PV production ends.
+Validate the configured evening objective against the daytime minimum; a forecast
+shortfall can make the evening objective unreachable and must be reported rather
+than met through unrequested grid charging.
+
+Use only the configured current-day remaining-PV-energy forecast, conservatively
+reduced by the configured forecast/safety reserve in kWh and floored at zero.
+The intended simple linear strategy compares usable forecast energy with the energy
+needed to reach the evening target and adjusts the permitted daytime battery-energy
+allowance linearly, bounded by the effective daytime floor. Less usable forecast
+means less battery energy may be allocated to the vehicle; more forecast can permit
+more, without lowering the floor. Re-evaluate with current SOC/flows as the day
+progresses. The forecast is not a guaranteed charging-power supply, so instantaneous
+grid and battery feedback always constrain the resulting request.
+
+Converting a kWh forecast to an SOC allowance needs an explicit usable battery-energy
+capacity/conversion basis. A time-based linear trajectory would also need a defined
+end-of-PV horizon. The source/configuration of that conversion, whether a time-based
+trajectory is needed, and the exact linear equation remain implementation decisions;
+do not infer capacity or sunset from these seven entities or silently assume them.
+Define and validate the required conversion inputs before enabling forecast-based
+allocation. This architecture specifies the simple monotonic linear policy and its
+bounds, not invented tuning or a finalized forecast algorithm.
+
+PV_MAXIMUM does not need that forecast or an evening target. It seeks the greatest
+useful vehicle power available from PV and permitted battery discharge, constrained
+by observed flows and physical limits. At its effective minimum, remove the intended
+battery contribution and hold the floor while following available PV. House loads
+or inverter behavior may still move SOC; Wallbox Manager can reduce vehicle demand
+but cannot guarantee the SOC of a battery it does not control.
+
+For PV_OPTIMUM and PV_MAXIMUM, the effective discharge floor is
+`max(profile.minimum_battery_soc, battery_reserve_soc)`. If the known reserve is
+higher, report that the requested profile minimum is currently unreachable and
+respect the higher limit. PV_SURPLUS likewise respects the external reserve as
+well as its high-SOC preservation target. Observe reserve changes and re-evaluate;
+never write the reserve entity or assume ownership of it.
+
+### Grid feedback and battery-discharge-unavailable fallback
+
+Account for existing measured vehicle consumption in feedback: installation export
+is incremental surplus after current loads, not the total allowable vehicle power.
+Do not add battery discharge or vehicle demand twice when using grid readings.
+Battery charging power is not automatically free surplus under every profile.
+Use time-aligned wallbox consumption and grid/battery observations; exact controller
+gains and ramp scheduling remain undecided.
+
+Grid-import tolerance accommodates discrete current steps, measurement/controller
+latency and normal fluctuations around the approximately zero-import objective.
+For the current reference wallbox, approximately 250 W (roughly a 1 A step on one
+phase) is an acceptable example. It is not an intentional grid charging budget:
+never add tolerance to the PV target or deliberately consume that extra power.
+Make it configurable/derivable from current step, active phase mode, voltage and
+installation behavior; do not hard-code 250 W for every device. Whole-site import
+may come from house loads, so the controller reduces the controllable vehicle load
+without claiming it can eliminate all household import.
+
+The normal battery-limit algorithm uses SOC and the known reserve above. Separately,
+apply a generic **battery-discharge-unavailable fallback** when all these conditions
+persist across coherent observations or a short debounce window:
+
+- a PV profile currently permits/expects battery discharge;
+- the vehicle is actually charging;
+- grid import exceeds the allowed control tolerance;
+- battery discharge is below a configurable small power deadband.
+
+Do not compare discharge to exactly 0 W. Deadband, persistence window and clearing
+hysteresis are tuning parameters; a single transient sample is insufficient. Invalid
+or stale readings invoke input inhibition, not a battery-limit diagnosis. When the
+condition holds, regard battery contribution as currently unavailable and reduce
+vehicle demand toward currently available PV-only surplus, pausing below the
+minimum feasible charging point. Clear/reassess conservatively using fresh evidence;
+do not repeatedly ramp up into the same grid-import condition.
+
+Grid import above tolerance while the battery is still materially discharging is
+different: reduce vehicle demand through ordinary grid feedback as needed, but do
+not label this as unavailable discharge or infer a reserve. The fallback never
+estimates a hidden SOC percentage; inverter power limits, temperature or other
+restrictions can produce similar observed behavior.
+
+The motivating Fronius installation example supplied for this design has an internal
+web-interface reserve that can exceed the externally visible Modbus reserve, with
+the higher restriction taking effect. This explains the need for flow-based fallback;
+it is not a Fronius reserve detector or a vendor-specific control path. Other systems
+may expose all relevant restrictions and never require this fallback.
+
+### Boundary to battery integrations and the future Energy Manager
+
+Wallbox Manager reads configured HA entities and controls the wallbox. It does not
+write Fronius Modbus registers or embed Fronius PV Manager logic. If active battery
+control is later needed, use a defined programmatic interface of the responsible
+battery/inverter integration. That API is neither designed nor implemented here.
+
+Standalone Wallbox Manager owns simple current-day PV policy, configured sensor
+inputs, simple linear forecast use, current-flow feedback and technical wallbox
+operating-point solving. The future Energy Manager owns learned behavior, vehicle
+target SOC/departure requirements, expected vehicle/next-day use, electricity-price
+optimization, advanced weather/forecast modeling, long-term and cross-device/site
+optimization, and more sophisticated battery strategies. None of those prediction
+features belongs in standalone PV_OPTIMUM. REMOTE remains the programmatic boundary
+for supplying current charging intent/target power; wallbox capabilities, ownership
+and technical constraints remain enforced locally.
+
+### Operating-point solving
 
 The pure solver enumerates current steps for each physically feasible phase mode.
 Use integer step indices or decimal arithmetic, not float modulo. Intersect device,
@@ -185,7 +365,7 @@ Separate the following state dimensions rather than using one owner field:
 
 | Dimension | Meaning and lifetime |
 | --- | --- |
-| Persistent desired control | `desired_owner = LOCAL | WALLBOX_MANAGER | REMOTE`, selected normal profile (`OFF`, `PV_SURPLUS`, `PV_OPTIMUM`, `MAXIMUM`, `GRID`), and the registered authorized Energy Manager owner when REMOTE is desired. Survives technical interruptions. |
+| Persistent desired control | `desired_owner = LOCAL | WALLBOX_MANAGER | REMOTE`, selected normal profile (`OFF`, `PV_SURPLUS`, `PV_OPTIMUM`, `PV_MAXIMUM`, `GRID`), and the registered authorized Energy Manager owner when REMOTE is desired. Survives technical interruptions. |
 | Runtime active ownership | `active_owner = NONE | WALLBOX_MANAGER | REMOTE`; permission actually established for this runtime/device session. Never inferred solely from persisted intent. LOCAL is represented by the latch/device authority, with no active software owner. |
 | Runtime REMOTE lease | Owner-bound opaque token, ownership epoch and monotonic deadline. Process/session scoped; never persist or restore token/deadline. |
 | Device/local authority | Fresh device-reported authority evidence plus the durable deliberate-LOCAL latch. Connectivity, desired state and actual device authority are separate facts. |
@@ -325,7 +505,11 @@ capability and unreachable target. Tokens and credentials are redacted in diagno
 
 ## Metering and Home Assistant presentation
 
-Normalize both periodic and transactional metering into samples containing station,
+Keep configured energy-system HA inputs separate from charger protocol metering;
+their non-negative directional semantics and freshness rules are defined above.
+Do not apply those input conventions to raw OCPP samples, whose signed/export
+meaning must still be preserved. Normalize periodic and transactional metering into
+samples containing station,
 EVSE, optional connector, transaction ID, source timestamp, received timestamp,
 sequence where available, measurand, phase, location, context, unit, multiplier,
 value and quality. Retain raw meaning alongside normalized units. EVSE-only or
@@ -343,6 +527,13 @@ signed/export values, duplicate events and out-of-order samples need explicit ru
 Profile select contains only the five normal profiles; read-only sensors expose
 desired ownership/profile, active ownership, device authority, lease/recovery status,
 pending actions, capability limitations and solver reasons.
+Configuration selects the energy-input entities and exposes separate PV_SURPLUS
+battery target, PV_OPTIMUM minimum/evening SOC and forecast reserve, and PV_MAXIMUM
+minimum SOC. Observe external battery reserve read-only. Present effective limits,
+input freshness/errors, forecast shortfall and active fallback reasons separately
+from configured desires. Tolerance/deadband/hysteresis settings must not appear as
+grid charging budgets. No profile controls or translations are implemented yet;
+add their localized strings with the eventual UI.
 Dynamic entity bounds come from snapshots and are revalidated on write. Preserve
 stable IDs across reconnects and discovered capability changes. UI text and errors
 use `strings.json` with matching `translations/en.json` and `translations/de.json`;
@@ -367,6 +558,17 @@ versus disconnect ordering; heartbeat exactly at expiry; simultaneous owners;
 shared station constraints; solver rounding, min/max/step and different 1P/3P envelopes; stale voltages;
 phase-switch dwell/failure; EV underconsumption; and per-phase periodic and
 transactional readings, including duplicates, multipliers and scope ambiguity.
+
+Future standalone PV tests must cover independent profile minima and the separate
+PV_OPTIMUM evening target; PV_SURPLUS target hysteresis; higher/changing known
+reserve; simple linear forecast allowance bounds, safety reserve and forecast
+shortfall/day rollover; unavailable/negative/nonfinite/wrong-unit/stale/skewed
+inputs; no intentional grid budget in PV profiles; no double-counting of current
+vehicle/battery flows; step/mode-dependent tolerance; deadband/debounce and fallback
+recovery; excess import with versus without material battery discharge; floor
+holding and pause below minimum; and fresh re-evaluation after technical recovery.
+Test that no battery reserve writes or inferred hidden reserve percentage occur.
+These are future controller acceptance cases, not tests implemented in this task.
 
 Current development gates are `ruff check`, `ruff format --check` and `pytest`
 (using `.venv/bin/` locally). A small scaffold test checks translation key and

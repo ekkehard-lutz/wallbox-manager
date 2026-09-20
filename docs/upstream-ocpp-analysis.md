@@ -105,7 +105,7 @@ uses observed phase activity and voltage for conversions. This is useful evidenc
 for metering, not proof of supported phase modes or switching. The
 [2.x set_charge_rate](https://github.com/lbbrhzn/ocpp/blob/848407c11ff659ce59779a99ce69984bbb0e3ce1/custom_components/ocpp/ocppv201.py#L917)
 contains a 22,000 W clear-limit threshold and clears at configured maximum current.
-Do not inherit that policy: MAXIMUM still respects explicit installation limits,
+Do not inherit that policy: PV_MAXIMUM still respects explicit installation limits,
 and a target never means indiscriminately remove a limit. Use the capability-based
 solver with explicit infeasibility, rounding and transition reasons.
 

@@ -45,8 +45,26 @@ Normal user-selectable Wallbox Manager profiles are:
 - OFF
 - PV_SURPLUS
 - PV_OPTIMUM
-- MAXIMUM
+- PV_MAXIMUM
 - GRID
+
+The PV profiles work standalone using configured, vendor-neutral HA sensors:
+separate non-negative grid import/export and battery charge/discharge power in W,
+battery SOC and observed reserve in %, plus remaining-current-day PV forecast in
+kWh for PV_OPTIMUM. Signed vendor readings can be split with HA template/helper
+sensors; Wallbox Manager does not write inverter registers.
+
+- PV_SURPLUS preserves a configurable high battery SOC while using current surplus.
+- PV_OPTIMUM has separate daytime minimum and evening battery SOC targets, with
+  simple linear forecast use and a configurable forecast/safety reserve.
+- PV_MAXIMUM maximizes PV plus permitted battery contribution using its own minimum
+  SOC, independent of PV_OPTIMUM.
+
+Known battery reserves take precedence over lower profile minima. If expected
+battery discharge becomes unavailable while grid import persists, flow-based
+fallback reduces charging toward PV-only surplus. Small grid-import tolerance
+covers control resolution and latency; it is not an intentional charging budget.
+Missing/stale required inputs inhibit the dependent profile.
 
 Two additional states represent control ownership and cannot be selected as
 normal Wallbox Manager profiles:
@@ -81,6 +99,11 @@ The planned target-power directions are:
 - DOWN
 - NEAREST
 - UP
+
+Standalone profiles handle simple current-day PV logic and energy-flow feedback.
+Advanced forecasts, prices, departure/vehicle targets, learned behavior and site-wide
+optimization belong to the future Energy Manager, which supplies current power
+intent through REMOTE. Wallbox Manager retains technical operating-point solving.
 
 Home Assistant entities remain available for user interaction, display and
 automations.
