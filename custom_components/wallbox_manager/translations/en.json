@@ -1,0 +1,14 @@
+{
+  "title": "Wallbox Manager",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Wallbox Manager",
+        "description": "Set up Wallbox Manager."
+      }
+    },
+    "abort": {
+      "already_configured": "Wallbox Manager is already configured."
+    }
+  }
+}

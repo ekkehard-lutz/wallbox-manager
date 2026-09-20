@@ -1,0 +1,13 @@
+{
+  "domain": "wallbox_manager",
+  "name": "Wallbox Manager",
+  "codeowners": [
+    "@ekkehard-lutz"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/ekkehard-lutz/wallbox-manager",
+  "issue_tracker": "https://github.com/ekkehard-lutz/wallbox-manager/issues",
+  "iot_class": "local_push",
+  "requirements": [],
+  "version": "0.0.0"
+}
