@@ -8,6 +8,11 @@ providing a programmatic interface for a future higher-level Energy Manager.
 
 ## Architecture
 
+See the [proposed architecture](docs/architecture.md) and the
+[pinned upstream OCPP adoption analysis](docs/upstream-ocpp-analysis.md) for module
+boundaries, ownership transitions, power solving and reuse decisions. These are
+design documents; OCPP runtime functionality has not been implemented yet.
+
 Wallbox Manager separates charging strategy from wallbox-specific communication.
 
 ~~~text
