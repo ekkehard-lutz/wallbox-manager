@@ -56,7 +56,12 @@ sensors; Wallbox Manager does not write inverter registers.
 
 - PV_SURPLUS preserves a configurable high battery SOC while using current surplus.
 - PV_OPTIMUM has separate daytime minimum and evening battery SOC targets, with
-  simple linear forecast use and a configurable forecast/safety reserve.
+  a configured average household consumption in W, battery capacity in kWh and
+  forecast/safety reserve in kWh. The forecast means total PV generation remaining
+  today, before household consumption. Predicted household energy shortfall until
+  sunset is converted to additional SOC above the evening target, clamped between
+  minimum SOC and 100%. HA supplies today’s sunset; after sunset the remaining
+  duration and forecast contribution are zero, without planning against tomorrow.
 - PV_MAXIMUM maximizes PV plus permitted battery contribution using its own minimum
   SOC, independent of PV_OPTIMUM.
 

@@ -170,7 +170,7 @@ register addresses or vendor-specific sign conventions belong in the core.
 | `battery_discharge_power` | W, finite and non-negative, power flowing out of the house battery. | All standalone PV profiles, for battery-flow accounting and discharge-unavailable fallback. |
 | `battery_soc` | %, finite in [0, 100], observed house-battery state of charge. | All three battery-aware PV profiles. |
 | `battery_reserve_soc` | %, finite in [0, 100], known externally imposed reserve; observed/configured input, not owned by Wallbox Manager. | All battery-aware PV profiles; combines with the profile floor/target. |
-| `pv_forecast_remaining` | kWh, finite and non-negative, expected remaining PV generation for the current day. It is energy, not instantaneous power or the full-day forecast. | PV_OPTIMUM only. |
+| `pv_forecast_remaining` | kWh, finite and non-negative, the total PV energy expected to be generated from now until the end of today's PV production period. It is not surplus after household consumption, vehicle-available energy or a full-day forecast including energy already generated. | PV_OPTIMUM only. |
 
 The battery-aware profiles described here require those battery inputs; absence does
 not imply a zero reserve or unrestricted battery energy. A battery-free variant is
@@ -221,24 +221,87 @@ Validate the configured evening objective against the daytime minimum; a forecas
 shortfall can make the evening objective unreachable and must be reported rather
 than met through unrequested grid charging.
 
-Use only the configured current-day remaining-PV-energy forecast, conservatively
-reduced by the configured forecast/safety reserve in kWh and floored at zero.
-The intended simple linear strategy compares usable forecast energy with the energy
-needed to reach the evening target and adjusts the permitted daytime battery-energy
-allowance linearly, bounded by the effective daytime floor. Less usable forecast
-means less battery energy may be allocated to the vehicle; more forecast can permit
-more, without lowering the floor. Re-evaluate with current SOC/flows as the day
-progresses. The forecast is not a guaranteed charging-power supply, so instantaneous
-grid and battery feedback always constrain the resulting request.
+PV_OPTIMUM uses the following additional configuration and normalized time input:
 
-Converting a kWh forecast to an SOC allowance needs an explicit usable battery-energy
-capacity/conversion basis. A time-based linear trajectory would also need a defined
-end-of-PV horizon. The source/configuration of that conversion, whether a time-based
-trajectory is needed, and the exact linear equation remain implementation decisions;
-do not infer capacity or sunset from these seven entities or silently assume them.
-Define and validate the required conversion inputs before enabling forecast-based
-allocation. This architecture specifies the simple monotonic linear policy and its
-bounds, not invented tuning or a finalized forecast algorithm.
+| Input/parameter | Unit and validation | Source |
+| --- | --- | --- |
+| `average_consumption_power` | W, finite and non-negative; assumed average household/site consumption for the remaining time until sunset. | User-configured constant, not a learned load profile. Household demand is accounted for separately from total PV generation. |
+| `battery_capacity` | kWh, finite and strictly positive; explicitly configured usable/nominal battery energy capacity consistent with the SOC conversion basis. | Validated configuration; never inferred from current SOC or power measurements. Exact config-flow presentation remains implementation work. |
+| `forecast_reserve` | kWh, finite and non-negative; conservative deduction from expected PV generation. | Existing configurable forecast/safety reserve. |
+| `hours_until_sunset` | Hours, finite and non-negative, remaining duration until today's sunset; zero after that sunset. | Normalized by the HA integration layer using HA's existing sun/location facilities, installation location and timezone. |
+
+The HA layer obtains today's local-date sunset; Wallbox Manager requires no separate
+latitude, longitude or sunset-sensor configuration. It supplies only the normalized
+duration to the pure controller, which imports no HA sun APIs. Do not blindly use
+a rolling “next sunset” value after today's sunset: it may refer to tomorrow and
+incorrectly create approximately 24 hours of remaining time. If today's solar timing
+cannot be established, inhibit the dependent calculation with a reason rather than
+substitute tomorrow or fabricate a duration.
+
+The finalized simple calculation is:
+
+```text
+remaining_consumption_kwh =
+    average_consumption_power_w / 1000 * hours_until_sunset
+
+usable_forecast_kwh =
+    max(0, pv_forecast_remaining_kwh - forecast_reserve_kwh)
+
+battery_energy_needed_kwh =
+    max(0, remaining_consumption_kwh - usable_forecast_kwh)
+
+additional_soc_needed_pct =
+    battery_energy_needed_kwh / battery_capacity_kwh * 100
+
+target_battery_soc = evening_battery_soc + additional_soc_needed_pct
+
+target_battery_soc = clamp(target_battery_soc, minimum_battery_soc, 100)
+```
+
+Here `clamp(value, lower, upper) = min(upper, max(lower, value))`; SOC quantities
+are percentage points on the 0–100 scale. Validate both configured SOC thresholds
+in that range and their minimum/evening relationship before calculating. Invalid
+capacity, consumption, reserve or timing inhibits PV_OPTIMUM under the same input
+validity rules as its required sensors.
+
+Expected household consumption is approximated linearly from average power and
+remaining time. Usable total PV generation first covers that consumption. Any
+predicted shortfall adds the corresponding battery SOC to preserve above the desired
+end-of-PV evening SOC. Surplus forecast cannot lower the target below the evening
+objective through a negative shortfall. Clamp the result to the configured minimum
+and 100%; if the unclamped requirement exceeds 100%, expose the planning shortfall
+rather than imply the evening goal is guaranteed. This equation adds no learned
+behavior, price optimization or sophisticated forecast model.
+
+For example, 500 W over four hours gives 2 kWh expected consumption. A 1.5 kWh
+remaining forecast less a 0.5 kWh reserve leaves 1 kWh usable forecast. The 1 kWh
+shortfall requires 10 SOC percentage points with a 10 kWh battery. An evening target
+of 60% and minimum of 30% therefore produce a planning target of 70%.
+
+`target_battery_soc` is a dynamic planning target, separate from the hard currently
+known `effective_discharge_floor` defined below. Compare current battery SOC to the
+planning target to preserve the planned battery energy when allocating vehicle
+power, while always respecting the effective floor. A higher known external reserve
+can constrain allocation even when the calculated planning target is lower. Neither
+a favorable forecast nor the planning target authorizes grid charging or overrides
+actual inverter limits; instantaneous grid/battery feedback still constrains power.
+
+Recalculate as current time/`hours_until_sunset`, remaining forecast, battery SOC,
+known reserve or configuration changes. SOC and reserve affect allocation and
+constraints even though they do not appear in the forecast arithmetic itself.
+Persist selected profile and configuration, never a calculated planning target as
+authoritative restart state. Recalculate from fresh inputs after recovery.
+
+After today's sunset, set `hours_until_sunset = 0` and treat the current-day forecast
+contribution as exhausted (zero for this calculation), even if a sensor retains a
+residual value. This intentional end-of-day normalization is not a generic fallback
+for missing/invalid daytime forecasts. Do not substitute tomorrow's sunset or consume
+a tomorrow forecast during this evening calculation. Expected remaining consumption
+and additional SOC needed then become zero, leaving the clamped evening target.
+Normal current-day input selection resumes for the new local date; no next-day
+optimization is introduced. Charging after sunset still respects that planning
+target, the profile minimum, known reserve, approximately zero grid import and
+observed energy flows; the equation is not permission for unrestricted discharge.
 
 PV_MAXIMUM does not need that forecast or an evening target. It seeks the greatest
 useful vehicle power available from PV and permitted battery discharge, constrained
@@ -528,8 +591,9 @@ Profile select contains only the five normal profiles; read-only sensors expose
 desired ownership/profile, active ownership, device authority, lease/recovery status,
 pending actions, capability limitations and solver reasons.
 Configuration selects the energy-input entities and exposes separate PV_SURPLUS
-battery target, PV_OPTIMUM minimum/evening SOC and forecast reserve, and PV_MAXIMUM
-minimum SOC. Observe external battery reserve read-only. Present effective limits,
+battery target, PV_OPTIMUM minimum/evening SOC, forecast reserve, configured average
+consumption power and battery capacity, and PV_MAXIMUM minimum SOC. Solar timing
+comes from HA rather than additional user-configured location or sunset entities. Observe external battery reserve read-only. Present effective limits,
 input freshness/errors, forecast shortfall and active fallback reasons separately
 from configured desires. Tolerance/deadband/hysteresis settings must not appear as
 grid charging budgets. No profile controls or translations are implemented yet;
@@ -561,8 +625,11 @@ transactional readings, including duplicates, multipliers and scope ambiguity.
 
 Future standalone PV tests must cover independent profile minima and the separate
 PV_OPTIMUM evening target; PV_SURPLUS target hysteresis; higher/changing known
-reserve; simple linear forecast allowance bounds, safety reserve and forecast
-shortfall/day rollover; unavailable/negative/nonfinite/wrong-unit/stale/skewed
+reserve; the finalized forecast equation and its W/kWh/SOC conversions, positive
+capacity validation, safety-reserve subtraction, zero shortfall and both clamp
+bounds; the worked numerical example; today-versus-next sunset, timezone/local-day
+rollover, missing solar timing and after-sunset forecast exhaustion; fresh target
+recalculation after time/configuration changes and restart; unavailable/negative/nonfinite/wrong-unit/stale/skewed
 inputs; no intentional grid budget in PV profiles; no double-counting of current
 vehicle/battery flows; step/mode-dependent tolerance; deadband/debounce and fallback
 recovery; excess import with versus without material battery discharge; floor
