@@ -13,7 +13,10 @@ Changes: isolated protocol adapters and captured socket/task owners; strict
 negotiation; generation-fenced generic snapshots; read-only bounded discovery;
 read-only HA platform lifecycle, diagnostic descriptions, DeviceInfo and push
 subscription cleanup adapted to generic snapshots; ACK-only MeterValues,
-NotifyEvent and TransactionEvent response patterns without domain processing;
+NotifyEvent and TransactionEvent response patterns; sampled-value buckets, unit/
+multiplier normalization, phase selection, status mapping and HA measurement
+class/unit patterns adapted to immutable scoped observations. No upstream phase
+aggregation, connector flattening or transaction/control policy is inherited;
 no inherited charging policy,
 services, measurement entity model or automatic availability.
 Tests use Wallbox Manager contracts and fake/local WebSocket peers without the

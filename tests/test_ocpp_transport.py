@@ -552,7 +552,7 @@ async def test_reboot_discards_delayed_inventory(server, protocol):
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
-async def test_status_identity_is_scoped_and_no_state_or_measurements_added(
+async def test_status_identity_and_state_are_scoped_without_control_evidence(
     server, protocol
 ):
     async with peer(server, protocol) as p:
@@ -564,7 +564,9 @@ async def test_status_identity_is_scoped_and_no_state_or_measurements_added(
             payload = {"connectorId": 0, "errorCode": "NoError", "status": "Available"}
             before = server.runtime.get(StationId("station-a"))
             assert (await p.call("StatusNotification", payload))[0] == 3
-            assert server.runtime.get(StationId("station-a")) == before
+            station_state = server.runtime.get(StationId("station-a"))
+            assert station_state.connectors == before.connectors
+            assert station_state.observations[0].channel.scope == StationId("station-a")
             payload["connectorId"] = 8
             expected = ("connector-8", "8")
         else:

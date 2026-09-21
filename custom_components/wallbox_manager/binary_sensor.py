@@ -1,4 +1,4 @@
-"""Connection diagnostic only; no charging-state or control entities."""
+"""Connection diagnostics and reported operational state, without controls."""
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -6,9 +6,11 @@ from homeassistant.components.binary_sensor import (
 )
 
 from .entity import StationEntity, async_setup_station_entities
+from .session_entity import setup_session_entities
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    setup_session_entities(hass, entry, async_add_entities, binary=True)
     async_setup_station_entities(
         hass,
         entry,

@@ -22,6 +22,9 @@
     "binary_sensor": {
       "connected": {
         "name": "Verbunden"
+      },
+      "session_active": {
+        "name": "{scope} Session aktiv"
       }
     },
     "sensor": {
@@ -46,6 +49,87 @@
           "unsupported": "Nicht unterstützt",
           "degraded": "Beeinträchtigt"
         }
+      },
+      "voltage_l1": {
+        "name": "{scope} Spannung L1"
+      },
+      "voltage_l2": {
+        "name": "{scope} Spannung L2"
+      },
+      "voltage_l3": {
+        "name": "{scope} Spannung L3"
+      },
+      "current_l1": {
+        "name": "{scope} Strom L1"
+      },
+      "current_l2": {
+        "name": "{scope} Strom L2"
+      },
+      "current_l3": {
+        "name": "{scope} Strom L3"
+      },
+      "power_l1": {
+        "name": "{scope} Wirkleistung L1"
+      },
+      "power_l2": {
+        "name": "{scope} Wirkleistung L2"
+      },
+      "power_l3": {
+        "name": "{scope} Wirkleistung L3"
+      },
+      "power": {
+        "name": "{scope} Wirkleistung"
+      },
+      "energy": {
+        "name": "{scope} Importierte Energie"
+      },
+      "connector_state": {
+        "name": "{scope} Anschlussstatus",
+        "state": {
+          "unknown": "Unbekannt",
+          "available": "Verfügbar",
+          "occupied": "Belegt",
+          "reserved": "Reserviert",
+          "unavailable": "Nicht verfügbar",
+          "faulted": "Gestört"
+        }
+      },
+      "charging_state": {
+        "name": "{scope} Ladezustand",
+        "state": {
+          "unknown": "Unbekannt",
+          "idle": "Inaktiv",
+          "connected": "Verbunden",
+          "charging": "Lädt",
+          "suspended_vehicle": "Vom Fahrzeug pausiert",
+          "suspended_station": "Von der Ladestation pausiert",
+          "finishing": "Abschluss",
+          "preparing": "Vorbereitung"
+        }
+      },
+      "session_id": {
+        "name": "{scope} Session-ID"
+      },
+      "session_started": {
+        "name": "{scope} Session gestartet"
+      },
+      "session_ended": {
+        "name": "{scope} Session beendet"
+      },
+      "session_duration": {
+        "name": "{scope} Session-Dauer"
+      },
+      "session_power": {
+        "name": "{scope} Session-Ladeleistung"
+      },
+      "session_energy": {
+        "name": "{scope} Session-Energie"
+      },
+      "session_start_meter": {
+        "name": "{scope} Session Start-Zählerstand"
+      },
+      "session_end_meter": {
+        "name": "{scope} Session End-Zählerstand"
       }
     }
   }

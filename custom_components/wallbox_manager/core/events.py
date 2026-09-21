@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from .capabilities import CapabilityEvidence, CapabilitySnapshot
 from .models import ConnectorId, EvseId, StationId
+from .telemetry import Channel, Observation
 
 
 @dataclass(frozen=True)
@@ -50,3 +51,18 @@ class StationSnapshot:
     discovery: CapabilityEvidence
     protocol: str | None = None
     protocol_version: str | None = None
+    supported_channels: tuple[Channel, ...] = ()
+    observations: tuple[Observation, ...] = ()
+
+    def __post_init__(self):
+        for name, expected in (
+            ("supported_channels", Channel),
+            ("observations", Observation),
+        ):
+            items = tuple(getattr(self, name))
+            if any(not isinstance(item, expected) for item in items):
+                raise ValueError("invalid telemetry snapshot")
+            object.__setattr__(self, name, items)
+
+    def observation(self, channel: Channel) -> Observation | None:
+        return next((o for o in self.observations if o.channel == channel), None)

@@ -1,4 +1,4 @@
-"""Read-only discovery diagnostics; no electrical measurements.
+"""Read-only discovery diagnostics and scoped runtime observations.
 
 Entity description/category pattern adapted from pinned lbbrhzn/ocpp sensor.py,
 848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
@@ -9,11 +9,15 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
+    SensorStateClass,
 )
 from homeassistant.helpers.entity import EntityCategory
 
 from .core.capabilities import EvidenceState
+from .core.telemetry import STATE_OPTIONS, Quantity
 from .entity import StationEntity, async_setup_station_entities
+from .observation_entity import ObservationEntity
+from .session_entity import setup_session_entities
 
 DESCRIPTIONS = tuple(
     SensorEntityDescription(
@@ -37,6 +41,7 @@ DESCRIPTIONS = tuple(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    setup_session_entities(hass, entry, async_add_entities, binary=False)
     async_setup_station_entities(
         hass,
         entry,
@@ -44,6 +49,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
         lambda runtime, entry_id, station: [
             DiagnosticSensor(runtime, entry_id, station, description)
             for description in DESCRIPTIONS
+        ],
+        observation_factory=lambda runtime, entry_id, channel: [
+            ObservationSensor(runtime, entry_id, channel)
         ],
     )
 
@@ -79,3 +87,39 @@ class DiagnosticSensor(StationEntity, SensorEntity):
                 observed_at=self.snapshot.discovery.observed_at.isoformat(),
             )
         return attrs
+
+
+class ObservationSensor(ObservationEntity, SensorEntity):
+    def __init__(self, runtime, entry_id, channel):
+        super().__init__(runtime, entry_id, channel)
+        quantity = channel.quantity
+        if quantity in STATE_OPTIONS:
+            self._attr_device_class = SensorDeviceClass.ENUM
+            self._attr_options = [state.value for state in STATE_OPTIONS[quantity]]
+        else:
+            prefix = quantity.value.split("_")[0]
+            device_class, unit = {
+                "voltage": (SensorDeviceClass.VOLTAGE, "V"),
+                "current": (SensorDeviceClass.CURRENT, "A"),
+                "power": (SensorDeviceClass.POWER, "W"),
+                "energy": (SensorDeviceClass.ENERGY, "kWh"),
+            }[prefix]
+            self._attr_device_class = device_class
+            self._attr_native_unit_of_measurement = unit
+            self._attr_state_class = (
+                SensorStateClass.TOTAL_INCREASING
+                if quantity == Quantity.ENERGY
+                else SensorStateClass.MEASUREMENT
+            )
+
+    @property
+    def native_value(self):
+        observation = self.observation
+        if observation is None or observation.value is None:
+            return None
+        if self.channel.quantity in STATE_OPTIONS:
+            return observation.value.value
+        value = observation.value
+        if self.channel.quantity == Quantity.ENERGY:
+            value /= 1000
+        return float(value)

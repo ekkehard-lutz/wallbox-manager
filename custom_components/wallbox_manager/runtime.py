@@ -9,6 +9,8 @@ from uuid import uuid4
 from .core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
 from .core.events import SessionToken, StationIdentity, StationSnapshot
 from .core.models import ConnectorId, EvseId, StationId
+from .core.telemetry import Channel, Observation, Quantity, State, station_of
+from .session_ledger import SessionLedger
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,6 +20,7 @@ class Runtime:
 
     def __init__(self) -> None:
         self.runtime_id = str(uuid4())
+        self.sessions = SessionLedger()
         self._stations: dict[StationId, StationSnapshot] = {}
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
@@ -55,6 +58,7 @@ class Runtime:
         connected: bool,
         reason: str,
     ) -> StationSnapshot:
+        self.sessions.clear_live(token.station)
         old = self.get(token.station)
         now = datetime.now(UTC)
         unknown = CapabilityEvidence(EvidenceState.UNKNOWN, "runtime", now, reason)
@@ -79,6 +83,7 @@ class Runtime:
             unknown,
             old.protocol if old else None,
             old.protocol_version if old else None,
+            old.supported_channels if old else (),
         )
 
     def connect(
@@ -158,4 +163,96 @@ class Runtime:
                 discovery=discovery,
             )
         )
+        return True
+
+    def session_event(self, token, event, observations=(), *, live=False):
+        """Persisted identity is independent of the live generation fence."""
+        if not self.current(token):
+            return False
+        if station_of(event.scope) != token.station:
+            raise ValueError("session belongs to another station")
+        return self.sessions.apply(event, observations, live=live)
+
+    def session_observations(self, token, observations, external_id=None):
+        if self.current(token):
+            if any(station_of(o.channel.scope) != token.station for o in observations):
+                raise ValueError("session observation belongs to another station")
+            self.sessions.observe(observations, external_id)
+
+    def observe(
+        self,
+        token: SessionToken,
+        observations: tuple[Observation, ...],
+        *,
+        session_external_id=None,
+        track_sessions=True,
+    ) -> bool:
+        """Accept only current-generation, monotonic per-channel observations.
+
+        Observed channel support survives invalidation, independently of physical
+        charging capabilities. Equal-time conflicting readings become unknown.
+        """
+        if not self.current(token):
+            return False
+        incoming = tuple(observations)
+        if any(
+            not isinstance(o, Observation)
+            or station_of(o.channel.scope) != token.station
+            for o in incoming
+        ):
+            raise ValueError("observation belongs to another station or is invalid")
+        old = self.get(token.station)
+        values = {o.channel: o for o in old.observations}
+        supported = dict.fromkeys(old.supported_channels)
+        evses, connectors = set(old.evses), set(old.connectors)
+        pending = list(incoming)
+        for observation in pending:
+            channel = observation.channel
+            previous = values.get(channel)
+            if previous is not None:
+                if observation.observed_at < previous.observed_at:
+                    continue
+                if observation.observed_at == previous.observed_at:
+                    if observation.value == previous.value:
+                        continue
+                    observation = replace(previous, value=None)
+            if observation.value is None and channel not in supported:
+                continue
+            values[channel] = observation
+            supported[channel] = None
+            # A newer connector availability event supersedes contradictory
+            # older charging state only at that exact scope. It does not create
+            # charging support or project connector state onto a whole EVSE.
+            charging = Channel(channel.scope, Quantity.CHARGING_STATE)
+            if (
+                channel.quantity == Quantity.CONNECTOR_STATE
+                and observation.value != State.OCCUPIED
+                and charging in supported
+            ):
+                pending.append(
+                    replace(
+                        observation,
+                        channel=charging,
+                        value=State.IDLE
+                        if observation.value == State.AVAILABLE
+                        else State.UNKNOWN,
+                    )
+                )
+            scope = channel.scope
+            if isinstance(scope, ConnectorId):
+                connectors.add(scope)
+                evses.add(scope.evse)
+            elif isinstance(scope, EvseId):
+                evses.add(scope)
+        updated = replace(
+            old,
+            observations=tuple(values.values()),
+            supported_channels=tuple(supported),
+            evses=tuple(sorted(evses, key=lambda e: e.value)),
+            connectors=tuple(sorted(connectors, key=lambda c: (c.evse.value, c.value))),
+        )
+        if track_sessions:
+            self.sessions.observe(incoming, session_external_id)
+        if updated != old:
+            self._publish(updated)
         return True

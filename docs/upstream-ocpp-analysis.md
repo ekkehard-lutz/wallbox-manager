@@ -281,3 +281,23 @@ unconditional token Accepted response, an optional token is reported Unknown.
 The reference station emits tokenless events. Existing MIT notices cover this
 adaptation. See the investigation follow-up for the reproduced 2.1 library
 missing-handler timeout and ACK-only tests.
+
+
+## Metering and runtime-state feature
+
+Re-inspected `chargepoint.py` `process_measurands`, `process_phases` and
+`get_energy_kwh`, `ocppv16.py` MeterValues/StatusNotification, `ocppv201.py`
+`_set_meter_values`/StatusNotification/TransactionEvent, and `sensor.py` device
+class, unit, state-class and push-subscription patterns at the same pinned SHA.
+
+| Source pattern | Local adaptation |
+| --- | --- |
+| `ocppv201.py` `_set_meter_values` sample buckets and decimal multiplier | `protocols/ocpp/common/metering.py`: shared normalization of separately validated 2.0.1/2.1 messages; exact fractions, explicit units, timestamp validation and per-channel deadlines. |
+| `chargepoint.py` phase selection and energy/power unit handling | `metering.py`: preserve individual phases, normalize to V/A/W/Wh; HA converts Wh to kWh. No phase averaging, line-to-line conversion, zero-filled aggregation or single-connector flattening. |
+| `ocppv16.py` and `ocppv201.py` status/meter handlers | Versioned adapters call `Runtime.observe` with immutable domain values; 1.6 detailed status and 2.x chargingState remain distinct from coarse Occupied status. No transaction/control policy copied. |
+| `sensor.py` HA device/state classes, units and push lifecycle | `sensor.py`, `binary_sensor.py`, `observation_entity.py`, `entity.py`: dynamic observed channels, operational categories, per-scope stable registry identity, one-shot expiry and reload/unload cleanup. No direct ChargePoint or metric-dictionary coupling. |
+
+Core Channel/Observation contracts, generation/time fencing and observed support
+are Wallbox Manager implementation. See [the feature contract](metering-runtime-state.md)
+for conservative exclusions, freshness policy and tests. The full MIT notice is
+retained and extended in THIRD_PARTY_NOTICES; normalization includes source attribution.

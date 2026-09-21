@@ -1,6 +1,7 @@
 """ACK-only interoperability using genuine versioned OCPP library peers."""
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from test_ocpp_bidirectional import paired
@@ -97,8 +98,22 @@ async def test_reporting_ack_during_discovery(protocol, kind):
             assert response.id_token_info == {"status": "Unknown"}
         else:
             assert all(value is None for value in vars(response).values())
-        # No measurements, transactions, authority, identity or evidence published.
-        assert server.runtime.get(adapter.token.station) == before
+        # Metering/state observations may change; discovery/control evidence does not.
+        after = server.runtime.get(adapter.token.station)
+        assert (
+            replace(
+                after,
+                observations=before.observations,
+                supported_channels=before.supported_channels,
+                evses=before.evses,
+                connectors=before.connectors,
+            )
+            == before
+        )
+        if kind == "NotifyEvent":
+            assert after == before
+        else:
+            assert after.observations
         assert not adapter.discovery_task.done()
         await station.call(
             station._call.NotifyReport(
