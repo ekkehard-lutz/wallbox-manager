@@ -462,34 +462,101 @@ values and sustained underconsumption; do not repeatedly increase the limit or
 switch phases just because the EV is full, tapering or internally constrained.
 Re-solve on relevant inputs with debouncing, never replay a stale solved point.
 
-### Future temporary EV-acceptance constraints
+### Future session-local EV acceptance
 
-Requested power, offered power, acknowledged command and measured consumption
-remain separate. The pure solver determines the offered operating point; actual
-EV consumption is observed later through metering. An acknowledged command does
-not establish actual consumption. For example, offering 3 x 25 A while observing
-3 x 16 A is underconsumption, not by itself a wallbox capability failure, a solver
-failure or evidence that the wallbox cannot offer 25 A.
+Wallbox Manager will support simple controller-side, session-local learning of
+actual AC current acceptance, conceptually named `EVAcceptanceEstimate`. This is
+neither a physical wallbox capability nor a permanent vehicle capability. The
+learning controller is future work; no learning runtime is implemented here.
 
-A future controller may derive a conservative temporary EV-acceptance constraint
-from current-session metering. Keep this separate from persistent wallbox
-capabilities and discard it on vehicle disconnect, a new charging session, stale
-evidence, or a phase-mode change without sufficient evidence for that mode. An
-observed 3P limit must not be assumed to apply to 1P or 2P. Never persist a learned
-EV limit as a wallbox capability. EV learning, vehicle fingerprinting and vehicle
-identification are not implemented in this task.
+Requested power, offered power/current, acknowledged command and measured EV
+consumption remain separate. The pure solver determines the offered operating
+point; actual consumption is observed later through metering. An acknowledged
+command does not establish actual consumption. Offering 20 A while observing
+16 A, or offering 3 x 25 A while observing 3 x 16 A, is not by itself a wallbox
+capability failure, a solver failure or evidence that the offered wallbox current
+is unsupported. Never lower the persistent `ChargingEnvelope` on that basis.
+
+At the start of each new charging session, every supported phase mode has unknown
+EV acceptance and no additional EV constraint beyond its currently verified
+wallbox/installation envelope. The controller may initially offer up to that
+permitted envelope; this is an initial assumption, not evidence of EV acceptance
+or permission to bypass the requested power, ownership or other safety limits.
+Conceptually, for each mode:
+
+```text
+effective_max_current(mode) = min(
+    wallbox_or_installation_max(mode),
+    observed_session_ev_acceptance(mode) if known
+)
+```
+
+An unknown acceptance estimate contributes no extra bound. For example, permitted
+installation envelopes might be 1P 6–20 A, 2P 6–20 A and 3P 6–27 A. These are
+examples, not defaults. The 20 A ceiling may already reflect an installation or
+regulatory unbalance limit even when the wallbox hardware permits more. Learning
+and upward probes must always respect those limits and the remaining shared
+station budget.
+
+Learn independently for each explicit `PhaseMode`, not merely its phase count.
+For example, L1 may have an observed 16 A estimate, L1+L2 may remain unknown, and
+L1+L2+L3 may independently have an observed 16 A estimate. Never infer a 2P limit
+from 1P or 3P evidence, or transfer a limit between L1, L2 and L3 single-phase
+mappings without explicit evidence for the destination mode.
+
+The future controller compares reliably offered current/power with measured
+current/power. If a higher current has been offered in a stable command state for
+a sufficient period while consumption remains materially lower, it may lower the
+estimate for that mode. For example, 1P/20 A offered with approximately 16 A
+persistently measured may yield a temporary estimate around 16 A for that mapping.
+A single low meter sample must never establish an EV limit.
+
+An estimate is not permanent even within a session: battery temperature,
+conditioning, BMS balancing, vehicle-side charging strategy or SOC-dependent
+tapering may cause temporary underconsumption. The future controller may
+periodically and conservatively probe a slightly higher offered current, within
+all current authorization, power-request and electrical limits. If the EV accepts
+the higher current, the estimate may rise. Both downward and upward adaptation
+are supported by the design; this does not authorize repeated uncontrolled
+increases merely because consumption is low.
+
+Learning and probing require persistence/debounce before lowering an estimate,
+measurement tolerance, stable wallbox command state, coherent/fresh metering,
+bounded upward probe steps, and hysteresis/cooldown after probes. Avoid rapid
+phase/current oscillation and respect phase-transition restrictions. Exact timing,
+deadbands, probe intervals and other tuning parameters remain to be implemented
+and tested with the future controller.
+
+The controller may feed an estimate into the solver as an explicit temporary
+constraint. If a requested power cannot be reached efficiently with 1P because
+session acceptance appears limited to 16 A, the solver can compare alternative
+2P or 3P offers, provided those modes are supported, eligible and safe. Unknown
+acceptance in an alternative mode still does not guarantee actual EV consumption.
+
+Discard all estimates when the charging/vehicle session ends or the vehicle
+disconnects; a new session starts unconstrained by earlier EV observations.
+Invalidate stale evidence or treat its estimate as unknown. A phase-mode change
+never transfers an estimate to the new mode: use only fresh evidence specific to
+that mapping, otherwise treat its acceptance as unknown. Never persist learned
+EV acceptance as wallbox capability. Cross-session vehicle learning, fingerprinting
+and identification are outside this implementation.
 
 The existing `CurrentLimit(mode, min_current_a, max_current_a, source)` contract
-is sufficient: it is an explicit additional interval for one physical phase
-mapping, intersected with the wallbox grid without changing capability evidence.
-No structural change is needed for future temporary session/EV constraints. The
-future controller owns their provenance, freshness, session lifetime and removal;
-the solver neither stores them nor decides when to learn or discard them.
+is sufficient without structural changes. It carries an explicit additional
+interval for one physical phase mapping and intersects the wallbox grid without
+changing capability evidence. Use a distinguishable source such as
+`temporary_session_acceptance`, separate from installation/site and shared-station
+sources; retain the evidence and reason for that constraint in the controller's
+session estimate. The controller owns provenance, freshness, session lifetime and
+removal. The solver need not interpret the source or know why the limit exists.
 
 The solver remains deterministic and stateless: `PowerRequest`, wallbox physical
 capabilities, explicit current/site/session constraints, voltage observations and
 eligible phase modes produce an offered `OperatingPoint` or explicit non-success.
-It does not inspect measured EV power or infer vehicle behavior.
+It does not inspect historical metering, learn EV behavior, probe the EV, maintain
+timers or decide when to retry higher current. Existing tests already establish
+that an explicit per-mode session limit leaves other modes and the underlying
+`ChargingEnvelope` unchanged; timing/probing tests belong to the future controller.
 
 ## Ownership state machine
 
