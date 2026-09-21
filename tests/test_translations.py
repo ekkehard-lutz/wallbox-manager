@@ -45,7 +45,7 @@ def test_all_diagnostic_names_and_evidence_states_are_translated():
     for filename in ("strings.json", "translations/en.json", "translations/de.json"):
         catalog = json.loads((INTEGRATION / filename).read_text())["entity"]
         assert catalog["binary_sensor"]["connected"]["name"]
-        assert set(catalog["sensor"]) == {d.key for d in DESCRIPTIONS}
+        assert {d.key for d in DESCRIPTIONS} <= set(catalog["sensor"])
         assert set(catalog["sensor"]["discovery"]["state"]) == {
             state.value for state in EvidenceState
         }
@@ -62,3 +62,20 @@ def test_listener_url_has_no_unclosed_rich_text_tags(filename):
     # literal endpoint placeholders. This URL intentionally contains no markup.
     assert "ws://HA-address:port/station-id" in description
     assert "<" not in description and ">" not in description
+
+
+def test_all_operational_entity_names_and_states_are_translated():
+    from custom_components.wallbox_manager.binary_sensor import STATE_FLAGS
+    from custom_components.wallbox_manager.core.telemetry import STATE_OPTIONS, Quantity
+
+    for filename in ("strings.json", "translations/en.json", "translations/de.json"):
+        catalog = json.loads((INTEGRATION / filename).read_text())["entity"]
+        for quantity in Quantity:
+            assert "{scope}" in catalog["sensor"][quantity.value]["name"]
+        for quantity, states in STATE_OPTIONS.items():
+            assert set(catalog["sensor"][quantity.value]["state"]) == {
+                s.value for s in states
+            }
+        for flags in STATE_FLAGS.values():
+            for flag in flags:
+                assert "{scope}" in catalog["binary_sensor"][flag]["name"]

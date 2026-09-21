@@ -2,7 +2,7 @@
 
 Listener setup/unload pattern adapted from lbbrhzn/ocpp __init__.py at
 848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
-See THIRD_PARTY_NOTICES.md. Runtime is entry-owned, with read-only diagnostic
+See THIRD_PARTY_NOTICES.md. Runtime is entry-owned, with read-only observation
 platforms and no services.
 """
 

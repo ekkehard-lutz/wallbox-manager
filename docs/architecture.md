@@ -2,8 +2,8 @@
 
 Status: design with initial pure-core implementation, 2026-09-21. Immutable
 identity/capability/request contracts and the operating-point solver are implemented.
-The read-only OCPP transport/discovery foundation is also implemented. Charging
-control, measurement entities and remaining runtime behavior below are planned.
+The read-only OCPP transport/discovery and scoped metering/runtime-state foundations
+are implemented. Charging control and remaining runtime behavior below are planned.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -101,12 +101,14 @@ subscriptions; HA diagnostic entities consume snapshots without parsing OCPP obj
 known identities across disconnect and distinguish disconnected state from live
 capability evidence. These are known identities, not a claim that all previously
 seen connectors are still present. No physical operating envelopes are fabricated.
-No measurement values, transaction state or charging/status state are implemented;
-StatusNotification is acknowledged only to learn explicit physical identities.
-OCPP 2.x MeterValues, TransactionEvent and NotifyEvent receive schema-validated
-protocol acknowledgements only: no measurements, transactions or authority state
-are recorded. Tokenless transaction events receive an empty result; optional
-idToken inputs receive Unknown token status, without authorization processing.
+MeterValues and 2.x TransactionEvent metering update immutable scoped observations;
+StatusNotification and 2.x chargingState supply distinct connector/charging enums.
+HA operational entities are created only for observed supported channels. See the
+[implemented metering/runtime contract](metering-runtime-state.md) for timestamps,
+normalization, freshness, scope, invalidation and limitations. Transaction ledgers
+and authority/authorization logic remain unimplemented. NotifyEvent stays ACK-only;
+tokenless transaction events receive an empty result, and optional idToken inputs
+receive Unknown token status without authorization processing.
 
 The URL station ID maps to `StationId`. OCPP 1.6 connector zero stays station-scoped;
 a positive connector N maps explicitly to `EvseId(station, "connector-N")` and
@@ -810,6 +812,10 @@ recovery timeout, local control, unavailable device, invalid input, unsupported
 capability and unreachable target. Tokens and credentials are redacted in diagnostics.
 
 ## Metering and Home Assistant presentation
+
+The initial implemented subset is specified in [Metering & Runtime State](metering-runtime-state.md).
+The following richer storage, aggregation and control presentation are future design;
+the initial subset does not store raw/historical payloads or compute derived totals.
 
 Keep configured energy-system HA inputs separate from charger protocol metering;
 their non-negative directional semantics and freshness rules are defined above.

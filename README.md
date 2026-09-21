@@ -6,12 +6,11 @@ stations through a common, capability-based interface.
 The integration is intended to work as a standalone wallbox manager while also
 providing a programmatic interface for a future higher-level Energy Manager.
 
-## Preparing v0.1.0-beta.1
+## Read-only integration
 
 This early read-only pre-release provides a HACS-installable integration foundation,
 an OCPP listener for 1.6J / 2.0.1 / 2.1, BootNotification, read-only discovery,
-dynamic station devices and diagnostic entities. It is for the first hardware
-interoperability test, **not the measurement beta**.
+dynamic station devices, diagnostics and reported metering/runtime state.
 
 Add this repository as a HACS custom repository of type Integration and install
 Wallbox Manager when the pre-release is published. For testing this branch before
@@ -30,8 +29,16 @@ protocol/counters remain, and discovery evidence is invalidated. After integrati
 reload known devices remain: Connected is false and other diagnostics are
 unavailable until a new connection supplies a snapshot.
 
-There are no electrical measurement sensors, charging controls, profiles, phase
-switching, vendor extensions, Energy Manager functionality or EV learning yet.
+Reported voltage/current/power per phase, explicit total import power and imported
+energy now create scoped HA sensors dynamically. Available/occupied and reported
+charging-state entities distinguish a connected vehicle from active charging.
+Missing measurements are never synthesized; readings expire after 120 seconds,
+and boot/disconnect makes operational entities unavailable while retaining IDs.
+See [metering and runtime state](docs/metering-runtime-state.md) for scope, units,
+capability-driven entity creation, freshness and deliberately unsupported cases.
+
+There are no charging controls, profiles, phase switching, vendor extensions,
+Energy Manager functionality or EV learning yet.
 
 ## Architecture
 
@@ -39,7 +46,7 @@ See the [proposed architecture](docs/architecture.md) and the
 [pinned upstream OCPP adoption analysis](docs/upstream-ocpp-analysis.md) for module
 boundaries, ownership transitions, power solving and reuse decisions. These are
 design documents; the implemented subset now includes pure solving and read-only
-OCPP transport/discovery.
+OCPP transport/discovery and metering/runtime state.
 
 Wallbox Manager separates charging strategy from wallbox-specific communication.
 
@@ -157,14 +164,14 @@ implemented. The pure solver respects current steps and supplied electrical limi
 uses actual per-phase voltages, and returns an offered operating point, logical OFF
 or an explicit unreachable reason. A deferred-result contract is reserved for the
 future phase-transition planner. It does not command a charger or claim measured
-EV consumption. Ownership, charging profiles and measurement processing remain
-future work; read-only HA station diagnostics are available.
+EV consumption. Metering and runtime state are reported separately by adapters.
+Ownership and charging profiles remain future work.
 
 Run development checks with `.venv/bin/ruff check .`,
 `.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
 Home Assistant instance; Python 3.14 CI runs these same checks.
 
-This branch prepares v0.1.0-beta.1; its tag and release will follow review and merge.
+This feature branch does not change the manifest version or create a release.
 
 ## Read-only OCPP endpoint
 
@@ -178,16 +185,16 @@ authentication or TLS, for a trusted local network only.
 The integration loads without a connected wallbox. It accepts BootNotification,
 answers Heartbeat, learns identity/connector inventory, and reruns read-only
 discovery after reconnect/boot. Disconnect invalidates old evidence without
-requiring an integration reload. StatusNotification currently supplies identity
-only. OCPP 1.6 uses GetConfiguration; 2.x uses correlated, complete
+requiring an integration reload. StatusNotification supplies scoped operational
+state and identity. OCPP 1.6 uses GetConfiguration; 2.x uses correlated, complete
 GetBaseReport/NotifyReport inventory. All three versions use their own schemas
 from `ocpp==2.1.0`; this is a tested foundation, not a full protocol implementation.
 
 Smart-charging advertisements remain distinct from verified behavior. Physical
 current envelopes, physical phase switching and stop support stay unknown; no
 nominal current/phase limits are invented. Generic immutable runtime snapshots are
-consumed by push-based HA diagnostics, but no measurement sensors or charging controls
-are exposed yet. Actual wallbox-stationary hardware interoperability has not been
+consumed by push-based HA diagnostics and observed meter/state entities. No
+charging controls are exposed. Actual wallbox-stationary hardware interoperability has not been
 verified by the automated fake/local-peer tests. Older empty scaffold entries
 migrate to the default endpoint configuration.
 

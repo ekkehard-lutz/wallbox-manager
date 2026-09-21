@@ -3,8 +3,8 @@
 Adapted from lbbrhzn/ocpp ocppv201.py _get_inventory/on_report at
 848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
 See ../../../THIRD_PARTY_NOTICES.md. Reports commit only after complete sequencing.
-ACK-only reporting patterns also adapted from upstream ocppv201.py; no metering
-or transaction processing is inherited. Concrete adapters select response schemas.
+Reporting/acknowledgement patterns also adapted from upstream ocppv201.py.
+Normalization lives in metering.py; concrete adapters select response schemas.
 """
 
 import asyncio
@@ -16,7 +16,14 @@ from ocpp.routing import on
 from ....core.capabilities import EvidenceState
 from ....core.events import StationIdentity
 from ....core.models import ConnectorId, EvseId
+from ....core.telemetry import Quantity, State
 from .adapter import DiscoveryAdapter, evidence
+from .metering import (
+    CHARGING_STATES,
+    CONNECTOR_STATES,
+    meter_observations,
+    state_observation,
+)
 
 
 def evse_identity(station, evse_id):
@@ -64,26 +71,68 @@ class InventoryAdapter(DiscoveryAdapter):
         return self._call_result.Heartbeat(current_time=datetime.now(UTC).isoformat())
 
     @on("StatusNotification")
-    def on_status(self, evse_id, connector_id, **kwargs):
+    def on_status(self, evse_id, connector_id, connector_status, timestamp, **kwargs):
         if evse_id > 0 and connector_id > 0 and self.runtime.current(self.token):
             connector = connector_identity(self.token.station, evse_id, connector_id)
-            state = self.runtime.get(self.token.station)
-            self.runtime.discover(
+            self.runtime.observe(
                 self.token,
-                discovery=state.discovery,
-                charging_schedule=state.charging_schedule,
-                connectors=(connector,),
+                state_observation(
+                    connector,
+                    Quantity.CONNECTOR_STATE,
+                    CONNECTOR_STATES.get(connector_status, State.UNKNOWN),
+                    timestamp,
+                    f"ocpp{self._ocpp_version}:StatusNotification",
+                ),
             )
         return self._call_result.StatusNotification()
 
     @on("MeterValues")
-    def on_meter_values(self, **kwargs):
-        """Acknowledge validated transport input without consuming measurements."""
+    def on_meter_values(self, evse_id, meter_value, **kwargs):
+        """Normalize only explicitly scoped, supported measurements."""
+        scope = (
+            self.token.station
+            if evse_id == 0
+            else evse_identity(self.token.station, evse_id)
+        )
+        self.runtime.observe(
+            self.token,
+            meter_observations(
+                scope, meter_value, f"ocpp{self._ocpp_version}:MeterValues"
+            ),
+        )
         return self._call_result.MeterValues()
 
     @on("TransactionEvent")
-    def on_transaction_event(self, id_token=None, **kwargs):
-        """Acknowledge receipt without tracking transactions or granting access."""
+    def on_transaction_event(
+        self,
+        timestamp,
+        transaction_info,
+        evse=None,
+        meter_value=None,
+        offline=False,
+        id_token=None,
+        **kwargs,
+    ):
+        """Observe current state and meters without tracking transactions."""
+        if evse and evse.get("id", 0) > 0 and not offline:
+            scope = evse_identity(self.token.station, evse["id"])
+            if evse.get("connector_id") is not None:
+                scope = connector_identity(
+                    self.token.station, evse["id"], evse["connector_id"]
+                )
+            source = f"ocpp{self._ocpp_version}:TransactionEvent"
+            observations = meter_observations(scope, meter_value, source)
+            if "charging_state" in transaction_info:
+                observations += state_observation(
+                    scope,
+                    Quantity.CHARGING_STATE,
+                    CHARGING_STATES.get(
+                        transaction_info["charging_state"], State.UNKNOWN
+                    ),
+                    timestamp,
+                    source,
+                )
+            self.runtime.observe(self.token, observations)
         # Neither version requires fields for the reference station's tokenless
         # events. If a token is supplied, include idTokenInfo without pretending
         # to have authorized it. The charging station owns the transaction ID.

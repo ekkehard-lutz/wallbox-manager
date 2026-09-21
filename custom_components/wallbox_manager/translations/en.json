@@ -22,6 +22,18 @@
     "binary_sensor": {
       "connected": {
         "name": "Connected"
+      },
+      "available": {
+        "name": "{scope} Available"
+      },
+      "occupied": {
+        "name": "{scope} Occupied"
+      },
+      "vehicle_connected": {
+        "name": "{scope} Vehicle connected"
+      },
+      "charging_active": {
+        "name": "{scope} Charging active"
       }
     },
     "sensor": {
@@ -45,6 +57,63 @@
           "verified": "Verified",
           "unsupported": "Unsupported",
           "degraded": "Degraded"
+        }
+      },
+      "voltage_l1": {
+        "name": "{scope} Voltage L1"
+      },
+      "voltage_l2": {
+        "name": "{scope} Voltage L2"
+      },
+      "voltage_l3": {
+        "name": "{scope} Voltage L3"
+      },
+      "current_l1": {
+        "name": "{scope} Current L1"
+      },
+      "current_l2": {
+        "name": "{scope} Current L2"
+      },
+      "current_l3": {
+        "name": "{scope} Current L3"
+      },
+      "power_l1": {
+        "name": "{scope} Active import power L1"
+      },
+      "power_l2": {
+        "name": "{scope} Active import power L2"
+      },
+      "power_l3": {
+        "name": "{scope} Active import power L3"
+      },
+      "power": {
+        "name": "{scope} Active import power"
+      },
+      "energy": {
+        "name": "{scope} Imported energy"
+      },
+      "connector_state": {
+        "name": "{scope} Connector state",
+        "state": {
+          "unknown": "Unknown",
+          "available": "Available",
+          "occupied": "Occupied",
+          "reserved": "Reserved",
+          "unavailable": "Unavailable",
+          "faulted": "Faulted"
+        }
+      },
+      "charging_state": {
+        "name": "{scope} Charging state",
+        "state": {
+          "unknown": "Unknown",
+          "idle": "Idle",
+          "connected": "Connected",
+          "charging": "Charging",
+          "suspended_vehicle": "Suspended by vehicle",
+          "suspended_station": "Suspended by station",
+          "finishing": "Finishing",
+          "preparing": "Preparing"
         }
       }
     }
