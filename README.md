@@ -105,7 +105,7 @@ The Energy Manager requests charging intent, for example target power and a
 rounding direction. Wallbox Manager translates that request into a valid
 wallbox operating point according to the wallbox capabilities.
 
-The planned target-power directions are:
+The implemented pure solver supports these target-power directions:
 
 - DOWN
 - NEAREST
@@ -122,6 +122,19 @@ automations.
 ## Development status
 
 This project is under active development. No stable release is available yet.
+
+Immutable station/EVSE/connector identities, capability evidence and independent
+phase envelopes, voltage observations, power requests and solver results are
+implemented. The pure solver respects current steps and supplied electrical limits,
+uses actual per-phase voltages, and returns an offered operating point, logical OFF
+or an explicit unreachable reason. A deferred-result contract is reserved for the
+future phase-transition planner. It does not command a charger or claim measured
+EV consumption. OCPP transport/discovery, ownership, profiles and HA entities remain
+future work.
+
+Run development checks with `.venv/bin/ruff check .`,
+`.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
+Home Assistant instance; Python 3.14 CI runs these same checks.
 
 The first public release is planned as v1.0.0. A changelog will be introduced
 with that release.

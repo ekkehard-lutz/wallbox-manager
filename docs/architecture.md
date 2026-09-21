@@ -1,7 +1,8 @@
 # Wallbox Manager architecture
 
-Status: proposed design, 2026-09-20. This document specifies future behavior;
-only the integration scaffold exists. No OCPP runtime is implemented here.
+Status: design with initial pure-core implementation, 2026-09-21. Immutable
+identity/capability/request contracts and the operating-point solver are implemented.
+The remaining runtime behavior below is planned; no OCPP runtime is implemented.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -23,8 +24,9 @@ never authorize it. Non-OCPP adapters implement the same internal contracts.
 
 ## Proposed package layout
 
-All paths below are proposed beneath `custom_components/wallbox_manager/`;
-this task does not create these runtime modules.
+Paths below are beneath `custom_components/wallbox_manager/`. The core models,
+capabilities, control requests and solver operating-point/power modules now exist;
+other runtime modules remain proposed.
 
 ```text
 __init__.py              HA setup/unload and config-entry runtime wiring
@@ -408,6 +410,34 @@ a 4,000 W request yields 1P/17 A/3,910 W with DOWN or NEAREST and
 At 500 W, DOWN and NEAREST choose OFF and UP chooses 1P/6 A/1,380 W.
 Above 11,040 W, UP is unreachable in this envelope.
 
+Implementation details for the initial pure solver: current grids are anchored at
+`min_current_a`; the maximum is a ceiling and need not lie on the grid. Additional
+installation/shared-station current intervals intersect that grid without moving
+its origin. The caller supplies fresh remaining shared budgets. Exact standard-library
+rational values and integer indices derive endpoints and target-neighbor candidates,
+equivalent to enumeration without allocating every current step. Unit suffixes are
+part of the contracts. Numeric inputs use their decimal spelling; booleans and
+nonfinite values are rejected.
+
+The initial voltage contract accepts measured RMS phase-to-neutral samples only,
+with explicit phase mapping, source, observation time and validity deadline. The
+caller supplies the comparison time; missing, expired or future samples inhibit
+selection for an eligible verified mode. Observation scope and connection generation
+must match the capability snapshot; adapters normalize scope only after validating
+applicability. Nominal fallback and line-to-line conversion are not implemented.
+Offered points retain the complete voltage basis and assume balanced current and
+unity power factor; they are estimates, not measured consumption.
+
+Only VERIFIED envelope/stop evidence enables the corresponding solver candidates.
+Configuration override records retain intent and reason separately and do not grant
+physical support. OFF has no amp setpoint. Prohibited charging yields OFF when stop
+is verified, otherwise an explicit unreachable/stop-unverified result. No charging
+point is suggested for prohibited charging. Zero targets also select supported OFF
+without needing voltage. After current-mode and lower-power tie preferences, fewer
+phases, canonical phase mapping and then current give a deterministic final order.
+The result contract includes diagnostic bounds/suggestions for directional failures
+and a deferred retry-deadline boundary; this solver does not plan phase transitions.
+
 Current operating state, switching hysteresis and minimum dwell time restrict
 eligible transitions. Return `deferred` and a retry deadline when an otherwise
 feasible mode is temporarily unavailable. Hard-limit reductions and emergency
@@ -681,8 +711,9 @@ Test that no battery reserve writes or inferred hidden reserve percentage occur.
 These are future controller acceptance cases, not tests implemented in this task.
 
 Current development gates are `ruff check`, `ruff format --check` and `pytest`
-(using `.venv/bin/` locally). A small scaffold test checks translation key and
-placeholder consistency now. Runtime tests and CI automation must arrive with the
-first runtime changes, not after release. These checks do not establish protocol
+(using `.venv/bin/` locally). Pure-core and solver tests now run alongside the
+unchanged translation key and placeholder checks, with Python 3.14 CI running
+the same quality gates. Future
+runtime changes must include their own tests. These checks do not establish protocol
 conformance or hardware safety; device behavior requires simulator and hardware
 verification before enabling control.
