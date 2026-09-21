@@ -1,7 +1,8 @@
 # Wallbox Manager architecture
 
-Status: proposed design, 2026-09-20. This document specifies future behavior;
-only the integration scaffold exists. No OCPP runtime is implemented here.
+Status: design with initial pure-core implementation, 2026-09-21. Immutable
+identity/capability/request contracts and the operating-point solver are implemented.
+The remaining runtime behavior below is planned; no OCPP runtime is implemented.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -23,8 +24,9 @@ never authorize it. Non-OCPP adapters implement the same internal contracts.
 
 ## Proposed package layout
 
-All paths below are proposed beneath `custom_components/wallbox_manager/`;
-this task does not create these runtime modules.
+Paths below are beneath `custom_components/wallbox_manager/`. The core models,
+capabilities, control requests and solver operating-point/power modules now exist;
+other runtime modules remain proposed.
 
 ```text
 __init__.py              HA setup/unload and config-entry runtime wiring
@@ -95,6 +97,18 @@ profile purposes and stack constraints, stop/pause/start support, transaction
 scope, and metering channels. For example, 1P 6–32 A and 3P 6–16 A are separate
 envelopes, not a single 32 A number entity. Re-evaluate bounds whenever capability
 revision or operating mode changes; reject stale writes at the core boundary.
+
+`PhaseMode` represents any nonempty subset of L1/L2/L3: L1, L2, L3,
+L1+L2, L1+L3, L2+L3 or L1+L2+L3. Each mapping can have its own verified
+`ChargingEnvelope`, minimum, maximum and current step. The models, voltage lookup,
+limit intersection, candidate generation and tie-breaking use the actual phase
+mapping/count; the 1P/3P examples do not restrict support to those counts.
+
+`ChargingEnvelope` describes what the **wallbox can safely offer**, not what a
+connected EV is guaranteed to consume. A wallbox may support 32 A in both 1P and
+3P while a particular EV accepts 32 A in 1P but only 16 A in 3P. That EV behavior
+must not reduce the discovered wallbox capability. Similarly, a supported 2P mode
+does not guarantee that the EV uses both phases or accepts the maximum current.
 
 Physical phase switching is a distinct capability with preconditions, safe
 sequence, feedback and timeout. `numberPhases`/`phaseToUse` schedule fields do not
@@ -408,6 +422,34 @@ a 4,000 W request yields 1P/17 A/3,910 W with DOWN or NEAREST and
 At 500 W, DOWN and NEAREST choose OFF and UP chooses 1P/6 A/1,380 W.
 Above 11,040 W, UP is unreachable in this envelope.
 
+Implementation details for the initial pure solver: current grids are anchored at
+`min_current_a`; the maximum is a ceiling and need not lie on the grid. Additional
+installation/shared-station current intervals intersect that grid without moving
+its origin. The caller supplies fresh remaining shared budgets. Exact standard-library
+rational values and integer indices derive endpoints and target-neighbor candidates,
+equivalent to enumeration without allocating every current step. Unit suffixes are
+part of the contracts. Numeric inputs use their decimal spelling; booleans and
+nonfinite values are rejected.
+
+The initial voltage contract accepts measured RMS phase-to-neutral samples only,
+with explicit phase mapping, source, observation time and validity deadline. The
+caller supplies the comparison time; missing, expired or future samples inhibit
+selection for an eligible verified mode. Observation scope and connection generation
+must match the capability snapshot; adapters normalize scope only after validating
+applicability. Nominal fallback and line-to-line conversion are not implemented.
+Offered points retain the complete voltage basis and assume balanced current and
+unity power factor; they are estimates, not measured consumption.
+
+Only VERIFIED envelope/stop evidence enables the corresponding solver candidates.
+Configuration override records retain intent and reason separately and do not grant
+physical support. OFF has no amp setpoint. Prohibited charging yields OFF when stop
+is verified, otherwise an explicit unreachable/stop-unverified result. No charging
+point is suggested for prohibited charging. Zero targets also select supported OFF
+without needing voltage. After current-mode and lower-power tie preferences, fewer
+phases, canonical phase mapping and then current give a deterministic final order.
+The result contract includes diagnostic bounds/suggestions for directional failures
+and a deferred retry-deadline boundary; this solver does not plan phase transitions.
+
 Current operating state, switching hysteresis and minimum dwell time restrict
 eligible transitions. Return `deferred` and a retry deadline when an otherwise
 feasible mode is temporarily unavailable. Hard-limit reductions and emergency
@@ -419,6 +461,102 @@ EV consumption below offered power is normal. Expose requested/offered/measured
 values and sustained underconsumption; do not repeatedly increase the limit or
 switch phases just because the EV is full, tapering or internally constrained.
 Re-solve on relevant inputs with debouncing, never replay a stale solved point.
+
+### Future session-local EV acceptance
+
+Wallbox Manager will support simple controller-side, session-local learning of
+actual AC current acceptance, conceptually named `EVAcceptanceEstimate`. This is
+neither a physical wallbox capability nor a permanent vehicle capability. The
+learning controller is future work; no learning runtime is implemented here.
+
+Requested power, offered power/current, acknowledged command and measured EV
+consumption remain separate. The pure solver determines the offered operating
+point; actual consumption is observed later through metering. An acknowledged
+command does not establish actual consumption. Offering 20 A while observing
+16 A, or offering 3 x 25 A while observing 3 x 16 A, is not by itself a wallbox
+capability failure, a solver failure or evidence that the offered wallbox current
+is unsupported. Never lower the persistent `ChargingEnvelope` on that basis.
+
+At the start of each new charging session, every supported phase mode has unknown
+EV acceptance and no additional EV constraint beyond its currently verified
+wallbox/installation envelope. The controller may initially offer up to that
+permitted envelope; this is an initial assumption, not evidence of EV acceptance
+or permission to bypass the requested power, ownership or other safety limits.
+Conceptually, for each mode:
+
+```text
+effective_max_current(mode) = min(
+    wallbox_or_installation_max(mode),
+    observed_session_ev_acceptance(mode) if known
+)
+```
+
+An unknown acceptance estimate contributes no extra bound. For example, permitted
+installation envelopes might be 1P 6–20 A, 2P 6–20 A and 3P 6–27 A. These are
+examples, not defaults. The 20 A ceiling may already reflect an installation or
+regulatory unbalance limit even when the wallbox hardware permits more. Learning
+and upward probes must always respect those limits and the remaining shared
+station budget.
+
+Learn independently for each explicit `PhaseMode`, not merely its phase count.
+For example, L1 may have an observed 16 A estimate, L1+L2 may remain unknown, and
+L1+L2+L3 may independently have an observed 16 A estimate. Never infer a 2P limit
+from 1P or 3P evidence, or transfer a limit between L1, L2 and L3 single-phase
+mappings without explicit evidence for the destination mode.
+
+The future controller compares reliably offered current/power with measured
+current/power. If a higher current has been offered in a stable command state for
+a sufficient period while consumption remains materially lower, it may lower the
+estimate for that mode. For example, 1P/20 A offered with approximately 16 A
+persistently measured may yield a temporary estimate around 16 A for that mapping.
+A single low meter sample must never establish an EV limit.
+
+An estimate is not permanent even within a session: battery temperature,
+conditioning, BMS balancing, vehicle-side charging strategy or SOC-dependent
+tapering may cause temporary underconsumption. The future controller may
+periodically and conservatively probe a slightly higher offered current, within
+all current authorization, power-request and electrical limits. If the EV accepts
+the higher current, the estimate may rise. Both downward and upward adaptation
+are supported by the design; this does not authorize repeated uncontrolled
+increases merely because consumption is low.
+
+Learning and probing require persistence/debounce before lowering an estimate,
+measurement tolerance, stable wallbox command state, coherent/fresh metering,
+bounded upward probe steps, and hysteresis/cooldown after probes. Avoid rapid
+phase/current oscillation and respect phase-transition restrictions. Exact timing,
+deadbands, probe intervals and other tuning parameters remain to be implemented
+and tested with the future controller.
+
+The controller may feed an estimate into the solver as an explicit temporary
+constraint. If a requested power cannot be reached efficiently with 1P because
+session acceptance appears limited to 16 A, the solver can compare alternative
+2P or 3P offers, provided those modes are supported, eligible and safe. Unknown
+acceptance in an alternative mode still does not guarantee actual EV consumption.
+
+Discard all estimates when the charging/vehicle session ends or the vehicle
+disconnects; a new session starts unconstrained by earlier EV observations.
+Invalidate stale evidence or treat its estimate as unknown. A phase-mode change
+never transfers an estimate to the new mode: use only fresh evidence specific to
+that mapping, otherwise treat its acceptance as unknown. Never persist learned
+EV acceptance as wallbox capability. Cross-session vehicle learning, fingerprinting
+and identification are outside this implementation.
+
+The existing `CurrentLimit(mode, min_current_a, max_current_a, source)` contract
+is sufficient without structural changes. It carries an explicit additional
+interval for one physical phase mapping and intersects the wallbox grid without
+changing capability evidence. Use a distinguishable source such as
+`temporary_session_acceptance`, separate from installation/site and shared-station
+sources; retain the evidence and reason for that constraint in the controller's
+session estimate. The controller owns provenance, freshness, session lifetime and
+removal. The solver need not interpret the source or know why the limit exists.
+
+The solver remains deterministic and stateless: `PowerRequest`, wallbox physical
+capabilities, explicit current/site/session constraints, voltage observations and
+eligible phase modes produce an offered `OperatingPoint` or explicit non-success.
+It does not inspect historical metering, learn EV behavior, probe the EV, maintain
+timers or decide when to retry higher current. Existing tests already establish
+that an explicit per-mode session limit leaves other modes and the underlying
+`ChargingEnvelope` unchanged; timing/probing tests belong to the future controller.
 
 ## Ownership state machine
 
@@ -681,8 +819,9 @@ Test that no battery reserve writes or inferred hidden reserve percentage occur.
 These are future controller acceptance cases, not tests implemented in this task.
 
 Current development gates are `ruff check`, `ruff format --check` and `pytest`
-(using `.venv/bin/` locally). A small scaffold test checks translation key and
-placeholder consistency now. Runtime tests and CI automation must arrive with the
-first runtime changes, not after release. These checks do not establish protocol
+(using `.venv/bin/` locally). Pure-core and solver tests now run alongside the
+unchanged translation key and placeholder checks, with Python 3.14 CI running
+the same quality gates. Future
+runtime changes must include their own tests. These checks do not establish protocol
 conformance or hardware safety; device behavior requires simulator and hardware
 verification before enabling control.
