@@ -1,5 +1,13 @@
 # Discovery session investigation
 
+This document records the earlier beta investigation and its evidence at the time.
+For v0.1.0, subsequent hardware testing confirmed reconnect after an actual network
+black-hole/DROP, preservation of an active charging session, and recovery of
+connector state and meter values. This does not retroactively establish the cause
+of every earlier disconnect. Metering and session state have since been
+implemented; see [metering/runtime state](metering-runtime-state.md) and
+[session tracking](session-tracking.md) for the current behavior.
+
 ## Sources inspected
 
 - Wallbox Manager beta.2: common transport, discovery, inventory and captured

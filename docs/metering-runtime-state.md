@@ -62,8 +62,10 @@ architecture; original unsupported/historical payloads are not stored.
 A malformed sample for an already known channel invalidates its value when its
 timestamp is current; it does not create a new entity. Unsupported measurands or
 unidentifiable scope/phase/timestamp are ignored. Missing channels in a partial
-report keep their last sample only until its own deadline. Conflicting values for
-one channel at the same timestamp invalidate that reading regardless of ordering;
+report retain their last valid live value while the connection generation remains
+live; the sample deadline still limits session attribution and endpoint accounting.
+Conflicting values for one channel at the same timestamp invalidate that reading
+regardless of ordering;
 identical duplicates do not extend freshness. Older samples cannot overwrite newer
 ones. A lower energy register at a newer timestamp is retained as reported; HA's
 `total_increasing` reset semantics apply, with no fabricated offset/session energy.
@@ -160,7 +162,7 @@ discovery, pending-call ownership, lifecycle, translation and solver checks rema
 
 There are no controls, PV modes, Energy Manager logic, EV learning, authorization
 implementation, physical capability inference, voltage fallback, phase aggregation,
-or new writable/public control API in this feature. Manifest version is unchanged.
+or writable/public control API in v0.1.0.
 
 ## Upgrading beta.6
 
