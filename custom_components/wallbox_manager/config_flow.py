@@ -27,7 +27,8 @@ def bind_address(value: str) -> str:
 
 LISTENER_SCHEMA = vol.Schema(
     {
-        vol.Required("host", default=DEFAULT_HOST): vol.All(str, bind_address),
+        # Keep arbitrary Python validators out of the frontend form schema.
+        vol.Required("host", default=DEFAULT_HOST): str,
         vol.Required("port", default=DEFAULT_PORT): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=65535)
         ),
@@ -45,6 +46,7 @@ class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 data = LISTENER_SCHEMA(user_input)
+                data["host"] = bind_address(data["host"])
             except vol.Invalid:
                 errors["base"] = "invalid_listener"
             else:
