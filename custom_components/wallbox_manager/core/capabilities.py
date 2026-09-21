@@ -53,6 +53,7 @@ class CapabilityOverride:
 class ChargingEnvelope:
     """Reachable currents are min_current_a + n * current_step_a, n >= 0.
 
+    This describes what the wallbox can safely offer, not EV consumption.
     max_current_a is a ceiling; it need not itself lie on the current grid.
     """
 
@@ -75,10 +76,13 @@ class ChargingEnvelope:
 
 @dataclass(frozen=True)
 class CurrentLimit:
-    """Additional installation/shared-station interval, on the device's grid.
+    """Additional mode-specific site/station/session interval on the device grid.
 
     A zero maximum inhibits charging in this mode. Limits do not grant new modes.
     The coordinator supplies the remaining shared budget, not aggregate capacity.
+    Temporary EV-acceptance constraints may be supplied explicitly by a future
+    controller; they never modify wallbox capability evidence. The caller owns
+    their session lifetime, freshness and removal, separately for each mode.
     """
 
     mode: PhaseMode

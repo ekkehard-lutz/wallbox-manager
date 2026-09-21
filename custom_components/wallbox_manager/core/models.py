@@ -49,7 +49,7 @@ class Phase(StrEnum):
 
 @dataclass(frozen=True)
 class PhaseMode:
-    """Actual active phase mapping; different single-phase mappings stay distinct."""
+    """Any nonempty subset of L1/L2/L3, including all two-phase mappings."""
 
     phases: tuple[Phase, ...]
 

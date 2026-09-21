@@ -341,3 +341,214 @@ def test_derived_candidates_match_exhaustive_reference(
                 result.point.mode,
                 result.point.current_a,
             ) == expected
+
+
+@pytest.fixture
+def ac_modes(capabilities, voltage, one, three):
+    """Independent grids and unequal observed voltages for 1P, 2P and 3P."""
+    two = PhaseMode((Phase.L1, Phase.L2))
+    cap = replace(
+        capabilities,
+        envelopes=(
+            ChargingEnvelope(one, 6, 32, 2, capabilities.stop),
+            ChargingEnvelope(two, 5, 25, Fraction(1, 2), capabilities.stop),
+            ChargingEnvelope(three, 4, 16, 1, capabilities.stop),
+        ),
+    )
+    observation = replace(
+        voltage,
+        phases=tuple(
+            replace(p, voltage_v=v)
+            for p, v in zip(voltage.phases, (220, 240, 260), strict=True)
+        ),
+    )
+    return cap, observation, two
+
+
+@pytest.mark.parametrize("only_two", [True, False])
+@pytest.mark.parametrize(
+    ("direction", "current"),
+    [
+        (Direction.DOWN, 7),
+        (Direction.NEAREST, Fraction(15, 2)),
+        (Direction.UP, Fraction(15, 2)),
+    ],
+)
+def test_two_phase_rounding(run, ac_modes, only_two, direction, current):
+    cap, observation, two = ac_modes
+    if only_two:
+        cap = replace(cap, envelopes=(cap.envelopes[1],))
+        # No L3 voltage is needed by a 2P-only charger.
+        observation = replace(observation, phases=observation.phases[:2])
+    result = run(
+        3400,
+        direction,
+        capabilities=cap,
+        voltage=observation,
+        eligible_modes=tuple(e.mode for e in cap.envelopes),
+    )
+    assert result.status == ResultStatus.FEASIBLE
+    assert result.point.mode == two
+    assert result.point.mode.count == 2
+    assert result.point.current_a == current
+    volts = tuple(p.voltage_v for p in observation.phases[:2])
+    assert result.point.phase_voltages_v == volts
+    assert result.point.offered_power_w == current * sum(volts)
+
+
+@pytest.mark.parametrize("missing_phase", [Phase.L1, Phase.L2])
+def test_two_phase_requires_both_voltages(run, ac_modes, missing_phase):
+    cap, observation, two = ac_modes
+    cap = replace(cap, envelopes=(cap.envelopes[1],))
+    observation = replace(
+        observation,
+        phases=tuple(p for p in observation.phases if p.phase != missing_phase),
+    )
+    result = run(3400, capabilities=cap, voltage=observation, eligible_modes=(two,))
+    assert result.status == ResultStatus.UNREACHABLE
+    assert result.reason == Reason.VOLTAGE_UNAVAILABLE
+    assert result.point is None
+
+
+def test_two_phase_becomes_ineligible(run, ac_modes, one, three):
+    cap, observation, two = ac_modes
+    assert (
+        run(
+            3400,
+            capabilities=cap,
+            voltage=observation,
+            eligible_modes=(one, two, three),
+        ).point.mode
+        == two
+    )
+    for current_mode in (two, one, three):
+        result = run(
+            3400,
+            capabilities=cap,
+            voltage=observation,
+            eligible_modes=(one, three),
+            current_mode=current_mode,
+        )
+        assert result.point.mode == one
+        assert result.point.current_a == 16
+        assert result.point.offered_power_w == 16 * observation.phases[0].voltage_v
+    assert (
+        run(
+            10000,
+            capabilities=cap,
+            voltage=observation,
+            eligible_modes=(one, three),
+        ).point.mode
+        == three
+    )
+
+
+@pytest.mark.parametrize("direction", list(Direction))
+def test_ties_across_one_two_three_phases(run, ac_modes, one, three, direction):
+    cap, observation, two = ac_modes
+    observation = replace(
+        observation, phases=tuple(replace(p, voltage_v=220) for p in observation.phases)
+    )
+    target = 6 * sum(p.voltage_v for p in observation.phases[:2])
+    # 1P/12 A, 2P/6 A and 3P/4 A all offer the same power.
+    for envelopes in permutations(cap.envelopes):
+        for current_mode in (None, one, two, three):
+            result = run(
+                target,
+                direction,
+                capabilities=replace(cap, envelopes=envelopes),
+                voltage=observation,
+                eligible_modes=tuple(e.mode for e in envelopes),
+                current_mode=current_mode,
+            )
+            assert result.point.mode == (current_mode or one)
+            assert result.point.offered_power_w == target
+    # With 1P ineligible, deterministic final ordering chooses 2P over 3P.
+    assert (
+        run(
+            target,
+            direction,
+            capabilities=cap,
+            voltage=observation,
+            eligible_modes=(three, two),
+        ).point.mode
+        == two
+    )
+
+
+def test_two_phase_lower_power_tie(run, ac_modes):
+    cap, observation, two = ac_modes
+    cap = replace(cap, envelopes=(cap.envelopes[1],))
+    voltage_sum = sum(p.voltage_v for p in observation.phases[:2])
+    result = run(
+        Fraction(29, 4) * voltage_sum,
+        capabilities=cap,
+        voltage=observation,
+        eligible_modes=(two,),
+        current_mode=two,
+    )
+    assert result.point.current_a == 7
+    assert result.point.offered_power_w == 7 * voltage_sum
+
+
+@pytest.mark.parametrize(
+    "phases",
+    [
+        (Phase.L1,),
+        (Phase.L2,),
+        (Phase.L3,),
+        (Phase.L1, Phase.L2),
+        (Phase.L1, Phase.L3),
+        (Phase.L2, Phase.L3),
+        (Phase.L1, Phase.L2, Phase.L3),
+    ],
+)
+def test_all_ac_phase_subsets_with_current_limit(run, ac_modes, phases):
+    cap, observation, _ = ac_modes
+    mode = PhaseMode(tuple(reversed(phases)))
+    assert mode.phases == phases
+    assert mode.count == len(phases)
+    cap = replace(cap, envelopes=(ChargingEnvelope(mode, 5, 25, 2, cap.stop),))
+    result = run(
+        100000,
+        Direction.DOWN,
+        capabilities=cap,
+        voltage=observation,
+        eligible_modes=(mode,),
+        limits=(CurrentLimit(mode, 0, 10, "site"),),
+    )
+    assert result.point.mode == mode
+    assert result.point.current_a == 9  # Limit intersects the min-anchored grid.
+    expected_volts = tuple(p.voltage_v for p in observation.phases if p.phase in phases)
+    assert result.point.phase_voltages_v == expected_volts
+    assert result.point.offered_power_w == 9 * sum(expected_volts)
+
+
+def test_explicit_session_limit_does_not_change_wallbox_capability(run, ac_modes):
+    cap, observation, _ = ac_modes
+    cap = replace(
+        cap, envelopes=tuple(replace(e, max_current_a=32) for e in cap.envelopes)
+    )
+    one, two, three = (e.mode for e in cap.envelopes)
+    session_limit = CurrentLimit(three, 0, 16, "temporary_session_acceptance")
+    for mode, expected_current in ((one, 32), (two, 32), (three, 16)):
+        result = run(
+            100000,
+            Direction.DOWN,
+            capabilities=cap,
+            voltage=observation,
+            eligible_modes=(mode,),
+            limits=(session_limit,),
+        )
+        assert result.point.current_a == expected_current
+    # Caller removal restores the original offer; the solver learns no state.
+    result = run(
+        100000,
+        Direction.DOWN,
+        capabilities=cap,
+        voltage=observation,
+        eligible_modes=(three,),
+    )
+    assert result.point.current_a == 32
+    assert all(e.max_current_a == 32 for e in cap.envelopes)
+    assert all(e.evidence.state == EvidenceState.VERIFIED for e in cap.envelopes)

@@ -27,7 +27,8 @@ def solve(
     Eligibility is supplied by the caller; it is not evidence of physical support.
     Voltage must match capability scope/generation exactly. Adapters explicitly
     normalize broader/narrower readings to that scope after checking applicability.
-    Caller supplies fresh remaining installation/station limits on every solve.
+    Caller supplies fresh installation/station/session limits on every solve.
+    No measured EV consumption is inspected and no acceptance limit is inferred.
 
     Each mode's linear power grid needs only its endpoints and the two indices
     bracketing the target. This is equivalent to full enumeration without memory
