@@ -2,7 +2,8 @@
 
 Listener setup/unload pattern adapted from lbbrhzn/ocpp __init__.py at
 848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
-See THIRD_PARTY_NOTICES.md. Runtime is entry-owned, with no entities or services.
+See THIRD_PARTY_NOTICES.md. Runtime is entry-owned, with read-only diagnostic
+platforms and no services.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 from .const import DEFAULT_HOST, DEFAULT_PORT
+
+PLATFORMS = ("binary_sensor", "sensor")
 
 
 @dataclass
@@ -55,6 +58,13 @@ async def async_setup_entry(
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
     entry.runtime_data = EntryRuntime(state, server)
 
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        await server.stop()
+        await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        raise
+
     async def shutdown(event):
         await server.stop()
 
@@ -68,6 +78,8 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: WallboxManagerConfigEntry
 ) -> bool:
     """Close the listener and join owned sessions before completing unload."""
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
     await entry.runtime_data.server.stop()
     return True
 

@@ -77,9 +77,17 @@ class Runtime:
             ),
             unknown,
             unknown,
+            old.protocol if old else None,
+            old.protocol_version if old else None,
         )
 
-    def connect(self, station: StationId) -> SessionToken:
+    def connect(
+        self,
+        station: StationId,
+        *,
+        protocol: str | None = None,
+        protocol_version: str | None = None,
+    ) -> SessionToken:
         old = self.get(station)
         token = SessionToken(
             self.runtime_id,
@@ -88,8 +96,12 @@ class Runtime:
             old.token.boot_generation if old else 0,
         )
         self._publish(
-            self._reset(
-                token, old.identity if old else StationIdentity(), True, "connected"
+            replace(
+                self._reset(
+                    token, old.identity if old else StationIdentity(), True, "connected"
+                ),
+                protocol=protocol,
+                protocol_version=protocol_version,
             )
         )
         return token

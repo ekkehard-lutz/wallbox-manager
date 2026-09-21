@@ -97,7 +97,7 @@ The current listener is plain WebSocket for trusted local networks; TLS and stat
 authentication are not implemented. It does not bind to a particular vendor.
 
 `runtime.Runtime` exposes immutable `core.events.StationSnapshot` updates and
-subscriptions; future HA entities need not parse OCPP objects. Snapshots retain
+subscriptions; HA diagnostic entities consume snapshots without parsing OCPP objects. Snapshots retain
 known identities across disconnect and distinguish disconnected state from live
 capability evidence. These are known identities, not a claim that all previously
 seen connectors are still present. No physical operating envelopes are fabricated.
@@ -147,9 +147,10 @@ supply that proof. Discovery sends no availability/configuration/control command
 Offline stations do not block setup. Disconnect invalidates connection-scoped
 evidence and retains known identity metadata in memory; reconnect needs no reload.
 Persisted HA listener configuration is untouched. Integration restart creates a
-fresh runtime and rediscovery; disk persistence of discovered identities/control
-state remains future work. This phase exposes no charging-control API or sensor
-entities and does not implement EV-acceptance learning.
+fresh runtime and rediscovery. HA Device Registry retains station identities and
+learned metadata; runtime capabilities and control state are not persisted. This
+phase exposes read-only diagnostic entities, no charging-control API, and no
+EV-acceptance learning.
 
 ## Capability model
 
@@ -893,3 +894,31 @@ the same quality gates. Future
 runtime changes must include their own tests. These checks do not establish protocol
 conformance or hardware safety; device behavior requires simulator and hardware
 verification before enabling control.
+
+## Read-only HA diagnostics (beta.1)
+
+The config entry forwards `binary_sensor` and `sensor` platforms even with zero
+stations. Both subscribe to the generic Runtime, replay current snapshots and
+recreate known station entities from HA Device Registry. New stations are added
+through push events without reload or polling. Entity subscriptions are removed
+by `async_on_remove`; platform discovery subscriptions use entry unload callbacks.
+
+A station device identifier is `(wallbox_manager, <entry-id>:<station-id>)`.
+Entity unique IDs append a stable diagnostic key to that string. The entry
+namespace separates identical station IDs on distinct listeners; neither identity
+contains generations, runtime incarnation, vendor nor model. A station is the HA
+device boundary; EVSE/connector distinctions remain in the generic runtime.
+
+Connected is a diagnostic connectivity binary sensor. Diagnostic sensors expose
+negotiated protocol version, connection generation, boot generation, capability
+revision and actual discovery evidence state. Discovery attributes include source,
+reason and timestamp; all entities carry station ID and runtime incarnation.
+There is no invented running/completed lifecycle or electrical measurement class.
+
+Disconnect sets Connected false while keeping metadata and last-known protocol
+and generations visible. Discovery reflects runtime invalidation to UNKNOWN with
+the disconnected reason, rather than presenting old evidence as current. On
+reload/restart the durable registry recreates the entity set, Connected is false,
+and other sensors are unavailable until a fresh runtime snapshot exists. No old
+connection counters or capabilities are restored. Missing BootNotification fields
+never overwrite learned registry metadata with fabricated defaults.

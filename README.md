@@ -6,6 +6,33 @@ stations through a common, capability-based interface.
 The integration is intended to work as a standalone wallbox manager while also
 providing a programmatic interface for a future higher-level Energy Manager.
 
+## Preparing v0.1.0-beta.1
+
+This early read-only pre-release provides a HACS-installable integration foundation,
+an OCPP listener for 1.6J / 2.0.1 / 2.1, BootNotification, read-only discovery,
+dynamic station devices and diagnostic entities. It is for the first hardware
+interoperability test, **not the measurement beta**.
+
+Add this repository as a HACS custom repository of type Integration and install
+Wallbox Manager when the pre-release is published. For testing this branch before
+publication, copy `custom_components/wallbox_manager` into your HA configuration's
+`custom_components` directory. Restart HA, then add Wallbox Manager under Settings
+→ Devices & services and configure the bind IP and port. Configure the wallbox URL
+as `ws://<HA-host>:<configured-port>/<station-id>`. This milestone uses plain
+WebSocket on a trusted local network.
+
+Each station appears as a device with learned manufacturer, model and firmware.
+Diagnostics include Connected, OCPP protocol version, Connection generation,
+Boot generation, Discovery evidence and Discovery revision. Station ID and runtime
+incarnation are attributes. Stations may connect after setup; reconnect updates
+the same entities. On disconnect Connected becomes false, metadata and last-known
+protocol/counters remain, and discovery evidence is invalidated. After integration
+reload known devices remain: Connected is false and other diagnostics are
+unavailable until a new connection supplies a snapshot.
+
+There are no electrical measurement sensors, charging controls, profiles, phase
+switching, vendor extensions, Energy Manager functionality or EV learning yet.
+
 ## Architecture
 
 See the [proposed architecture](docs/architecture.md) and the
@@ -39,9 +66,9 @@ Wallbox
 Standard OCPP functionality is preferred whenever possible. Vendor-specific
 functionality may be implemented through isolated OCPP DataTransfer extensions.
 
-## Charging profiles and control ownership
+## Planned charging profiles and control ownership
 
-Normal user-selectable Wallbox Manager profiles are:
+The planned user-selectable Wallbox Manager profiles are:
 
 - OFF
 - PV_SURPLUS
@@ -97,7 +124,7 @@ user click. A deliberate LOCAL takeover blocks automatic recovery and requires
 a new explicit user action to leave LOCAL. Ordinary API calls, heartbeats and
 recovery handshakes cannot assert that authorization or bypass the LOCAL latch.
 
-## Energy Manager interface
+## Planned Energy Manager interface
 
 A future Energy Manager communicates with Wallbox Manager through a programmatic
 API rather than by manipulating Home Assistant entities.
@@ -130,15 +157,14 @@ implemented. The pure solver respects current steps and supplied electrical limi
 uses actual per-phase voltages, and returns an offered operating point, logical OFF
 or an explicit unreachable reason. A deferred-result contract is reserved for the
 future phase-transition planner. It does not command a charger or claim measured
-EV consumption. Ownership, charging profiles, measurement processing and HA entities
-remain future work.
+EV consumption. Ownership, charging profiles and measurement processing remain
+future work; read-only HA station diagnostics are available.
 
 Run development checks with `.venv/bin/ruff check .`,
 `.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
 Home Assistant instance; Python 3.14 CI runs these same checks.
 
-The first public release is planned as v1.0.0. A changelog will be introduced
-with that release.
+This branch prepares v0.1.0-beta.1; its tag and release will follow review and merge.
 
 ## Read-only OCPP endpoint
 
@@ -160,7 +186,7 @@ from `ocpp==2.1.0`; this is a tested foundation, not a full protocol implementat
 Smart-charging advertisements remain distinct from verified behavior. Physical
 current envelopes, physical phase switching and stop support stay unknown; no
 nominal current/phase limits are invented. Generic immutable runtime snapshots are
-available for future consumers, but no measurement sensors or charging controls
+consumed by push-based HA diagnostics, but no measurement sensors or charging controls
 are exposed yet. Actual wallbox-stationary hardware interoperability has not been
 verified by the automated fake/local-peer tests. Older empty scaffold entries
 migrate to the default endpoint configuration.

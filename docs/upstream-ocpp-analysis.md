@@ -247,3 +247,16 @@ it contains distinct `v16`, `v201`, `v21` classes and schemas, and performs sche
 validation through an executor by default. Its release number alone was not used
 as proof of protocol 2.1 support. Dependencies and bundled schemas retain their own
 license notices; no dependency schemas are copied into this repository.
+
+## HA diagnostics follow-up
+
+Inspected the same pinned `custom_components/ocpp/sensor.py` and `__init__.py`.
+Adapted normal config-entry platform forwarding/unloading into local `__init__.py`;
+DeviceInfo/registry association, diagnostic entity descriptions, push updates and
+`async_on_remove` subscription cleanup into `entity.py`, `sensor.py` and the shared
+base used by `binary_sensor.py`. The generic Runtime subscription replaces the
+upstream dispatcher and direct CentralSystem/ChargePoint references. Station
+registry reconciliation and entry-scoped stable identities support dynamic multiple
+stations. No upstream metering, RestoreSensor measurement restoration, controls,
+services or monolithic charge-point coupling were adopted. The earlier transport
+milestone's entity exclusion above describes that milestone, not this follow-up.

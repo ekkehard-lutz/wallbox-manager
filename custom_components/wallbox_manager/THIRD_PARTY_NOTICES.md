@@ -5,13 +5,15 @@ Portions of this integration and its lifecycle/discovery tests are adapted from
 `848407c11ff659ce59779a99ce69984bbb0e3ce1`.
 
 Original files: `custom_components/ocpp/api.py`, `chargepoint.py`, `ocppv16.py`,
-`ocppv201.py`, `__init__.py`, `config_flow.py`; tests
+`ocppv201.py`, `__init__.py`, `config_flow.py`, `sensor.py`; tests
 `test_reconnect_lifecycle.py`, `test_initial_start_lifecycle.py`,
 `test_v201_smart_charging_probe.py`, `test_v201_probe_timeout.py`.
 
 Changes: isolated protocol adapters and captured socket/task owners; strict
 negotiation; generation-fenced generic snapshots; read-only bounded discovery;
-no inherited charging policy, services, entity model or automatic availability.
+read-only HA platform lifecycle, diagnostic descriptions, DeviceInfo and push
+subscription cleanup adapted to generic snapshots; no inherited charging policy,
+services, measurement entity model or automatic availability.
 Tests use Wallbox Manager contracts and fake/local WebSocket peers without the
 upstream HA fixture suite. See `docs/upstream-ocpp-analysis.md` in the repository
 for the original-to-local mapping and detailed adoption record.

@@ -48,3 +48,5 @@ class StationSnapshot:
     capabilities: CapabilitySnapshot
     charging_schedule: CapabilityEvidence
     discovery: CapabilityEvidence
+    protocol: str | None = None
+    protocol_version: str | None = None

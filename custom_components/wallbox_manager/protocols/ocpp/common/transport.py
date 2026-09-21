@@ -87,7 +87,11 @@ class CentralSystem:
                     raise TimeoutError("old session still retiring")
             if self._closing or self._admissions.get(station) is not ticket:
                 return
-            token = self.runtime.connect(station)
+            token = self.runtime.connect(
+                station,
+                protocol="ocpp",
+                protocol_version=connection.subprotocol.removeprefix("ocpp"),
+            )
             adapter = ADAPTERS[connection.subprotocol](
                 station.value,
                 connection,

@@ -215,6 +215,8 @@ async def test_boot_and_discovery(server, protocol):
             server.runtime, lambda s: s.discovery.state == EvidenceState.VERIFIED
         )
         assert state.token.connection_generation == state.token.boot_generation == 1
+        assert state.protocol == "ocpp"
+        assert state.protocol_version == protocol.removeprefix("ocpp")
         assert state.identity.firmware == "v7"
         assert state.identity.serial == "serial-a"
         assert state.charging_schedule.state == EvidenceState.ADVERTISED
