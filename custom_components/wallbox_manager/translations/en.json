@@ -23,18 +23,6 @@
       "connected": {
         "name": "Connected"
       },
-      "available": {
-        "name": "{scope} Available"
-      },
-      "occupied": {
-        "name": "{scope} Occupied"
-      },
-      "vehicle_connected": {
-        "name": "{scope} Vehicle connected"
-      },
-      "charging_active": {
-        "name": "{scope} Charging active"
-      },
       "session_active": {
         "name": "{scope} Session active"
       }
@@ -142,19 +130,6 @@
       },
       "session_end_meter": {
         "name": "{scope} Session end meter"
-      },
-      "session_charging_state": {
-        "name": "{scope} Session charging state",
-        "state": {
-          "unknown": "Unknown",
-          "idle": "Idle",
-          "connected": "Connected",
-          "charging": "Charging",
-          "suspended_vehicle": "Suspended by vehicle",
-          "suspended_station": "Suspended by station",
-          "finishing": "Finishing",
-          "preparing": "Preparing"
-        }
       }
     }
   }

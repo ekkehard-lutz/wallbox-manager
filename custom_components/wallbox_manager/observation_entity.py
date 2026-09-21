@@ -1,16 +1,13 @@
 """Thin projections of scoped, push-based runtime observations."""
 
-from datetime import UTC, datetime
-
-from homeassistant.core import callback
-from homeassistant.helpers.event import async_track_point_in_utc_time
-
 from .core.models import ConnectorId, EvseId
 from .core.telemetry import station_of
 from .entity import StationEntity, observation_unique_id
 
 
 class ObservationEntity(StationEntity):
+    """Known values live for the connection generation, not the sample deadline."""
+
     _attr_entity_category = None
 
     def __init__(self, runtime, entry_id, channel, projection=None):
@@ -29,7 +26,6 @@ class ObservationEntity(StationEntity):
         elif isinstance(scope, ConnectorId):
             label = f"EVSE {scope.evse.value} / {scope.value}"
         self._attr_translation_placeholders = {"scope": label}
-        self._expire_cancel = None
 
     @property
     def observation(self):
@@ -42,7 +38,7 @@ class ObservationEntity(StationEntity):
             self.snapshot
             and self.snapshot.connected
             and observation
-            and observation.fresh(datetime.now(UTC))
+            and observation.value is not None
         )
 
     @property
@@ -65,34 +61,3 @@ class ObservationEntity(StationEntity):
                 else None,
             )
         return attrs
-
-    async def async_added_to_hass(self):
-        await super().async_added_to_hass()
-        self.async_on_remove(self._cancel_expiry)
-        self._schedule_expiry()
-
-    @callback
-    def _changed(self, snapshot):
-        super()._changed(snapshot)
-        if snapshot.token.station == self.station:
-            self._schedule_expiry()
-
-    @callback
-    def _cancel_expiry(self):
-        if self._expire_cancel is not None:
-            self._expire_cancel()
-            self._expire_cancel = None
-
-    @callback
-    def _schedule_expiry(self):
-        self._cancel_expiry()
-        observation = self.observation
-        if self.available and observation.valid_until is not None:
-            self._expire_cancel = async_track_point_in_utc_time(
-                self.hass, self._expired, observation.valid_until
-            )
-
-    @callback
-    def _expired(self, now):
-        self._expire_cancel = None
-        self.async_write_ha_state()

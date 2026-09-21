@@ -89,8 +89,10 @@ class Observation:
     """Numbers are V, A, W or Wh. None is invalid, never a fabricated zero.
 
     A missing deadline denotes an event-driven state, valid only in its runtime
-    generation. Meter observations always have a deadline. Consumers must call
-    fresh() before using values. Report/receipt times remain independently visible.
+    generation. Meter observations always have a deadline for time-bounded accounting.
+    Consumers requiring a recent sample must call fresh(); HA live measurement
+    availability instead follows the current connected runtime generation.
+    Report/receipt times remain independently visible.
     """
 
     channel: Channel

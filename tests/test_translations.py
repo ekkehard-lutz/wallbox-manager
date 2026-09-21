@@ -65,7 +65,6 @@ def test_listener_url_has_no_unclosed_rich_text_tags(filename):
 
 
 def test_all_operational_entity_names_and_states_are_translated():
-    from custom_components.wallbox_manager.binary_sensor import STATE_FLAGS
     from custom_components.wallbox_manager.core.telemetry import STATE_OPTIONS, Quantity
 
     for filename in ("strings.json", "translations/en.json", "translations/de.json"):
@@ -76,6 +75,5 @@ def test_all_operational_entity_names_and_states_are_translated():
             assert set(catalog["sensor"][quantity.value]["state"]) == {
                 s.value for s in states
             }
-        for flags in STATE_FLAGS.values():
-            for flag in flags:
-                assert "{scope}" in catalog["binary_sensor"][flag]["name"]
+        assert set(catalog["binary_sensor"]) == {"connected", "session_active"}
+        assert "session_charging_state" not in catalog["sensor"]

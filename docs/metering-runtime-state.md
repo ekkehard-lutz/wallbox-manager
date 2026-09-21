@@ -72,11 +72,22 @@ ones. A lower energy register at a newer timestamp is retained as reported; HA's
 
 Observations retain source time, receive time, source label and validity deadline.
 Naive/invalid timestamps and source times more than five seconds ahead of receipt
-are ignored. Meter readings expire 120 seconds after source time (and no later
-than 120 seconds after receipt). This initial conservative policy is fixed in the
-adapter, not inferred from a vendor or polling configuration. Historical meter
-readings may establish channel support but are immediately unavailable if stale.
-Consumers must check `Observation.fresh(now)`, not use stored values blindly.
+are ignored. The 120-second sample deadline remains for time-bounded session
+attribution and transaction endpoint accounting. It is **not** an HA live meter
+availability deadline. Zero and non-zero measurements remain the current known
+values while their station/connection generation is live, even if a station only
+reports changed channels. Source/receipt timestamps remain visible; a known value
+is not a claim that a fresh sample was recently received.
+
+HA live meter availability requires a connected station and a valid, non-null
+observation in the current runtime generation. Disconnect, connection loss,
+boot/reconnect invalidation, missing data or a subsequently invalid/conflicting
+reading makes the entity unavailable. Mere channel silence does not. The existing
+WebSocket transport sends pings every 20 seconds and allows 20 seconds for a pong;
+failed keepalive closes the connection and its receive-loop finalizer calls
+Runtime.disconnect. Socket closure, transport failure and shutdown use this same
+path. OCPP Heartbeat is acknowledged (boot advertises 60 seconds), but no separate
+heartbeat watchdog or contradictory connection flag is added.
 
 For 1.6 StatusNotification only, an omitted optional timestamp uses receipt time;
 malformed supplied timestamps are not used. Meter sample timestamps are mandatory.
@@ -113,14 +124,15 @@ DIAGNOSTIC category and are created dynamically only for observed valid channels
 | Each phase current | Current L1/L2/L3 as reported | current / A / measurement |
 | Phase or explicit total power | Active import power for that channel | power / W / measurement |
 | Total imported energy | Imported energy | energy / kWh / total_increasing |
-| Connector state | Connector-state enum, Available, Occupied | enum, plain binary, occupancy binary |
-| Charging state | Charging-state enum, Vehicle connected, Charging active | enum, plug binary, battery_charging binary |
+| Connector state | Connector state / Anschlussstatus | enum |
+| Charging state | Charging state / Ladezustand | enum |
 
-Unknown enum state projects to unknown binary values, not false. Faulted/reserved/
-unavailable connector status does not assert whether a vehicle is plugged in.
-EVConnected and suspended states mean vehicle connected but charging inactive.
-1.6 Preparing and Finishing are explicit states with charging inactive; vehicle
-presence remains unknown, since connector occupancy need not prove a plugged-in EV.
+The enums are the canonical operational state surface. Charging, connected,
+suspended_vehicle and suspended_station remain distinct; paused charging due to
+insufficient station power is not flattened to charging or connected. OCPP
+SuspendedEVSE maps to suspended_station and SuspendedEV to suspended_vehicle.
+Available, Occupied, Vehicle connected and Charging active binary projections
+are no longer created. Internal three-valued projection helpers remain available.
 
 All entities attach to the station's existing HA device, with the explicit scope
 in their translated names and attributes. Stable unique IDs encode entry ID,
@@ -130,10 +142,9 @@ Registry recreates only previously observed channels on reload; their values sta
 unavailable until fresh observations arrive. Capabilities are not guessed from
 station model names or an arbitrary universal entity list.
 
-Updates are push-only. One-shot expiry callbacks update HA availability without
-polling. They are cancelled on refresh/invalidation/removal. Entry-level discovery
-and per-entity runtime subscriptions are removed on unload. Temporary value loss,
-expiry, boot or disconnect never deletes a channel's entity identity. English and
+Updates are push-only; ordinary observation entities have no per-channel expiry
+timers. Entry-level discovery and per-entity runtime subscriptions are removed on
+unload. Temporary value loss, boot or disconnect never deletes an entity identity. English and
 German names and enum labels are provided.
 
 ## Verification and exclusions
@@ -141,7 +152,8 @@ German names and enum labels are provided.
 Pure tests cover immutability, numeric validation, normalization, scope/time/
 generation fencing, unknown states, partial data and observed support. Real HA
 registry/state-machine tests exercise dynamic creation, proper units/classes,
-expiry, invalidation, restart identity reuse and timer/subscription cleanup.
+connection-based availability, invalidation, restart identity reuse and subscription
+cleanup. Keepalive timeout tests exercise the actual WebSocket timeout path.
 Versioned local OCPP wire tests cover 1.6J, 2.0.1 and 2.1 status, periodic and
 transaction metering, offline/old data and multi-scope isolation. Existing ACK,
 discovery, pending-call ownership, lifecycle, translation and solver checks remain.
@@ -149,3 +161,12 @@ discovery, pending-call ownership, lifecycle, translation and solver checks rema
 There are no controls, PV modes, Energy Manager logic, EV learning, authorization
 implementation, physical capability inference, voltage fallback, phase aggregation,
 or new writable/public control API in this feature. Manifest version is unchanged.
+
+## Upgrading beta.6
+
+The removed Available, Occupied, Vehicle connected and Charging active binary
+entities may remain in HA's entity registry after upgrading. Session Charging
+State is also no longer created; the live charging-state enum remains canonical.
+There is no destructive automatic registry cleanup. Remove unwanted legacy test
+entries manually. New installations create neither these projections nor old
+TransactionEvent duplicate meters. Existing canonical IDs remain unchanged.

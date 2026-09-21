@@ -43,7 +43,8 @@ async def test_active_completed_replacement_and_reload(diagnostics):
     )
     await hass.async_block_till_done()
     entities = sessions(platforms)
-    assert len(entities) == 10
+    assert len(entities) == 9
+    assert "charging_state" not in entities
     assert entities["active"].is_on
     assert entities["ended"].native_value is None
     assert entities["started"].device_class == SensorDeviceClass.TIMESTAMP
@@ -54,7 +55,7 @@ async def test_active_completed_replacement_and_reload(diagnostics):
     assert entities["power"].native_value == 5000
     assert entities["energy"].native_value == 0.4
     assert entities["energy"].state_class is None
-    assert entities["charging_state"].native_value == "connected"
+    assert runtime.sessions.get(scope).charging_state == State.CONNECTED
     assert all(e.available and e.entity_category is None for e in entities.values())
     identities = {k: (e.unique_id, e.entity_id) for k, e in entities.items()}
     runtime.disconnect(token)
@@ -83,7 +84,7 @@ async def test_active_completed_replacement_and_reload(diagnostics):
     assert entities["end_meter"].native_value == 1.9
     assert entities["duration"].native_value == 5
     assert entities["ended"].native_value == end
-    assert entities["charging_state"].native_value == "idle"
+    assert runtime.sessions.get(scope).charging_state == State.IDLE
     old_id = entities["id"].native_value
     runtime.disconnect(token)
     assert entities["power"].native_value == 0
@@ -108,7 +109,7 @@ async def test_active_completed_replacement_and_reload(diagnostics):
                 if ":session:" in e.unique_id
             ]
         )
-        == 10
+        == 9
     )
 
 

@@ -106,7 +106,13 @@ Ordinary MeterValues updates immutable scoped measurement observations; 2.x
 TransactionEvent measurements feed session accounting without advertising ordinary
 HA meter channels;
 StatusNotification and 2.x chargingState supply distinct connector/charging enums.
-HA operational entities are created only for observed supported channels. See the
+HA operational entities are created only for observed supported channels. Live
+meters retain valid known values for the connected runtime generation, without
+per-channel expiry. WebSocket ping/pong owns connection liveness; boot/disconnect
+clears observations. Time-bounded sample validity still governs session accounting.
+Connector-state and charging-state enums are canonical; redundant operational
+binary projections and the Session Charging State HA entity are not created.
+Sessions expose nine entities while retaining charging state internally. See the
 [implemented metering/runtime contract](metering-runtime-state.md) for timestamps,
 normalization, freshness, scope, invalidation and limitations. Session ledgers are
 implemented separately as described below; authority/authorization logic remains

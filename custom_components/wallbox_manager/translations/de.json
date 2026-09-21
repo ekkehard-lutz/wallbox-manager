@@ -23,18 +23,6 @@
       "connected": {
         "name": "Verbunden"
       },
-      "available": {
-        "name": "{scope} Verfügbar"
-      },
-      "occupied": {
-        "name": "{scope} Belegt"
-      },
-      "vehicle_connected": {
-        "name": "{scope} Fahrzeug verbunden"
-      },
-      "charging_active": {
-        "name": "{scope} Ladung aktiv"
-      },
       "session_active": {
         "name": "{scope} Session aktiv"
       }
@@ -142,19 +130,6 @@
       },
       "session_end_meter": {
         "name": "{scope} Session End-Zählerstand"
-      },
-      "session_charging_state": {
-        "name": "{scope} Session-Ladezustand",
-        "state": {
-          "unknown": "Unbekannt",
-          "idle": "Inaktiv",
-          "connected": "Verbunden",
-          "charging": "Lädt",
-          "suspended_vehicle": "Vom Fahrzeug pausiert",
-          "suspended_station": "Von der Ladestation pausiert",
-          "finishing": "Abschluss",
-          "preparing": "Vorbereitung"
-        }
       }
     }
   }

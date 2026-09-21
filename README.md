@@ -31,19 +31,25 @@ reload known devices remain: Connected is false and other diagnostics are
 unavailable until a new connection supplies a snapshot.
 
 Reported voltage/current/power per phase, explicit total import power and imported
-energy now create scoped HA sensors dynamically. Available/occupied and reported
-charging-state entities distinguish a connected vehicle from active charging.
-Missing measurements are never synthesized; readings expire after 120 seconds,
-and boot/disconnect makes operational entities unavailable while retaining IDs.
+energy now create scoped HA sensors dynamically. Connector state and Charging
+state enums are the canonical operational state entities, preserving connected,
+charging and paused/suspended states without redundant boolean projections.
+Known meter values, including unchanged zero values, remain available while the
+connection is live. Missing/invalid data and boot/disconnect make operational
+entities unavailable while retaining IDs. The 120-second sample deadline remains
+for conservative session attribution and endpoint accounting, not ordinary HA
+meter availability.
 See [metering and runtime state](docs/metering-runtime-state.md) for scope, units,
 capability-driven entity creation, freshness and deliberately unsupported cases.
 
-Transaction lifecycle events now create a current-or-last session entity set per
+Transaction lifecycle events now create exactly nine current-or-last session
+entities (without a separate Session Charging State entity) per
 observed EVSE/connector. Completed values stay visible until the next session;
 energy uses matching meter-register deltas. A sole connector session may use fresh
 parent-EVSE total power/energy; ambiguous multi-session attribution stays unknown.
 TransactionEvent samples feed sessions without creating duplicate ordinary meter
-entities. Existing beta.5 duplicates may remain in HA's registry for manual cleanup.
+entities. Existing beta.5 duplicates and beta.6 removed boolean/session-state entities may
+remain in HA's registry for manual cleanup; no automatic deletion is performed.
 Active sessions and all completed
 history survive reload/restart. Disconnect and boot do not end a session. See
 [session tracking and persistence](docs/session-tracking.md) for lifecycle,

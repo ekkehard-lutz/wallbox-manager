@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_time_interval
 
-from .core.telemetry import STATE_OPTIONS, Quantity
+from .core.telemetry import Quantity
 from .entity import StationEntity, device_info
 from .session_ledger import scope_parts
 
@@ -25,7 +25,6 @@ SENSOR_KEYS = (
     "energy",
     "start_meter",
     "end_meter",
-    "charging_state",
 )
 
 
@@ -141,11 +140,6 @@ class SessionSensor(SessionEntity, SensorEntity):
         elif key in ("energy", "start_meter", "end_meter"):
             self._attr_device_class = SensorDeviceClass.ENERGY
             self._attr_native_unit_of_measurement = "kWh"
-        elif key == "charging_state":
-            self._attr_device_class = SensorDeviceClass.ENUM
-            self._attr_options = [
-                s.value for s in STATE_OPTIONS[Quantity.CHARGING_STATE]
-            ]
 
     @property
     def native_value(self):
@@ -160,8 +154,6 @@ class SessionSensor(SessionEntity, SensorEntity):
                 return session.ended_at
             case "duration":
                 return session.duration(now)
-            case "charging_state":
-                return session.charging_state.value
             case "power":
                 if not session.active:
                     return 0

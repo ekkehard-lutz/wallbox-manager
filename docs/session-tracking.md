@@ -100,20 +100,27 @@ and running energy become unknown immediately. Exact connector meters remain
 usable. Once a session's energy has depended on a shared parent meter during an
 overlap, energy stays unknown for that session, even after overlap ends, rather
 than including another connector's consumption. The start snapshot is retained. Active power
-becomes unknown when its live reading expires, disconnects or a new generation
-invalidates observations. Completed sessions always display 0 W. Saved power is
+remains a time-bounded session attribution: it becomes unknown when its supporting
+sample expires, disconnects or a new generation invalidates observations. This is
+separate from ordinary live MeterValues entities, which keep their known values
+for the connection lifetime. Endpoint/fallback accounting still requires a recent
+sample; retained HA meter availability does not make an old register suitable. Completed sessions always display 0 W. Saved power is
 historical and cannot become a live reading merely through restoration.
 
 ## Home Assistant
 
-The first session at a scope creates nine sensors and one binary sensor:
+The first session at a scope creates exactly **nine entities**: eight sensors and
+one binary sensor:
 
 - Session ID and Session Active.
 - Session Started and Session Ended (native timestamp sensors).
 - Session Duration (seconds, updated while active).
 - Session Charging Power (W, power measurement).
 - Session Energy, Start Meter and End Meter (kWh; no total_increasing class).
-- Session Charging State (existing protocol-independent enum).
+
+Session Charging State is no longer an HA entity. Charging state remains in the
+internal ChargingSession/history model; the live Charging state enum is the
+canonical HA interface, including connected, charging and both suspension states.
 
 Completed values remain visible, even offline, until the next session replaces
 them. The next start clears ended time and starts a fresh duration/accounting
@@ -164,5 +171,6 @@ The integration no longer advertises ordinary measurement channels from
 TransactionEvent samples. Existing beta.5 connector meter registry entries may
 remain and restore as unavailable entities until a legitimate ordinary meter for
 that channel is reported. No destructive automatic cleanup is performed; unwanted
-test duplicates can be removed manually in HA. Session entity IDs and the exact
-ten-entity projection set are unchanged. No new session entities are introduced.
+test duplicates can be removed manually in HA. Retained session entity IDs are unchanged. For beta.6 upgrades, the removed
+Session Charging State registry entry may likewise remain for manual removal;
+newly observed sessions create exactly nine entities.

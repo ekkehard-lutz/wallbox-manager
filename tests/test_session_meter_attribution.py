@@ -247,7 +247,7 @@ def test_reset_and_restored_session_fencing(context):
 
 
 @pytest.mark.parametrize("protocol", ["ocpp2.0.1", "ocpp2.1"])
-async def test_wire_messages_publish_only_normal_meters_and_ten_session_entities(
+async def test_wire_messages_publish_only_normal_meters_and_nine_session_entities(
     diagnostics, monkeypatch, protocol
 ):
     hass, _, runtime, platforms, _, _ = diagnostics
@@ -283,7 +283,8 @@ async def test_wire_messages_publish_only_normal_meters_and_ten_session_entities
             for e in p.entities.values()
             if isinstance(e, SessionEntity)
         }
-        assert len(entities) == 10
+        assert len(entities) == 9
+        assert "charging_state" not in entities
         assert entities["power"].native_value == 100
         assert entities["start_meter"].native_value == 1.1
         assert all(
