@@ -3,6 +3,8 @@
 Adapted from lbbrhzn/ocpp ocppv201.py _get_inventory/on_report at
 848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
 See ../../../THIRD_PARTY_NOTICES.md. Reports commit only after complete sequencing.
+ACK-only reporting patterns also adapted from upstream ocppv201.py; no metering
+or transaction processing is inherited. Concrete adapters select response schemas.
 """
 
 import asyncio
@@ -73,6 +75,26 @@ class InventoryAdapter(DiscoveryAdapter):
                 connectors=(connector,),
             )
         return self._call_result.StatusNotification()
+
+    @on("MeterValues")
+    def on_meter_values(self, **kwargs):
+        """Acknowledge validated transport input without consuming measurements."""
+        return self._call_result.MeterValues()
+
+    @on("TransactionEvent")
+    def on_transaction_event(self, id_token=None, **kwargs):
+        """Acknowledge receipt without tracking transactions or granting access."""
+        # Neither version requires fields for the reference station's tokenless
+        # events. If a token is supplied, include idTokenInfo without pretending
+        # to have authorized it. The charging station owns the transaction ID.
+        return self._call_result.TransactionEvent(
+            id_token_info={"status": "Unknown"} if id_token is not None else None
+        )
+
+    @on("NotifyEvent")
+    def on_notify_event(self, **kwargs):
+        """Acknowledge device events without interpreting authority or state."""
+        return self._call_result.NotifyEvent()
 
     @on("NotifyReport")
     def on_report(

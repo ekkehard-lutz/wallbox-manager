@@ -49,3 +49,16 @@ def test_all_diagnostic_names_and_evidence_states_are_translated():
         assert set(catalog["sensor"]["discovery"]["state"]) == {
             state.value for state in EvidenceState
         }
+
+
+@pytest.mark.parametrize(
+    "filename", ["strings.json", "translations/en.json", "translations/de.json"]
+)
+def test_listener_url_has_no_unclosed_rich_text_tags(filename):
+    description = json.loads((INTEGRATION / filename).read_text())["config"]["step"][
+        "user"
+    ]["description"]
+    # ICU rich-text formatting interprets <port>, etc. as opening tags, not
+    # literal endpoint placeholders. This URL intentionally contains no markup.
+    assert "ws://HA-address:port/station-id" in description
+    assert "<" not in description and ">" not in description
