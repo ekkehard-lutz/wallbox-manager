@@ -4,11 +4,49 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "Wallbox Manager einrichten."
+        "description": "OCPP-Endpunkt für eingehende Wallbox-Verbindungen im vertrauenswürdigen lokalen Netzwerk einrichten. Noch keine Ladesteuerung. Konfigurieren Sie die Wallbox für ws://<HA-address>:<port>/<station-id>.",
+        "data": {
+          "host": "Lokale Bind-Adresse",
+          "port": "WebSocket-Port"
+        }
       }
     },
     "abort": {
       "already_configured": "Wallbox Manager ist bereits eingerichtet."
+    },
+    "error": {
+      "invalid_listener": "Eine gültige IP-Adresse und einen Port zwischen 1 und 65535 eingeben."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Verbunden"
+      }
+    },
+    "sensor": {
+      "protocol_version": {
+        "name": "OCPP-Protokollversion"
+      },
+      "connection_generation": {
+        "name": "Verbindungsgeneration"
+      },
+      "boot_generation": {
+        "name": "Boot-Generation"
+      },
+      "revision": {
+        "name": "Discovery-Revision"
+      },
+      "discovery": {
+        "name": "Discovery-Nachweis",
+        "state": {
+          "unknown": "Unbekannt",
+          "advertised": "Angekündigt",
+          "verified": "Verifiziert",
+          "unsupported": "Nicht unterstützt",
+          "degraded": "Beeinträchtigt"
+        }
+      }
     }
   }
 }

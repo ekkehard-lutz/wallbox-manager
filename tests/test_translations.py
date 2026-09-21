@@ -36,3 +36,16 @@ def test_translation_keys_and_placeholders_match(language):
         expected = {field for _, field, _, _ in formatter.parse(message) if field}
         actual = {field for _, field, _, _ in formatter.parse(translated[key]) if field}
         assert actual == expected, key
+
+
+def test_all_diagnostic_names_and_evidence_states_are_translated():
+    from custom_components.wallbox_manager.core.capabilities import EvidenceState
+    from custom_components.wallbox_manager.sensor import DESCRIPTIONS
+
+    for filename in ("strings.json", "translations/en.json", "translations/de.json"):
+        catalog = json.loads((INTEGRATION / filename).read_text())["entity"]
+        assert catalog["binary_sensor"]["connected"]["name"]
+        assert set(catalog["sensor"]) == {d.key for d in DESCRIPTIONS}
+        assert set(catalog["sensor"]["discovery"]["state"]) == {
+            state.value for state in EvidenceState
+        }

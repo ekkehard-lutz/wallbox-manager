@@ -6,12 +6,40 @@ stations through a common, capability-based interface.
 The integration is intended to work as a standalone wallbox manager while also
 providing a programmatic interface for a future higher-level Energy Manager.
 
+## Preparing v0.1.0-beta.1
+
+This early read-only pre-release provides a HACS-installable integration foundation,
+an OCPP listener for 1.6J / 2.0.1 / 2.1, BootNotification, read-only discovery,
+dynamic station devices and diagnostic entities. It is for the first hardware
+interoperability test, **not the measurement beta**.
+
+Add this repository as a HACS custom repository of type Integration and install
+Wallbox Manager when the pre-release is published. For testing this branch before
+publication, copy `custom_components/wallbox_manager` into your HA configuration's
+`custom_components` directory. Restart HA, then add Wallbox Manager under Settings
+→ Devices & services and configure the bind IP and port. Configure the wallbox URL
+as `ws://<HA-host>:<configured-port>/<station-id>`. This milestone uses plain
+WebSocket on a trusted local network.
+
+Each station appears as a device with learned manufacturer, model and firmware.
+Diagnostics include Connected, OCPP protocol version, Connection generation,
+Boot generation, Discovery evidence and Discovery revision. Station ID and runtime
+incarnation are attributes. Stations may connect after setup; reconnect updates
+the same entities. On disconnect Connected becomes false, metadata and last-known
+protocol/counters remain, and discovery evidence is invalidated. After integration
+reload known devices remain: Connected is false and other diagnostics are
+unavailable until a new connection supplies a snapshot.
+
+There are no electrical measurement sensors, charging controls, profiles, phase
+switching, vendor extensions, Energy Manager functionality or EV learning yet.
+
 ## Architecture
 
 See the [proposed architecture](docs/architecture.md) and the
 [pinned upstream OCPP adoption analysis](docs/upstream-ocpp-analysis.md) for module
 boundaries, ownership transitions, power solving and reuse decisions. These are
-design documents; OCPP runtime functionality has not been implemented yet.
+design documents; the implemented subset now includes pure solving and read-only
+OCPP transport/discovery.
 
 Wallbox Manager separates charging strategy from wallbox-specific communication.
 
@@ -38,9 +66,9 @@ Wallbox
 Standard OCPP functionality is preferred whenever possible. Vendor-specific
 functionality may be implemented through isolated OCPP DataTransfer extensions.
 
-## Charging profiles and control ownership
+## Planned charging profiles and control ownership
 
-Normal user-selectable Wallbox Manager profiles are:
+The planned user-selectable Wallbox Manager profiles are:
 
 - OFF
 - PV_SURPLUS
@@ -96,7 +124,7 @@ user click. A deliberate LOCAL takeover blocks automatic recovery and requires
 a new explicit user action to leave LOCAL. Ordinary API calls, heartbeats and
 recovery handshakes cannot assert that authorization or bypass the LOCAL latch.
 
-## Energy Manager interface
+## Planned Energy Manager interface
 
 A future Energy Manager communicates with Wallbox Manager through a programmatic
 API rather than by manipulating Home Assistant entities.
@@ -129,15 +157,39 @@ implemented. The pure solver respects current steps and supplied electrical limi
 uses actual per-phase voltages, and returns an offered operating point, logical OFF
 or an explicit unreachable reason. A deferred-result contract is reserved for the
 future phase-transition planner. It does not command a charger or claim measured
-EV consumption. OCPP transport/discovery, ownership, profiles and HA entities remain
-future work.
+EV consumption. Ownership, charging profiles and measurement processing remain
+future work; read-only HA station diagnostics are available.
 
 Run development checks with `.venv/bin/ruff check .`,
 `.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
 Home Assistant instance; Python 3.14 CI runs these same checks.
 
-The first public release is planned as v1.0.0. A changelog will be introduced
-with that release.
+This branch prepares v0.1.0-beta.1; its tag and release will follow review and merge.
+
+## Read-only OCPP endpoint
+
+Configure Wallbox Manager with a local bind IP and port (defaults `0.0.0.0:9000`).
+Point the wallbox at `ws://<HA-host>:<port>/<station-id>` and explicitly select
+OCPP 1.6J, 2.0.1 or 2.1. Multiple stations can connect to one endpoint. Missing or
+unsupported subprotocols are rejected. No station ID, vendor or current limit is
+hard-coded. The endpoint currently uses plain WebSocket without station
+authentication or TLS, for a trusted local network only.
+
+The integration loads without a connected wallbox. It accepts BootNotification,
+answers Heartbeat, learns identity/connector inventory, and reruns read-only
+discovery after reconnect/boot. Disconnect invalidates old evidence without
+requiring an integration reload. StatusNotification currently supplies identity
+only. OCPP 1.6 uses GetConfiguration; 2.x uses correlated, complete
+GetBaseReport/NotifyReport inventory. All three versions use their own schemas
+from `ocpp==2.1.0`; this is a tested foundation, not a full protocol implementation.
+
+Smart-charging advertisements remain distinct from verified behavior. Physical
+current envelopes, physical phase switching and stop support stay unknown; no
+nominal current/phase limits are invented. Generic immutable runtime snapshots are
+consumed by push-based HA diagnostics, but no measurement sensors or charging controls
+are exposed yet. Actual wallbox-stationary hardware interoperability has not been
+verified by the automated fake/local-peer tests. Older empty scaffold entries
+migrate to the default endpoint configuration.
 
 ## Upstream code and attribution
 
@@ -147,7 +199,9 @@ projects, including OCPP implementations.
 Any code that is copied or substantially adapted will retain the required
 copyright and license notices and will be documented appropriately.
 
-No upstream code has been incorporated at this stage.
+Selected transport, lifecycle, boot and discovery code/scenarios are now adapted
+from the pinned upstream. See the [adoption record](docs/upstream-ocpp-analysis.md)
+and [MIT notices](custom_components/wallbox_manager/THIRD_PARTY_NOTICES.md).
 
 ## License
 

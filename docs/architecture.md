@@ -2,7 +2,8 @@
 
 Status: design with initial pure-core implementation, 2026-09-21. Immutable
 identity/capability/request contracts and the operating-point solver are implemented.
-The remaining runtime behavior below is planned; no OCPP runtime is implemented.
+The read-only OCPP transport/discovery foundation is also implemented. Charging
+control, measurement entities and remaining runtime behavior below are planned.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -25,8 +26,8 @@ never authorize it. Non-OCPP adapters implement the same internal contracts.
 ## Proposed package layout
 
 Paths below are beneath `custom_components/wallbox_manager/`. The core models,
-capabilities, control requests and solver operating-point/power modules now exist;
-other runtime modules remain proposed.
+capabilities, control requests, solver, generic discovery/runtime snapshots and
+read-only OCPP adapters now exist; remaining runtime modules are proposed.
 
 ```text
 __init__.py              HA setup/unload and config-entry runtime wiring
@@ -82,6 +83,74 @@ may bypass ownership via an adapter reference. Core and solver modules must not
 import HA or OCPP types. Adapters translate protocol objects into immutable core
 events; entity updates subscribe to snapshots. Setup/unload owns all tasks,
 subscriptions, timers and connections. No server starts as a side effect of import.
+
+## Implemented transport/discovery foundation
+
+An entry-owned async CSMS listener accepts `ws://host:port/station-id`, with an
+explicit negotiated subprotocol: `ocpp2.1`, `ocpp2.0.1`, then `ocpp1.6` in server
+preference order. Missing/unsupported subprotocols are rejected; each version uses
+its own library messages and schemas. The pinned `ocpp==2.1.0` library provides a
+real v21 module, but only this tested read-only subset is supported here, not full
+feature parity or conformance. No server starts at import time. Configuration
+contains only bind IP and port; runtime objects live in `entry.runtime_data`.
+The current listener is plain WebSocket for trusted local networks; TLS and station
+authentication are not implemented. It does not bind to a particular vendor.
+
+`runtime.Runtime` exposes immutable `core.events.StationSnapshot` updates and
+subscriptions; HA diagnostic entities consume snapshots without parsing OCPP objects. Snapshots retain
+known identities across disconnect and distinguish disconnected state from live
+capability evidence. These are known identities, not a claim that all previously
+seen connectors are still present. No physical operating envelopes are fabricated.
+No measurement values, transaction state or charging/status state are implemented;
+StatusNotification is acknowledged only to learn explicit physical identities.
+
+The URL station ID maps to `StationId`. OCPP 1.6 connector zero stays station-scoped;
+a positive connector N maps explicitly to `EvseId(station, "connector-N")` and
+`ConnectorId(evse, "N")`, an adapter representation of the 1.6 controllable outlet,
+not evidence of a native EVSE hierarchy. A reported NumberOfConnectors N inventories
+1..N; absent counts create no default connector. OCPP 2.x uses explicit reported
+EVSE/connector IDs independently, including multiple connectors per EVSE. EVSE-only
+inventory remains EVSE-only. Identities from different protocol mappings are not
+silently equated when a station changes protocol.
+
+A fresh adapter and captured task/socket owner are created per admitted connection.
+A runtime incarnation UUID fences counters across integration restarts. Within that
+incarnation, each station's connection generation increases on admission; a valid
+BootNotification advances a separate boot-notification epoch and invalidates old
+capability/discovery work. Reconnect alone does not advance the boot epoch. OCPP
+boot notifications can be retried or triggered, so this conservative invalidation
+epoch is not a claim to count physical power cycles. Accepted responses carry UTC
+time and a heartbeat interval. Repeated boot messages on a live socket rerun
+discovery. New sessions fence old publications and finalizers; unload/shutdown
+closes the listener and joins captured tasks with bounded session retirement.
+
+Initial discovery starts after the accepted boot response. A known reconnect also
+performs fresh read-only discovery even if no new boot is sent. OCPP 1.6 reads
+SupportedFeatureProfiles and NumberOfConnectors via GetConfiguration. OCPP 2.x
+requests FullInventory via GetBaseReport, correlates NotifyReport by request ID,
+and commits only a complete ordered report (bounded to 10,000 rows). Incomplete,
+malformed or timed-out reports do not publish partial support. Runtime snapshots
+carry monotonically increasing revisions, source/time and generation metadata.
+
+`charging_schedule` records ADVERTISED support from SmartCharging or an explicit
+SmartChargingCtrlr/Available value; it does not verify dynamic current control.
+An explicit negative advertisement is UNSUPPORTED for that advertised feature;
+missing evidence is UNKNOWN. Timeout/malformed discovery is DEGRADED; an unsupported
+discovery operation does not deny the physical charging feature. VERIFIED discovery
+means the read-only exchange completed, not that charging commands have been
+verified. Physical current min/max/step, phase mapping/switching, stop/pause and
+actual current-control behavior remain unknown: `CapabilitySnapshot.envelopes` is
+empty and stop evidence is UNKNOWN. Populating a `ChargingEnvelope` requires later
+adequate device evidence; neither phase-count schedule fields nor static settings
+supply that proof. Discovery sends no availability/configuration/control commands.
+
+Offline stations do not block setup. Disconnect invalidates connection-scoped
+evidence and retains known identity metadata in memory; reconnect needs no reload.
+Persisted HA listener configuration is untouched. Integration restart creates a
+fresh runtime and rediscovery. HA Device Registry retains station identities and
+learned metadata; runtime capabilities and control state are not persisted. This
+phase exposes read-only diagnostic entities, no charging-control API, and no
+EV-acceptance learning.
 
 ## Capability model
 
@@ -779,8 +848,8 @@ Implement pure capability, ownership and solver contracts first, with fake adapt
 then versioned protocol adapters, HA presentation and device-specific extensions.
 Test each adapter against the same normalized contract suite. OCPP 2.1 needs its
 own schema/library compatibility proof; advertising its subprotocol is insufficient.
-No production code is adopted by this analysis and no changelog is created before
-v1.0.0.
+Transport/discovery adoption is recorded in the upstream analysis and distributed
+MIT notice. No changelog is created before v1.0.0.
 
 Required future tests include every transition above; stale same-owner tokens;
 local takeover during acquisition/dispatch; restart persistence and corrupt state;
@@ -825,3 +894,31 @@ the same quality gates. Future
 runtime changes must include their own tests. These checks do not establish protocol
 conformance or hardware safety; device behavior requires simulator and hardware
 verification before enabling control.
+
+## Read-only HA diagnostics (beta.1)
+
+The config entry forwards `binary_sensor` and `sensor` platforms even with zero
+stations. Both subscribe to the generic Runtime, replay current snapshots and
+recreate known station entities from HA Device Registry. New stations are added
+through push events without reload or polling. Entity subscriptions are removed
+by `async_on_remove`; platform discovery subscriptions use entry unload callbacks.
+
+A station device identifier is `(wallbox_manager, <entry-id>:<station-id>)`.
+Entity unique IDs append a stable diagnostic key to that string. The entry
+namespace separates identical station IDs on distinct listeners; neither identity
+contains generations, runtime incarnation, vendor nor model. A station is the HA
+device boundary; EVSE/connector distinctions remain in the generic runtime.
+
+Connected is a diagnostic connectivity binary sensor. Diagnostic sensors expose
+negotiated protocol version, connection generation, boot generation, capability
+revision and actual discovery evidence state. Discovery attributes include source,
+reason and timestamp; all entities carry station ID and runtime incarnation.
+There is no invented running/completed lifecycle or electrical measurement class.
+
+Disconnect sets Connected false while keeping metadata and last-known protocol
+and generations visible. Discovery reflects runtime invalidation to UNKNOWN with
+the disconnected reason, rather than presenting old evidence as current. On
+reload/restart the durable registry recreates the entity set, Connected is false,
+and other sensors are unavailable until a fresh runtime snapshot exists. No old
+connection counters or capabilities are restored. Missing BootNotification fields
+never overwrite learned registry metadata with fabricated defaults.

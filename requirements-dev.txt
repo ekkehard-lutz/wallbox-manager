@@ -3,3 +3,5 @@ pytest
 pytest-asyncio
 pytest-cov
 ruff
+ocpp==2.1.0
+websockets==15.0.1

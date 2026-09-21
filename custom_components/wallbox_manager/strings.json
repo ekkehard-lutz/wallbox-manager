@@ -4,11 +4,49 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "Set up Wallbox Manager."
+        "description": "Host an OCPP endpoint for incoming wallbox connections on a trusted local network. Charging control is not available yet. Configure the wallbox to connect to ws://<HA-address>:<port>/<station-id>.",
+        "data": {
+          "host": "Local bind address",
+          "port": "WebSocket port"
+        }
       }
     },
     "abort": {
       "already_configured": "Wallbox Manager is already configured."
+    },
+    "error": {
+      "invalid_listener": "Enter a valid IP address and a port between 1 and 65535."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      }
+    },
+    "sensor": {
+      "protocol_version": {
+        "name": "OCPP protocol version"
+      },
+      "connection_generation": {
+        "name": "Connection generation"
+      },
+      "boot_generation": {
+        "name": "Boot generation"
+      },
+      "revision": {
+        "name": "Discovery revision"
+      },
+      "discovery": {
+        "name": "Discovery evidence",
+        "state": {
+          "unknown": "Unknown",
+          "advertised": "Advertised",
+          "verified": "Verified",
+          "unsupported": "Unsupported",
+          "degraded": "Degraded"
+        }
+      }
     }
   }
 }
