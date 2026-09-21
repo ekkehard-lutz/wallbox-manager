@@ -4,11 +4,18 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "Set up Wallbox Manager."
+        "description": "Host an OCPP endpoint for incoming wallbox connections on a trusted local network. Charging control is not available yet.",
+        "data": {
+          "host": "Local bind address",
+          "port": "WebSocket port"
+        }
       }
     },
     "abort": {
       "already_configured": "Wallbox Manager is already configured."
+    },
+    "error": {
+      "invalid_listener": "Enter a valid IP address and a port between 1 and 65535."
     }
   }
 }

@@ -22,7 +22,8 @@ an entity-level wrapper around its services. The target layout and policies are 
 
 ## Adoption matrix
 
-Every mark is a **future recommendation**, not a claim of incorporated code.
+The matrix records the original adoption recommendations. Actual incorporation
+is recorded separately below; a matrix mark alone does not claim code reuse.
 A row covers the named responsibility, not necessarily the entire file. `—` means
 not selected. Attribution codes: **A** = if source/tests are copied or substantially
 adapted, preserve upstream copyright and MIT permission notice, record original
@@ -185,9 +186,9 @@ ordinary OCPP connectivity is not that signal.
 
 The pinned [upstream LICENSE](https://github.com/lbbrhzn/ocpp/blob/848407c11ff659ce59779a99ce69984bbb0e3ce1/LICENSE)
 is MIT and identifies `Copyright (c) 2021 lbbrhzn`. Wallbox Manager retains its own
-MIT license. **No upstream production code, tests or translations have been copied
-or substantially adapted in this task.** The upstream checkout is a temporary
-research checkout outside the project and is not committed or distributed here.
+MIT license. The architecture and pure-core phases incorporated no upstream code.
+The transport/discovery phase now adapts the portions listed below. Upstream
+translations remain unused. The research checkout stays outside the repository.
 
 When adoption actually occurs, keep the upstream copyright and full MIT permission
 notice with the distributed substantial portions (for example in an included
@@ -197,3 +198,52 @@ fixtures/tests and translated text as well as production code. Review separate
 third-party dependencies under their own licenses when selected. Do not add a
 present-tense code-reuse claim or a copied-code attribution artifact merely because
 this document recommends future adoption.
+
+
+## Transport/discovery adoption record
+
+All upstream inspection and adaptation in this phase uses repository
+`https://github.com/lbbrhzn/ocpp`, commit
+`848407c11ff659ce59779a99ce69984bbb0e3ce1`. The checkout was detached at that SHA;
+no newer upstream HEAD code was adopted. Local paths below are relative to
+`custom_components/wallbox_manager/` unless prefixed `tests/`.
+
+| Original path under `custom_components/ocpp/` | Local path | Adaptation and intentionally excluded policy |
+| --- | --- | --- |
+| `api.py`: `create`, `select_subprotocol`, `on_connect`, version dispatch | `protocols/ocpp/common/transport.py` | Adapted async listener, deterministic server-order negotiation, station routing and protocol-change replacement. Require explicit supported subprotocol; fresh adapter per socket, latest-admission fencing. Use library ping/timeout handling; no implicit 1.6, service registration or automatic control. |
+| `chargepoint.py`: `run`, `_get_session`, `_close_session`, `_stop_session`, `reconnect` | `protocols/ocpp/common/sessions.py`, `transport.py` | Adapted captured ownership, shared cancellation-safe cleanup, bounded retirement, retained/observed survivors and later retry after cleanup errors. Separate owner per socket rather than mutating one charge point; no HA metrics/authority policy. |
+| `chargepoint.py`: boot/post-connect lifecycle; `ocppv16.py`: BootNotification/Heartbeat and `get_supported_features` | `protocols/ocpp/common/adapter.py`, `v16/adapter.py` | Adapted accepted/time/interval reply, identity extraction and read-only SupportedFeatureProfiles token parsing. Added NumberOfConnectors mapping; removed Core/default connector fallback, force-support override, configuration writes and automatic availability. Discovery runs after the boot response and on known reconnects. |
+| `ocppv201.py`: BootNotification/Heartbeat, `_get_inventory`, `on_report`, smart-charging evidence extraction | `protocols/ocpp/common/inventory.py`, `v201/adapter.py` | Adapted GetBaseReport/NotifyReport flow, Actual attribute selection and Available extraction. Require matching request ID and complete ordered bounded report before publishing; retain explicit EVSE/connector pairs. Missing/invalid values stay unknown/degraded. No flattened global connector IDs, partial report reuse, mutating probes or inferred hardware envelopes. |
+| `__init__.py`: `async_setup_entry`, `async_unload_entry`; `config_flow.py`: listener schema and duplicate-port guard | `__init__.py`, `config_flow.py` | Selectively adapted listener lifecycle and host/port validation pattern, as requested for this phase. Use typed entry.runtime_data, HA shutdown cleanup, scaffold migration, retryable bind errors and offline startup. No HA entity/service/device-registry code copied; those remain outside this task. |
+
+The OCPP 2.1 adapter is independently implemented using `ocpp.v21.ChargePoint`,
+its own `call`/`call_result` classes and 2.1 schemas. It shares only the boot,
+heartbeat, identity-only status and inventory subset tested against both 2.x wire
+versions. It does not adopt upstream's use of 2.0.1 messages for a 2.1 connection.
+
+Inspected upstream test files and adapted regression scenarios:
+
+- `tests/test_reconnect_lifecycle.py` and `test_initial_start_lifecycle.py` ->
+  `tests/test_ocpp_sessions.py` and `tests/test_ocpp_transport.py`: controllable
+  close barriers, latest reconnect wins, stop fencing, delayed old finalizers,
+  repeated cancellation, retirement survivors and close-error retry. This task has
+  no transaction-store initialization, so that specific store fixture is excluded.
+- `tests/test_v201_smart_charging_probe.py` and `test_v201_probe_timeout.py` ->
+  `tests/test_ocpp_transport.py`: missing/true/false advertisements, optional
+  discovery failure and timeout isolation. Assertions use UNKNOWN/ADVERTISED/
+  UNSUPPORTED/DEGRADED evidence rather than the upstream SMART bit. No schedule,
+  firmware-update or TriggerMessage probes are copied; their success cannot verify
+  physical current control. New multipart/stale-report and per-version schema
+  tests cover the changed architecture.
+
+The full upstream MIT notice is distributed in
+`custom_components/wallbox_manager/THIRD_PARTY_NOTICES.md`, with source comments
+in adapted modules/tests. Generic runtime snapshots and generation fencing are
+Wallbox Manager code; core/control/solver import no protocol or HA types.
+
+Dependencies are pinned consistently in the manifest and development requirements:
+`ocpp==2.1.0` and `websockets==15.0.1`. The installed OCPP library was inspected:
+it contains distinct `v16`, `v201`, `v21` classes and schemas, and performs schema
+validation through an executor by default. Its release number alone was not used
+as proof of protocol 2.1 support. Dependencies and bundled schemas retain their own
+license notices; no dependency schemas are copied into this repository.

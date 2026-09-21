@@ -11,7 +11,8 @@ providing a programmatic interface for a future higher-level Energy Manager.
 See the [proposed architecture](docs/architecture.md) and the
 [pinned upstream OCPP adoption analysis](docs/upstream-ocpp-analysis.md) for module
 boundaries, ownership transitions, power solving and reuse decisions. These are
-design documents; OCPP runtime functionality has not been implemented yet.
+design documents; the implemented subset now includes pure solving and read-only
+OCPP transport/discovery.
 
 Wallbox Manager separates charging strategy from wallbox-specific communication.
 
@@ -129,8 +130,8 @@ implemented. The pure solver respects current steps and supplied electrical limi
 uses actual per-phase voltages, and returns an offered operating point, logical OFF
 or an explicit unreachable reason. A deferred-result contract is reserved for the
 future phase-transition planner. It does not command a charger or claim measured
-EV consumption. OCPP transport/discovery, ownership, profiles and HA entities remain
-future work.
+EV consumption. Ownership, charging profiles, measurement processing and HA entities
+remain future work.
 
 Run development checks with `.venv/bin/ruff check .`,
 `.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
@@ -138,6 +139,31 @@ Home Assistant instance; Python 3.14 CI runs these same checks.
 
 The first public release is planned as v1.0.0. A changelog will be introduced
 with that release.
+
+## Read-only OCPP endpoint
+
+Configure Wallbox Manager with a local bind IP and port (defaults `0.0.0.0:9000`).
+Point the wallbox at `ws://<HA-host>:<port>/<station-id>` and explicitly select
+OCPP 1.6J, 2.0.1 or 2.1. Multiple stations can connect to one endpoint. Missing or
+unsupported subprotocols are rejected. No station ID, vendor or current limit is
+hard-coded. The endpoint currently uses plain WebSocket without station
+authentication or TLS, for a trusted local network only.
+
+The integration loads without a connected wallbox. It accepts BootNotification,
+answers Heartbeat, learns identity/connector inventory, and reruns read-only
+discovery after reconnect/boot. Disconnect invalidates old evidence without
+requiring an integration reload. StatusNotification currently supplies identity
+only. OCPP 1.6 uses GetConfiguration; 2.x uses correlated, complete
+GetBaseReport/NotifyReport inventory. All three versions use their own schemas
+from `ocpp==2.1.0`; this is a tested foundation, not a full protocol implementation.
+
+Smart-charging advertisements remain distinct from verified behavior. Physical
+current envelopes, physical phase switching and stop support stay unknown; no
+nominal current/phase limits are invented. Generic immutable runtime snapshots are
+available for future consumers, but no measurement sensors or charging controls
+are exposed yet. Actual wallbox-stationary hardware interoperability has not been
+verified by the automated fake/local-peer tests. Older empty scaffold entries
+migrate to the default endpoint configuration.
 
 ## Upstream code and attribution
 
@@ -147,7 +173,9 @@ projects, including OCPP implementations.
 Any code that is copied or substantially adapted will retain the required
 copyright and license notices and will be documented appropriately.
 
-No upstream code has been incorporated at this stage.
+Selected transport, lifecycle, boot and discovery code/scenarios are now adapted
+from the pinned upstream. See the [adoption record](docs/upstream-ocpp-analysis.md)
+and [MIT notices](custom_components/wallbox_manager/THIRD_PARTY_NOTICES.md).
 
 ## License
 
