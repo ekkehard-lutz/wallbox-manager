@@ -4,11 +4,133 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "Set up Wallbox Manager."
+        "description": "Host an OCPP endpoint for incoming wallbox connections on a trusted local network. Charging control is not available yet. Configure the wallbox to connect to ws://HA-address:port/station-id.",
+        "data": {
+          "host": "Local bind address",
+          "port": "WebSocket port"
+        }
       }
     },
     "abort": {
       "already_configured": "Wallbox Manager is already configured."
+    },
+    "error": {
+      "invalid_listener": "Enter a valid IP address and a port between 1 and 65535."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      },
+      "session_active": {
+        "name": "{scope} Session active"
+      }
+    },
+    "sensor": {
+      "protocol_version": {
+        "name": "OCPP protocol version"
+      },
+      "connection_generation": {
+        "name": "Connection generation"
+      },
+      "boot_generation": {
+        "name": "Boot generation"
+      },
+      "revision": {
+        "name": "Discovery revision"
+      },
+      "discovery": {
+        "name": "Discovery evidence",
+        "state": {
+          "unknown": "Unknown",
+          "advertised": "Advertised",
+          "verified": "Verified",
+          "unsupported": "Unsupported",
+          "degraded": "Degraded"
+        }
+      },
+      "voltage_l1": {
+        "name": "{scope} Voltage L1"
+      },
+      "voltage_l2": {
+        "name": "{scope} Voltage L2"
+      },
+      "voltage_l3": {
+        "name": "{scope} Voltage L3"
+      },
+      "current_l1": {
+        "name": "{scope} Current L1"
+      },
+      "current_l2": {
+        "name": "{scope} Current L2"
+      },
+      "current_l3": {
+        "name": "{scope} Current L3"
+      },
+      "power_l1": {
+        "name": "{scope} Active import power L1"
+      },
+      "power_l2": {
+        "name": "{scope} Active import power L2"
+      },
+      "power_l3": {
+        "name": "{scope} Active import power L3"
+      },
+      "power": {
+        "name": "{scope} Active import power"
+      },
+      "energy": {
+        "name": "{scope} Imported energy"
+      },
+      "connector_state": {
+        "name": "{scope} Connector state",
+        "state": {
+          "unknown": "Unknown",
+          "available": "Available",
+          "occupied": "Occupied",
+          "reserved": "Reserved",
+          "unavailable": "Unavailable",
+          "faulted": "Faulted"
+        }
+      },
+      "charging_state": {
+        "name": "{scope} Charging state",
+        "state": {
+          "unknown": "Unknown",
+          "idle": "Idle",
+          "connected": "Connected",
+          "charging": "Charging",
+          "suspended_vehicle": "Suspended by vehicle",
+          "suspended_station": "Suspended by station",
+          "finishing": "Finishing",
+          "preparing": "Preparing"
+        }
+      },
+      "session_id": {
+        "name": "{scope} Session ID"
+      },
+      "session_started": {
+        "name": "{scope} Session started"
+      },
+      "session_ended": {
+        "name": "{scope} Session ended"
+      },
+      "session_duration": {
+        "name": "{scope} Session duration"
+      },
+      "session_power": {
+        "name": "{scope} Session charging power"
+      },
+      "session_energy": {
+        "name": "{scope} Session energy"
+      },
+      "session_start_meter": {
+        "name": "{scope} Session start meter"
+      },
+      "session_end_meter": {
+        "name": "{scope} Session end meter"
+      }
     }
   }
 }
