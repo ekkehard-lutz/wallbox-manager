@@ -6,6 +6,8 @@ stations through a common, capability-based interface.
 The integration is intended to work as a standalone wallbox manager while also
 providing a programmatic interface for a future higher-level Energy Manager.
 
+![Wallbox Manager overview](docs/images/wallbox-manager-overview.png)
+
 ## Read-only integration
 
 Version 0.1.0 is the first stable release of the read-only integration. It provides
