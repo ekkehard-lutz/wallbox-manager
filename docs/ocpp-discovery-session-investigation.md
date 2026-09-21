@@ -96,3 +96,55 @@ Existing JSON-peer tests cover all three protocol versions, unsupported requests
 request timeout, rejected reports, report timeout, wrong request IDs, malformed
 sequences, multipart reports and stale boot/reconnect fencing. Explicit connection
 and Heartbeat assertions verify that discovery failures do not imply transport loss.
+
+## Follow-up: proven OCPP 2.1 missing-handler timeout
+
+Subsequent inspection identified a separate defect in the installed ocpp 2.1.0
+library's `_raise_key_error(action, version)`: it branches for `1.6`, `2.0` and
+`2.0.1`, but not `2.1`. When `_handle_call` finds no registered handler, the 2.1
+path returns without sending **either CALLRESULT or CALLERROR**. In 2.0.1 the
+same missing handler produces a NotImplemented CALLERROR instead.
+
+Wallbox Manager lacked handlers for MeterValues and TransactionEvent. The inspected
+reference station sends periodic MeterValues (EVSE 1, timestamped sampled values)
+and tokenless TransactionEvent notifications (Started/Updated/Ended, station-owned
+transaction ID and sequence, EVSE/connector, optional meter values). Both use
+`call(..., suppress=False)`. It also sends NotifyEvent after authority loss, which
+is an event notification rather than a vendor DataTransfer command.
+
+A genuine 2.1 library peer sending the reference MeterValues shape reproduced
+TimeoutError before this change, using a shortened one-second response timeout.
+The corresponding 2.0.1 test failed with NotImplemented. This proves the protocol
+failure mechanism missing from the earlier investigation: a silently dropped 2.1
+station call reaches the station's response timeout, whose supervised worker then
+ends the session. The hardware's 30-second setting matches this mechanism. A new
+hardware run is still necessary to confirm that this accounts for every observed
+reconnect; we have not captured that specific hardware exchange.
+
+The common 2.x adapter now acknowledges schema-valid MeterValues, TransactionEvent
+and NotifyEvent with the **concrete protocol version's** call_result classes.
+There is no storage, aggregation, metering/transaction state, authorization lookup,
+authority interpretation or new public API. Runtime snapshots remain unchanged.
+The existing response-correlation cancellation fix and single reader are unchanged;
+1.6 handlers and behavior are unchanged. No wallbox-stationary code was modified.
+
+Both versions' MeterValuesResponse and NotifyEventResponse schemas permit `{}`.
+Both TransactionEventResponse schemas also permit `{}`: the reference station
+sends no idToken, and neither a transaction ID nor a status is required in its
+response. 2.1 adds optional transactionLimit and updatedPersonalMessageExtra fields;
+these are not populated. Neither JSON schema encodes the cross-message condition
+that an incoming idToken calls for idTokenInfo (also handled explicitly upstream).
+For such requests we return only `idTokenInfo.status = Unknown`, never the upstream
+unconditional Accepted. This is a fixed acknowledgement of an unverified token,
+not an authorization implementation. Costs/priorities/limits are omitted rather
+than invented. The normal version-specific request and response validation stays on.
+
+`tests/test_ocpp_reporting_ack.py` covers both versions, MeterValues, all three
+transaction event types with embedded samples, the token-bearing response, and
+NotifyEvent while discovery is awaiting inventory. It verifies concrete response
+types, completion of discovery, stable generations/connection, unchanged generic
+state and working Heartbeat. Invalid messages still receive CALLERROR. The tests
+use genuine library senders/receivers and validate against each version's schemas.
+The missing-handler defect for other unimplemented 2.1 actions remains a library
+limitation; this change explicitly handles the reference station's current traffic
+rather than adding a broad ACK or bypassing schema validation.

@@ -103,6 +103,10 @@ capability evidence. These are known identities, not a claim that all previously
 seen connectors are still present. No physical operating envelopes are fabricated.
 No measurement values, transaction state or charging/status state are implemented;
 StatusNotification is acknowledged only to learn explicit physical identities.
+OCPP 2.x MeterValues, TransactionEvent and NotifyEvent receive schema-validated
+protocol acknowledgements only: no measurements, transactions or authority state
+are recorded. Tokenless transaction events receive an empty result; optional
+idToken inputs receive Unknown token status, without authorization processing.
 
 The URL station ID maps to `StationId`. OCPP 1.6 connector zero stays station-scoped;
 a positive connector N maps explicitly to `EvseId(station, "connector-N")` and

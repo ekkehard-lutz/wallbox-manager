@@ -12,7 +12,9 @@ Original files: `custom_components/ocpp/api.py`, `chargepoint.py`, `ocppv16.py`,
 Changes: isolated protocol adapters and captured socket/task owners; strict
 negotiation; generation-fenced generic snapshots; read-only bounded discovery;
 read-only HA platform lifecycle, diagnostic descriptions, DeviceInfo and push
-subscription cleanup adapted to generic snapshots; no inherited charging policy,
+subscription cleanup adapted to generic snapshots; ACK-only MeterValues,
+NotifyEvent and TransactionEvent response patterns without domain processing;
+no inherited charging policy,
 services, measurement entity model or automatic availability.
 Tests use Wallbox Manager contracts and fake/local WebSocket peers without the
 upstream HA fixture suite. See `docs/upstream-ocpp-analysis.md` in the repository

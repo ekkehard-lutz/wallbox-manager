@@ -269,3 +269,15 @@ response-queue implementation. The new session-owned, shielded outbound-call
 boundary is independently implemented; no additional upstream code was copied.
 See [the investigation](ocpp-discovery-session-investigation.md) for the proven
 cancellation race, library-peer regression and limits of the hardware diagnosis.
+
+## Protocol-only reporting acknowledgements
+
+Adapted the pinned `ocppv201.py` `on_meter_values`, `on_notify_event`, and the
+response-only boundary of `on_transaction_event` into common `inventory.py`.
+Concrete adapters supply independent 2.0.1/2.1 call_result classes; installed
+schemas were checked separately. No upstream measurement/transaction state,
+buffering, authorization, pricing or control logic was copied. Unlike upstream's
+unconditional token Accepted response, an optional token is reported Unknown.
+The reference station emits tokenless events. Existing MIT notices cover this
+adaptation. See the investigation follow-up for the reproduced 2.1 library
+missing-handler timeout and ACK-only tests.
