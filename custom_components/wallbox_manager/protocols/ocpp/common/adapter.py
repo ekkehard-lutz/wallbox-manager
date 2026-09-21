@@ -33,6 +33,18 @@ class DiscoveryAdapter:
         self._boot_pending = False
         self._attempt = 0
 
+    async def call(self, *args, **kwargs):
+        """Let a sent request settle even when its discovery attempt is replaced.
+
+        The library serializes calls with a lock and consumes their responses
+        from one queue. Cancelling that consumer releases the lock while its
+        response is still in flight; the next call would discard the old reply.
+        Shield only the session-owned call, not the discovery attempt. Teardown
+        still cancels and joins both, and stale discovery remains token-fenced.
+        """
+        pending = self.session.spawn(super().call(*args, **kwargs))
+        return await asyncio.shield(pending)
+
     def register_boot(self, identity: StationIdentity) -> None:
         token = self.runtime.boot(self.token, identity)
         if token is not None:

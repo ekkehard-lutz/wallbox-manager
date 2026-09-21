@@ -395,6 +395,8 @@ async def test_timeout_is_degraded_not_unsupported(server, protocol):
             server.runtime, lambda s: s.discovery.state == EvidenceState.DEGRADED
         )
         assert state.charging_schedule.state == EvidenceState.UNKNOWN
+        assert state.connected
+        assert state.token.connection_generation == state.token.boot_generation == 1
         assert (await p.call("Heartbeat", {}))[0] == 3
 
 
@@ -410,6 +412,8 @@ async def test_discovery_not_implemented_does_not_deny_charging(server, protocol
         )
         assert state.charging_schedule.state == EvidenceState.UNKNOWN
         assert state.capabilities.stop.state == EvidenceState.UNKNOWN
+        assert state.connected
+        assert (await p.call("Heartbeat", {}))[0] == 3
 
 
 @pytest.mark.parametrize("protocol", ["ocpp2.0.1", "ocpp2.1"])
@@ -436,6 +440,9 @@ async def test_partial_inventory_never_commits(server, protocol, failure):
         )
         assert state.connectors == ()
         assert state.charging_schedule.state == EvidenceState.UNKNOWN
+        assert state.connected
+        assert state.token.connection_generation == state.token.boot_generation == 1
+        assert (await p.call("Heartbeat", {}))[0] == 3
 
 
 def test_runtime_restart_changes_incarnation():
@@ -587,6 +594,8 @@ async def test_inventory_refusal_is_not_physical_incompatibility(
         state = await state_when(server.runtime, lambda s: s.discovery.reason == status)
         assert state.charging_schedule.state == EvidenceState.UNKNOWN
         assert not state.capabilities.envelopes
+        assert state.connected
+        assert (await p.call("Heartbeat", {}))[0] == 3
 
 
 @pytest.mark.parametrize("profiles", [None, "", "Core", "Core,SmartCharging"])

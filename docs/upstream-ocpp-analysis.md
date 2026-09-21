@@ -260,3 +260,12 @@ registry reconciliation and entry-scoped stable identities support dynamic multi
 stations. No upstream metering, RestoreSensor measurement restoration, controls,
 services or monolithic charge-point coupling were adopted. The earlier transport
 milestone's entity exclusion above describes that milestone, not this follow-up.
+
+## Discovery cancellation follow-up
+
+Re-inspected the pinned `chargepoint.py` start/run/session lifecycle and
+`ocppv201.py` `_get_inventory`/`on_report`, alongside the installed ocpp 2.1.0
+response-queue implementation. The new session-owned, shielded outbound-call
+boundary is independently implemented; no additional upstream code was copied.
+See [the investigation](ocpp-discovery-session-investigation.md) for the proven
+cancellation race, library-peer regression and limits of the hardware diagnosis.
