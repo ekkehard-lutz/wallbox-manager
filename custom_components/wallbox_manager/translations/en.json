@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "Host an OCPP endpoint for incoming wallbox connections on a trusted local network. Charging control is not available yet. Configure the wallbox to connect to ws://<HA-address>:<port>/<station-id>.",
+        "description": "Host an OCPP endpoint for incoming wallbox connections on a trusted local network. Charging control is not available yet. Configure the wallbox to connect to ws://HA-address:port/station-id.",
         "data": {
           "host": "Local bind address",
           "port": "WebSocket port"

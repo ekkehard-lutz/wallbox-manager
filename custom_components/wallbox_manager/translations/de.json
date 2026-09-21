@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "OCPP-Endpunkt für eingehende Wallbox-Verbindungen im vertrauenswürdigen lokalen Netzwerk einrichten. Noch keine Ladesteuerung. Konfigurieren Sie die Wallbox für ws://<HA-address>:<port>/<station-id>.",
+        "description": "OCPP-Endpunkt für eingehende Wallbox-Verbindungen im vertrauenswürdigen lokalen Netzwerk einrichten. Noch keine Ladesteuerung. Konfigurieren Sie die Wallbox für ws://HA-address:port/station-id.",
         "data": {
           "host": "Lokale Bind-Adresse",
           "port": "WebSocket-Port"
