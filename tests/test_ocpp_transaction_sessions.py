@@ -125,9 +125,9 @@ async def test_transaction_lifecycle_schemas_ordering_and_boundary_meters(
         assert ledger.get(scope) == final
         assert ledger.history() == (final,)
         assert server.runtime.get(root).connected
-        # Boundary register samples remain distinct from lifetime meter entities.
+        # All embedded measurements remain internal session inputs.
         assert (
-            server.runtime.get(root).observation(Channel(scope, Quantity.ENERGY)).value
+            server.runtime.get(root).observation(Channel(scope, Quantity.ENERGY))
             is None
         )
 

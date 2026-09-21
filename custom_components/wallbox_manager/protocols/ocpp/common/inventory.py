@@ -160,6 +160,7 @@ class InventoryAdapter(DiscoveryAdapter):
                     f"ocpp{self._ocpp_version}:TransactionEvent",
                     session=True,
                 ),
+                live=not offline,
             )
         if evse and evse.get("id", 0) > 0 and not offline:
             scope = evse_identity(self.token.station, evse["id"])
@@ -168,7 +169,9 @@ class InventoryAdapter(DiscoveryAdapter):
                     self.token.station, evse["id"], evse["connector_id"]
                 )
             source = f"ocpp{self._ocpp_version}:TransactionEvent"
-            observations = meter_observations(scope, meter_value, source)
+            # Embedded measurements belong to the session ledger, not to
+            # ordinary metering capability/entity advertisement.
+            observations = ()
             if "charging_state" in transaction_info:
                 observations += state_observation(
                     scope,

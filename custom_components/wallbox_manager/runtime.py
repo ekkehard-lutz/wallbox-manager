@@ -58,6 +58,7 @@ class Runtime:
         connected: bool,
         reason: str,
     ) -> StationSnapshot:
+        self.sessions.clear_live(token.station)
         old = self.get(token.station)
         now = datetime.now(UTC)
         unknown = CapabilityEvidence(EvidenceState.UNKNOWN, "runtime", now, reason)
@@ -164,13 +165,13 @@ class Runtime:
         )
         return True
 
-    def session_event(self, token, event, observations=()):
+    def session_event(self, token, event, observations=(), *, live=False):
         """Persisted identity is independent of the live generation fence."""
         if not self.current(token):
             return False
         if station_of(event.scope) != token.station:
             raise ValueError("session belongs to another station")
-        return self.sessions.apply(event, observations)
+        return self.sessions.apply(event, observations, live=live)
 
     def session_observations(self, token, observations, external_id=None):
         if self.current(token):

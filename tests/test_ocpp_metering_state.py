@@ -119,7 +119,8 @@ async def test_occupied_is_not_charging_and_transaction_scope(protocol):
             snapshot.observation(Channel(scope, Quantity.CHARGING_STATE)).value
             == State.CHARGING
         )
-        assert snapshot.observation(Channel(scope, Quantity.VOLTAGE_L1)).value == 231.5
+        assert snapshot.observation(Channel(scope, Quantity.VOLTAGE_L1)) is None
+        assert Channel(scope, Quantity.VOLTAGE_L1) not in snapshot.supported_channels
         assert (
             snapshot.observation(Channel(EvseId(root, "1"), Quantity.VOLTAGE_L1))
             is None

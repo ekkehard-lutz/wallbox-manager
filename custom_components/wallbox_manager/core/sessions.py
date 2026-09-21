@@ -69,6 +69,8 @@ class ChargingSession:
     power_valid_until: datetime | None = None
     energy_invalid: bool = False
     start_known: bool = True
+    energy_parent: bool = False
+    power_parent: bool = False
 
     def __post_init__(self):
         nonempty(self.session_id)

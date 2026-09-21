@@ -169,10 +169,8 @@ class SessionSensor(SessionEntity, SensorEntity):
                 snapshot = self.runtime.get(session.station_id)
                 if snapshot is None or not snapshot.connected:
                     return None
-                from .core.telemetry import Channel
-
-                observation = snapshot.observation(
-                    Channel(session.scope, Quantity.POWER)
+                observation = self.runtime.sessions.measurement(
+                    session.scope, Quantity.POWER, now
                 )
                 if (
                     observation is None

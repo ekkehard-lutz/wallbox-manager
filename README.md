@@ -40,7 +40,11 @@ capability-driven entity creation, freshness and deliberately unsupported cases.
 
 Transaction lifecycle events now create a current-or-last session entity set per
 observed EVSE/connector. Completed values stay visible until the next session;
-energy uses matching meter-register deltas. Active sessions and all completed
+energy uses matching meter-register deltas. A sole connector session may use fresh
+parent-EVSE total power/energy; ambiguous multi-session attribution stays unknown.
+TransactionEvent samples feed sessions without creating duplicate ordinary meter
+entities. Existing beta.5 duplicates may remain in HA's registry for manual cleanup.
+Active sessions and all completed
 history survive reload/restart. Disconnect and boot do not end a session. See
 [session tracking and persistence](docs/session-tracking.md) for lifecycle,
 accounting, restoration, query access and limitations.

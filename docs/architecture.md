@@ -102,7 +102,9 @@ subscriptions; HA diagnostic entities consume snapshots without parsing OCPP obj
 known identities across disconnect and distinguish disconnected state from live
 capability evidence. These are known identities, not a claim that all previously
 seen connectors are still present. No physical operating envelopes are fabricated.
-MeterValues and 2.x TransactionEvent metering update immutable scoped observations;
+Ordinary MeterValues updates immutable scoped measurement observations; 2.x
+TransactionEvent measurements feed session accounting without advertising ordinary
+HA meter channels;
 StatusNotification and 2.x chargingState supply distinct connector/charging enums.
 HA operational entities are created only for observed supported channels. See the
 [implemented metering/runtime contract](metering-runtime-state.md) for timestamps,
@@ -177,8 +179,12 @@ while obsolete live events remain fenced. Completed records are retained in full
 and their entity values remain visible until the next session at that scope.
 
 Energy is a validated register delta, not integrated power. Missing endpoints,
-resets and conflicting readings produce unknown energy. Exact-scope total power
-provides current/max power; completed power is zero. Saved active power does not
+resets and conflicting readings produce unknown energy. Fresh exact-scope normal
+meters are preferred. A connector session can consume its parent EVSE's total
+power/energy only when it is the sole active session there. Fresh normal registers
+can seed start/end snapshots without timestamp equality. TransactionEvent samples
+stay internal to sessions. Ambiguous shared metering becomes unknown and never
+creates connector meter entities. Completed power is zero. Saved active power does not
 become live after restart. Store loads before listener admission, coalesces writes
 and flushes on unload/shutdown. `runtime.sessions.history(scope=None)` exposes
 immutable completed records for a future UI; no per-history HA entities exist.

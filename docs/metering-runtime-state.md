@@ -16,8 +16,10 @@ missing phase channels or an inferred total. All values are finite, nonnegative
 exact fractions in V, A, W or Wh. HA presents energy in kWh.
 
 OCPP 2.0.1 and 2.1 MeterValues `evseId=0` is station-scoped; positive IDs retain
-EVSE scope. TransactionEvent metering and chargingState retain the explicitly
-reported EVSE and optional connector. Missing EVSE scope is ignored rather than
+EVSE scope. TransactionEvent embedded measurements are consumed only by the
+session ledger: they do not advertise ordinary meter channels or create HA meter
+entities. TransactionEvent chargingState retains the explicitly reported EVSE and
+optional connector. Missing EVSE scope is ignored rather than
 assigned to connector 1. `offline=true` transaction reports are acknowledged but
 not used as current state. The separate [session ledger](session-tracking.md)
 can account for offline transaction lifecycle events without changing live

@@ -19,8 +19,10 @@ uses the start and end timestamps, or the current clock while active.
 
 The UUID survives reconnect/reload/restart. Runtime incarnation IDs never enter
 session identity. Matching requires exact scope and transaction ID. Missing
-connectors stay EVSE-scoped; no connector 1 is invented and no readings are
-projected across EVSEs/connectors/stations. Omitted entire EVSE information on a
+connectors stay EVSE-scoped; no connector 1 is invented. A connector session may
+consume its own parent EVSE's total power and energy only when that EVSE has no
+other active session. This is internal accounting, not publication of connector
+meter channels. Nothing crosses station or EVSE boundaries. Omitted entire EVSE information on a
 2.x event can use an existing unambiguous station transaction match. A later omitted connector can reuse an already explicit connector on the same
 EVSE. Conflicting explicit scope changes are ignored for session lifecycle; they
 do not duplicate or move the existing transaction. A first EVSE-only event remains
@@ -60,11 +62,14 @@ within a scope; completed IDs are not recycled by this ledger.
 ## Energy and power
 
 Session energy is the explicit total Energy.Active.Import.Register endpoint minus
-the start register, in exact Wh internally. HA displays kWh. The start register
-must accompany the known start timestamp; a later first reading does not pretend
-to measure the whole session. During charging the endpoint is the latest matching
-register. At completion an endpoint at the end timestamp is needed for a final
-energy value. Missing/invalid endpoints yield unknown, never fabricated zero.
+the start register, in exact Wh internally. HA displays kWh. Prefer an explicit valid embedded start/end register. Otherwise a fresh normal
+meter at exact scope, or at the parent EVSE when attribution is unambiguous, can
+supply the endpoint. The normal meter may precede the lifecycle timestamp: it must
+still be fresh under the existing 120-second deadline both now and at the event,
+and cannot be newer than that event. A later first reading does not pretend to
+measure the whole session. During charging the endpoint follows matching normal
+register observations. Missing/invalid endpoints yield unknown, never fabricated
+zero. An old TransactionEvent start snapshot is not reused as a missing end meter.
 
 Any decreasing, invalid or conflicting same-time register makes session energy
 unknown for the remainder of that session, even if later readings rise above the
@@ -72,16 +77,29 @@ original start. This avoids counting through a meter reset. Valid raw start/end
 snapshots remain available. A new session can establish a new baseline. There is
 no power integration, phase summation, inferred total or reset offset.
 
-Transaction Begin/End register contexts may be used for the session endpoints
-only. The same samples remain excluded from lifetime energy entities, preserving
-the existing lifetime-meter interpretation. Unit/multiplier/phase validation uses
+All TransactionEvent embedded measurements are session inputs only. They neither
+publish ordinary runtime measurement channels nor advertise HA meter entities.
+Charging-state publication is unchanged. Ordinary MeterValues retains existing
+scope/channel semantics, including legitimate 1.6 connector meters. Transaction
+Begin/End register contexts may be used for session endpoints only. Unit/multiplier/phase validation uses
 the shared normalization path. Devices with inconsistent boundary/periodic
 register bases cannot provide trustworthy energy; reset/conflict handling is
 conservative but cannot detect every plausible-looking device reporting error.
 
-Power uses only explicit total active-import power at the exact session scope;
-phase powers and broader EVSE/station measurements are not attributed to a
-connector session. Track the maximum reported total for history. Active power
+Power uses only explicit total active-import power, with no phase summation.
+Fresh exact-scope normal MeterValues takes precedence over parent fallback. A
+one-off explicitly scoped TransactionEvent sample wins ties with parent metering,
+but yields to a newer periodic parent sample so the start snapshot cannot freeze
+live power/energy. Among exact-scope normal/event samples the newer sample wins.
+Parent fallback requires exactly one relevant active session on the EVSE; EVSE
+sessions and connector sessions both count. Never project shared EVSE values to
+multiple connector sessions. Track the maximum reported total for history.
+
+When a second session makes attribution ambiguous, parent-derived current power
+and running energy become unknown immediately. Exact connector meters remain
+usable. Once a session's energy has depended on a shared parent meter during an
+overlap, energy stays unknown for that session, even after overlap ends, rather
+than including another connector's consumption. The start snapshot is retained. Active power
 becomes unknown when its live reading expires, disconnects or a new generation
 invalidates observations. Completed sessions always display 0 W. Saved power is
 historical and cannot become a live reading merely through restoration.
@@ -112,8 +130,11 @@ Home Assistant `Store`, version **1**, atomically writes
 active records, the per-scope current/last display index and the next 1.6 ID.
 Records include final duration, start/end meter, charged energy, maximum power,
 reason, lifecycle/measurement ordering timestamps and reset/incomplete-start flags.
-Aware timestamps are ISO strings and exact numeric fractions are strings. There
-are no credentials or raw OCPP objects in this document.
+Aware timestamps are ISO strings and exact numeric fractions are strings. Optional
+parent-attribution flags are additive version-1 fields; beta.5 records load with
+false defaults. Live normal/event measurement caches are never persisted and
+clear on disconnect, boot, reconnect and ledger restoration. There are no
+credentials or raw OCPP objects in this document.
 
 Load and validate the entire document before opening the listener or creating HA
 entities. Writes are coalesced by one second through Store; graceful unload and
@@ -136,3 +157,12 @@ runtime.sessions.history(scope)  # completed records at one exact scope
 History queries return immutable snapshots and never create HA entities. Session
 persistence remains separate from discovered wallbox capability, EV acceptance,
 control ownership and live observations.
+
+## Upgrading beta.5 test installations
+
+The integration no longer advertises ordinary measurement channels from
+TransactionEvent samples. Existing beta.5 connector meter registry entries may
+remain and restore as unavailable entities until a legitimate ordinary meter for
+that channel is reported. No destructive automatic cleanup is performed; unwanted
+test duplicates can be removed manually in HA. Session entity IDs and the exact
+ten-entity projection set are unchanged. No new session entities are introduced.
