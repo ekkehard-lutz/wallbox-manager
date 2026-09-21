@@ -6,19 +6,21 @@ stations through a common, capability-based interface.
 The integration is intended to work as a standalone wallbox manager while also
 providing a programmatic interface for a future higher-level Energy Manager.
 
+![Wallbox Manager overview](docs/images/wallbox-manager-overview.png)
+
 ## Read-only integration
 
-This early read-only pre-release provides a HACS-installable integration foundation,
+Version 0.1.0 is the first stable release of the read-only integration. It provides
 an OCPP listener for 1.6J / 2.0.1 / 2.1, BootNotification, read-only discovery,
 dynamic station devices, diagnostics, reported metering/runtime state and persistent
 charging sessions.
 
 Add this repository as a HACS custom repository of type Integration and install
-Wallbox Manager when the pre-release is published. For testing this branch before
-publication, copy `custom_components/wallbox_manager` into your HA configuration's
+Wallbox Manager once v0.1.0 is published. For manual installation, copy
+`custom_components/wallbox_manager` into your HA configuration's
 `custom_components` directory. Restart HA, then add Wallbox Manager under Settings
 → Devices & services and configure the bind IP and port. Configure the wallbox URL
-as `ws://<HA-host>:<configured-port>/<station-id>`. This milestone uses plain
+as `ws://<HA-host>:<configured-port>/<station-id>`. Version 0.1.0 uses plain
 WebSocket on a trusted local network.
 
 Each station appears as a device with learned manufacturer, model and firmware.
@@ -174,7 +176,8 @@ automations.
 
 ## Development status
 
-This project is under active development. No stable release is available yet.
+Version 0.1.0 establishes the stable read-only scope described above. Charging
+controls and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
 phase envelopes, voltage observations, power requests and solver results are
@@ -188,8 +191,6 @@ Ownership and charging profiles remain future work.
 Run development checks with `.venv/bin/ruff check .`,
 `.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
 Home Assistant instance; Python 3.14 CI runs these same checks.
-
-This feature branch does not change the manifest version or create a release.
 
 ## Read-only OCPP endpoint
 
@@ -212,9 +213,14 @@ Smart-charging advertisements remain distinct from verified behavior. Physical
 current envelopes, physical phase switching and stop support stay unknown; no
 nominal current/phase limits are invented. Generic immutable runtime snapshots are
 consumed by push-based HA diagnostics and observed meter/state entities. No
-charging controls are exposed. Actual wallbox-stationary hardware interoperability has not been
-verified by the automated fake/local-peer tests. Older empty scaffold entries
-migrate to the default endpoint configuration.
+charging controls are exposed. Hardware validation with wallbox-stationary has
+confirmed capability-driven metering entities, connection-generation/liveness
+handling, session tracking and persistence, and session meter attribution. An
+actual network black-hole/DROP test confirmed OCPP reconnect, preservation of an
+active charging session, and recovery of connector state and meter values after
+reconnect. This validation complements the automated fake/local-peer tests; it
+does not establish full protocol conformance or compatibility with every wallbox.
+Older empty scaffold entries migrate to the default endpoint configuration.
 
 ## Upstream code and attribution
 
