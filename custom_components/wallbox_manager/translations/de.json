@@ -34,6 +34,9 @@
       },
       "charging_active": {
         "name": "{scope} Ladung aktiv"
+      },
+      "session_active": {
+        "name": "{scope} Session aktiv"
       }
     },
     "sensor": {
@@ -105,6 +108,43 @@
       },
       "charging_state": {
         "name": "{scope} Ladezustand",
+        "state": {
+          "unknown": "Unbekannt",
+          "idle": "Inaktiv",
+          "connected": "Verbunden",
+          "charging": "Lädt",
+          "suspended_vehicle": "Vom Fahrzeug pausiert",
+          "suspended_station": "Von der Ladestation pausiert",
+          "finishing": "Abschluss",
+          "preparing": "Vorbereitung"
+        }
+      },
+      "session_id": {
+        "name": "{scope} Session-ID"
+      },
+      "session_started": {
+        "name": "{scope} Session gestartet"
+      },
+      "session_ended": {
+        "name": "{scope} Session beendet"
+      },
+      "session_duration": {
+        "name": "{scope} Session-Dauer"
+      },
+      "session_power": {
+        "name": "{scope} Session-Ladeleistung"
+      },
+      "session_energy": {
+        "name": "{scope} Session-Energie"
+      },
+      "session_start_meter": {
+        "name": "{scope} Session Start-Zählerstand"
+      },
+      "session_end_meter": {
+        "name": "{scope} Session End-Zählerstand"
+      },
+      "session_charging_state": {
+        "name": "{scope} Session-Ladezustand",
         "state": {
           "unknown": "Unbekannt",
           "idle": "Inaktiv",

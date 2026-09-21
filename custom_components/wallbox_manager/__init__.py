@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from .protocols.ocpp.common.transport import CentralSystem
     from .runtime import Runtime
+    from .session_storage import SessionStorage
 
 from .const import DEFAULT_HOST, DEFAULT_PORT
 
@@ -28,6 +29,7 @@ PLATFORMS = ("binary_sensor", "sensor")
 class EntryRuntime:
     state: Runtime
     server: CentralSystem
+    sessions: SessionStorage
 
 
 type WallboxManagerConfigEntry = ConfigEntry[EntryRuntime]
@@ -52,21 +54,28 @@ async def async_setup_entry(
         entry.data.get("host", DEFAULT_HOST),
         entry.data.get("port", DEFAULT_PORT),
     )
+    from .session_storage import SessionStorage
+
+    storage = SessionStorage(hass, entry.entry_id, state.sessions)
+    await storage.load()
     try:
         await server.start()
     except OSError as exc:
+        await storage.close()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
-    entry.runtime_data = EntryRuntime(state, server)
+    entry.runtime_data = EntryRuntime(state, server, storage)
 
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
         await server.stop()
+        await storage.close()
         await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         raise
 
     async def shutdown(event):
         await server.stop()
+        await storage.close()
 
     entry.async_on_unload(
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, shutdown)
@@ -81,6 +90,7 @@ async def async_unload_entry(
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
     await entry.runtime_data.server.stop()
+    await entry.runtime_data.sessions.close()
     return True
 
 

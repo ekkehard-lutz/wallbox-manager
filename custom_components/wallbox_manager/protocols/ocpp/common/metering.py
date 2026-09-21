@@ -73,7 +73,7 @@ def quantity_for(sample):
     return None
 
 
-def normalized_value(sample, legacy):
+def normalized_value(sample, legacy, session=False):
     measurand = sample.get("measurand", "Energy.Active.Import.Register")
     if sample.get("location", "Outlet") != "Outlet":
         return None
@@ -87,8 +87,10 @@ def normalized_value(sample, legacy):
     ):
         return None
     # A transaction-boundary register may be session-relative on real devices.
-    if measurand == "Energy.Active.Import.Register" and context.startswith(
-        "Transaction."
+    if (
+        not session
+        and measurand == "Energy.Active.Import.Register"
+        and context.startswith("Transaction.")
     ):
         return None
     if sample.get("format", "Raw") != "Raw":
@@ -128,7 +130,9 @@ def normalized_value(sample, legacy):
         return None
 
 
-def meter_observations(scope, groups, source, *, legacy=False, received_at=None):
+def meter_observations(
+    scope, groups, source, *, legacy=False, received_at=None, session=False
+):
     received = received_at or datetime.now(UTC)
     observations = {}
     for group in groups or ():
@@ -144,7 +148,7 @@ def meter_observations(scope, groups, source, *, legacy=False, received_at=None)
             if quantity is None:
                 continue
             channel = Channel(scope, quantity)
-            value = normalized_value(sample, legacy)
+            value = normalized_value(sample, legacy, session)
             key = (channel, observed)
             if key in observations and observations[key].value != value:
                 value = None  # Conflicting samples never depend on wire ordering.

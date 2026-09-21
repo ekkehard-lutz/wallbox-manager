@@ -55,6 +55,12 @@ async def test_setup_without_wallbox_and_unload(tmp_path):
 
 
 async def test_bind_error_is_retryable(monkeypatch):
+    from custom_components.wallbox_manager import session_storage
+
+    storage = Mock(load=AsyncMock(), close=AsyncMock())
+    monkeypatch.setattr(
+        session_storage, "SessionStorage", lambda *args, **kwargs: storage
+    )
     monkeypatch.setattr(CentralSystem, "start", AsyncMock(side_effect=OSError("busy")))
     hass = SimpleNamespace(
         async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a))
@@ -93,6 +99,12 @@ async def test_migrate_scaffold_entry():
 
 
 async def test_platform_setup_failure_closes_listener(monkeypatch):
+    from custom_components.wallbox_manager import session_storage
+
+    storage = Mock(load=AsyncMock(), close=AsyncMock())
+    monkeypatch.setattr(
+        session_storage, "SessionStorage", lambda *args, **kwargs: storage
+    )
     start, stop = AsyncMock(), AsyncMock()
     monkeypatch.setattr(CentralSystem, "start", start)
     monkeypatch.setattr(CentralSystem, "stop", stop)
@@ -106,6 +118,7 @@ async def test_platform_setup_failure_closes_listener(monkeypatch):
     with pytest.raises(RuntimeError, match="platform"):
         await async_setup_entry(hass, entry())
     stop.assert_awaited_once()
+    storage.close.assert_awaited_once()
     hass.config_entries.async_unload_platforms.assert_awaited_once()
 
 
@@ -121,3 +134,36 @@ async def test_failed_platform_unload_keeps_listener_running():
     )
     assert not await async_unload_entry(hass, config)
     stop.assert_not_awaited()
+
+
+async def test_entry_reload_restores_session_before_listening(tmp_path, monkeypatch):
+    from test_sessions import SCOPE, event
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = ConfigEntries(hass, {})
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
+    hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+    config = entry()
+    try:
+        assert await async_setup_entry(hass, config)
+        state = config.runtime_data.state
+        token = state.connect(SCOPE.evse.station)
+        state.session_event(token, event(meter_wh=1000))
+        original = state.sessions.get(SCOPE)
+        assert await async_unload_entry(hass, config)
+        await config._async_process_on_unload(hass)
+        assert not state.sessions._listeners
+        original_start = CentralSystem.start
+
+        async def checked_start(server):
+            assert server.runtime.sessions.get(SCOPE) == original
+            return await original_start(server)
+
+        monkeypatch.setattr(CentralSystem, "start", checked_start)
+        assert await async_setup_entry(hass, config)
+        assert config.runtime_data.state.sessions.get(SCOPE).active
+        assert config.runtime_data.state.runtime_id != state.runtime_id
+        assert await async_unload_entry(hass, config)
+        await config._async_process_on_unload(hass)
+    finally:
+        await hass.async_stop()

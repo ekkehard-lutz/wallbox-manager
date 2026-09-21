@@ -3,7 +3,8 @@
 Status: design with initial pure-core implementation, 2026-09-21. Immutable
 identity/capability/request contracts and the operating-point solver are implemented.
 The read-only OCPP transport/discovery and scoped metering/runtime-state foundations
-are implemented. Charging control and remaining runtime behavior below are planned.
+and persistent session tracking are implemented. Charging control and remaining
+runtime behavior below are planned.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -105,8 +106,9 @@ MeterValues and 2.x TransactionEvent metering update immutable scoped observatio
 StatusNotification and 2.x chargingState supply distinct connector/charging enums.
 HA operational entities are created only for observed supported channels. See the
 [implemented metering/runtime contract](metering-runtime-state.md) for timestamps,
-normalization, freshness, scope, invalidation and limitations. Transaction ledgers
-and authority/authorization logic remain unimplemented. NotifyEvent stays ACK-only;
+normalization, freshness, scope, invalidation and limitations. Session ledgers are
+implemented separately as described below; authority/authorization logic remains
+unimplemented. NotifyEvent stays ACK-only;
 tokenless transaction events receive an empty result, and optional idToken inputs
 receive Unknown token status without authorization processing.
 
@@ -157,6 +159,30 @@ fresh runtime and rediscovery. HA Device Registry retains station identities and
 learned metadata; runtime capabilities and control state are not persisted. This
 phase exposes read-only diagnostic entities, no charging-control API, and no
 EV-acceptance learning.
+
+## Implemented session tracking and persistence
+
+`core.sessions` contains immutable protocol-independent lifecycle events and
+charging-session records. `Runtime` fences live events and owns `SessionLedger`;
+`SessionStorage` serializes the full ledger through HA Store version 1 before
+thin scoped session entities present the current or last completed session.
+See [session tracking](session-tracking.md) for the complete contract and limits.
+
+OCPP 2.0.1/2.1 TransactionEvent Started/Updated/Ended and OCPP 1.6
+StartTransaction/StopTransaction establish boundaries. Neither zero power,
+StatusNotification, temporary disconnect, BootNotification nor HA restart ends a
+transaction. Persisted internal UUIDs and external transaction IDs are independent
+of runtime generations; the current connection may resume the same transaction
+while obsolete live events remain fenced. Completed records are retained in full,
+and their entity values remain visible until the next session at that scope.
+
+Energy is a validated register delta, not integrated power. Missing endpoints,
+resets and conflicting readings produce unknown energy. Exact-scope total power
+provides current/max power; completed power is zero. Saved active power does not
+become live after restart. Store loads before listener admission, coalesces writes
+and flushes on unload/shutdown. `runtime.sessions.history(scope=None)` exposes
+immutable completed records for a future UI; no per-history HA entities exist.
+Charging controls, authorization services and EV learning remain unimplemented.
 
 ## Capability model
 
@@ -709,7 +735,7 @@ control signal for physical enforcement; document devices without that guarantee
 | Explicit remote release | Validate lease, revoke remote recovery authorization and lease, persist WALLBOX_MANAGER/OFF intent and inhibit. Do not automatically resume an earlier charging profile. |
 | HA restart/reload | Restore desired control and the LOCAL latch, never active ownership or old leases. Reconcile identity, boot/session generation, capabilities, fresh telemetry and authority. LOCAL remains blocked. Otherwise automatically re-establish safe control for the desired normal profile, or await the authorized REMOTE recovery handshake. |
 | OCPP disconnect/reconnect | Fence in-flight commands/results, invalidate their connection generation and any runtime lease, clear active ownership and enter RECONCILING/unavailable. Preserve desired profile/ownership and remote recovery authorization; do not infer LOCAL. On reconnect perform fresh reconciliation, then automatically recover the normal profile or use the REMOTE handshake. Verified LOCAL overrides both. |
-| Wallbox restart | Invalidate transaction/session-specific state, leases, commands and capability evidence, while preserving desired control authorization. Rediscover and verify actual authority; LOCAL wins. Otherwise automatically resume the desired normal profile or recover REMOTE by handshake. Inspect owned OCPP profiles/settings without assuming they survived or disappeared. |
+| Wallbox restart | Invalidate connection-specific control state, leases, commands and capability evidence (retain the charging-session ledger until a transaction end), while preserving desired control authorization. Rediscover and verify actual authority; LOCAL wins. Otherwise automatically resume the desired normal profile or recover REMOTE by handshake. Inspect owned OCPP profiles/settings without assuming they survived or disappeared. |
 | Recovery timeout | End the bounded recovery attempt and fence provisional leases/targets. Stay INHIBITED with OFF safety intent and a visible failure; retain desired state for diagnosis/retry, not execution. Do not apply an old target or silently fall back to a historical normal profile. |
 | Command timeout/rejection | Report pending/unknown or refused result, not successful state. Inhibit the affected action and reconcile. Retry only with current authorization and freshly validated intent; failed attempts to leave LOCAL always need a new explicit user action. |
 

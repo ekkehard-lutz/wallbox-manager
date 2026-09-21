@@ -8,9 +8,11 @@ from homeassistant.components.binary_sensor import (
 from .core.telemetry import Quantity, state_flag
 from .entity import StationEntity, async_setup_station_entities
 from .observation_entity import ObservationEntity
+from .session_entity import setup_session_entities
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    setup_session_entities(hass, entry, async_add_entities, binary=True)
     async_setup_station_entities(
         hass,
         entry,

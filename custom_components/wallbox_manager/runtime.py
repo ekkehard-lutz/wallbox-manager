@@ -10,6 +10,7 @@ from .core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceS
 from .core.events import SessionToken, StationIdentity, StationSnapshot
 from .core.models import ConnectorId, EvseId, StationId
 from .core.telemetry import Channel, Observation, Quantity, State, station_of
+from .session_ledger import SessionLedger
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class Runtime:
 
     def __init__(self) -> None:
         self.runtime_id = str(uuid4())
+        self.sessions = SessionLedger()
         self._stations: dict[StationId, StationSnapshot] = {}
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
@@ -162,8 +164,27 @@ class Runtime:
         )
         return True
 
+    def session_event(self, token, event, observations=()):
+        """Persisted identity is independent of the live generation fence."""
+        if not self.current(token):
+            return False
+        if station_of(event.scope) != token.station:
+            raise ValueError("session belongs to another station")
+        return self.sessions.apply(event, observations)
+
+    def session_observations(self, token, observations, external_id=None):
+        if self.current(token):
+            if any(station_of(o.channel.scope) != token.station for o in observations):
+                raise ValueError("session observation belongs to another station")
+            self.sessions.observe(observations, external_id)
+
     def observe(
-        self, token: SessionToken, observations: tuple[Observation, ...]
+        self,
+        token: SessionToken,
+        observations: tuple[Observation, ...],
+        *,
+        session_external_id=None,
+        track_sessions=True,
     ) -> bool:
         """Accept only current-generation, monotonic per-channel observations.
 
@@ -229,6 +250,8 @@ class Runtime:
             evses=tuple(sorted(evses, key=lambda e: e.value)),
             connectors=tuple(sorted(connectors, key=lambda c: (c.evse.value, c.value))),
         )
+        if track_sessions:
+            self.sessions.observe(incoming, session_external_id)
         if updated != old:
             self._publish(updated)
         return True

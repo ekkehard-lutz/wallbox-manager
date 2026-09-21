@@ -19,13 +19,15 @@ OCPP 2.0.1 and 2.1 MeterValues `evseId=0` is station-scoped; positive IDs retain
 EVSE scope. TransactionEvent metering and chargingState retain the explicitly
 reported EVSE and optional connector. Missing EVSE scope is ignored rather than
 assigned to connector 1. `offline=true` transaction reports are acknowledged but
-not used as current state. There is no transaction ledger, authorization feature,
-transaction-derived session energy, or replay archive.
+not used as current state. The separate [session ledger](session-tracking.md)
+can account for offline transaction lifecycle events without changing live
+observation semantics. Authorization and raw replay archives remain unimplemented.
 
 OCPP 1.6J MeterValues connector 0 stays station-scoped. Positive connector N uses
 the existing `EvseId(station, "connector-N") / ConnectorId(..., "N")` mapping.
-Optional transactionId does not introduce a transaction model. No new 1.6 start/
-stop transaction handlers or charging controls are added.
+Optional transactionId also fences association with the separate active session.
+StartTransaction/StopTransaction now feed the session ledger; they do not change
+these lifetime-meter entities. No charging controls are added.
 
 ## Measurement interpretation
 

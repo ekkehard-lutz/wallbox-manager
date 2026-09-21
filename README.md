@@ -10,7 +10,8 @@ providing a programmatic interface for a future higher-level Energy Manager.
 
 This early read-only pre-release provides a HACS-installable integration foundation,
 an OCPP listener for 1.6J / 2.0.1 / 2.1, BootNotification, read-only discovery,
-dynamic station devices, diagnostics and reported metering/runtime state.
+dynamic station devices, diagnostics, reported metering/runtime state and persistent
+charging sessions.
 
 Add this repository as a HACS custom repository of type Integration and install
 Wallbox Manager when the pre-release is published. For testing this branch before
@@ -37,6 +38,13 @@ and boot/disconnect makes operational entities unavailable while retaining IDs.
 See [metering and runtime state](docs/metering-runtime-state.md) for scope, units,
 capability-driven entity creation, freshness and deliberately unsupported cases.
 
+Transaction lifecycle events now create a current-or-last session entity set per
+observed EVSE/connector. Completed values stay visible until the next session;
+energy uses matching meter-register deltas. Active sessions and all completed
+history survive reload/restart. Disconnect and boot do not end a session. See
+[session tracking and persistence](docs/session-tracking.md) for lifecycle,
+accounting, restoration, query access and limitations.
+
 There are no charging controls, profiles, phase switching, vendor extensions,
 Energy Manager functionality or EV learning yet.
 
@@ -46,7 +54,7 @@ See the [proposed architecture](docs/architecture.md) and the
 [pinned upstream OCPP adoption analysis](docs/upstream-ocpp-analysis.md) for module
 boundaries, ownership transitions, power solving and reuse decisions. These are
 design documents; the implemented subset now includes pure solving and read-only
-OCPP transport/discovery and metering/runtime state.
+OCPP transport/discovery, metering/runtime state and session tracking/persistence.
 
 Wallbox Manager separates charging strategy from wallbox-specific communication.
 

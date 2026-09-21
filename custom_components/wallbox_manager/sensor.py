@@ -17,6 +17,7 @@ from .core.capabilities import EvidenceState
 from .core.telemetry import STATE_OPTIONS, Quantity
 from .entity import StationEntity, async_setup_station_entities
 from .observation_entity import ObservationEntity
+from .session_entity import setup_session_entities
 
 DESCRIPTIONS = tuple(
     SensorEntityDescription(
@@ -40,6 +41,7 @@ DESCRIPTIONS = tuple(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    setup_session_entities(hass, entry, async_add_entities, binary=False)
     async_setup_station_entities(
         hass,
         entry,

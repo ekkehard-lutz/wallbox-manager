@@ -16,12 +16,14 @@ from ocpp.routing import on
 from ....core.capabilities import EvidenceState
 from ....core.events import StationIdentity
 from ....core.models import ConnectorId, EvseId
+from ....core.sessions import SessionEvent, SessionEventKind
 from ....core.telemetry import Quantity, State
 from .adapter import DiscoveryAdapter, evidence
 from .metering import (
     CHARGING_STATES,
     CONNECTOR_STATES,
     meter_observations,
+    reported_time,
     state_observation,
 )
 
@@ -107,13 +109,58 @@ class InventoryAdapter(DiscoveryAdapter):
         self,
         timestamp,
         transaction_info,
+        event_type,
+        seq_no,
+        trigger_reason,
         evse=None,
         meter_value=None,
         offline=False,
         id_token=None,
         **kwargs,
     ):
-        """Observe current state and meters without tracking transactions."""
+        """Map transaction lifecycle without authorization or charging controls."""
+        known = self.runtime.sessions.find(
+            self.token.station, transaction_info["transaction_id"]
+        )
+        scope = None
+        if evse and evse.get("id", 0) > 0:
+            scope = evse_identity(self.token.station, evse["id"])
+            if evse.get("connector_id") is not None:
+                scope = connector_identity(
+                    self.token.station, evse["id"], evse["connector_id"]
+                )
+        elif known is not None:
+            scope = known.scope
+        # Optional connector information may be omitted on later events. Reuse
+        # only a previously explicit connector on that same EVSE; never invent
+        # one. Conflicting explicit scopes cannot duplicate/reassign a transaction.
+        if known is not None and scope is not None:
+            if scope == known.evse_id:
+                scope = known.scope
+            elif scope != known.scope:
+                scope = None
+        at = reported_time(timestamp, datetime.now(UTC))
+        if scope is not None and at is not None:
+            event = SessionEvent(
+                scope,
+                transaction_info["transaction_id"],
+                SessionEventKind(event_type.lower()),
+                at,
+                CHARGING_STATES.get(transaction_info.get("charging_state")),
+                transaction_info.get("stopped_reason")
+                or (trigger_reason if event_type == "Ended" else None),
+                seq_no,
+            )
+            self.runtime.session_event(
+                self.token,
+                event,
+                meter_observations(
+                    scope,
+                    meter_value,
+                    f"ocpp{self._ocpp_version}:TransactionEvent",
+                    session=True,
+                ),
+            )
         if evse and evse.get("id", 0) > 0 and not offline:
             scope = evse_identity(self.token.station, evse["id"])
             if evse.get("connector_id") is not None:
@@ -132,7 +179,7 @@ class InventoryAdapter(DiscoveryAdapter):
                     timestamp,
                     source,
                 )
-            self.runtime.observe(self.token, observations)
+            self.runtime.observe(self.token, observations, track_sessions=False)
         # Neither version requires fields for the reference station's tokenless
         # events. If a token is supplied, include idTokenInfo without pretending
         # to have authorized it. The charging station owns the transaction ID.

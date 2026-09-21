@@ -34,6 +34,9 @@
       },
       "charging_active": {
         "name": "{scope} Charging active"
+      },
+      "session_active": {
+        "name": "{scope} Session active"
       }
     },
     "sensor": {
@@ -105,6 +108,43 @@
       },
       "charging_state": {
         "name": "{scope} Charging state",
+        "state": {
+          "unknown": "Unknown",
+          "idle": "Idle",
+          "connected": "Connected",
+          "charging": "Charging",
+          "suspended_vehicle": "Suspended by vehicle",
+          "suspended_station": "Suspended by station",
+          "finishing": "Finishing",
+          "preparing": "Preparing"
+        }
+      },
+      "session_id": {
+        "name": "{scope} Session ID"
+      },
+      "session_started": {
+        "name": "{scope} Session started"
+      },
+      "session_ended": {
+        "name": "{scope} Session ended"
+      },
+      "session_duration": {
+        "name": "{scope} Session duration"
+      },
+      "session_power": {
+        "name": "{scope} Session charging power"
+      },
+      "session_energy": {
+        "name": "{scope} Session energy"
+      },
+      "session_start_meter": {
+        "name": "{scope} Session start meter"
+      },
+      "session_end_meter": {
+        "name": "{scope} Session end meter"
+      },
+      "session_charging_state": {
+        "name": "{scope} Session charging state",
         "state": {
           "unknown": "Unknown",
           "idle": "Idle",
