@@ -81,8 +81,8 @@ def stale_command_result() -> CommandResult:
 class ControlAdapter(Protocol):
     """One adapter instance is bound to one controllable device scope.
 
-    Apply permission, physical phases and current as one coordinated operation.
-    OFF means disable charging using the device's stop semantics, not generic 0 A.
+    Apply a resolved electrical operating point. OFF requires verified stop
+    semantics. Permission changes use the distinct charging-permission operation.
     APPLIED requires confirmation of the whole requested operation.
 
     Check is_current after queue/lock waits and immediately before each device
@@ -119,3 +119,28 @@ async def apply_operating_point(
     if not isinstance(result, CommandResult):
         raise ValueError("adapter returned an invalid command result")
     return result
+
+
+async def apply_charging_permission(adapter, enabled: bool, *, is_current):
+    """Independent permission operation; retains the electrical target."""
+    if type(enabled) is not bool:
+        raise ValueError("charging permission must be boolean")
+    if not command_is_current(is_current):
+        return stale_command_result()
+    operation = getattr(adapter, "apply_charging_permission", None)
+    if operation is None:
+        return CommandResult(
+            CommandStatus.UNSUPPORTED,
+            ControlArea.CHARGING_PERMISSION,
+            CommandReason.UNSUPPORTED_OPERATION,
+        )
+    result = await operation(enabled, is_current=is_current)
+    if not isinstance(result, CommandResult):
+        raise ValueError("adapter returned an invalid command result")
+    return result
+
+
+def permission_available(adapter) -> bool:
+    """A protocol-neutral preflight; execution rechecks after queue waits."""
+    check = getattr(adapter, "can_set_charging_permission", None)
+    return check is not None and check() is True

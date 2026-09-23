@@ -2,8 +2,8 @@
 
 Listener setup/unload pattern adapted from lbbrhzn/ocpp __init__.py at
 848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
-See THIRD_PARTY_NOTICES.md. Runtime is entry-owned, with read-only observation
-platforms and no services.
+See THIRD_PARTY_NOTICES.md. Runtime is entry-owned, with observation and manual
+intent platforms. Entities use the generic control boundary.
 """
 
 from __future__ import annotations
@@ -16,13 +16,14 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
+    from .control.runtime import ControlRuntime
     from .protocols.ocpp.common.transport import CentralSystem
     from .runtime import Runtime
     from .session_storage import SessionStorage
 
 from .const import DEFAULT_HOST, DEFAULT_PORT
 
-PLATFORMS = ("binary_sensor", "sensor")
+PLATFORMS = ("binary_sensor", "sensor", "switch", "number", "select")
 
 
 @dataclass
@@ -30,6 +31,7 @@ class EntryRuntime:
     state: Runtime
     server: CentralSystem
     sessions: SessionStorage
+    control: ControlRuntime
 
 
 type WallboxManagerConfigEntry = ConfigEntry[EntryRuntime]
@@ -63,17 +65,24 @@ async def async_setup_entry(
     except OSError as exc:
         await storage.close()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
-    entry.runtime_data = EntryRuntime(state, server, storage)
+    from .control.reference import ConfiguredReference
+    from .protocols.ocpp.v21.control_runtime import create_control_runtime
+
+    source = ConfiguredReference(entry.options)
+    control = create_control_runtime(state, server, source)
+    entry.runtime_data = EntryRuntime(state, server, storage, control)
 
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
+        control.close()
         await server.stop()
         await storage.close()
         await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         raise
 
     async def shutdown(event):
+        control.close()
         await server.stop()
         await storage.close()
 
@@ -89,6 +98,7 @@ async def async_unload_entry(
     """Close the listener and join owned sessions before completing unload."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
+    entry.runtime_data.control.close()
     await entry.runtime_data.server.stop()
     await entry.runtime_data.sessions.close()
     return True

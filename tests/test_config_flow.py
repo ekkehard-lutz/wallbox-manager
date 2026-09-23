@@ -79,3 +79,63 @@ async def test_duplicate_listener_port_is_rejected():
     )
     with pytest.raises(AbortFlow, match="already_configured"):
         await flow.async_step_user({"host": "::", "port": 9000})
+
+
+async def test_reference_options_form_serializes():
+    from homeassistant.config_entries import ConfigEntries
+    from homeassistant.core import HomeAssistant
+    from test_ha_lifecycle import entry
+
+    from custom_components.wallbox_manager.config_flow import ReferenceOptionsFlow
+
+    hass = HomeAssistant("/tmp")
+    hass.config_entries = ConfigEntries(hass, {})
+    config = entry()
+    hass.config_entries._entries[config.entry_id] = config
+    flow = ReferenceOptionsFlow()
+    flow.hass = hass
+    flow.handler = config.entry_id
+    try:
+        result = await flow.async_step_init()
+        payload = FlowManagerIndexView(None)._prepare_result_json(result)
+        fields = {f["name"]: f for f in payload["data_schema"]}
+        assert "reference_verified" not in fields
+        assert fields["reference_min_a"]["type"] == "string"
+        assert fields["reference_evse_id"]["type"] == "integer"
+        result = await flow.async_step_init({"reference_min_a": "6.5"})
+        assert result["errors"] == {"base": "invalid_reference"}
+        result = await flow.async_step_init({})
+        assert result["type"] == "create_entry" and result["data"] == {}
+    finally:
+        await hass.async_stop()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"reference_station_id": ""},
+        {"reference_min_a": "20"},
+        {"reference_step_a": "0"},
+        {"reference_max_3a": "nan"},
+        {"reference_phases": "1,2"},
+    ],
+)
+def test_invalid_reference(change):
+    from test_control_runtime import REFERENCE
+
+    from custom_components.wallbox_manager.config_flow import validate_reference_options
+
+    with pytest.raises(ValueError):
+        validate_reference_options({**REFERENCE, **change})
+
+
+def test_partial_fractional_reference():
+    from custom_components.wallbox_manager.config_flow import validate_reference_options
+
+    data = {
+        "reference_station_id": "station",
+        "reference_evse_id": 2,
+        "reference_connector_id": 7,
+        "reference_step_a": "0.125",
+    }
+    assert validate_reference_options(data) == data

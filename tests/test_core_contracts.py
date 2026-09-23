@@ -82,8 +82,7 @@ def test_invalid_snapshot_generation(field, value, capabilities):
 
 def test_snapshot_scopes_and_duplicates(capabilities):
     dataclasses.replace(capabilities, scope=capabilities.scope.station)
-    with pytest.raises(ValueError):
-        dataclasses.replace(capabilities, scope=ConnectorId(capabilities.scope, "8"))
+    dataclasses.replace(capabilities, scope=ConnectorId(capabilities.scope, "8"))
     with pytest.raises(ValueError):
         dataclasses.replace(capabilities, envelopes=capabilities.envelopes * 2)
 

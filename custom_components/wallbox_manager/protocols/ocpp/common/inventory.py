@@ -254,10 +254,14 @@ class InventoryAdapter(DiscoveryAdapter):
                 schedule,
                 evses,
                 connectors,
+                self.electrical_inventory(token, report.rows),
             )
         finally:
             if self._report is report:
                 self._report = None
+
+    def electrical_inventory(self, token, rows):
+        return ()
 
     @staticmethod
     def parse_inventory(station, rows, source):

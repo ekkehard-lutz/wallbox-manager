@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 
 from .capabilities import CapabilityEvidence, CapabilitySnapshot
-from .models import ConnectorId, EvseId, StationId
+from .electrical import ElectricalCapability
+from .models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
 from .telemetry import Channel, Observation
 
 
@@ -53,11 +54,15 @@ class StationSnapshot:
     protocol_version: str | None = None
     supported_channels: tuple[Channel, ...] = ()
     observations: tuple[Observation, ...] = ()
+    physical_phases: tuple[PhysicalPhaseObservation, ...] = ()
+    electrical: tuple[ElectricalCapability, ...] = ()
 
     def __post_init__(self):
         for name, expected in (
             ("supported_channels", Channel),
             ("observations", Observation),
+            ("physical_phases", PhysicalPhaseObservation),
+            ("electrical", ElectricalCapability),
         ):
             items = tuple(getattr(self, name))
             if any(not isinstance(item, expected) for item in items):

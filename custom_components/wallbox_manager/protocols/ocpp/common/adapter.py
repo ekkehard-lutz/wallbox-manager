@@ -68,7 +68,9 @@ class DiscoveryAdapter:
             self._discover(self.token, self._attempt)
         )
 
-    def publish(self, token, attempt, state, schedule, evses=(), connectors=()):
+    def publish(
+        self, token, attempt, state, schedule, evses=(), connectors=(), electrical=()
+    ):
         if attempt == self._attempt:
             self.runtime.discover(
                 token,
@@ -76,6 +78,7 @@ class DiscoveryAdapter:
                 charging_schedule=schedule,
                 evses=tuple(evses),
                 connectors=tuple(connectors),
+                electrical=tuple(electrical),
             )
 
     async def _discover(self, token, attempt):

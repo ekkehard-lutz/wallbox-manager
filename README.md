@@ -65,12 +65,87 @@ Physical mappings and any required phase transition need separate verified
 operation evidence: numberPhases alone does not select conductors or prove
 switching support. Fixed-phase devices can use their verified fixed mode.
 
-wallbox-stationary is the first reference/test device (EVSE 1, 1 A grid, verified
-1-/3-phase switching), not a default for other devices. Current discovery does not
-verify electrical envelopes or physical phase operations; control requires explicit
-capability/evidence providers. This does not establish universal OCPP 2.1 charger
-compatibility. OFF/enable-disable, HA control entities, OCPP 1.6J/2.0.1 charging
-control, charging strategies, Energy Manager and EV learning remain unimplemented.
+## Manual charging control (v0.2.x development)
+
+Known OCPP 2.1 connectors receive seven stable Home Assistant controls, named
+`EVSE N / M`: desired charging power, allowed current 1p/2p/3p, charging enabled,
+power approximation (DOWN/NEAREST/UP), and maximum deviation without phase
+switching (0–25%, default 5%). Desired values survive offline periods and reloads.
+Restoration, telemetry and reconnects never dispatch commands; explicit edits do.
+An unset current limit imposes no additional restriction. Current limits accept
+non-negative fractions, including values above the device maximum and values for
+unsupported modes. Zero inhibits only that mode. They never establish capability.
+
+### Capabilities and reference fallback
+
+Each normalized capability is resolved independently: a verified current-generation
+OCPP observation wins; otherwise an explicitly configured operator reference fills
+that field; otherwise it remains unknown. Explicit unsupported or malformed OCPP
+observations fail closed and cannot be overridden by reference values. A reference
+maximum never adds a phase count excluded by the station. The solver intersects
+resolved capability envelopes with desired current limits using exact fractions;
+reachable points remain on the device's minimum-plus-step grid.
+
+Completed accepted OCPP 2.1 FullInventory reports recognize the descriptive
+extensions `SupportedPhaseModes`, `MinimumCurrent`, `CurrentStep` and
+`PhaseSwitchingSupported` on EVSE components, and `MaximumCurrent1Phase`,
+`MaximumCurrent2Phase`, `MaximumCurrent3Phase`, `ChargingEnableDisableSupported`
+on explicitly scoped Connector components. These extensions are not universal
+OCA variables. SmartChargingCtrlr/Available remains advertisement only.
+Reconnection and BootNotification invalidate discovered evidence and rediscover it.
+
+Read-only capability sensors use EVSE scope for supported phases, minimum and
+step, and connector scope for maxima and enable/disable support. Missing or
+unsupported maxima do not create sensors (in particular no invented 2p maximum).
+Existing entity identities remain in the registry offline. Diagnostic source and
+evidence attributes distinguish OCPP observations from configured operator fallback.
+
+Configure fallback fields individually in integration options, associated with
+explicit station/EVSE/connector IDs. No vendor, model, firmware, serial or global
+verification checkbox is required. Decimal and fractional currents are accepted.
+References never override verified wallbox values. Normal current limits belong
+to the runtime controls, not the reference form.
+
+Phase counts do not identify conductors. The core retains arbitrary PhaseMode
+subsets. Three phases identify the complete subset; one/two-phase mappings need
+physical evidence or an explicit operator mapping such as `l1;l1,l2;l1,l2,l3`.
+Consequently count-only discovery may expose capabilities before it can execute
+all corresponding modes. No default L1/L2 mapping is manufactured for 2p.
+
+### Physical feedback and phase retention
+
+Fresh standard NotifyEvent `Connector.PhaseRotation`, with explicit EVSE and
+connector identity, maps `Rxx` to L1 and `RST` to L1/L2/L3. Unknown values invalidate
+that connector's physical mode. Reports expire after five seconds, are ordered by
+timestamp, and are fenced by connection/boot generation. There is no vendor or
+reference identity gate. Feedback proves position, not switching capability.
+Profiles, desired state and measured currents cannot prove physical phase position.
+
+Retention applies only to an active positive charging operating point. Disabled,
+zero-current or unconfirmed/inactive charging selects the globally best valid
+initial mode. Re-enabling explicitly bypasses retention from the idle relay
+position. The deviation is `abs(reachable - target) / target * 100`, evaluated only
+for positive targets after directional and electrical constraints. DOWN never
+exceeds the target; UP never undershoots it. There is no dwell timer.
+
+### Charging permission
+
+Charging enabled is desired permission, independent of capability and observed
+charging state. Explicit disable uses the protocol-neutral permission operation,
+implemented through OCPP 2.1 SetVariables on a discovered writable
+`WallboxController.ChargingEnabled`. Exact connector scope is preferred; a
+station-scoped endpoint is usable only for a station with exactly one known
+connector. A matching accepted result is required. Missing capability or writable
+endpoint fails closed. Desired watts remain stored while disabled.
+
+Enabling with a positive target first installs a valid transaction charging profile,
+then grants permission. Both operations use generation/intent fences, including
+checks after queue waits. There is no automatic retry or resume. APPLIED means
+protocol acceptance, not proof of energy flow. Disable is never implemented as a
+zero-ampere profile. Zero-power pause execution remains unsupported and fails
+closed; it does not grant permission or silently substitute a positive target.
+OCPP 1.6/2.0.1 charging control, Energy Manager strategies and EV learning remain
+future work. Hardware behavior requires testing with the actual station.
 
 ## Architecture
 
@@ -192,8 +267,8 @@ automations.
 ## Development status
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
-now includes the OCPP 2.1 charging adapter; HA controls and the planned Energy
-Manager interface remain future work.
+now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
+Charging profiles and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
 phase envelopes, voltage observations, power requests and solver results are
@@ -228,8 +303,8 @@ from `ocpp==2.1.0`; this is a tested foundation, not a full protocol implementat
 Smart-charging advertisements remain distinct from verified behavior. Physical
 current envelopes, physical phase switching and stop support stay unknown; no
 nominal current/phase limits are invented. Generic immutable runtime snapshots are
-consumed by push-based HA diagnostics and observed meter/state entities. No
-charging controls are exposed. Hardware validation with wallbox-stationary has
+consumed by push-based HA diagnostics and observed meter/state entities. Manual
+intent controls are exposed for known OCPP 2.1 connectors. Hardware validation with wallbox-stationary has
 confirmed capability-driven metering entities, connection-generation/liveness
 handling, session tracking and persistence, and session meter attribution. An
 actual network black-hole/DROP test confirmed OCPP reconnect, preservation of an

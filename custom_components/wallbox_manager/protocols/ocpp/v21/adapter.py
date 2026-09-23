@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from fractions import Fraction
 
 from ocpp.exceptions import OCPPError
+from ocpp.routing import on
 from ocpp.v21 import ChargePoint, call
 from websockets.exceptions import ConnectionClosed
 
@@ -20,9 +21,10 @@ from ....control.commands import (
     stale_command_result,
 )
 from ....core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
-from ....core.models import EvseId, PhaseMode
+from ....core.models import ConnectorId, EvseId, PhaseMode
 from ....solver.operating_point import OperatingPoint
 from ..common.inventory import InventoryAdapter
+from .phase_feedback import accept_phase_events
 
 # Context follows DiscoveryAdapter's session-owned task, without contaminating
 # concurrent discovery calls or inbound CALLRESULTs on the same adapter.
@@ -37,9 +39,20 @@ class _DispatchRefused(Exception):
 class Adapter(InventoryAdapter, ChargePoint):
     """Station transport; control bindings share its serialized outbound queue."""
 
+    def electrical_inventory(self, token, rows):
+        from .capabilities import parse_capabilities
+
+        self.permission_inventory = (token, tuple(rows))
+        return parse_capabilities(token.station, rows)
+
+    @on("NotifyEvent")
+    def on_notify_event(self, event_data, **kwargs):
+        accept_phase_events(self.runtime, self.token, event_data)
+        return self._call_result.NotifyEvent()
+
     def bind_control(
         self,
-        target: EvseId,
+        target: EvseId | ConnectorId,
         capabilities: Callable[[], CapabilitySnapshot | None],
         *,
         phase_operation_evidence: Callable[
@@ -74,21 +87,31 @@ class EvseControlAdapter:
     """
 
     def __init__(self, adapter, target, capabilities, phase_operation_evidence):
+        evse = target.evse if isinstance(target, ConnectorId) else target
         if (
-            not isinstance(target, EvseId)
+            not isinstance(evse, EvseId)
             or target.station != adapter.token.station
-            or not target.value.isascii()
+            or not evse.value.isascii()
+            or not evse.value.isdecimal()
+            or int(evse.value) <= 0
+            or str(int(evse.value)) != evse.value
+        ):
+            raise ValueError("target must be a canonical positive EVSE of this station")
+        if isinstance(target, ConnectorId) and (
+            not target.value.isascii()
             or not target.value.isdecimal()
             or int(target.value) <= 0
             or str(int(target.value)) != target.value
         ):
-            raise ValueError("target must be a canonical positive EVSE of this station")
+            raise ValueError("connector ID must be canonical and positive")
         if not callable(capabilities) or not callable(phase_operation_evidence):
             raise ValueError(
                 "explicit capability and phase operation providers required"
             )
         self.adapter = adapter
         self.target = target
+        self.evse = evse
+        self.permission_evidence = lambda: None
         self.token = adapter.token
         self._capabilities = capabilities
         self._phase_operation_evidence = phase_operation_evidence
@@ -97,9 +120,13 @@ class EvseControlAdapter:
         sessions = [
             session
             for session in self.adapter.runtime.sessions.latest
-            if session.active and session.evse_id == self.target
+            if session.active and session.evse_id == self.evse
         ]
-        return sessions[0].external_transaction_id if len(sessions) == 1 else None
+        if len(sessions) != 1 or (
+            isinstance(self.target, ConnectorId) and sessions[0].scope != self.target
+        ):
+            return None
+        return sessions[0].external_transaction_id
 
     @staticmethod
     def _unsupported(area, detail):
@@ -218,9 +245,9 @@ class EvseControlAdapter:
             guard()
             response = await self.adapter.call(
                 call.SetChargingProfile(
-                    evse_id=int(self.target.value),
+                    evse_id=int(self.evse.value),
                     charging_profile={
-                        "id": int(self.target.value),
+                        "id": int(self.evse.value),
                         "stack_level": 0,
                         "charging_profile_purpose": "TxProfile",
                         "charging_profile_kind": "Absolute",
@@ -261,3 +288,133 @@ class EvseControlAdapter:
         return CommandResult(
             CommandStatus.FAILED, reason=CommandReason.COMMUNICATION_ERROR
         )
+
+    def _permission_component(self):
+        inventory = getattr(self.adapter, "permission_inventory", None)
+        if (
+            inventory is None
+            or inventory[0] != self.token
+            or not isinstance(self.target, ConnectorId)
+        ):
+            return None
+        state = self.adapter.runtime.get(self.target.station)
+        components = []
+        for row in inventory[1]:
+            component = row.get("component", {})
+            if component.get("name") != "WallboxController" or row.get("variable") != {
+                "name": "ChargingEnabled"
+            }:
+                continue
+            exact = {
+                "name": "WallboxController",
+                "evse": {
+                    "id": int(self.evse.value),
+                    "connector_id": int(self.target.value),
+                },
+            }
+            if component != exact and not (
+                component == {"name": "WallboxController"}
+                and state.connectors == (self.target,)
+            ):
+                continue
+            attrs = [
+                a
+                for a in row.get("variable_attribute", [])
+                if a.get("type", "Actual") == "Actual"
+            ]
+            if len(attrs) != 1 or attrs[0].get("mutability") not in (
+                "ReadWrite",
+                "WriteOnly",
+            ):
+                return None
+            components.append(component)
+        return components[0] if len(components) == 1 else None
+
+    def can_set_charging_permission(self):
+        proof = self.permission_evidence()
+        return bool(
+            self.adapter.runtime.current(self.token)
+            and self._permission_component() is not None
+            and proof is not None
+            and proof.state == EvidenceState.VERIFIED
+        )
+
+    async def apply_charging_permission(self, enabled, *, is_current):
+        component = self._permission_component()
+        proof = self.permission_evidence()
+
+        def guard():
+            if (
+                not command_is_current(is_current)
+                or self.adapter.token != self.token
+                or not self.adapter.runtime.current(self.token)
+            ):
+                raise _DispatchRefused(stale_command_result())
+            if (
+                component is None
+                or self._permission_component() != component
+                or proof is None
+                or proof.state != EvidenceState.VERIFIED
+                or self.permission_evidence() != proof
+            ):
+                raise _DispatchRefused(
+                    self._unsupported(
+                        ControlArea.CHARGING_PERMISSION,
+                        "Verified permission and writable scoped endpoint required.",
+                    )
+                )
+
+        context = _dispatch_guard.set(guard)
+        try:
+            guard()
+            response = await self.adapter.call(
+                call.SetVariables(
+                    set_variable_data=[
+                        {
+                            "component": component,
+                            "variable": {"name": "ChargingEnabled"},
+                            "attribute_type": "Actual",
+                            "attribute_value": "true" if enabled else "false",
+                        }
+                    ]
+                ),
+                suppress=False,
+            )
+            guard()
+            results = response.set_variable_result
+            if (
+                len(results) != 1
+                or results[0].get("component") != component
+                or results[0].get("variable") != {"name": "ChargingEnabled"}
+                or results[0].get("attribute_type", "Actual") != "Actual"
+            ):
+                return CommandResult(
+                    CommandStatus.FAILED,
+                    ControlArea.CHARGING_PERMISSION,
+                    CommandReason.COMMUNICATION_ERROR,
+                )
+            if results[0].get("attribute_status") == "Accepted":
+                return CommandResult(
+                    CommandStatus.APPLIED, ControlArea.CHARGING_PERMISSION
+                )
+            return CommandResult(
+                CommandStatus.TEMPORARILY_REJECTED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.BUSY,
+            )
+        except _DispatchRefused as exc:
+            return exc.result
+        except TimeoutError:
+            return CommandResult(
+                CommandStatus.FAILED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.TIMEOUT,
+            )
+        except ConnectionClosed, OSError, OCPPError:
+            return CommandResult(
+                CommandStatus.FAILED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.COMMUNICATION_ERROR,
+            )
+        finally:
+            _dispatch_guard.reset(context)

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
 from .core.events import SessionToken, StationIdentity, StationSnapshot
-from .core.models import ConnectorId, EvseId, StationId
+from .core.models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
 from .core.telemetry import Channel, Observation, Quantity, State, station_of
 from .session_ledger import SessionLedger
 
@@ -22,6 +22,7 @@ class Runtime:
         self.runtime_id = str(uuid4())
         self.sessions = SessionLedger()
         self._stations: dict[StationId, StationSnapshot] = {}
+        self._phase_epoch = {}
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
     @property
@@ -61,6 +62,7 @@ class Runtime:
         self.sessions.clear_live(token.station)
         old = self.get(token.station)
         now = datetime.now(UTC)
+        self._phase_epoch[token.station] = now
         unknown = CapabilityEvidence(EvidenceState.UNKNOWN, "runtime", now, reason)
         return StationSnapshot(
             token,
@@ -136,6 +138,7 @@ class Runtime:
         charging_schedule: CapabilityEvidence,
         evses: tuple[EvseId, ...] = (),
         connectors: tuple[ConnectorId, ...] = (),
+        electrical: tuple = (),
     ) -> bool:
         if not self.current(token):
             return False
@@ -144,6 +147,8 @@ class Runtime:
             c.evse.station != token.station for c in connectors
         ):
             raise ValueError("discovery identity belongs to another station")
+        if any(c.scope.station != token.station for c in electrical):
+            raise ValueError("electrical capability belongs to another station")
         known_evses = set(old.evses) | set(evses) | {c.evse for c in connectors}
         known_connectors = set(old.connectors) | set(connectors)
         self._publish(
@@ -159,10 +164,36 @@ class Runtime:
                     observed_at=discovery.observed_at,
                     source=discovery.source,
                 ),
+                electrical=tuple(electrical),
                 charging_schedule=charging_schedule,
                 discovery=discovery,
             )
         )
+        return True
+
+    def observe_physical_phase(self, token, observation: PhysicalPhaseObservation):
+        """Connection/boot fenced, timestamp-ordered, non-persistent hardware data."""
+        if not self.current(token):
+            return False
+        if observation.scope.station != token.station:
+            raise ValueError("physical phase report belongs to another station")
+        now = datetime.now(UTC)
+        if observation.observed_at < self._phase_epoch[
+            token.station
+        ] or not observation.fresh(now):
+            return False
+        state = self.get(token.station)
+        records = {o.scope: o for o in state.physical_phases}
+        old = records.get(observation.scope)
+        if old is not None:
+            if observation.observed_at < old.observed_at:
+                return False
+            if observation.observed_at == old.observed_at:
+                if observation.mode == old.mode:
+                    return False
+                observation = replace(old, mode=None)
+        records[observation.scope] = observation
+        self._publish(replace(state, physical_phases=tuple(records.values())))
         return True
 
     def session_event(self, token, event, observations=(), *, live=False):

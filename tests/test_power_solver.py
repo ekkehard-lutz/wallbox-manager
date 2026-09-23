@@ -31,6 +31,7 @@ def run(capabilities, voltage, now, one, three):
             kwargs.pop("voltage", voltage),
             now=kwargs.pop("now", now),
             eligible_modes=kwargs.pop("eligible_modes", (one, three)),
+            actively_charging=kwargs.pop("actively_charging", True),
             **kwargs,
         )
 
@@ -428,6 +429,7 @@ def test_two_phase_becomes_ineligible(run, ac_modes, one, three):
             voltage=observation,
             eligible_modes=(one, three),
             current_mode=current_mode,
+            actively_charging=True,
         )
         assert result.point.mode == one
         assert result.point.current_a == 16
@@ -460,6 +462,7 @@ def test_ties_across_one_two_three_phases(run, ac_modes, one, three, direction):
                 voltage=observation,
                 eligible_modes=tuple(e.mode for e in envelopes),
                 current_mode=current_mode,
+                actively_charging=True,
             )
             assert result.point.mode == (current_mode or one)
             assert result.point.offered_power_w == target
@@ -486,6 +489,7 @@ def test_two_phase_lower_power_tie(run, ac_modes):
         voltage=observation,
         eligible_modes=(two,),
         current_mode=two,
+        actively_charging=True,
     )
     assert result.point.current_a == 7
     assert result.point.offered_power_w == 7 * voltage_sum
