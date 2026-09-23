@@ -92,7 +92,8 @@ async def test_registered_and_retained_offline(controls):
     ids = {key: e.unique_id for key, e in entities.items()}
     source.snapshot = None
     bound.adapter.runtime.disconnect(bound.token)
-    assert all(e.available for e in entities.values())
+    assert not entities["charging_enabled"].available
+    assert all(e.available for key, e in entities.items() if key != "charging_enabled")
     assert all(
         not e.extra_state_attributes["execution_ready"] for e in entities.values()
     )
@@ -155,7 +156,7 @@ async def test_ha_restoration_never_sends(controls, monkeypatch):
 
     monkeypatch.setattr(ControlEntity, "async_get_last_state", restored)
     entities = await setup()
-    assert entities["charging_enabled"].is_on
+    assert entities["charging_enabled"].is_on is False
     assert entities["desired_charging_power"].native_value == 5000
     assert control.intent(bound.target).request.direction == Direction.DOWN
     assert control.intent(bound.target).phase_switch_deviation_pct == 7
@@ -183,7 +184,7 @@ async def test_other_known_evse_exists_without_inventing_capabilities(controls):
     await hass.async_block_till_done()
     assert len(er.async_get(hass).entities) == 14
     await control.change(target, target_w=4000, allowed=True)
-    assert control.intent(target).status == "capabilities_unavailable"
+    assert control.intent(target).status == "enabled_unknown"
     other = runtime.connect(
         StationId("legacy"), protocol="ocpp", protocol_version="1.6"
     )

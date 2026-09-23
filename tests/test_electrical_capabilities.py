@@ -197,9 +197,9 @@ def test_generation_and_mapping_fences():
         electrical=parse_capabilities(STATION, inventory()),
     )
     source = CapabilityResolver(runtime)
-    # Three conductors have an unambiguous subset; count 1 grants no L1 mapping.
+    # Counts now identify canonical EVSE-local modes without a grid mapping.
     caps = source.capabilities(CONNECTOR)
-    assert [e.mode.count for e in caps.envelopes] == [3]
+    assert [e.mode.count for e in caps.envelopes] == [1, 3]
     runtime.boot(token, StationIdentity("Generic", "Generic"))
     assert source.capabilities(CONNECTOR) is None
     assert not runtime.discover(
@@ -270,3 +270,29 @@ def test_partial_maximum_keeps_independent_evidence_without_inventing_mode():
     resolved = resolve_capabilities(observed, ())
     assert len(resolved) == 1 and resolved[0].value == Fraction(35, 2)
     assert resolved[0].key == "maximum_current_2"
+
+
+@pytest.mark.parametrize("counts", [(1, 3), (1, 2, 3)])
+def test_count_only_discovery_builds_canonical_local_envelopes(counts):
+    from custom_components.wallbox_manager.core.models import Phase
+
+    runtime = Runtime()
+    token = runtime.connect(STATION, protocol="ocpp", protocol_version="2.1")
+    rows = [r for r in inventory() if r["variable"]["name"] != "SupportedPhaseModes"]
+    rows += [row("SupportedPhaseModes", ",".join(map(str, counts)))]
+    if 2 in counts:
+        rows += [row("MaximumCurrent2Phase", "16.5", connector=True)]
+    proof = CapabilityEvidence(EvidenceState.VERIFIED, "inventory", datetime.now(UTC))
+    runtime.discover(
+        token,
+        discovery=proof,
+        charging_schedule=proof,
+        connectors=(CONNECTOR,),
+        electrical=parse_capabilities(STATION, rows),
+    )
+    caps = CapabilityResolver(runtime).capabilities(CONNECTOR)
+    assert [e.mode.phases for e in caps.envelopes] == [tuple(Phase)[:n] for n in counts]
+    expected = {1: Fraction("20.5"), 2: Fraction("16.5"), 3: Fraction("27.25")}
+    assert {e.mode.count: e.max_current_a for e in caps.envelopes} == {
+        n: expected[n] for n in counts
+    }

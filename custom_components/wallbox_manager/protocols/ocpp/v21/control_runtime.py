@@ -47,6 +47,18 @@ def create_control_runtime(runtime, server, source=None):
     def capabilities(target):
         return source.capabilities(target) if source is not None else None
 
+    def active_transactions(target):
+        return [
+            session
+            for session in runtime.sessions.latest
+            if session.active
+            and (
+                session.scope == target
+                if isinstance(target, ConnectorId)
+                else session.evse_id == target
+            )
+        ]
+
     def inputs(target):
         caps = capabilities(target)
         state = runtime.get(target.station)
@@ -83,6 +95,7 @@ def create_control_runtime(runtime, server, source=None):
             and (proof := source.phase_operation_evidence(caps, e.mode)) is not None
             and proof.state == EvidenceState.VERIFIED
         )
+        transactions = active_transactions(target)
         return ControlInputs(
             caps,
             VoltageObservation(
@@ -92,6 +105,9 @@ def create_control_runtime(runtime, server, source=None):
             tuple(source.limits(target)),
             source.current_mode(target),
             actively_charging=actively_charging(state, target),
+            transaction_id=transactions[0].external_transaction_id
+            if len(transactions) == 1
+            else None,
         )
 
     def adapter(target):
@@ -119,17 +135,17 @@ def create_control_runtime(runtime, server, source=None):
     def blocker(target):
         if adapter(target) is None:
             return "adapter_unavailable"
-        active = [
-            s
-            for s in runtime.sessions.latest
-            if s.active
-            and (
-                s.scope == target
-                if isinstance(target, ConnectorId)
-                else s.evse_id == target
-            )
-        ]
+        active = active_transactions(target)
         return None if len(active) == 1 else "transaction_unavailable"
+
+    def authority_adapter(station):
+        session = server.sessions.get(station)
+        live = session.adapter if session is not None else None
+        return (
+            live.bind_authority()
+            if isinstance(live, Adapter) and runtime.current(live.token)
+            else None
+        )
 
     control = ControlRuntime(
         runtime,
@@ -137,6 +153,7 @@ def create_control_runtime(runtime, server, source=None):
         adapter,
         blocker,
         electrical_capabilities=getattr(source, "resolved", lambda target: ()),
+        authority_adapter=authority_adapter,
     )
     control.capability_source = source
     return control

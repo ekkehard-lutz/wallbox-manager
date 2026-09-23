@@ -97,6 +97,8 @@ async def manual(connected):
             },
         ),
     )
+    await bound.read_enabled()
+    peer.operations.clear()
     source = Source(bound)
     server = SimpleNamespace(
         sessions={bound.target.station: SimpleNamespace(adapter=live)}
@@ -242,7 +244,9 @@ async def test_superseded_in_library_queue(manual):
         control.change(bound.target, target_w=4000, allowed=True)
     )
     await asyncio.wait_for(entered.wait(), 1)
-    second = asyncio.create_task(control.change(bound.target, target_w=5000))
+    second = asyncio.create_task(
+        control.change(bound.target, target_w=5000, allowed=True)
+    )
     await asyncio.sleep(0)
     live._call_lock.release()
     old, new = await asyncio.gather(first, second)

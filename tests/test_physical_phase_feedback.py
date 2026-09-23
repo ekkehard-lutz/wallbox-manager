@@ -156,6 +156,8 @@ async def test_retention_uses_fresh_positive_measurement(reference):
     bound, peer, _, control = reference
     runtime = bound.adapter.runtime
     await physical_report(peer, "RST")
+    peer.enabled = True
+    await bound.read_enabled()
     control.restore(bound.target, target_w=4000, allowed=True)
     now = datetime.now(UTC)
     runtime.observe(
@@ -203,5 +205,5 @@ async def test_zero_target_does_not_send_positive_profile(reference):
     bound, peer, _, control = reference
     await physical_report(peer, "Rxx")
     await control.change(bound.target, allowed=True, target_w=0)
-    assert control.intent(bound.target).status == "zero_target_unsupported"
+    assert control.intent(bound.target).status == "zero_current_unverified"
     assert not peer.requests and not peer.permissions

@@ -186,15 +186,15 @@ False, invalid and conflicting OCPP assertions cannot be hidden by references.
 Supported counts exclude contradictory reference maxima. Envelopes require a
 complete positive minimum/step/maximum and a known conductor mapping.
 
-Counts and conductor subsets remain distinct. Three phases have one subset;
-one/two-phase mappings require actual physical feedback or explicit configured
-mapping. No implicit L1/L2 assignment is made for a reported two-phase count.
+Verified counts construct canonical EVSE-local subsets: 1p=L1, 2p=L1+L2,
+3p=L1+L2+L3. These are not installation/grid conductor identities. Fresh physical
+feedback and switching evidence still gate execution, not envelope construction.
 References associate exact station, EVSE and connector IDs, without vendor/model
 or serial requirements. All fields are optional independently; decimal and
 fractional values are exact. They never override verified observations.
 
 `ControlRuntime` owns `ManualIntent` by connector (generic callers can also bind
-EVSE scope). It stores power/direction/permission, three independent fractional
+EVSE scope). It stores power/direction, three independent fractional
 current ceilings, retention tolerance and generation/results. The solver sees the
 intersection of resolved envelopes and desired limits. An unsupported 2p limit
 remains stored and harmless; limits above capability cannot expand it; zero removes
@@ -226,16 +226,17 @@ OCPP requires resolved enable/disable support plus a current-generation inventor
 entry exposing writable WallboxController.ChargingEnabled. SetVariables targets
 that exact component. A station-global variable is usable only for a single-known-
 connector station. The response must identify the same variable/component and be
-Accepted. Generation, intent, evidence and endpoint are checked after queue waits
+Accepted, followed by a confirmed Actual GetVariables readback. Generation,
+intent, evidence and endpoint are checked after queue waits
 and after the result. Desired power is retained on disable. Permission is never
 encoded as a zero-ampere profile. The observed charging state remains separate.
 
-An explicit enable with positive target prepares the transaction profile before
-enabling permission. Zero-power pause dispatch remains unsupported and fails
-closed. There is no automatic retry or resume after restore/reconnect.
+An explicit enable prepares the transaction profile (including zero-current
+pause) before enabling permission. Zero-current support requires explicit verified
+evidence and does not change the hardware enable state. There is no automatic retry or resume after restore/reconnect.
 
 The solver receives explicit active-charging context. Only fresh positive measured
-charging with permitted intent can retain its known physical mode; initial enable,
+charging with confirmed Enabled can retain its known physical mode; initial enable,
 disabled and zero-target states bypass retention. For positive targets the exact
 comparison is `abs(reachable - target) * 100 <= target * tolerance`. Direction,
 voltage freshness, current grid and all limits apply first. DOWN/UP never violate
@@ -708,7 +709,8 @@ nonfinite values are rejected.
 The initial voltage contract accepts measured RMS phase-to-neutral samples only,
 with explicit phase mapping, source, observation time and validity deadline. The
 caller supplies the comparison time; missing, expired or future samples inhibit
-selection for an eligible verified mode. Observation scope and connection generation
+selection for that eligible verified mode, without excluding other modes whose
+required voltages remain valid. Observation scope and connection generation
 must match the capability snapshot; adapters normalize scope only after validating
 applicability. Nominal fallback and line-to-line conversion are not implemented.
 Offered points retain the complete voltage basis and assume balanced current and
@@ -1131,3 +1133,66 @@ reload/restart the durable registry recreates the entity set, Connected is false
 and other sensors are unavailable until a fresh runtime snapshot exists. No old
 connection counters or capabilities are restored. Missing BootNotification fields
 never overwrite learned registry metadata with fabricated defaults.
+
+
+### Implemented 0.2.x canonical modes and explicit acquisition
+
+The capability resolver maps verified phase counts to EVSE-local modes:
+1p = L1, 2p = L1+L2, 3p = L1+L2+L3. These labels make no assertion about
+building/grid conductor names. Counts suffice to construct envelopes; separate
+switching evidence and fresh physical feedback still gate execution. Legacy
+reference mapping options remain readable, but ordinary resolution is canonical.
+Missing or invalid voltage excludes only modes requiring the unavailable phase.
+The solver recalculates on control actions; telemetry never triggers dispatch.
+
+The current implementation is deliberately smaller than the future profile/lease
+ownership design above. `ControlAuthority` and timestamped `AuthorityObservation`
+are protocol-neutral station observations. Unknown/local authority inhibits normal
+power and permission dispatch while edits continue to persist. Explicit acquisition
+uses a generic authority adapter operation, confirms authority, then synchronizes
+stored targets once without changing desired values. Actual Disabled remains
+disabled; there is no persistent desired permission. No automatic acquisition, restoration dispatch, retry or return action is
+implemented. Future profile selection may explicitly invoke this same operation.
+
+The OCPP 2.1 binding uses discovered station-scoped Actual
+`WallboxController.ControlAuthority` (`Local`/`OCPP`), an implementation-defined
+extension, not an OCA ownership standard. It requires writable inventory evidence,
+a matching Accepted SetVariables result and an Accepted GetVariables readback of
+`OCPP`. Timestamped hard-wired local-loss events invalidate remote authority;
+connection/boot and revision fences prevent stale results and queued commands.
+Read-only inventory timestamps refer to request acceptance, so an older inventory
+cannot replace newer local-loss evidence. This relies on the station's event-driven
+local-loss interface and live connection, not periodic authority polling or leases.
+HA exposes one station enum sensor and one one-way Take control button. See README
+for exact IDs and execution limitations. Authority acquisition itself needs no
+station change; Stage 1 adds the confirmed enable reader described below.
+
+
+### Stage 1 hardware permission and zero-current contract
+
+Charging permission is no longer persistent manual intent. `PowerSettings`
+stores target/direction; current limits and retention preference remain desired
+settings. `EnabledObservation` is connector-resolved confirmed hardware state,
+fenced by connection/boot, ordered by read time, and subject to freshness. Its
+revision advances for value changes or a lapse of validity, not identical refreshes.
+Legacy switch restore records are ignored while entity identity remains stable.
+
+`request_enabled` is transient: ON prepares the saved operating point, revalidates
+it after queue waits, requests permission and reads actual state; OFF requests
+permission directly. Failed/LOCAL requests never become future work. Takeover
+reads permission and never writes it; only already-enabled hardware receives a
+one-time saved target application. Read-only polling begins after discovery and
+is owned/cancelled by the transport session. No observation triggers a write.
+
+`ZeroCurrentSupported` on the Connector is an implementation-defined verified
+pause fact. It supplies solver stop evidence independently of enable/disable.
+The adapter maps OFF to an immediate zero-ampere TxProfile without phase selection.
+Active transaction and REMOTE authority are still required; voltage and parked
+phase observations are unnecessary for this current-only pause. Positive targets
+use all existing capability, voltage, phase and current-limit fences. Identical
+voltage refreshes are compared semantically, not by timestamp object equality.
+
+The station owns all CP and connection-detection mechanics. Its actual enable
+reader confirms the EVSE register through existing command dispatch; unavailable
+hardware produces an unsuccessful read rather than a synthetic Disabled value.
+No lockout timers or timer configuration are implemented in Stage 1.

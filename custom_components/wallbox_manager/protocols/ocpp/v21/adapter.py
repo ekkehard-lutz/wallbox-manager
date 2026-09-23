@@ -20,6 +20,7 @@ from ....control.commands import (
     command_is_current,
     stale_command_result,
 )
+from ....core.authority import ControlAuthority
 from ....core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
 from ....core.models import ConnectorId, EvseId, PhaseMode
 from ....solver.operating_point import OperatingPoint
@@ -45,8 +46,27 @@ class Adapter(InventoryAdapter, ChargePoint):
         self.permission_inventory = (token, tuple(rows))
         return parse_capabilities(token.station, rows)
 
+    def inventory_completed(self, token, rows, observed_at):
+        from .authority import inventory_observation
+
+        inventory_observation(self.runtime, token, rows, observed_at)
+        from .enabled import poll_enabled
+
+        previous = getattr(self, "enabled_poll_task", None)
+        if previous is not None:
+            previous.cancel()
+        self.enabled_poll_task = self.session.spawn(poll_enabled(self, token))
+
+    def bind_authority(self):
+        from .authority import StationAuthorityAdapter
+
+        return StationAuthorityAdapter(self)
+
     @on("NotifyEvent")
     def on_notify_event(self, event_data, **kwargs):
+        from .authority import accept_authority_events
+
+        accept_authority_events(self.runtime, self.token, event_data)
         accept_phase_events(self.runtime, self.token, event_data)
         return self._call_result.NotifyEvent()
 
@@ -135,6 +155,15 @@ class EvseControlAdapter:
         )
 
     def _validate_capabilities(self, point):
+        if (
+            self.adapter.runtime.authority(self.target.station)
+            != ControlAuthority.REMOTE
+        ):
+            return CommandResult(
+                CommandStatus.TEMPORARILY_REJECTED,
+                ControlArea.AUTHORITY,
+                CommandReason.NO_AUTHORITY,
+            )
         snapshot = self._capabilities()
         state = self.adapter.runtime.get(self.target.station)
         if snapshot is not None and not isinstance(snapshot, CapabilitySnapshot):
@@ -150,6 +179,15 @@ class EvseControlAdapter:
             return self._unsupported(
                 ControlArea.OPERATING_POINT,
                 "Matching current EVSE capabilities required.",
+            )
+        if not point.charging:
+            return (
+                None
+                if snapshot.stop.state == EvidenceState.VERIFIED
+                else self._unsupported(
+                    ControlArea.OPERATING_POINT,
+                    "Verified zero-current operation required.",
+                )
             )
         envelope = next((e for e in snapshot.envelopes if e.mode == point.mode), None)
         if envelope is None or envelope.evidence.state != EvidenceState.VERIFIED:
@@ -199,17 +237,10 @@ class EvseControlAdapter:
             raise ValueError("expected a resolved operating point")
         if not command_is_current(is_current):
             return stale_command_result()
-        if not point.charging:
-            return CommandResult(
-                CommandStatus.UNSUPPORTED,
-                ControlArea.CHARGING_PERMISSION,
-                CommandReason.UNSUPPORTED_OPERATION,
-                "Stop/disable semantics are not implemented yet.",
-            )
         refusal = self._validate_capabilities(point)
         if refusal is not None:
             return refusal
-        current = self._wire_current(point.current_a)
+        current = self._wire_current(point.current_a) if point.charging else 0
         if current is None:
             return self._unsupported(
                 ControlArea.CURRENT,
@@ -217,6 +248,9 @@ class EvseControlAdapter:
             )
         token = self.token
         transaction = self._active_transaction()
+        authority_revision = self.adapter.runtime.get(
+            self.target.station
+        ).authority_revision
 
         def guard():
             if not command_is_current(is_current):
@@ -236,6 +270,11 @@ class EvseControlAdapter:
                     )
                 )
 
+            if (
+                self.adapter.runtime.get(self.target.station).authority_revision
+                != authority_revision
+            ):
+                raise _DispatchRefused(stale_command_result())
             refusal = self._validate_capabilities(point)
             if refusal is not None:
                 raise _DispatchRefused(refusal)
@@ -260,7 +299,11 @@ class EvseControlAdapter:
                                     {
                                         "start_period": 0,
                                         "limit": current,
-                                        "number_phases": point.mode.count,
+                                        **(
+                                            {"number_phases": point.mode.count}
+                                            if point.charging
+                                            else {}
+                                        ),
                                     }
                                 ],
                             }
@@ -279,6 +322,14 @@ class EvseControlAdapter:
             )
         finally:
             _dispatch_guard.reset(context)
+        if (
+            not self.adapter.runtime.current(token)
+            or self.adapter.runtime.authority(self.target.station)
+            != ControlAuthority.REMOTE
+            or self.adapter.runtime.get(self.target.station).authority_revision
+            != authority_revision
+        ):
+            return stale_command_result()
         if response.status == "Accepted":
             return CommandResult(CommandStatus.APPLIED)
         if response.status == "Rejected":
@@ -289,7 +340,7 @@ class EvseControlAdapter:
             CommandStatus.FAILED, reason=CommandReason.COMMUNICATION_ERROR
         )
 
-    def _permission_component(self):
+    def _permission_component(self, *, writable=True):
         inventory = getattr(self.adapter, "permission_inventory", None)
         if (
             inventory is None
@@ -324,7 +375,7 @@ class EvseControlAdapter:
             ]
             if len(attrs) != 1 or attrs[0].get("mutability") not in (
                 "ReadWrite",
-                "WriteOnly",
+                "WriteOnly" if writable else "ReadOnly",
             ):
                 return None
             components.append(component)
@@ -339,15 +390,42 @@ class EvseControlAdapter:
             and proof.state == EvidenceState.VERIFIED
         )
 
+    async def read_enabled(self):
+        from .enabled import read_enabled
+
+        return await read_enabled(self)
+
     async def apply_charging_permission(self, enabled, *, is_current):
         component = self._permission_component()
         proof = self.permission_evidence()
+        state = self.adapter.runtime.get(self.target.station)
+        authority_revision = state.authority_revision if state else None
 
-        def guard():
+        def guard(*, after_dispatch=False):
             if (
-                not command_is_current(is_current)
+                not command_is_current(
+                    getattr(is_current, "after_dispatch", is_current)
+                    if after_dispatch
+                    else is_current
+                )
                 or self.adapter.token != self.token
                 or not self.adapter.runtime.current(self.token)
+            ):
+                raise _DispatchRefused(stale_command_result())
+            if (
+                self.adapter.runtime.authority(self.target.station)
+                != ControlAuthority.REMOTE
+            ):
+                raise _DispatchRefused(
+                    CommandResult(
+                        CommandStatus.TEMPORARILY_REJECTED,
+                        ControlArea.AUTHORITY,
+                        CommandReason.NO_AUTHORITY,
+                    )
+                )
+            if (
+                self.adapter.runtime.get(self.target.station).authority_revision
+                != authority_revision
             ):
                 raise _DispatchRefused(stale_command_result())
             if (
@@ -380,7 +458,7 @@ class EvseControlAdapter:
                 ),
                 suppress=False,
             )
-            guard()
+            guard(after_dispatch=True)
             results = response.set_variable_result
             if (
                 len(results) != 1
@@ -394,8 +472,14 @@ class EvseControlAdapter:
                     CommandReason.COMMUNICATION_ERROR,
                 )
             if results[0].get("attribute_status") == "Accepted":
+                actual = await self.read_enabled()
+                guard(after_dispatch=True)
                 return CommandResult(
-                    CommandStatus.APPLIED, ControlArea.CHARGING_PERMISSION
+                    CommandStatus.APPLIED
+                    if actual is enabled
+                    else CommandStatus.FAILED,
+                    ControlArea.CHARGING_PERMISSION,
+                    None if actual is enabled else CommandReason.COMMUNICATION_ERROR,
                 )
             return CommandResult(
                 CommandStatus.TEMPORARILY_REJECTED,

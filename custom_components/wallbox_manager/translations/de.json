@@ -157,6 +157,17 @@
       },
       "maximum_current": {
         "name": "{scope} Maximaler Strom"
+      },
+      "control_authority": {
+        "name": "Steuerungsautorität",
+        "state": {
+          "remote": "Wallbox Manager / Fernsteuerung",
+          "local": "Lokale Steuerung",
+          "unknown": "Unbekannt"
+        }
+      },
+      "zero_current": {
+        "name": "{scope} Nullstrom-Unterstützung"
       }
     },
     "switch": {
@@ -189,6 +200,11 @@
           "nearest": "Nächstgelegene Leistung",
           "up": "Nicht unterschreiten"
         }
+      }
+    },
+    "button": {
+      "take_control": {
+        "name": "Steuerung übernehmen"
       }
     }
   },

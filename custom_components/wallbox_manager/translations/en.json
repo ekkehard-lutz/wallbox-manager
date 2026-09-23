@@ -157,6 +157,17 @@
       },
       "maximum_current": {
         "name": "{scope} Maximum current"
+      },
+      "control_authority": {
+        "name": "Control authority",
+        "state": {
+          "remote": "Wallbox Manager / remote control",
+          "local": "Local control",
+          "unknown": "Unknown"
+        }
+      },
+      "zero_current": {
+        "name": "{scope} Zero-current support"
       }
     },
     "switch": {
@@ -189,6 +200,11 @@
           "nearest": "Nearest power",
           "up": "Do not fall below"
         }
+      }
+    },
+    "button": {
+      "take_control": {
+        "name": "Take control"
       }
     }
   },

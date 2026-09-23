@@ -2,8 +2,10 @@
 
 from dataclasses import dataclass
 
+from .authority import AuthorityObservation
 from .capabilities import CapabilityEvidence, CapabilitySnapshot
 from .electrical import ElectricalCapability
+from .enabled import EnabledObservation
 from .models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
 from .telemetry import Channel, Observation
 
@@ -56,6 +58,9 @@ class StationSnapshot:
     observations: tuple[Observation, ...] = ()
     physical_phases: tuple[PhysicalPhaseObservation, ...] = ()
     electrical: tuple[ElectricalCapability, ...] = ()
+    authority: AuthorityObservation | None = None
+    authority_revision: int = 0
+    enabled: tuple[EnabledObservation, ...] = ()
 
     def __post_init__(self):
         for name, expected in (
@@ -63,6 +68,7 @@ class StationSnapshot:
             ("observations", Observation),
             ("physical_phases", PhysicalPhaseObservation),
             ("electrical", ElectricalCapability),
+            ("enabled", EnabledObservation),
         ):
             items = tuple(getattr(self, name))
             if any(not isinstance(item, expected) for item in items):
