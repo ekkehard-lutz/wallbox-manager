@@ -11,7 +11,13 @@ EVSE_FIELDS = frozenset(
     ("supported_phases", "minimum_current", "current_step", "phase_switching")
 )
 CONNECTOR_FIELDS = frozenset(
-    ("maximum_current_1", "maximum_current_2", "maximum_current_3", "enable_disable")
+    (
+        "maximum_current",  # Generic current fact; never implies a phase mode.
+        "maximum_current_1",
+        "maximum_current_2",
+        "maximum_current_3",
+        "enable_disable",
+    )
 )
 
 

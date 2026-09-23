@@ -12,6 +12,9 @@ VARIABLES = {
     "MinimumCurrent": ("EVSE", "minimum_current"),
     "CurrentStep": ("EVSE", "current_step"),
     "PhaseSwitchingSupported": ("EVSE", "phase_switching"),
+    # Implementation-defined ampere-valued extension, not a universal OCA variable.
+    # Like the per-phase extensions, it requires a complete accepted inventory.
+    "MaximumCurrent": ("Connector", "maximum_current"),
     "MaximumCurrent1Phase": ("Connector", "maximum_current_1"),
     "MaximumCurrent2Phase": ("Connector", "maximum_current_2"),
     "MaximumCurrent3Phase": ("Connector", "maximum_current_3"),
@@ -54,6 +57,11 @@ def parse_capabilities(station, rows):
             values.append(None)
         for attr in attrs:
             try:
+                if (
+                    key == "maximum_current"
+                    and row.get("variable_characteristics", {}).get("unit", "A") != "A"
+                ):
+                    raise ValueError("generic maximum current must be amperes")
                 text = attr["value"].strip()
                 if key == "supported_phases":
                     value = tuple(int(n.strip()) for n in text.split(","))
