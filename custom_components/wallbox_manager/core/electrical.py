@@ -17,6 +17,7 @@ CONNECTOR_FIELDS = frozenset(
         "maximum_current_2",
         "maximum_current_3",
         "enable_disable",
+        "zero_current",
     )
 )
 
@@ -50,7 +51,7 @@ def validate_value(key, value):
         ):
             raise ValueError("invalid supported phase counts")
         return tuple(sorted(values))
-    if key in ("phase_switching", "enable_disable"):
+    if key in ("phase_switching", "enable_disable", "zero_current"):
         if type(value) is not bool:
             raise ValueError("boolean capability required")
         return value

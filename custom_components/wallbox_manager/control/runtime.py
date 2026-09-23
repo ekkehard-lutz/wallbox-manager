@@ -34,11 +34,23 @@ class ControlInputs:
     limits: tuple[CurrentLimit, ...] = ()
     current_mode: PhaseMode | None = None
     actively_charging: bool = False
+    transaction_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PowerSettings:
+    target_w: Fraction = Fraction(0)
+    direction: Direction = Direction.NEAREST
+
+    def __post_init__(self):
+        object.__setattr__(self, "target_w", scalar(self.target_w))
+        if not isinstance(self.direction, Direction):
+            raise ValueError("invalid direction")
 
 
 @dataclass
 class ManualIntent:
-    request: PowerRequest = PowerRequest(0, Direction.NEAREST, False)
+    request: PowerSettings = PowerSettings()
     phase_switch_deviation_pct: Fraction = Fraction(5)
     current_limits: dict[int, Fraction] = field(default_factory=dict)
     generation: int = 0
@@ -50,9 +62,10 @@ class ManualIntent:
 class ControlRuntime:
     """Providers supply fresh execution inputs and a protocol-neutral adapter.
 
-    Only explicit edits execute. Observations update diagnostics, never desired
-    values or dispatch. New edits fence queued work; late results cannot publish
-    over newer intent. There is no auto-resume, retry or state-restoration dispatch.
+    Only explicit control actions execute. Observations update diagnostics,
+    never desired values or dispatch. New edits fence queued work; late results
+    cannot publish over newer intent. There is no automatic resume, retry or
+    restoration dispatch.
     """
 
     def __init__(
@@ -150,7 +163,9 @@ class ControlRuntime:
     def restore(self, target, **changes):
         """Restore only desired fields; never enqueue execution."""
         changes = {
-            k: v for k, v in changes.items() if k not in self._edited.get(target, set())
+            k: v
+            for k, v in changes.items()
+            if k != "allowed" and k not in self._edited.get(target, set())
         }
         if changes:
             self._edit(target, changes)
@@ -198,16 +213,16 @@ class ControlRuntime:
         ):
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
-        if intent.request.allowed and intent.request.target_w == 0:
+        if intent.request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
             from ..solver.operating_point import Reason, ResultStatus
 
             return (
                 inputs,
                 SolverResult(ResultStatus.UNREACHABLE, Reason.STOP_UNVERIFIED),
-                "zero_target_unsupported",
+                "zero_current_unverified",
             )
         result = solve(
-            intent.request,
+            PowerRequest(intent.request.target_w, intent.request.direction, True),
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
@@ -225,7 +240,7 @@ class ControlRuntime:
             ),
             current_mode=inputs.current_mode,
             actively_charging=inputs.actively_charging
-            and intent.request.allowed
+            and self.runtime.enabled(target) is True
             and target not in self._inactive,
             phase_switch_deviation_pct=intent.phase_switch_deviation_pct,
         )
@@ -239,6 +254,7 @@ class ControlRuntime:
         intent = self.intent(target)
         inputs, _, blocked = self.resolve(target)
         return {
+            "actual_enabled": self.runtime.enabled(target),
             "control_authority": self.runtime.authority(target.station).value,
             "physical_phase_mode": [p.value for p in inputs.current_mode.phases]
             if inputs and inputs.current_mode
@@ -259,24 +275,23 @@ class ControlRuntime:
         }
 
     async def change(self, target, **changes):
-        was_allowed = self.intent(target).request.allowed
-        intent = self._edit(target, changes)
-        if (
-            not was_allowed
-            or not intent.request.allowed
-            or intent.request.target_w == 0
-        ):
-            self._inactive.add(target)
-        self._edited.setdefault(target, set()).update(changes)
-        return await self.apply_stored(
-            target, synchronize_permission="allowed" in changes
-        )
+        # Compatibility for callers: permission is a transient command, not intent.
+        enabled = changes.pop("allowed", None)
+        if changes:
+            intent = self._edit(target, changes)
+            if intent.request.target_w == 0 or self.runtime.enabled(target) is not True:
+                self._inactive.add(target)
+            self._edited.setdefault(target, set()).update(changes)
+        if enabled is not None:
+            return await self.request_enabled(target, enabled)
+        return await self.apply_stored(target)
 
-    async def apply_stored(
-        self, target, *, synchronize_permission=True, fence=lambda: True
-    ):
-        """Execute saved intent once, only after an explicit authorized action."""
+    async def request_enabled(self, target, enabled):
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be boolean")
         intent = self.intent(target)
+        intent.generation += 1
+        intent.command_result = intent.solver_result = None
         generation = intent.generation
         state = self.runtime.get(target.station)
         blocked = (
@@ -284,6 +299,8 @@ class ControlRuntime:
             if self._closed or state is None or not state.connected
             else "no_authority"
             if self.runtime.authority(target.station) != ControlAuthority.REMOTE
+            else "enabled_unknown"
+            if self.runtime.enabled(target) is None
             else "adapter_unavailable"
             if self.adapter(target) is None
             else None
@@ -292,21 +309,7 @@ class ControlRuntime:
             intent.status = blocked
             self.publish(target)
             return None
-        if synchronize_permission and not intent.request.allowed:
-            return await self._permission(
-                target, intent, generation, False, fence=fence
-            )
-        if not intent.request.allowed:
-            intent.status = "charging_disabled"
-            self.publish(target)
-            return None
-        inputs, resolved, blocked = self.resolve(target)
-        intent.solver_result = resolved
-        if (
-            inputs is not None
-            and synchronize_permission
-            and not permission_available(self.adapter(target))
-        ):
+        if not permission_available(self.adapter(target)):
             result = CommandResult(
                 CommandStatus.UNSUPPORTED,
                 ControlArea.CHARGING_PERMISSION,
@@ -316,6 +319,56 @@ class ControlRuntime:
             intent.status = result.status.value
             self.publish(target)
             return result
+        prepared = {}
+        if enabled:
+            self._inactive.add(target)
+            observation = self.runtime.enabled_observation(target)
+            result = await self.apply_stored(target, prepare=True, prepared=prepared)
+            if result is None or result.status != CommandStatus.APPLIED:
+                return result
+            if (
+                intent.generation != generation
+                or self.runtime.enabled(target) is not observation.enabled
+                or self.runtime.enabled_observation(target).revision
+                != observation.revision
+            ):
+                return stale_command_result()
+        return await self._permission(
+            target,
+            intent,
+            generation,
+            enabled,
+            fence=prepared.get("fence", lambda: True),
+        )
+
+    async def apply_stored(
+        self, target, *, prepare=False, fence=lambda: True, prepared=None
+    ):
+        """Apply a target once; never change hardware permission."""
+        intent = self.intent(target)
+        generation = intent.generation
+        state = self.runtime.get(target.station)
+        actual = self.runtime.enabled(target)
+        blocked = (
+            "disconnected"
+            if self._closed or state is None or not state.connected
+            else "no_authority"
+            if self.runtime.authority(target.station) != ControlAuthority.REMOTE
+            else "enabled_unknown"
+            if actual is None
+            else "charging_disabled"
+            if not actual and not prepare
+            else "adapter_unavailable"
+            if self.adapter(target) is None
+            else None
+        )
+        if blocked:
+            intent.status = blocked
+            self.publish(target)
+            return None
+        enabled_revision = self.runtime.enabled_observation(target).revision
+        inputs, resolved, blocked = self.resolve(target)
+        intent.solver_result = resolved
         adapter = self.adapter(target) if blocked is None else None
         if blocked is not None or adapter is None:
             intent.status = blocked or "adapter_unavailable"
@@ -325,11 +378,19 @@ class ControlRuntime:
         token = state.token
         authority_revision = state.authority_revision
 
-        def current(*, after_dispatch=False):
+        def current(*, after_dispatch=False, permission_confirmed=False):
             if (
                 self._closed
                 or not fence()
                 or generation != intent.generation
+                or (
+                    not permission_confirmed
+                    and (
+                        self.runtime.enabled(target) is not actual
+                        or self.runtime.enabled_observation(target).revision
+                        != enabled_revision
+                    )
+                )
                 or not self.runtime.current(token)
                 or self.runtime.authority(target.station) != ControlAuthority.REMOTE
                 or self.runtime.get(target.station).authority_revision
@@ -337,43 +398,42 @@ class ControlRuntime:
             ):
                 return False
             fresh, result, reason = self.resolve(target)
-            if after_dispatch and fresh is not None:
-                # Relay feedback is expected to change during an accepted phase
-                # transition. It must not relabel that acceptance as rejection.
-                # Keep desired/generation, electrical evidence and limit fences.
+            if fresh is None:
+                return False
+            if resolved.point.charging:
+                if (
+                    fresh.voltage.active_voltages(
+                        resolved.point.mode, datetime.now(UTC)
+                    )
+                    != resolved.point.phase_voltages_v
+                ):
+                    return False
+            # Compare required electrical values, not sample timestamps.
+            fresh = replace(fresh, voltage=inputs.voltage)
+            if after_dispatch or not resolved.point.charging:
                 fresh = replace(
                     fresh,
                     current_mode=inputs.current_mode,
                     actively_charging=inputs.actively_charging,
                     eligible_modes=inputs.eligible_modes,
                 )
-                return fresh == inputs and (
-                    not resolved.point.charging
-                    or fresh.voltage.active_voltages(
-                        resolved.point.mode, datetime.now(UTC)
-                    )
-                    == resolved.point.phase_voltages_v
-                )
+                return fresh == inputs and self.blocker(target) is None
             return reason is None and fresh == inputs and result.point == resolved.point
 
+        if prepared is not None:
+
+            def prepared_fence():
+                return current(after_dispatch=True)
+
+            prepared_fence.after_dispatch = lambda: current(
+                after_dispatch=True, permission_confirmed=True
+            )
+            prepared["fence"] = prepared_fence
         intent.status = "pending"
         self.publish(target)
         result = await apply_operating_point(
             adapter, resolved.point, is_current=current
         )
-        if (
-            result.status == CommandStatus.APPLIED
-            and synchronize_permission
-            and intent.request.allowed
-        ):
-            result = await self._permission(
-                target,
-                intent,
-                generation,
-                True,
-                publish=False,
-                fence=lambda: current(after_dispatch=True),
-            )
         if generation != intent.generation or (
             result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
         ):
@@ -402,7 +462,9 @@ class ControlRuntime:
         token = state.token
         authority_revision = state.authority_revision
 
-        def current():
+        observation = self.runtime.enabled_observation(target)
+
+        def current(*, after_dispatch=False):
             return (
                 not self._closed
                 and intent.generation == generation
@@ -410,13 +472,29 @@ class ControlRuntime:
                 and self.runtime.authority(target.station) == ControlAuthority.REMOTE
                 and self.runtime.get(target.station).authority_revision
                 == authority_revision
-                and fence()
+                and (
+                    after_dispatch
+                    or (
+                        self.runtime.enabled(target) is not None
+                        and observation is not None
+                        and self.runtime.enabled_observation(target).revision
+                        == observation.revision
+                    )
+                )
+                and (
+                    getattr(fence, "after_dispatch", fence)()
+                    if after_dispatch
+                    else fence()
+                )
             )
 
+        current.after_dispatch = lambda: current(after_dispatch=True)
         intent.status = "pending"
         self.publish(target)
         result = await apply_charging_permission(adapter, enabled, is_current=current)
-        if not current():
+        if result.status != CommandStatus.APPLIED and self.runtime.current(token):
+            await adapter.read_enabled()
+        if not current(after_dispatch=True):
             result = stale_command_result()
         if publish and generation == intent.generation:
             intent.command_result = result
@@ -467,5 +545,10 @@ class ControlRuntime:
                     break
                 # Starting after acquisition cannot retain a relay parked by Local.
                 self._inactive.add(target)
-                await self.apply_stored(target, fence=current)
+                bound = self.adapter(target)
+                if bound is None:
+                    continue
+                await bound.read_enabled()
+                if current():
+                    await self.apply_stored(target, fence=current)
         return result

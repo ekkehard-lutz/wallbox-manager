@@ -74,7 +74,7 @@ class CapabilitySensor(StationEntity, SensorEntity):
         self._attr_translation_placeholders = {
             "scope": f"EVSE {evse.value}" + (f" / {connector}" if connector else "")
         }
-        if "current" in key:
+        if "current" in key and key != "zero_current":
             self._attr_native_unit_of_measurement = "A"
 
     @property

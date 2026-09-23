@@ -165,6 +165,9 @@
           "local": "Lokale Steuerung",
           "unknown": "Unbekannt"
         }
+      },
+      "zero_current": {
+        "name": "{scope} Nullstrom-Unterstützung"
       }
     },
     "switch": {

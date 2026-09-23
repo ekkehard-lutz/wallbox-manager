@@ -142,6 +142,11 @@ class ControlEntity(RestoreEntity):
         if snapshot and snapshot.connected:
             deadlines.extend(
                 o.valid_until
+                for o in snapshot.enabled
+                if o.scope == self.target and o.valid_until > now
+            )
+            deadlines.extend(
+                o.valid_until
                 for o in snapshot.physical_phases
                 if o.scope == self.target and o.valid_until > now
             )

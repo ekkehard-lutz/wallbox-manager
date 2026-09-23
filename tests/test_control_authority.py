@@ -57,6 +57,11 @@ def inventory():
             "true",
             {"name": "Connector", "evse": {"id": 1, "connector_id": 1}},
         ),
+        (
+            "ZeroCurrentSupported",
+            "true",
+            {"name": "Connector", "evse": {"id": 1, "connector_id": 1}},
+        ),
         ("ChargingEnabled", "false", COMPONENT),
         ("ControlAuthority", "Local", COMPONENT),
     ):
@@ -97,6 +102,10 @@ async def authority(manual):
     )
     live.inventory_completed(live.token, rows, datetime.now(UTC))
     peer.authority = "Local"
+    if live.enabled_poll_task:
+        live.enabled_poll_task.cancel()
+    await bound.read_enabled()
+    peer.operations.clear()
     control = create_control_runtime(runtime, server)
     await physical_report(peer, "RST")
     try:
@@ -146,6 +155,7 @@ async def test_local_edits_only_store_intent(authority, changes):
 async def test_takeover_confirms_then_applies_saved_once(authority, enabled):
     control, bound, peer, _ = authority
     control.restore(bound.target, target_w=2300, allowed=enabled)
+    peer.enabled = enabled
     saved = replace(control.intent(bound.target))
     result = await control.take_control(bound.target.station)
     assert result.status == CommandStatus.APPLIED
@@ -166,10 +176,10 @@ async def test_takeover_confirms_then_applies_saved_once(authority, enabled):
     assert peer.operations == [
         "authority_set",
         "authority_get",
+        "enabled_get",
         *(["profile"] if enabled else []),
-        "permission",
     ]
-    assert peer.permissions[0]["attribute_value"] == str(enabled).lower()
+    assert not peer.permissions
     if enabled:
         point = control.intent(bound.target).solver_result.point
         assert point.mode.count == 1 and point.current_a == 10
@@ -298,6 +308,7 @@ async def test_local_event_fences_commands_waiting_for_transport(authority, oper
     control, bound, peer, _ = authority
     live = bound.adapter
     if operation != "takeover":
+        peer.enabled = True
         await control.take_control(bound.target.station)
     control.restore(bound.target, target_w=2300, allowed=True)
     before = list(peer.operations)
@@ -328,12 +339,15 @@ async def test_local_event_fences_commands_waiting_for_transport(authority, oper
     )
     live._call_lock.release()
     assert (await pending).reason == CommandReason.STALE
-    assert peer.operations == before
+    assert peer.operations == before + (
+        ["enabled_get"] if operation == "disable" else []
+    )
 
 
 async def test_local_loss_during_profile_prevents_enable(authority):
     control, bound, peer, _ = authority
     control.restore(bound.target, target_w=2300, allowed=True)
+    peer.enabled = True
     peer.release.clear()
     pending = asyncio.create_task(control.take_control(bound.target.station))
     await asyncio.wait_for(peer.received.wait(), 1)
@@ -346,7 +360,12 @@ async def test_local_loss_during_profile_prevents_enable(authority):
     )
     peer.release.set()
     await pending
-    assert peer.operations == ["authority_set", "authority_get", "profile"]
+    assert peer.operations == [
+        "authority_set",
+        "authority_get",
+        "enabled_get",
+        "profile",
+    ]
     assert control.intent(bound.target).command_result.reason == CommandReason.STALE
 
 
@@ -390,6 +409,7 @@ async def test_invalid_or_zero_phase_voltage_preserves_valid_one_phase(
     )
     assert peer.operations == []  # Telemetry never applies a new point.
     control.restore(bound.target, target_w=2300, allowed=True)
+    peer.enabled = True
     await control.take_control(bound.target.station)
     point = control.intent(bound.target).solver_result.point
     assert point.mode.count == 1 and point.current_a == 10

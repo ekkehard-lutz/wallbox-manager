@@ -18,6 +18,7 @@ VARIABLES = {
     "MaximumCurrent1Phase": ("Connector", "maximum_current_1"),
     "MaximumCurrent2Phase": ("Connector", "maximum_current_2"),
     "MaximumCurrent3Phase": ("Connector", "maximum_current_3"),
+    "ZeroCurrentSupported": ("Connector", "zero_current"),
     "ChargingEnableDisableSupported": ("Connector", "enable_disable"),
 }
 
@@ -65,7 +66,7 @@ def parse_capabilities(station, rows):
                 text = attr["value"].strip()
                 if key == "supported_phases":
                     value = tuple(int(n.strip()) for n in text.split(","))
-                elif key in ("enable_disable", "phase_switching"):
+                elif key in ("enable_disable", "phase_switching", "zero_current"):
                     value = {"true": True, "false": False}[text.lower()]
                 else:
                     value = Fraction(text)

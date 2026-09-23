@@ -58,6 +58,8 @@ class Peer(ChargePoint):
         super().__init__("station", wire)
         self.requests = []
         self.permissions = []
+        self.enabled = False
+        self.enabled_read_value = None
         self.status = "Accepted"
         self.authority = "OCPP"
         self.authority_status = "Accepted"
@@ -96,6 +98,8 @@ class Peer(ChargePoint):
             )
         self.operations.append("permission")
         self.permissions.extend(set_variable_data)
+        if self.status == "Accepted":
+            self.enabled = set_variable_data[0]["attribute_value"] == "true"
         return call_result.SetVariables(
             set_variable_result=[
                 {
@@ -109,6 +113,21 @@ class Peer(ChargePoint):
 
     @on("GetVariables")
     async def get_variables(self, get_variable_data):
+        if get_variable_data[0]["variable"]["name"] == "ChargingEnabled":
+            self.operations.append("enabled_get")
+            return call_result.GetVariables(
+                get_variable_result=[
+                    {
+                        "component": item["component"],
+                        "variable": item["variable"],
+                        "attribute_status": "Accepted",
+                        "attribute_value": self.enabled_read_value
+                        if self.enabled_read_value is not None
+                        else str(self.enabled).lower(),
+                    }
+                    for item in get_variable_data
+                ]
+            )
         self.operations.append("authority_get")
         self.authority_read_received.set()
         await self.authority_read_release.wait()

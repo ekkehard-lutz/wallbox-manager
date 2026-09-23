@@ -90,7 +90,9 @@ class CapabilityResolver:
             state.capabilities.observed_at,
             "per_capability_resolution",
             tuple(envelopes),
-            unknown,
+            fields["zero_current"].evidence
+            if value("zero_current") is True
+            else unknown,
         )
 
     def permission_evidence(self, target):

@@ -83,14 +83,15 @@ async def test_one_way_button_confirms_and_applies_saved_intent(authority_entiti
     assert action.available
     assert action.unique_id.endswith(f":{bound.target.station.value}:take_control")
     control.restore(bound.target, target_w=2300, allowed=True)
+    peer.enabled = True
     await action.async_press()
     assert status.native_value == "remote"
     assert action.extra_state_attributes["takeover_status"] == "applied"
     assert peer.operations == [
         "authority_set",
         "authority_get",
+        "enabled_get",
         "profile",
-        "permission",
     ]
     assert hass.states.get(status.entity_id).state == "remote"
     buttons = [e for e in er.async_get(hass).entities.values() if e.domain == "button"]

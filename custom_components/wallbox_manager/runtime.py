@@ -172,6 +172,53 @@ class Runtime:
         )
         return True
 
+    def enabled_observation(self, target):
+        state = self.get(target.station)
+        if state is None or not state.connected:
+            return None
+        return next((o for o in state.enabled if o.scope == target), None)
+
+    def enabled(self, target):
+        observation = self.enabled_observation(target)
+        now = datetime.now(UTC)
+        return (
+            observation.enabled
+            if observation and observation.observed_at <= now < observation.valid_until
+            else None
+        )
+
+    def observe_enabled(self, token, observation):
+        if not self.current(token):
+            return False
+        if observation.scope.station != token.station:
+            raise ValueError("enabled scope belongs to another station")
+        if (
+            not self._phase_epoch[token.station]
+            <= observation.observed_at
+            <= datetime.now(UTC)
+        ):
+            return False
+        state = self.get(token.station)
+        old = self.enabled_observation(observation.scope)
+        if old and observation.observed_at <= old.observed_at:
+            return False
+        revision = old.revision if old else 0
+        if (
+            old is None
+            or old.enabled != observation.enabled
+            or old.valid_until <= observation.observed_at
+        ):
+            revision += 1
+        observation = replace(observation, revision=revision)
+        self._publish(
+            replace(
+                state,
+                enabled=tuple(o for o in state.enabled if o.scope != observation.scope)
+                + (observation,),
+            )
+        )
+        return True
+
     def authority(self, station):
         state = self.get(station)
         return (
