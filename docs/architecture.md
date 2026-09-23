@@ -237,9 +237,16 @@ execution or reconnection. Unload invalidates pending work before transport tear
 
 `control/reference_wallbox_stationary.py` is an isolated operator-attested source,
 selected only through an explicit options-flow acknowledgement and complete
-station ID, exact firmware, verified minimum/per-mode maximum currents and separate
-configured per-mode limits. The live identity must report vendor and model
-`wallbox-stationary` and the exact configured firmware over OCPP 2.1. These checks
+station ID, vendor, model, exact firmware, verified minimum/per-mode maximum
+currents and separate configured per-mode limits. `wallbox-stationary` is the
+reference implementation name, not an OCPP vendor/model requirement. The live
+BootNotification/runtime identity must exactly match `reference_station_id`,
+`reference_vendor`, `reference_model` and `reference_firmware`; if configured,
+`reference_serial` must match too. No identity values are defaulted. Older options
+missing the new vendor/model attestations fail closed. A single reference identity
+predicate gates both capability access and phase-feedback ingestion; no configured
+reference means no trusted phase feedback, even with the standard event name.
+These checks
 are not authentication or automated verification. They scope previously established
 manual device evidence to the live connection/boot. This source explicitly covers
 EVSE 1, physical L1 and L1/L2/L3, 1 A grid and verified atomic phase switching;

@@ -110,9 +110,16 @@ rolled back. APPLIED confirms acceptance, not measured charging power.
 The integration's **Configure** options provide an isolated, operator-attested
 reference source. Leave it disabled for unknown devices. Before enabling, verify:
 
-- Exact OCPP station ID and reported firmware; reported vendor and model must both
-  be `wallbox-stationary`. This is identity matching on the existing trusted local
-  network, not authentication or automatic hardware verification.
+- Exact OCPP station ID, vendor, model and firmware observed from the device.
+  `wallbox-stationary` names the reference implementation, not its OCPP identity.
+  Configure `reference_station_id`, `reference_vendor`, `reference_model` and
+  `reference_firmware`; optionally attest `reference_serial` for an exact serial
+  match too. For the physical reference: `Wallbox01`, `Lutz`, `Lutz-EVSE-DIN`,
+  serial `4C75747A00000001`, and the explicitly configured verified firmware.
+  There are no identity defaults. Existing options without vendor/model attestation
+  fail closed until updated. The same identity gate protects capabilities and
+  physical feedback. This is matching on the trusted local network, not
+  authentication or automatic hardware verification.
 - EVSE 1, physical L1 and L1/L2/L3 modes, safe atomic phase/current switching,
   immediate TxProfile transaction behavior and 1 A resolution on that firmware.
 - The actual verified minimum and each mode's maximum current, entered explicitly.

@@ -13,12 +13,8 @@ LIFETIME = timedelta(seconds=5)
 
 
 def accept_phase_events(runtime, token, events):
-    state = runtime.get(token.station)
-    if (
-        not runtime.current(token)
-        or state.identity.vendor != "wallbox-stationary"
-        or state.identity.model != "wallbox-stationary"
-    ):
+    target = EvseId(token.station, "1")
+    if not runtime.current(token) or not runtime.physical_phase_authorized(target):
         return
     for event in events:
         if (
@@ -33,7 +29,7 @@ def accept_phase_events(runtime, token, events):
                 event["timestamp"].replace("Z", "+00:00")
             )
             observation = PhysicalPhaseObservation(
-                EvseId(token.station, "1"),
+                target,
                 {"Rxx": PhaseMode((Phase.L1,)), "RST": PhaseMode(tuple(Phase))}.get(
                     event.get("actual_value")
                 ),

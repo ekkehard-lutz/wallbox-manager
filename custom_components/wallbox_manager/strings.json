@@ -160,16 +160,19 @@
     "step": {
       "init": {
         "title": "wallbox-stationary reference verification",
-        "description": "Only for manually verified wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomic switching, 1 A grid. Identity and firmware must match. Complete all fields before enabling. Disabling removes this evidence source; it does not send a stop.",
+        "description": "Only for manually verified wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomic switching, 1 A grid. Identity and firmware must match. Complete all required fields before enabling; serial number is optional. Disabling removes this evidence source; it does not send a stop.",
         "data": {
           "reference_verified": "I verified the reference device and safe phase switching (enable)",
-          "reference_station_id": "wallbox-stationary station ID",
+          "reference_station_id": "Exact verified station ID",
           "reference_firmware": "Exact verified firmware",
           "reference_min_a": "Verified minimum current (A)",
           "reference_max_1a": "Verified one-phase maximum (A)",
           "reference_max_3a": "Verified three-phase maximum (A)",
           "limit_1a": "Configured one-phase current limit (A)",
-          "limit_3a": "Configured three-phase current limit (A)"
+          "limit_3a": "Configured three-phase current limit (A)",
+          "reference_vendor": "Exact verified OCPP vendor",
+          "reference_model": "Exact verified OCPP model",
+          "reference_serial": "Exact verified serial number (optional)"
         }
       }
     },

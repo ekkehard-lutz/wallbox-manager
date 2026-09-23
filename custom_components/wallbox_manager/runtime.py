@@ -23,6 +23,7 @@ class Runtime:
         self.sessions = SessionLedger()
         self._stations: dict[StationId, StationSnapshot] = {}
         self._phase_epoch = {}
+        self.physical_phase_authorized: Callable[[EvseId], bool] = lambda target: False
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
     @property

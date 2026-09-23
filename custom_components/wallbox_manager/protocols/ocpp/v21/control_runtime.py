@@ -1,5 +1,6 @@
 """Wire a verified capability source to the generic manual-control runtime."""
 
+from ....control.reference_wallbox_stationary import WallboxStationaryReference
 from ....control.runtime import ControlInputs, ControlRuntime
 from ....core.capabilities import EvidenceState
 from ....core.models import Phase, PhaseVoltage, VoltageObservation
@@ -8,6 +9,12 @@ from .adapter import Adapter
 
 
 def create_control_runtime(runtime, server, source=None):
+    runtime.physical_phase_authorized = (
+        source.matches_identity
+        if isinstance(source, WallboxStationaryReference)
+        else lambda target: False
+    )
+
     def capabilities(target):
         return source.capabilities(target) if source is not None else None
 

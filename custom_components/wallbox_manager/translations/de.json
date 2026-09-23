@@ -160,16 +160,19 @@
     "step": {
       "init": {
         "title": "wallbox-stationary Referenzprüfung",
-        "description": "Nur für manuell geprüfte wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomarer Phasenwechsel, 1-A-Raster. Identität und Firmware müssen übereinstimmen. Alle Werte vor Aktivierung eingeben. Deaktivieren entfernt die Freigabe; es sendet keinen Stopp.",
+        "description": "Nur für manuell geprüfte wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomarer Phasenwechsel, 1-A-Raster. Identität und Firmware müssen übereinstimmen. Alle Pflichtwerte vor Aktivierung eingeben. Deaktivieren entfernt die Freigabe; es sendet keinen Stopp. Die Seriennummer ist optional; Hersteller und Modell müssen der tatsächlichen OCPP-Identität entsprechen.",
         "data": {
           "reference_verified": "Referenzgerät und sicheren Phasenwechsel geprüft (aktivieren)",
-          "reference_station_id": "wallbox-stationary Stations-ID",
+          "reference_station_id": "Exakte verifizierte Stations-ID",
           "reference_firmware": "Exakt geprüfte Firmware",
           "reference_min_a": "Geprüfter Mindeststrom (A)",
           "reference_max_1a": "Geprüfter Maximalstrom einphasig (A)",
           "reference_max_3a": "Geprüfter Maximalstrom dreiphasig (A)",
           "limit_1a": "Konfiguriertes Stromlimit einphasig (A)",
-          "limit_3a": "Konfiguriertes Stromlimit dreiphasig (A)"
+          "limit_3a": "Konfiguriertes Stromlimit dreiphasig (A)",
+          "reference_vendor": "Exakter verifizierter OCPP-Hersteller",
+          "reference_model": "Exaktes verifiziertes OCPP-Modell",
+          "reference_serial": "Exakte verifizierte Seriennummer (optional)"
         }
       }
     },

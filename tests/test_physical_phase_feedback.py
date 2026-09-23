@@ -31,7 +31,7 @@ async def reference(manual):
     live.token = live.runtime.boot(
         live.token,
         StationIdentity(
-            "wallbox-stationary", "wallbox-stationary", firmware="test-verified"
+            "Lutz", "Lutz-EVSE-DIN", serial="4C75747A00000001", firmware="test-verified"
         ),
     )
     live.runtime._publish(
@@ -196,3 +196,86 @@ async def test_untrusted_or_inapplicable_events(reference, alteration):
     await physical_report(peer, "RST", at=at, **changes)
     assert source.current_mode(bound.target) is None
     assert not bound.adapter.runtime.get(bound.target.station).physical_phases
+
+
+@pytest.mark.parametrize("field", ["vendor", "model", "firmware", "serial"])
+async def test_runtime_identity_mismatch_blocks_capabilities_and_feedback(
+    reference, field
+):
+    bound, peer, source, _ = reference
+    live = bound.adapter
+    identity = live.runtime.get(bound.target.station).identity
+    live.token = live.runtime.boot(
+        live.token, replace(identity, **{field: "different"})
+    )
+    await physical_report(peer, "RST")
+    assert source.capabilities(bound.target) is None
+    assert source.current_mode(bound.target) is None
+    assert not live.runtime.get(bound.target.station).physical_phases
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "reference_vendor",
+        "reference_model",
+        "reference_firmware",
+        "reference_station_id",
+        "reference_verified",
+    ],
+)
+async def test_missing_attestation_blocks_capabilities_and_feedback(reference, key):
+    bound, peer, source, _ = reference
+    source.options = {k: v for k, v in REFERENCE.items() if k != key}
+    await physical_report(peer, "RST")
+    assert source.capabilities(bound.target) is None
+    assert not bound.adapter.runtime.get(bound.target.station).physical_phases
+
+
+async def test_other_configured_station_cannot_supply_feedback(reference):
+    bound, peer, source, control = reference
+    from custom_components.wallbox_manager.core.models import EvseId, StationId
+
+    source.target = EvseId(StationId("Wallbox01"), "1")
+    source.options = {**REFERENCE, "reference_station_id": "Wallbox01"}
+    await physical_report(peer, "RST")
+    assert source.capabilities(bound.target) is None
+    assert not bound.adapter.runtime.get(bound.target.station).physical_phases
+
+
+async def test_serial_attestation_optional_but_no_reference_means_no_feedback(
+    reference,
+):
+    bound, peer, source, _ = reference
+    source.options = {k: v for k, v in REFERENCE.items() if k != "reference_serial"}
+    await physical_report(peer, "RST")
+    assert source.capabilities(bound.target) is not None
+    assert source.current_mode(bound.target).count == 3
+    live = bound.adapter
+    live.token = live.runtime.boot(
+        live.token, live.runtime.get(bound.target.station).identity
+    )
+    live.runtime.physical_phase_authorized = lambda target: False
+    await physical_report(peer, "RST")
+    assert not live.runtime.get(bound.target.station).physical_phases
+
+
+async def test_boot_notification_identity_gates_reference_feedback(reference):
+    from ocpp.v21 import call
+
+    bound, peer, source, _ = reference
+    await peer.call(
+        call.BootNotification(
+            charging_station={
+                "vendor_name": "Lutz",
+                "model": "Lutz-EVSE-DIN",
+                "serial_number": "4C75747A00000001",
+                "firmware_version": "test-verified",
+            },
+            reason="PowerUp",
+        ),
+        suppress=False,
+    )
+    await physical_report(peer, "RST")
+    assert source.capabilities(bound.target) is not None
+    assert source.current_mode(bound.target).count == 3

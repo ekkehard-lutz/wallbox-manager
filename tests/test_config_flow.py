@@ -101,6 +101,8 @@ async def test_reference_options_form_serializes():
         fields = {f["name"]: f for f in payload["data_schema"]}
         assert fields["reference_verified"]["type"] == "boolean"
         assert fields["reference_min_a"]["type"] == "float"
+        for key in ("reference_vendor", "reference_model", "reference_serial"):
+            assert fields[key]["type"] == "string"
         result = await flow.async_step_init({"reference_verified": True})
         assert result["errors"] == {"base": "invalid_reference"}
         result = await flow.async_step_init({"reference_verified": False})
@@ -137,3 +139,28 @@ def test_reference_verification_and_limits_are_separate():
     data = validate_reference_options({**REFERENCE, "limit_1a": 7.5})
     assert data["reference_max_1a"] == 16
     assert data["limit_1a"] == 7.5
+
+
+@pytest.mark.parametrize("key", ["reference_vendor", "reference_model"])
+@pytest.mark.parametrize("value", [None, "", " ", " padded "])
+def test_identity_attestation_required(key, value):
+    from test_control_runtime import REFERENCE
+
+    from custom_components.wallbox_manager.config_flow import validate_reference_options
+
+    options = dict(REFERENCE)
+    if value is None:
+        options.pop(key)
+    else:
+        options[key] = value
+    with pytest.raises(ValueError):
+        validate_reference_options(options)
+
+
+def test_serial_attestation_is_optional():
+    from test_control_runtime import REFERENCE
+
+    from custom_components.wallbox_manager.config_flow import validate_reference_options
+
+    options = {k: v for k, v in REFERENCE.items() if k != "reference_serial"}
+    assert validate_reference_options(options) == options

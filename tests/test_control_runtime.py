@@ -260,6 +260,9 @@ REFERENCE = {
     "reference_verified": True,
     "reference_station_id": "station",
     "reference_firmware": "test-verified",
+    "reference_vendor": "Lutz",
+    "reference_model": "Lutz-EVSE-DIN",
+    "reference_serial": "4C75747A00000001",
     "reference_min_a": 6,
     "reference_max_1a": 16,
     "reference_max_3a": 16,
@@ -294,7 +297,7 @@ async def test_explicit_reference_source(manual):
     live.token = live.runtime.boot(
         live.token,
         StationIdentity(
-            "wallbox-stationary", "wallbox-stationary", firmware="test-verified"
+            "Lutz", "Lutz-EVSE-DIN", serial="4C75747A00000001", firmware="test-verified"
         ),
     )
     live.runtime._publish(

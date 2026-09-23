@@ -68,6 +68,9 @@ REFERENCE_FIELDS = {
     "reference_verified": bool,
     "reference_station_id": str,
     "reference_firmware": str,
+    "reference_vendor": str,
+    "reference_model": str,
+    "reference_serial": str,
     "reference_min_a": vol.Coerce(float),
     "reference_max_1a": vol.Coerce(float),
     "reference_max_3a": vol.Coerce(float),
@@ -79,9 +82,15 @@ REFERENCE_FIELDS = {
 def validate_reference_options(data):
     if data.get("reference_verified") is not True:
         return {}
-    if any(key not in data for key in REFERENCE_FIELDS):
+    if any(key not in data for key in REFERENCE_FIELDS if key != "reference_serial"):
         raise ValueError("complete reference verification required")
-    for key in ("reference_station_id", "reference_firmware"):
+    for key in (
+        "reference_station_id",
+        "reference_firmware",
+        "reference_vendor",
+        "reference_model",
+        *(["reference_serial"] if "reference_serial" in data else []),
+    ):
         if not data[key].strip() or data[key] != data[key].strip():
             raise ValueError("nonempty reference identity required")
     from .core.models import StationId

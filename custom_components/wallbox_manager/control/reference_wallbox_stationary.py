@@ -1,6 +1,6 @@
 """Explicit operator-attested reference fixture, never automatic discovery.
 
-Selection requires exact station/firmware and default wallbox-stationary identity,
+Selection requires an explicitly attested OCPP station/vendor/model/firmware identity,
 plus an acknowledgement that physical L1 / L1-L2-L3 atomic switching and electrical
 bounds were verified. A setting alone is not automatic hardware verification.
 """
@@ -24,19 +24,39 @@ class WallboxStationaryReference:
         self.target = EvseId(StationId(options["reference_station_id"]), "1")
         self.modes = (PhaseMode((Phase.L1,)), PhaseMode(tuple(Phase)))
 
-    def capabilities(self, target):
+    def matches_identity(self, target):
+        """One fail-closed identity gate for capabilities and physical feedback."""
         state = self.runtime.get(target.station)
-        if (
-            target != self.target
-            or state is None
-            or not state.connected
-            or state.protocol_version != "2.1"
-            or state.identity.vendor != "wallbox-stationary"
-            or state.identity.model != "wallbox-stationary"
-            or state.identity.firmware != self.options["reference_firmware"]
-            or self.options.get("reference_verified") is not True
+        required = ("station_id", "vendor", "model", "firmware")
+        if any(
+            not isinstance(self.options.get(f"reference_{key}"), str)
+            or not self.options[f"reference_{key}"].strip()
+            for key in required
         ):
+            return False
+        return (
+            target == self.target
+            and target.station.value == self.options["reference_station_id"]
+            and state is not None
+            and state.connected
+            and state.protocol_version == "2.1"
+            and self.options.get("reference_verified") is True
+            and state.identity.vendor == self.options["reference_vendor"]
+            and state.identity.model == self.options["reference_model"]
+            and state.identity.firmware == self.options["reference_firmware"]
+            and (
+                "reference_serial" not in self.options
+                or (
+                    bool(self.options["reference_serial"])
+                    and state.identity.serial == self.options["reference_serial"]
+                )
+            )
+        )
+
+    def capabilities(self, target):
+        if not self.matches_identity(target):
             return None
+        state = self.runtime.get(target.station)
         evidence = CapabilityEvidence(
             EvidenceState.VERIFIED,
             "operator_verified:wallbox-stationary",
