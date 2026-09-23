@@ -134,8 +134,11 @@ class ControlRuntime:
 
     def attributes(self, target):
         intent = self.intent(target)
-        _, _, blocked = self.resolve(target)
+        inputs, _, blocked = self.resolve(target)
         return {
+            "physical_phase_mode": [p.value for p in inputs.current_mode.phases]
+            if inputs and inputs.current_mode
+            else None,
             "execution_ready": blocked is None and self.adapter(target) is not None,
             "execution_blocked_reason": blocked
             or ("adapter_unavailable" if self.adapter(target) is None else None),
@@ -164,7 +167,7 @@ class ControlRuntime:
             return None
         token = self.runtime.get(target.station).token
 
-        def current():
+        def current(*, after_dispatch=False):
             if (
                 self._closed
                 or generation != intent.generation
@@ -172,6 +175,22 @@ class ControlRuntime:
             ):
                 return False
             fresh, result, reason = self.resolve(target)
+            if after_dispatch and fresh is not None:
+                # Relay feedback is expected to change during an accepted phase
+                # transition. It must not relabel that acceptance as rejection.
+                # Keep desired/generation, electrical evidence and limit fences.
+                fresh = replace(
+                    fresh,
+                    current_mode=inputs.current_mode,
+                    eligible_modes=inputs.eligible_modes,
+                )
+                return fresh == inputs and (
+                    not resolved.point.charging
+                    or fresh.voltage.active_voltages(
+                        resolved.point.mode, datetime.now(UTC)
+                    )
+                    == resolved.point.phase_voltages_v
+                )
             return reason is None and fresh == inputs and result.point == resolved.point
 
         intent.status = "pending"
@@ -180,7 +199,7 @@ class ControlRuntime:
             adapter, resolved.point, is_current=current
         )
         if generation != intent.generation or (
-            result.status == CommandStatus.APPLIED and not current()
+            result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
         ):
             result = stale_command_result()
         if generation == intent.generation:

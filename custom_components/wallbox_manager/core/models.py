@@ -120,3 +120,28 @@ class VoltageObservation:
         if any(p not in samples for p in mode.phases):
             return None
         return tuple(samples[p] for p in mode.phases)
+
+
+@dataclass(frozen=True)
+class PhysicalPhaseObservation:
+    """Hardware-backed conductor state; unknown is explicit, never desired state."""
+
+    scope: EvseId
+    mode: PhaseMode | None
+    observed_at: datetime
+    valid_until: datetime
+    source: str
+
+    def __post_init__(self):
+        if not isinstance(self.scope, EvseId):
+            raise ValueError("physical phase state requires EVSE scope")
+        if self.mode is not None and not isinstance(self.mode, PhaseMode):
+            raise ValueError("invalid physical phase state")
+        timestamp(self.observed_at)
+        timestamp(self.valid_until)
+        nonempty(self.source)
+        if self.valid_until <= self.observed_at:
+            raise ValueError("physical phase evidence requires a positive lifetime")
+
+    def fresh(self, now):
+        return self.observed_at <= now < self.valid_until

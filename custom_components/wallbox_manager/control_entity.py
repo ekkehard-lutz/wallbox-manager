@@ -130,6 +130,12 @@ class ControlEntity(RestoreEntity):
             if snapshot and snapshot.connected
             else []
         )
+        if snapshot and snapshot.connected:
+            deadlines.extend(
+                o.valid_until
+                for o in snapshot.physical_phases
+                if o.scope == self.target and o.valid_until > now
+            )
         if deadlines:
             self._expire = async_track_point_in_utc_time(
                 self.hass, self._expired, min(deadlines)

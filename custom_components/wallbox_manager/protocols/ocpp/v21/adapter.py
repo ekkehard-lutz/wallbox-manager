@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from fractions import Fraction
 
 from ocpp.exceptions import OCPPError
+from ocpp.routing import on
 from ocpp.v21 import ChargePoint, call
 from websockets.exceptions import ConnectionClosed
 
@@ -23,6 +24,7 @@ from ....core.capabilities import CapabilityEvidence, CapabilitySnapshot, Eviden
 from ....core.models import EvseId, PhaseMode
 from ....solver.operating_point import OperatingPoint
 from ..common.inventory import InventoryAdapter
+from .phase_feedback import accept_phase_events
 
 # Context follows DiscoveryAdapter's session-owned task, without contaminating
 # concurrent discovery calls or inbound CALLRESULTs on the same adapter.
@@ -36,6 +38,11 @@ class _DispatchRefused(Exception):
 
 class Adapter(InventoryAdapter, ChargePoint):
     """Station transport; control bindings share its serialized outbound queue."""
+
+    @on("NotifyEvent")
+    def on_notify_event(self, event_data, **kwargs):
+        accept_phase_events(self.runtime, self.token, event_data)
+        return self._call_result.NotifyEvent()
 
     def bind_control(
         self,

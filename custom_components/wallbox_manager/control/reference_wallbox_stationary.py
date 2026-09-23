@@ -5,6 +5,8 @@ plus an acknowledgement that physical L1 / L1-L2-L3 atomic switching and electri
 bounds were verified. A setting alone is not automatic hardware verification.
 """
 
+from datetime import UTC, datetime
+
 from ..core.capabilities import (
     CapabilityEvidence,
     CapabilitySnapshot,
@@ -68,7 +70,11 @@ class WallboxStationaryReference:
 
     def phase_operation_evidence(self, snapshot, mode):
         current = self.capabilities(snapshot.scope)
-        if current == snapshot and mode in self.modes:
+        if (
+            current == snapshot
+            and mode in self.modes
+            and self.current_mode(snapshot.scope) is not None
+        ):
             return next(e.evidence for e in snapshot.envelopes if e.mode == mode)
         return None
 
@@ -81,5 +87,15 @@ class WallboxStationaryReference:
         )
 
     def current_mode(self, target):
-        # Neither current draw nor last requested mode proves physical switch state.
+        if self.capabilities(target) is None:
+            return None
+        state = self.runtime.get(target.station)
+        for observed in state.physical_phases:
+            if (
+                observed.scope == target
+                and observed.source
+                == "ocpp2.1:wallbox-stationary:Connector.PhaseRotation"
+                and observed.fresh(datetime.now(UTC))
+            ):
+                return observed.mode
         return None

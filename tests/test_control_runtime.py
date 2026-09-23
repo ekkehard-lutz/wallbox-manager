@@ -268,6 +268,26 @@ REFERENCE = {
 }
 
 
+async def physical_report(peer, value, at=None, **changes):
+    from ocpp.v21 import call
+
+    at = (at or datetime.now(UTC)).isoformat()
+    event = {
+        "event_id": 0,
+        "timestamp": at,
+        "component": {"name": "Connector", "evse": {"id": 1, "connector_id": 1}},
+        "variable": {"name": "PhaseRotation"},
+        "actual_value": value,
+        "event_notification_type": "HardWiredNotification",
+        "trigger": "Periodic",
+        **changes,
+    }
+    await peer.call(
+        call.NotifyEvent(generated_at=at, seq_no=0, tbc=False, event_data=[event]),
+        suppress=False,
+    )
+
+
 async def test_explicit_reference_source(manual):
     _, bound, peer, _, _, server = manual
     live = bound.adapter
@@ -283,6 +303,7 @@ async def test_explicit_reference_source(manual):
     source = WallboxStationaryReference(live.runtime, REFERENCE)
     control = create_control_runtime(live.runtime, server, source)
     measured(live.runtime, live.token, bound.target)
+    await physical_report(peer, "Rxx")
     assert (
         await control.change(bound.target, target_w=4000, allowed=True)
     ).status == CommandStatus.APPLIED

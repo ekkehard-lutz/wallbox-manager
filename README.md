@@ -133,11 +133,27 @@ EVSE-scoped per-phase L-N MeterValues. Set desired watts/direction, then enable
 requested charging and inspect both command status and measured charging behavior.
 Use the device's own controls to stop: this integration cannot yet stop it.
 
-The current reference source has no trustworthy physical switch-position
-observation, so `current_mode` remains unknown and its retention preference is
-inactive. Do not infer phase mode from low/zero vehicle current. Generic runtime
-providers can supply a verified current mode (covered by tests); a trustworthy
-reference-device observation is still needed to test retention on physical hardware.
+The reference source now consumes fresh physical feedback from the station's
+standard OCPP 2.1 `NotifyEvent` reporting of `Connector.PhaseRotation`: `Rxx`
+means L1, `RST` means L1/L2/L3, and an empty value means unknown. This interpretation
+is restricted to the verified wallbox-stationary wiring, EVSE 1 / connector 1.
+It does not enable generic chargers or verify their capabilities.
+
+Deploy the station feedback implementation and set its `[ocpp] firmware_version`
+to the exact manually verified build configured in the manager. Synchronize both
+hosts' UTC clocks. Reports expire after five seconds and are cleared on boot or
+connection changes; absent/unknown feedback blocks reference phase operations.
+Inspect the existing control entities' `physical_phase_mode` attribute. Requested
+profiles and measured current never establish this attribute.
+
+The software is ready for a supervised retention/transition hardware test: confirm
+physical feedback, request a target within the configured deviation in the current
+mode, check that the relay stays put, then request a target for which another
+verified mode is appropriate and confirm the new reported position. First verify
+that GPIO 5 really follows the installed phase switch (0 = L1, 1 = L1/L2/L3).
+This feedback cannot independently detect welded power contacts or a broken
+pulled-down signal wire. Hardware behavior has not been tested by the automated
+suite. See [physical feedback details](docs/architecture.md#physical-phase-feedback).
 
 ## Architecture
 

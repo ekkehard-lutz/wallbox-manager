@@ -249,11 +249,55 @@ UNSUPPORTED. Options changes reload without sending control.
 Current discovery still cannot verify electrical envelopes, physical mappings,
 atomic switching safety or immediate transaction-profile behavior. Without the
 explicit source (or another verified provider), execution fails closed while
-entities stay present. The reference source deliberately reports current physical
-mode as unknown: the current telemetry contract contains no trustworthy switch
-position. A successful requested mode or vehicle current is not substituted for
-that observation. Retention becomes effective only when a source supplies a known
-current physical mode. Tests cover this via explicit normalized fixtures.
+entities stay present. Physical feedback supplies current mode, not capability
+verification. Requested mode and vehicle current never substitute for feedback.
+
+### Physical phase feedback
+
+The reference station samples its existing GPIO 5 phase-switch feedback through
+`WallboxDomain.read_physical_phase_mode()`: 0 means L1 and 1 means L1/L2/L3.
+It reads the hardware rather than the cached/requested `wb_phase_mode`. Startup
+before readiness, an active transition/pulse, an unavailable domain lock, invalid
+signal or read failure yields unknown. After a failed transition a readable,
+settled physical position may still be reported; it is never replaced by the
+failed request. No additional persistent phase state is introduced.
+
+Standard OCPP 2.1 is sufficient: the OCA Device Model defines `PhaseRotation`
+as actual wiring relative to the upstream phases, with `x` for a disconnected
+phase and an empty value for unknown. See the
+[OCA OCPP 2.1 appendices](https://openchargealliance.org/my-oca/ocpp/).
+The station sends `NotifyEvent` with `Connector` EVSE 1 / connector 1,
+`PhaseRotation`, `HardWiredNotification`, `Periodic`, and Actual values `Rxx`,
+`RST` or empty. `SupplyPhases` or a profile's `numberPhases` alone would not prove
+physical conductor selection. No vendor variable or DataTransfer is required;
+the GPIO-to-conductor interpretation remains reference-device-specific.
+
+The station samples every second after registration (outbound call waits can
+lengthen this interval), using fresh UTC timestamps, including after reconnect.
+The manager normalizes accepted reference reports into `PhysicalPhaseObservation`
+in the existing station snapshot. Evidence expires five seconds after observation.
+It requires the current connection token, a timestamp at or after the current
+boot/connection epoch, and a non-future timestamp. Older reports cannot overwrite
+newer ones; conflicting equal-time reports invalidate the mode. Boot/disconnect
+clears observations. Synchronize the hosts' clocks; stale/future data fails closed.
+Unknown/expired feedback inhibits reference phase operations and retention.
+Generic station capability discovery is unchanged. The explicitly enabled source
+still requires matching station identity and exact firmware; the station's optional
+`[ocpp] firmware_version` must identify the manually verified installed build.
+
+Existing control entities expose `physical_phase_mode` as phase names or null.
+Expiry refreshes diagnostics without issuing commands. All pre-dispatch fences,
+including after OCPP queue waits, remain active. Post-dispatch result handling
+allows the expected physical-mode/eligibility change during a successful transition
+while preserving intent, generation, electrical evidence, limits and voltage fences.
+Acceptance itself does not establish physical state. The solver is unchanged.
+
+The automated suites exercise both real OCPP message paths without hardware.
+The supervised physical retention/transition test is software-ready, conditional
+on verifying the installation's GPIO feedback and reference electrical limits.
+GPIO feedback is not an independent measurement of power-contact continuity:
+welded contacts and a broken pulled-down signal wire cannot be excluded by this
+single input. No hardware validation or universal OCPP compatibility is claimed.
 
 ### Phase-retention solver preference
 
@@ -301,7 +345,8 @@ Sessions expose nine entities while retaining charging state internally. See the
 [implemented metering/runtime contract](metering-runtime-state.md) for timestamps,
 normalization, freshness, scope, invalidation and limitations. Session ledgers are
 implemented separately as described below; authority/authorization logic remains
-unimplemented. NotifyEvent stays ACK-only;
+unimplemented. NotifyEvent stays ACK-only except for the isolated OCPP 2.1
+reference physical-phase observation above;
 tokenless transaction events receive an empty result, and optional idToken inputs
 receive Unknown token status without authorization processing.
 
