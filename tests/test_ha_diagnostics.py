@@ -161,7 +161,7 @@ async def test_multiple_stations_read_only_generic_entities(diagnostics):
     all_entities = [e for p in platforms for e in p.entities.values()]
     assert len(all_entities) == 12
     assert len({e.unique_id for e in all_entities}) == 12
-    assert PLATFORMS == ("binary_sensor", "sensor")
+    assert PLATFORMS == ("binary_sensor", "sensor", "switch", "number", "select")
     for e in all_entities:
         assert not e.should_poll
         assert e.entity_category == EntityCategory.DIAGNOSTIC

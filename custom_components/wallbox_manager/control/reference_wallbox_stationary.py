@@ -1,0 +1,85 @@
+"""Explicit operator-attested reference fixture, never automatic discovery.
+
+Selection requires exact station/firmware and default wallbox-stationary identity,
+plus an acknowledgement that physical L1 / L1-L2-L3 atomic switching and electrical
+bounds were verified. A setting alone is not automatic hardware verification.
+"""
+
+from ..core.capabilities import (
+    CapabilityEvidence,
+    CapabilitySnapshot,
+    ChargingEnvelope,
+    CurrentLimit,
+    EvidenceState,
+)
+from ..core.models import EvseId, Phase, PhaseMode, StationId
+
+
+class WallboxStationaryReference:
+    def __init__(self, runtime, options):
+        self.runtime = runtime
+        self.options = options
+        self.target = EvseId(StationId(options["reference_station_id"]), "1")
+        self.modes = (PhaseMode((Phase.L1,)), PhaseMode(tuple(Phase)))
+
+    def capabilities(self, target):
+        state = self.runtime.get(target.station)
+        if (
+            target != self.target
+            or state is None
+            or not state.connected
+            or state.protocol_version != "2.1"
+            or state.identity.vendor != "wallbox-stationary"
+            or state.identity.model != "wallbox-stationary"
+            or state.identity.firmware != self.options["reference_firmware"]
+            or self.options.get("reference_verified") is not True
+        ):
+            return None
+        evidence = CapabilityEvidence(
+            EvidenceState.VERIFIED,
+            "operator_verified:wallbox-stationary",
+            state.capabilities.observed_at,
+        )
+        return CapabilitySnapshot(
+            target,
+            state.identity.firmware,
+            state.token.connection_generation,
+            state.token.boot_generation,
+            state.capabilities.revision,
+            state.capabilities.observed_at,
+            evidence.source,
+            tuple(
+                ChargingEnvelope(
+                    mode,
+                    self.options["reference_min_a"],
+                    self.options[f"reference_max_{mode.count}a"],
+                    1,
+                    evidence,
+                )
+                for mode in self.modes
+            ),
+            CapabilityEvidence(
+                EvidenceState.UNSUPPORTED,
+                evidence.source,
+                evidence.observed_at,
+                "stop_unimplemented",
+            ),
+        )
+
+    def phase_operation_evidence(self, snapshot, mode):
+        current = self.capabilities(snapshot.scope)
+        if current == snapshot and mode in self.modes:
+            return next(e.evidence for e in snapshot.envelopes if e.mode == mode)
+        return None
+
+    def limits(self, target):
+        return tuple(
+            CurrentLimit(
+                mode, 0, self.options[f"limit_{mode.count}a"], "configured_site_limit"
+            )
+            for mode in self.modes
+        )
+
+    def current_mode(self, target):
+        # Neither current draw nor last requested mode proves physical switch state.
+        return None

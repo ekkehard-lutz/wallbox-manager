@@ -8,7 +8,7 @@ from math import ceil, floor
 from ..control.requests import Direction, PowerRequest
 from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import PhaseMode, VoltageObservation
-from ..core.values import timestamp
+from ..core.values import scalar, timestamp
 from .operating_point import OperatingPoint, Reason, ResultStatus, SolverResult
 
 
@@ -21,6 +21,7 @@ def solve(
     eligible_modes: Iterable[PhaseMode],
     current_mode: PhaseMode | None = None,
     limits: Iterable[CurrentLimit] = (),
+    phase_switch_deviation_pct: Fraction = Fraction(0),
 ) -> SolverResult:
     """Select among verified modes within all supplied hard current intervals.
 
@@ -29,12 +30,17 @@ def solve(
     normalize broader/narrower readings to that scope after checking applicability.
     Caller supplies fresh installation/station/session limits on every solve.
     No measured EV consumption is inspected and no acceptance limit is inferred.
+    Optional current-mode retention applies only after direction/hard constraints.
+    Existing callers default to 0%; the manual runtime explicitly supplies 5%.
 
     Each mode's linear power grid needs only its endpoints and the two indices
     bracketing the target. This is equivalent to full enumeration without memory
     or runtime proportional to the number of current steps.
     """
     timestamp(now)
+    tolerance = scalar(phase_switch_deviation_pct)
+    if tolerance > 25:
+        raise ValueError("phase retention tolerance must be between 0 and 25 percent")
     eligible = frozenset(eligible_modes)
     if any(not isinstance(mode, PhaseMode) for mode in eligible):
         raise ValueError("invalid eligible phase mode")
@@ -143,6 +149,14 @@ def solve(
             suggested=min(candidates, key=nearest_key),
         )
     chosen = min(directional, key=nearest_key)
+    if request.target_w > 0 and current_mode is not None:
+        retained = [p for p in directional if p.charging and p.mode == current_mode]
+        if retained:
+            candidate = min(retained, key=nearest_key)
+            if abs(candidate.offered_power_w - request.target_w) * 100 <= (
+                request.target_w * tolerance
+            ):
+                chosen = candidate
     return SolverResult(
         ResultStatus.FEASIBLE if chosen.charging else ResultStatus.OFF,
         Reason.SELECTED if chosen.charging else Reason.OFF_SELECTED,

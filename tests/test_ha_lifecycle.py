@@ -43,7 +43,7 @@ async def test_setup_without_wallbox_and_unload(tmp_path):
     try:
         assert await async_setup_entry(hass, config)
         hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
-            config, ("binary_sensor", "sensor")
+            config, ("binary_sensor", "sensor", "switch", "number", "select")
         )
         server = config.runtime_data.server
         assert config.runtime_data.state.stations == ()

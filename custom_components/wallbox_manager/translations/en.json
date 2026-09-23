@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "Host an OCPP endpoint for incoming wallbox connections on a trusted local network. Charging control is not available yet. Configure the wallbox to connect to ws://HA-address:port/station-id.",
+        "description": "Host an OCPP endpoint on a trusted local network. Manual control requires explicitly verified capabilities. Configure the wallbox to connect to ws://HA-address:port/station-id.",
         "data": {
           "host": "Local bind address",
           "port": "WebSocket port"
@@ -131,6 +131,50 @@
       "session_end_meter": {
         "name": "{scope} Session end meter"
       }
+    },
+    "switch": {
+      "charging_enabled": {
+        "name": "{scope} Charging enabled (requested)"
+      }
+    },
+    "number": {
+      "desired_charging_power": {
+        "name": "{scope} Desired charging power"
+      },
+      "phase_switch_deviation_pct": {
+        "name": "{scope} Phase retention deviation"
+      }
+    },
+    "select": {
+      "power_approximation": {
+        "name": "{scope} Power approximation",
+        "state": {
+          "down": "Do not exceed",
+          "nearest": "Nearest power",
+          "up": "Do not fall below"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "wallbox-stationary reference verification",
+        "description": "Only for manually verified wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomic switching, 1 A grid. Identity and firmware must match. Complete all fields before enabling. Disabling removes this evidence source; it does not send a stop.",
+        "data": {
+          "reference_verified": "I verified the reference device and safe phase switching (enable)",
+          "reference_station_id": "wallbox-stationary station ID",
+          "reference_firmware": "Exact verified firmware",
+          "reference_min_a": "Verified minimum current (A)",
+          "reference_max_1a": "Verified one-phase maximum (A)",
+          "reference_max_3a": "Verified three-phase maximum (A)",
+          "limit_1a": "Configured one-phase current limit (A)",
+          "limit_3a": "Configured three-phase current limit (A)"
+        }
+      }
+    },
+    "error": {
+      "invalid_reference": "Provide complete valid identity, firmware, verified current bounds and configured limits."
     }
   }
 }

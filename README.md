@@ -68,9 +68,76 @@ switching support. Fixed-phase devices can use their verified fixed mode.
 wallbox-stationary is the first reference/test device (EVSE 1, 1 A grid, verified
 1-/3-phase switching), not a default for other devices. Current discovery does not
 verify electrical envelopes or physical phase operations; control requires explicit
-capability/evidence providers. This does not establish universal OCPP 2.1 charger
-compatibility. OFF/enable-disable, HA control entities, OCPP 1.6J/2.0.1 charging
-control, charging strategies, Energy Manager and EV learning remain unimplemented.
+capability/evidence providers, including the opt-in reference source below. This does not establish universal OCPP 2.1 charger
+compatibility. Physical OFF/stop, OCPP 1.6J/2.0.1 charging control, charging
+strategies, Energy Manager and EV learning remain unimplemented.
+
+## Manual charging control (v0.2.x development)
+
+Known OCPP 2.1 EVSEs receive four stable Home Assistant entities:
+
+| Entity | Meaning |
+| --- | --- |
+| Charging enabled (requested) | User permission (`PowerRequest.allowed`); changing it retains desired power. |
+| Desired charging power | Requested watts, 0–100,000 W, 100 W UI step. This range is not a device rating. |
+| Power approximation | DOWN / NEAREST / UP: do not exceed / nearest power / do not fall below. Labels are localized. |
+| Phase retention deviation | 0–25%, 1% UI step, default 5%; prefer the known current physical mode within this deviation. |
+
+Each explicit edit passes through PowerRequest → verified capabilities, configured
+CurrentLimits and fresh measured L-N voltages → solver → OperatingPoint → command
+boundary → the EVSE-bound OCPP 2.1 adapter. Phase retention is considered **after**
+all hard limits and direction constraints. It never allows DOWN above target or
+UP below target. No raw current or physical phase controls are exposed.
+
+Entities remain editable while offline or without capabilities; attributes
+`execution_ready`, `execution_blocked_reason`, `control_status`, `solver_reason`,
+`command_status` and `command_reason` explain execution. Their primary states are
+**desired intent**, not measured output or proof of a stop. Physical stop remains
+unimplemented: turning permission off retains the requested watts and reports
+`stop_unverified` (or an unsupported adapter result if a solver resolves OFF).
+It never sends a zero-ampere substitute or reports a successful physical disable.
+A 0 W target alone is not permission off: with stop unsupported, UP/NEAREST may
+resolve the smallest positive offer under the existing solver rules.
+
+Only explicit edits dispatch. Telemetry, reconnects and restored HA state never
+send commands. Initial intent is disabled with 0 W; HA restores only desired
+values. After restart or a blocked/rejected operation, make an explicit edit when
+ready. Queued superseded requests are fenced; dispatched requests cannot be
+rolled back. APPLIED confirms acceptance, not measured charging power.
+
+### Explicit wallbox-stationary reference setup
+
+The integration's **Configure** options provide an isolated, operator-attested
+reference source. Leave it disabled for unknown devices. Before enabling, verify:
+
+- Exact OCPP station ID and reported firmware; reported vendor and model must both
+  be `wallbox-stationary`. This is identity matching on the existing trusted local
+  network, not authentication or automatic hardware verification.
+- EVSE 1, physical L1 and L1/L2/L3 modes, safe atomic phase/current switching,
+  immediate TxProfile transaction behavior and 1 A resolution on that firmware.
+- The actual verified minimum and each mode's maximum current, entered explicitly.
+  Enter installation/user current limits separately; they do not change capability
+  evidence. Zero configured maximum can inhibit a mode.
+
+The acknowledgement records manual verification; it must not be used to guess
+capabilities. Changing options reloads the integration and never sends a command.
+Clearing the acknowledgement removes the source, **without stopping the charger**.
+Only the configured station with matching identity/firmware receives this source.
+All other known EVSEs retain their entities but cannot execute without a verified
+source. Production discovery cannot currently establish these electrical facts.
+
+For the first hardware test, configure the listener and reference source, connect
+the verified firmware over OCPP 2.1, establish an active unambiguous EVSE 1
+transaction and device-side permission for remote control, and obtain fresh
+EVSE-scoped per-phase L-N MeterValues. Set desired watts/direction, then enable
+requested charging and inspect both command status and measured charging behavior.
+Use the device's own controls to stop: this integration cannot yet stop it.
+
+The current reference source has no trustworthy physical switch-position
+observation, so `current_mode` remains unknown and its retention preference is
+inactive. Do not infer phase mode from low/zero vehicle current. Generic runtime
+providers can supply a verified current mode (covered by tests); a trustworthy
+reference-device observation is still needed to test retention on physical hardware.
 
 ## Architecture
 
@@ -192,8 +259,8 @@ automations.
 ## Development status
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
-now includes the OCPP 2.1 charging adapter; HA controls and the planned Energy
-Manager interface remain future work.
+now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
+Charging profiles and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
 phase envelopes, voltage observations, power requests and solver results are
@@ -228,8 +295,8 @@ from `ocpp==2.1.0`; this is a tested foundation, not a full protocol implementat
 Smart-charging advertisements remain distinct from verified behavior. Physical
 current envelopes, physical phase switching and stop support stay unknown; no
 nominal current/phase limits are invented. Generic immutable runtime snapshots are
-consumed by push-based HA diagnostics and observed meter/state entities. No
-charging controls are exposed. Hardware validation with wallbox-stationary has
+consumed by push-based HA diagnostics and observed meter/state entities. Manual
+intent controls are exposed for known OCPP 2.1 EVSEs. Hardware validation with wallbox-stationary has
 confirmed capability-driven metering entities, connection-generation/liveness
 handling, session tracking and persistence, and session meter attribution. An
 actual network black-hole/DROP test confirmed OCPP reconnect, preservation of an

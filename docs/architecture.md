@@ -5,8 +5,8 @@ identity/capability/request contracts, the operating-point solver and the
 protocol-independent control command boundary are implemented.
 The read-only OCPP transport/discovery and scoped metering/runtime-state foundations
 and persistent session tracking are implemented. OCPP 2.1 transaction-scoped
-charging OperatingPoint dispatch is implemented; remaining runtime behavior
-below is planned.
+charging OperatingPoint dispatch and the first v0.2.x manual HA intent/runtime
+path are implemented; remaining runtime behavior below is planned.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -30,7 +30,8 @@ never authorize it. Non-OCPP adapters implement the same internal contracts.
 
 Paths below are beneath `custom_components/wallbox_manager/`. The core models,
 capabilities, control requests/commands, solver, generic discovery/runtime
-snapshots and OCPP adapters now exist; remaining runtime modules are proposed.
+snapshots, manual intent runtime and OCPP adapters now exist; other modules below
+are proposed unless marked as implemented.
 
 ```text
 __init__.py              HA setup/unload and config-entry runtime wiring
@@ -41,8 +42,10 @@ strings.json             canonical translatable UI messages
 translations/en.json     English strings
 translations/de.json     German strings
 sensor.py                metering, ownership, solver and capability diagnostics
-select.py                the five normal profile choices
-number.py                capability-derived product settings, no direct OCPP calls
+select.py                implemented power approximation direction
+number.py                implemented desired watts and phase-retention tolerance
+switch.py                implemented requested charging permission
+control_entity.py        implemented stable EVSE identities and intent restoration
 button.py                explicit supported maintenance actions
 entity.py                shared snapshot subscriptions and stable identities
 api.py                   versioned programmatic Energy Manager facade
@@ -58,6 +61,8 @@ control/
   energy_inputs.py       normalized energy-input snapshots and validity rules
   requests.py            PowerRequest and rounding direction
   commands.py            async control adapter contract, outcomes and validity fence
+  runtime.py             implemented manual intent -> solve -> dispatch
+  reference_wallbox_stationary.py  explicit operator-attested reference source
   ownership.py           state transitions and command fencing
   leases.py              authenticated owner leases and monotonic deadlines
   controller.py          intent -> solve -> dispatch -> reconcile
@@ -76,6 +81,7 @@ protocols/
     v16/adapter.py       OCPP 1.6J mapping and configuration discovery
     v201/adapter.py      OCPP 2.0.1 inventory and transaction mapping
     v21/adapter.py       OCPP 2.1 schemas and independently tested behavior
+    v21/control_runtime.py  live EVSE binding and measured voltage normalization
     extensions/
       registry.py       vendor/message/version routing and validation
       wallbox_stationary.py  verified first-device extension contract only
@@ -177,8 +183,92 @@ registration and protocol version cannot supply these proofs; production binding
 must obtain them explicitly. No universal OCPP 2.1 compatibility is claimed.
 
 OFF/enable-disable remains unsupported and never becomes a 0 A profile. OCPP
-1.6J/2.0.1 control, HA control entities, charging strategies, Energy Manager,
+1.6J/2.0.1 control, charging strategies, Energy Manager,
 ownership/leases, retries and failure counters remain unimplemented.
+
+## Implemented manual intent runtime and HA entities
+
+`control/runtime.py` owns one `ManualIntent` per EVSE: existing PowerRequest,
+phase-retention percentage (default 5), generation, SolverResult and CommandResult.
+`ControlInputs` only groups existing CapabilitySnapshot, VoltageObservation,
+CurrentLimit, eligible modes and optional current physical mode; it is not a
+capability registry. Providers are read on demand. The generic runtime imports
+neither HA nor OCPP and uses the existing solve/apply_operating_point boundaries.
+
+`switch.py`, `number.py` and `select.py` expose charging permission, desired watts
+(0–100,000 W / 100 W UI step), DOWN/NEAREST/UP approximation and retention tolerance
+(0–25% / 1%, default 5). Direction values remain stable while en/de labels are
+localized. Control identity includes config entry, station, EVSE and entity key.
+Known numeric OCPP 2.1 EVSEs get entities independently of verified capabilities.
+Registry identity restores offline entities; temporary disconnect, missing evidence
+or voltage expiry never removes them. Desired values remain editable and separate
+from execution/solver/command status attributes. No raw current or phase selector
+is added. The number's UI maximum is not a capability.
+
+The entry creates a generic ControlRuntime via `v21/control_runtime.py`. This
+protocol-layer binder selects only a live v21 station adapter and explicitly binds
+target EVSE, current capability provider and verified phase-operation evidence.
+Eligible modes require VERIFIED envelopes and VERIFIED operation proof. Voltage
+normalization uses exact EVSE-scoped, positive L-N phase readings with timestamps
+and deadlines, never nominal values, station-wide guesses or nonzero-current
+phase inference. Applicable CurrentLimits remain separate from capability data.
+The canonical session ledger must contain exactly one active transaction under
+the target EVSE; the wire adapter rechecks identity after its outbound lock.
+
+Every explicit edit increments an intent generation before any await. Resolving
+uses live capabilities, limits, voltages and known physical mode. The validity
+closure rechecks generation, connection/boot, fresh inputs and the resolved point,
+including after the OCPP queue wait. New requests may enqueue concurrently on the
+existing library serialization lock so older queued targets can be fenced. Late
+success cannot overwrite newer intent or claim current confirmation after inputs
+changed; no rollback is invented. There is no retry, auto-resume or command on
+telemetry. A telemetry/freshness timer only refreshes readiness attributes. An
+APPLIED result means protocol/device acceptance, never measured power.
+
+RestoreEntity restores desired fields only; loading enabled=True does not execute.
+Live user edits win over later restoration of the same field. Initial intent is
+allowed=False / 0 W. Permission off retains requested watts. If stop evidence is
+unverified the solver exposes STOP_UNVERIFIED; if it resolves OFF, v21 still
+returns UNSUPPORTED with no outbound request. Desired switch state never claims
+that the physical wallbox stopped. A new explicit edit is required after blocked
+execution or reconnection. Unload invalidates pending work before transport teardown.
+
+### Explicit reference capability source
+
+`control/reference_wallbox_stationary.py` is an isolated operator-attested source,
+selected only through an explicit options-flow acknowledgement and complete
+station ID, exact firmware, verified minimum/per-mode maximum currents and separate
+configured per-mode limits. The live identity must report vendor and model
+`wallbox-stationary` and the exact configured firmware over OCPP 2.1. These checks
+are not authentication or automated verification. They scope previously established
+manual device evidence to the live connection/boot. This source explicitly covers
+EVSE 1, physical L1 and L1/L2/L3, 1 A grid and verified atomic phase switching;
+none are defaults for generic adapters or unknown chargers. Stop evidence remains
+UNSUPPORTED. Options changes reload without sending control.
+
+Current discovery still cannot verify electrical envelopes, physical mappings,
+atomic switching safety or immediate transaction-profile behavior. Without the
+explicit source (or another verified provider), execution fails closed while
+entities stay present. The reference source deliberately reports current physical
+mode as unknown: the current telemetry contract contains no trustworthy switch
+position. A successful requested mode or vehicle current is not substituted for
+that observation. Retention becomes effective only when a source supplies a known
+current physical mode. Tests cover this via explicit normalized fixtures.
+
+### Phase-retention solver preference
+
+After verification, eligible modes, voltage freshness, device current grid,
+CurrentLimits and Direction filtering, select the closest valid current-mode
+candidate. For target > 0, retain it when
+`abs(offered_power - target_power) * 100 <= target_power * tolerance`.
+Otherwise use the existing closest directional candidate/tie-breaking. No division
+is needed at target zero; existing OFF/stop behavior remains authoritative. At 0%
+only an exact current-mode candidate receives this preference. The standalone
+solver's optional argument defaults to 0 for existing callers; manual control
+explicitly supplies its 5% default. The solver remains exact and deterministic;
+there is no time-based lockout. For example, at 230 V and 1 A grids, current 3P can
+retain 4,140 W for a 4,000 W NEAREST target at 5%, even though 1P/3,910 W is closer.
+For DOWN the same 4,140 W candidate is forbidden regardless of tolerance.
 
 ## Implemented transport/discovery foundation
 
@@ -260,8 +350,8 @@ evidence and retains known identity metadata in memory; reconnect needs no reloa
 Persisted HA listener configuration is untouched. Integration restart creates a
 fresh runtime and rediscovery. HA Device Registry retains station identities and
 learned metadata; runtime capabilities and control state are not persisted. This
-phase exposes read-only diagnostic entities, no HA charging-control API, and no
-EV-acceptance learning.
+phase exposes diagnostic entities and manual HA intent entities; EV-acceptance
+learning is not implemented.
 
 ## Implemented session tracking and persistence
 
@@ -289,7 +379,8 @@ creates connector meter entities. Completed power is zero. Saved active power do
 become live after restart. Store loads before listener admission, coalesces writes
 and flushes on unload/shutdown. `runtime.sessions.history(scope=None)` exposes
 immutable completed records for a future UI; no per-history HA entities exist.
-HA charging controls, authorization services and EV learning remain unimplemented.
+Manual HA charging intent is implemented separately below. Authorization services
+and EV learning remain unimplemented.
 
 ## Capability model
 
@@ -617,15 +708,18 @@ number of nonzero meter readings.
 
 Include OFF as a separate zero-power candidate when stopping is supported.
 DOWN chooses the largest feasible offer at or below target; UP the smallest at or
-above target; NEAREST minimizes absolute error, breaking ties toward the current
-mode, then lower power. Hard safety limits always win. If the directional set is
+above target; NEAREST minimizes absolute error. A configured phase-retention
+preference may retain a less-close direction-valid current-mode point as described
+above. Otherwise ties favor the current mode, then lower power. Hard safety limits
+always win. If the directional set is
 empty, return `unreachable` with bounds and a suggested feasible point, never
 silently claim that opposite rounding succeeded. A controller may request a new
 explicitly relaxed target; a hard budget cannot be relaxed. Below minimum, DOWN
 may select OFF, UP may select minimum if allowed, and NEAREST compares both.
 
 Example at 230 V, 1P 6–32 A, 3P 6–16 A, 1 A steps, both modes currently eligible:
-a 4,000 W request yields 1P/17 A/3,910 W with DOWN or NEAREST and
+without an applicable retention preference, a 4,000 W request yields
+1P/17 A/3,910 W with DOWN or NEAREST and
 1P/18 A/4,140 W with UP (tie against 3P/6 A favors current 1P mode).
 At 500 W, DOWN and NEAREST choose OFF and UP chooses 1P/6 A/1,380 W.
 Above 11,040 W, UP is unreachable in this envelope.

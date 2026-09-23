@@ -12,9 +12,11 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
+from .core.values import scalar
 
 
 def bind_address(value: str) -> str:
@@ -39,6 +41,11 @@ LISTENER_SCHEMA = vol.Schema(
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        return ReferenceOptionsFlow()
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -55,3 +62,59 @@ class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user", data_schema=LISTENER_SCHEMA, errors=errors
         )
+
+
+REFERENCE_FIELDS = {
+    "reference_verified": bool,
+    "reference_station_id": str,
+    "reference_firmware": str,
+    "reference_min_a": vol.Coerce(float),
+    "reference_max_1a": vol.Coerce(float),
+    "reference_max_3a": vol.Coerce(float),
+    "limit_1a": vol.Coerce(float),
+    "limit_3a": vol.Coerce(float),
+}
+
+
+def validate_reference_options(data):
+    if data.get("reference_verified") is not True:
+        return {}
+    if any(key not in data for key in REFERENCE_FIELDS):
+        raise ValueError("complete reference verification required")
+    for key in ("reference_station_id", "reference_firmware"):
+        if not data[key].strip() or data[key] != data[key].strip():
+            raise ValueError("nonempty reference identity required")
+    from .core.models import StationId
+
+    StationId(data["reference_station_id"])
+    for key in ("reference_min_a", "reference_max_1a", "reference_max_3a"):
+        value = scalar(data[key], positive=True)
+        if value.denominator != 1:
+            raise ValueError("reference device has a whole ampere grid")
+    for count in (1, 3):
+        if data[f"reference_max_{count}a"] < data["reference_min_a"]:
+            raise ValueError("invalid reference interval")
+        scalar(data[f"limit_{count}a"])
+    return data
+
+
+class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
+    async def async_step_init(self, user_input=None):
+        errors = {}
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    key,
+                    description={"suggested_value": self.config_entry.options.get(key)},
+                ): value
+                for key, value in REFERENCE_FIELDS.items()
+            }
+        )
+        if user_input is not None:
+            try:
+                data = validate_reference_options(schema(user_input))
+            except ValueError, vol.Invalid:
+                errors["base"] = "invalid_reference"
+            else:
+                return self.async_create_entry(title="", data=data)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

@@ -79,3 +79,61 @@ async def test_duplicate_listener_port_is_rejected():
     )
     with pytest.raises(AbortFlow, match="already_configured"):
         await flow.async_step_user({"host": "::", "port": 9000})
+
+
+async def test_reference_options_form_serializes():
+    from homeassistant.config_entries import ConfigEntries
+    from homeassistant.core import HomeAssistant
+    from test_ha_lifecycle import entry
+
+    from custom_components.wallbox_manager.config_flow import ReferenceOptionsFlow
+
+    hass = HomeAssistant("/tmp")
+    hass.config_entries = ConfigEntries(hass, {})
+    config = entry()
+    hass.config_entries._entries[config.entry_id] = config
+    flow = ReferenceOptionsFlow()
+    flow.hass = hass
+    flow.handler = config.entry_id
+    try:
+        result = await flow.async_step_init()
+        payload = FlowManagerIndexView(None)._prepare_result_json(result)
+        fields = {f["name"]: f for f in payload["data_schema"]}
+        assert fields["reference_verified"]["type"] == "boolean"
+        assert fields["reference_min_a"]["type"] == "float"
+        result = await flow.async_step_init({"reference_verified": True})
+        assert result["errors"] == {"base": "invalid_reference"}
+        result = await flow.async_step_init({"reference_verified": False})
+        assert result["type"] == "create_entry" and result["data"] == {}
+    finally:
+        await hass.async_stop()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"reference_firmware": ""},
+        {"reference_station_id": ""},
+        {"reference_min_a": 20},
+        {"reference_min_a": 6.5},
+        {"limit_1a": -1},
+        {"reference_max_3a": float("nan")},
+    ],
+)
+def test_reference_options_require_explicit_valid_evidence(change):
+    from test_control_runtime import REFERENCE
+
+    from custom_components.wallbox_manager.config_flow import validate_reference_options
+
+    with pytest.raises(ValueError):
+        validate_reference_options({**REFERENCE, **change})
+
+
+def test_reference_verification_and_limits_are_separate():
+    from test_control_runtime import REFERENCE
+
+    from custom_components.wallbox_manager.config_flow import validate_reference_options
+
+    data = validate_reference_options({**REFERENCE, "limit_1a": 7.5})
+    assert data["reference_max_1a"] == 16
+    assert data["limit_1a"] == 7.5

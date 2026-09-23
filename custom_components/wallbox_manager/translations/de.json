@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "OCPP-Endpunkt für eingehende Wallbox-Verbindungen im vertrauenswürdigen lokalen Netzwerk einrichten. Noch keine Ladesteuerung. Konfigurieren Sie die Wallbox für ws://HA-address:port/station-id.",
+        "description": "OCPP-Endpunkt im vertrauenswürdigen lokalen Netzwerk. Manuelle Steuerung benötigt ausdrücklich verifizierte Fähigkeiten. Wallbox-Verbindung: ws://HA-address:port/station-id.",
         "data": {
           "host": "Lokale Bind-Adresse",
           "port": "WebSocket-Port"
@@ -131,6 +131,50 @@
       "session_end_meter": {
         "name": "{scope} Session End-Zählerstand"
       }
+    },
+    "switch": {
+      "charging_enabled": {
+        "name": "{scope} Laden erlaubt (Wunsch)"
+      }
+    },
+    "number": {
+      "desired_charging_power": {
+        "name": "{scope} Gewünschte Ladeleistung"
+      },
+      "phase_switch_deviation_pct": {
+        "name": "{scope} Abweichung für Phasenbeibehaltung"
+      }
+    },
+    "select": {
+      "power_approximation": {
+        "name": "{scope} Leistungsannäherung",
+        "state": {
+          "down": "Nicht überschreiten",
+          "nearest": "Nächstgelegene Leistung",
+          "up": "Nicht unterschreiten"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "wallbox-stationary Referenzprüfung",
+        "description": "Nur für manuell geprüfte wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomarer Phasenwechsel, 1-A-Raster. Identität und Firmware müssen übereinstimmen. Alle Werte vor Aktivierung eingeben. Deaktivieren entfernt die Freigabe; es sendet keinen Stopp.",
+        "data": {
+          "reference_verified": "Referenzgerät und sicheren Phasenwechsel geprüft (aktivieren)",
+          "reference_station_id": "wallbox-stationary Stations-ID",
+          "reference_firmware": "Exakt geprüfte Firmware",
+          "reference_min_a": "Geprüfter Mindeststrom (A)",
+          "reference_max_1a": "Geprüfter Maximalstrom einphasig (A)",
+          "reference_max_3a": "Geprüfter Maximalstrom dreiphasig (A)",
+          "limit_1a": "Konfiguriertes Stromlimit einphasig (A)",
+          "limit_3a": "Konfiguriertes Stromlimit dreiphasig (A)"
+        }
+      }
+    },
+    "error": {
+      "invalid_reference": "Identität, Firmware, geprüfte Stromgrenzen und konfigurierte Limits vollständig und gültig eingeben."
     }
   }
 }
