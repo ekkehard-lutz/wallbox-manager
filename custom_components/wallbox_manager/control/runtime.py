@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fractions import Fraction
 
+from ..core.authority import ControlAuthority
 from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
@@ -18,6 +19,7 @@ from .commands import (
     apply_operating_point,
     permission_available,
     stale_command_result,
+    take_control,
 )
 from .requests import Direction, PowerRequest
 
@@ -61,6 +63,7 @@ class ControlRuntime:
         blocker=lambda target: None,
         *,
         electrical_capabilities=lambda target: (),
+        authority_adapter=lambda station: None,
     ):
         self.runtime = runtime
         self.inputs = inputs
@@ -71,6 +74,9 @@ class ControlRuntime:
         self._listeners = set()
         self._closed = False
         self._inactive = set()
+        self.authority_adapter = authority_adapter
+        self._takeover_generations = {}
+        self.takeover_results = {}
         self.electrical_capabilities = electrical_capabilities
         self._unsubscribe_defaults = runtime.subscribe(self._initialize_defaults)
         for snapshot in runtime.stations:
@@ -178,6 +184,8 @@ class ControlRuntime:
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
             return None, None, "disconnected"
+        if self.runtime.authority(target.station) != ControlAuthority.REMOTE:
+            return None, None, "no_authority"
         inputs = self.inputs(target)
         if inputs is None:
             return None, None, "capabilities_unavailable"
@@ -231,6 +239,7 @@ class ControlRuntime:
         intent = self.intent(target)
         inputs, _, blocked = self.resolve(target)
         return {
+            "control_authority": self.runtime.authority(target.station).value,
             "physical_phase_mode": [p.value for p in inputs.current_mode.phases]
             if inputs and inputs.current_mode
             else None,
@@ -259,9 +268,34 @@ class ControlRuntime:
         ):
             self._inactive.add(target)
         self._edited.setdefault(target, set()).update(changes)
+        return await self.apply_stored(
+            target, synchronize_permission="allowed" in changes
+        )
+
+    async def apply_stored(
+        self, target, *, synchronize_permission=True, fence=lambda: True
+    ):
+        """Execute saved intent once, only after an explicit authorized action."""
+        intent = self.intent(target)
         generation = intent.generation
-        if "allowed" in changes and not intent.request.allowed:
-            return await self._permission(target, intent, generation, False)
+        state = self.runtime.get(target.station)
+        blocked = (
+            "disconnected"
+            if self._closed or state is None or not state.connected
+            else "no_authority"
+            if self.runtime.authority(target.station) != ControlAuthority.REMOTE
+            else "adapter_unavailable"
+            if self.adapter(target) is None
+            else None
+        )
+        if blocked:
+            intent.status = blocked
+            self.publish(target)
+            return None
+        if synchronize_permission and not intent.request.allowed:
+            return await self._permission(
+                target, intent, generation, False, fence=fence
+            )
         if not intent.request.allowed:
             intent.status = "charging_disabled"
             self.publish(target)
@@ -270,7 +304,7 @@ class ControlRuntime:
         intent.solver_result = resolved
         if (
             inputs is not None
-            and "allowed" in changes
+            and synchronize_permission
             and not permission_available(self.adapter(target))
         ):
             result = CommandResult(
@@ -287,13 +321,19 @@ class ControlRuntime:
             intent.status = blocked or "adapter_unavailable"
             self.publish(target)
             return None
-        token = self.runtime.get(target.station).token
+        state = self.runtime.get(target.station)
+        token = state.token
+        authority_revision = state.authority_revision
 
         def current(*, after_dispatch=False):
             if (
                 self._closed
+                or not fence()
                 or generation != intent.generation
                 or not self.runtime.current(token)
+                or self.runtime.authority(target.station) != ControlAuthority.REMOTE
+                or self.runtime.get(target.station).authority_revision
+                != authority_revision
             ):
                 return False
             fresh, result, reason = self.resolve(target)
@@ -323,7 +363,7 @@ class ControlRuntime:
         )
         if (
             result.status == CommandStatus.APPLIED
-            and "allowed" in changes
+            and synchronize_permission
             and intent.request.allowed
         ):
             result = await self._permission(
@@ -360,12 +400,16 @@ class ControlRuntime:
                 CommandReason.UNSUPPORTED_OPERATION,
             )
         token = state.token
+        authority_revision = state.authority_revision
 
         def current():
             return (
                 not self._closed
                 and intent.generation == generation
                 and self.runtime.current(token)
+                and self.runtime.authority(target.station) == ControlAuthority.REMOTE
+                and self.runtime.get(target.station).authority_revision
+                == authority_revision
                 and fence()
             )
 
@@ -378,4 +422,50 @@ class ControlRuntime:
             intent.command_result = result
             intent.status = result.status.value
             self.publish(target)
+        return result
+
+    async def take_control(self, station):
+        """Explicit acquisition, followed by one fenced application of saved intent.
+
+        Ordinary edits never call this. Future profile selection can intentionally
+        reuse it. Concurrent edits/new presses invalidate the pending synchronization.
+        """
+        state = self.runtime.get(station)
+        adapter = self.authority_adapter(station)
+        if self._closed or state is None or not state.connected or adapter is None:
+            return CommandResult(
+                CommandStatus.UNSUPPORTED,
+                ControlArea.AUTHORITY,
+                CommandReason.UNSUPPORTED_OPERATION,
+            )
+        generation = self._takeover_generations.get(station, 0) + 1
+        self._takeover_generations[station] = generation
+        token = state.token
+        targets = state.connectors
+        intents = {target: self.intent(target).generation for target in targets}
+
+        def current():
+            return (
+                not self._closed
+                and self.runtime.current(token)
+                and self._takeover_generations.get(station) == generation
+                and self.runtime.get(station).connectors == targets
+                and all(self.intent(t).generation == g for t, g in intents.items())
+            )
+
+        result = await take_control(adapter, is_current=current)
+        if not current():
+            result = stale_command_result()
+        if generation == self._takeover_generations.get(station):
+            self.takeover_results[station] = result
+        if (
+            result.status == CommandStatus.APPLIED
+            and self.runtime.authority(station) == ControlAuthority.REMOTE
+        ):
+            for target in targets:
+                if not current():
+                    break
+                # Starting after acquisition cannot retain a relay parked by Local.
+                self._inactive.add(target)
+                await self.apply_stored(target, fence=current)
         return result

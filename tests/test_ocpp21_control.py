@@ -15,6 +15,10 @@ from custom_components.wallbox_manager.control.commands import (
     CommandStatus,
     apply_operating_point,
 )
+from custom_components.wallbox_manager.core.authority import (
+    AuthorityObservation,
+    ControlAuthority,
+)
 from custom_components.wallbox_manager.core.capabilities import (
     CapabilityEvidence,
     CapabilitySnapshot,
@@ -55,6 +59,17 @@ class Peer(ChargePoint):
         self.requests = []
         self.permissions = []
         self.status = "Accepted"
+        self.authority = "OCPP"
+        self.authority_status = "Accepted"
+        self.authority_read_value = None
+        self.authority_requests = []
+        self.operations = []
+        self.authority_received = asyncio.Event()
+        self.authority_release = asyncio.Event()
+        self.authority_release.set()
+        self.authority_read_received = asyncio.Event()
+        self.authority_read_release = asyncio.Event()
+        self.authority_read_release.set()
         self.error = None
         self.received = asyncio.Event()
         self.release = asyncio.Event()
@@ -62,6 +77,24 @@ class Peer(ChargePoint):
 
     @on("SetVariables")
     async def variables(self, set_variable_data):
+        if set_variable_data[0]["variable"]["name"] == "ControlAuthority":
+            self.operations.append("authority_set")
+            self.authority_requests.extend(set_variable_data)
+            self.authority_received.set()
+            await self.authority_release.wait()
+            if self.authority_status == "Accepted":
+                self.authority = set_variable_data[0]["attribute_value"]
+            return call_result.SetVariables(
+                set_variable_result=[
+                    {
+                        "component": item["component"],
+                        "variable": item["variable"],
+                        "attribute_status": self.authority_status,
+                    }
+                    for item in set_variable_data
+                ]
+            )
+        self.operations.append("permission")
         self.permissions.extend(set_variable_data)
         return call_result.SetVariables(
             set_variable_result=[
@@ -74,8 +107,28 @@ class Peer(ChargePoint):
             ]
         )
 
+    @on("GetVariables")
+    async def get_variables(self, get_variable_data):
+        self.operations.append("authority_get")
+        self.authority_read_received.set()
+        await self.authority_read_release.wait()
+        return call_result.GetVariables(
+            get_variable_result=[
+                {
+                    "component": item["component"],
+                    "variable": item["variable"],
+                    "attribute_status": "Accepted",
+                    "attribute_value": self.authority_read_value
+                    if self.authority_read_value is not None
+                    else self.authority,
+                }
+                for item in get_variable_data
+            ]
+        )
+
     @on("SetChargingProfile")
     async def profile(self, evse_id, charging_profile):
+        self.operations.append("profile")
         self.requests.append((evse_id, charging_profile))
         self.received.set()
         await self.release.wait()
@@ -90,6 +143,15 @@ async def connected():
     wire.other, remote.other = remote, wire
     runtime = Runtime()
     token = runtime.connect(StationId("station"))
+    runtime.observe_authority(
+        token,
+        AuthorityObservation(
+            token.station,
+            ControlAuthority.REMOTE,
+            datetime.now(UTC),
+            "test-confirmed-authority",
+        ),
+    )
     session = Session(wire)
     adapter = Adapter("station", wire, runtime, session, token, response_timeout=0.1)
     peer = Peer(remote)

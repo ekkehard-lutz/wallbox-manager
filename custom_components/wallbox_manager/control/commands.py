@@ -19,12 +19,14 @@ class CommandStatus(StrEnum):
 class ControlArea(StrEnum):
     OPERATING_POINT = "operating_point"
     CHARGING_PERMISSION = "charging_permission"
+    AUTHORITY = "authority"
     CURRENT = "current"
     PHASE_MODE = "phase_mode"
 
 
 class CommandReason(StrEnum):
     STALE = "stale"
+    NO_AUTHORITY = "no_authority"
     BUSY = "busy"
     TRANSACTION_UNAVAILABLE = "transaction_unavailable"
     PHASE_SWITCH_LOCKOUT = "phase_switch_lockout"
@@ -144,3 +146,18 @@ def permission_available(adapter) -> bool:
     """A protocol-neutral preflight; execution rechecks after queue waits."""
     check = getattr(adapter, "can_set_charging_permission", None)
     return check is not None and check() is True
+
+
+class AuthorityAdapter(Protocol):
+    """Explicit one-way acquisition. APPLIED requires observed remote authority."""
+
+    async def take_control(self, *, is_current: CommandValidity) -> CommandResult: ...
+
+
+async def take_control(adapter: AuthorityAdapter, *, is_current):
+    if not command_is_current(is_current):
+        return stale_command_result()
+    result = await adapter.take_control(is_current=is_current)
+    if not isinstance(result, CommandResult):
+        raise ValueError("adapter returned an invalid authority result")
+    return result

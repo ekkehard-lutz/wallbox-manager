@@ -61,9 +61,9 @@ OCPP 2.1 transaction-scoped charging OperatingPoint dispatch is implemented for
 explicitly bound EVSEs with verified device capabilities. One immediate TxProfile
 sets current and phase count together. Current bounds and resolution come from the
 EVSE's verified ChargingEnvelope; representable fractional currents are supported.
-Physical mappings and any required phase transition need separate verified
-operation evidence: numberPhases alone does not select conductors or prove
-switching support. Fixed-phase devices can use their verified fixed mode.
+Canonical phase counts identify EVSE-local modes; any required phase transition
+still needs separate verified operation evidence. `numberPhases` alone does not
+prove switching support. Fixed-phase devices can use their verified fixed mode.
 
 ## Manual charging control (v0.2.x development)
 
@@ -71,7 +71,8 @@ Known OCPP 2.1 connectors receive seven stable Home Assistant controls, named
 `EVSE N / M`: desired charging power, allowed current 1p/2p/3p, charging enabled,
 power approximation (DOWN/NEAREST/UP), and maximum deviation without phase
 switching (0–25%, default 5%). Desired values survive offline periods and reloads.
-Restoration, telemetry and reconnects never dispatch commands; explicit edits do.
+Restoration, telemetry and reconnects never dispatch commands. Explicit edits can
+dispatch only while remote authority is confirmed.
 Missing allowed-current controls initialize once from verified connector maxima:
 the matching phase-specific maximum, then a generic maximum, then the highest
 known phase-specific maximum. Thus 20 A (1p) / 27 A (3p) initializes 20 / 27 / 27 A
@@ -119,11 +120,49 @@ verification checkbox is required. Decimal and fractional currents are accepted.
 References never override verified wallbox values. Normal current limits belong
 to the runtime controls, not the reference form.
 
-Phase counts do not identify conductors. The core retains arbitrary PhaseMode
-subsets. Three phases identify the complete subset; one/two-phase mappings need
-physical evidence or an explicit operator mapping such as `l1;l1,l2;l1,l2,l3`.
-Consequently count-only discovery may expose capabilities before it can execute
-all corresponding modes. No default L1/L2 mapping is manufactured for 2p.
+Supported phase counts construct canonical **EVSE-local** modes: 1p = L1,
+2p = L1+L2, 3p = L1+L2+L3. These labels do not identify the equally named
+building/grid conductors. No separate conductor-mapping extension or reference
+mapping is required. Existing reference options remain readable; the resolver
+uses canonical modes. The core can still represent arbitrary subsets for other
+adapters. Each mode requires fresh, positive voltage observations on all its local
+phases. Missing L2/L3 excludes affected modes while a valid L1 still permits 1p.
+Telemetry alone never dispatches; a new explicit control action recalculates.
+
+### Explicit control authority
+
+Authority is observed separately from desired charging permission: `unknown`,
+`local`, or `remote`. Normal control edits persist intent but cannot acquire
+authority. Actual power and permission dispatch requires confirmed remote authority;
+otherwise diagnostics report `no_authority`.
+
+Stations exposing the implementation-defined, station-scoped
+`WallboxController.ControlAuthority` gain one enum sensor **Control authority**
+(**Steuerungsautorität**) and one button **Take control** (**Steuerung übernehmen**).
+Their stable unique IDs are `<entry>:<station>:control_authority` and
+`<entry>:<station>:take_control`. They are not duplicated per connector. There is
+no authority switch or return-control action; return to local operation in the
+wallbox's own web UI.
+
+The OCPP 2.1 adapter discovers the exact writable Actual variable, sends
+SetVariables with `OCPP`, requires a matching Accepted response, and then confirms
+Actual `OCPP` with GetVariables. `Local` means local control; other values remain
+unknown. This descriptive extension is not a universal standardized OCPP variable.
+After confirmation, the explicit action applies stored manual intent once: enabled
+positive power installs the solved profile before enabling permission; disabled
+intent sends disable without starting charging. Desired values do not change.
+The button result reports acquisition; connector diagnostics report application,
+which can still be blocked by missing transaction, voltage or capability evidence.
+
+Connection/boot generations, newer edits, concurrent takeover requests and local
+loss events fence queued work and late results. Discovery/telemetry/reconnects never
+automatically apply intent or retry takeover. Authority is valid within the current
+connection, using the inspected station's hard-wired local-loss NotifyEvent path;
+this assumes timely delivery of those events, not a remote ownership lease. A
+command already sent cannot be recalled. `wallbox-stationary` already supplies the
+read/write/readback and local-loss interface and needs no change. Hardware validation
+remains outstanding. Future profile selection can explicitly reuse the generic
+`take_control` operation instead of hiding takeover in ordinary edits.
 
 ### Physical feedback and phase retention
 

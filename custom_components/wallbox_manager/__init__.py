@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 from .const import DEFAULT_HOST, DEFAULT_PORT
 
-PLATFORMS = ("binary_sensor", "sensor", "switch", "number", "select")
+PLATFORMS = ("binary_sensor", "sensor", "switch", "number", "select", "button")
 
 
 @dataclass

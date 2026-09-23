@@ -708,7 +708,8 @@ nonfinite values are rejected.
 The initial voltage contract accepts measured RMS phase-to-neutral samples only,
 with explicit phase mapping, source, observation time and validity deadline. The
 caller supplies the comparison time; missing, expired or future samples inhibit
-selection for an eligible verified mode. Observation scope and connection generation
+selection for that eligible verified mode, without excluding other modes whose
+required voltages remain valid. Observation scope and connection generation
 must match the capability snapshot; adapters normalize scope only after validating
 applicability. Nominal fallback and line-to-line conversion are not implemented.
 Offered points retain the complete voltage basis and assume balanced current and
@@ -1131,3 +1132,35 @@ reload/restart the durable registry recreates the entity set, Connected is false
 and other sensors are unavailable until a fresh runtime snapshot exists. No old
 connection counters or capabilities are restored. Missing BootNotification fields
 never overwrite learned registry metadata with fabricated defaults.
+
+
+### Implemented 0.2.x canonical modes and explicit acquisition
+
+The capability resolver maps verified phase counts to EVSE-local modes:
+1p = L1, 2p = L1+L2, 3p = L1+L2+L3. These labels make no assertion about
+building/grid conductor names. Counts suffice to construct envelopes; separate
+switching evidence and fresh physical feedback still gate execution. Legacy
+reference mapping options remain readable, but ordinary resolution is canonical.
+Missing or invalid voltage excludes only modes requiring the unavailable phase.
+The solver recalculates on control actions; telemetry never triggers dispatch.
+
+The current implementation is deliberately smaller than the future profile/lease
+ownership design above. `ControlAuthority` and timestamped `AuthorityObservation`
+are protocol-neutral station observations. Unknown/local authority inhibits normal
+power and permission dispatch while edits continue to persist. Explicit acquisition
+uses a generic authority adapter operation, confirms authority, then synchronizes
+stored manual state once without changing desired values. Disabled intent stays
+disabled. No automatic acquisition, restoration dispatch, retry or return action is
+implemented. Future profile selection may explicitly invoke this same operation.
+
+The OCPP 2.1 binding uses discovered station-scoped Actual
+`WallboxController.ControlAuthority` (`Local`/`OCPP`), an implementation-defined
+extension, not an OCA ownership standard. It requires writable inventory evidence,
+a matching Accepted SetVariables result and an Accepted GetVariables readback of
+`OCPP`. Timestamped hard-wired local-loss events invalidate remote authority;
+connection/boot and revision fences prevent stale results and queued commands.
+Read-only inventory timestamps refer to request acceptance, so an older inventory
+cannot replace newer local-loss evidence. This relies on the station's event-driven
+local-loss interface and live connection, not periodic authority polling or leases.
+HA exposes one station enum sensor and one one-way Take control button. See README
+for exact IDs and execution limitations. No station implementation change is needed.

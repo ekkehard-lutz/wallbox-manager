@@ -219,6 +219,7 @@ class InventoryAdapter(DiscoveryAdapter):
     async def discover(self, token, attempt):
         source = f"ocpp{self._ocpp_version}:GetBaseReport"
         report = self._report = Report(attempt)
+        observed_at = datetime.now(UTC)
         try:
             response = await self.call(
                 self._call.GetBaseReport(
@@ -256,9 +257,14 @@ class InventoryAdapter(DiscoveryAdapter):
                 connectors,
                 self.electrical_inventory(token, report.rows),
             )
+            if self.runtime.current(token) and attempt == self._attempt:
+                self.inventory_completed(token, report.rows, observed_at)
         finally:
             if self._report is report:
                 self._report = None
+
+    def inventory_completed(self, token, rows, observed_at):
+        """Optional version-specific observations from a complete current report."""
 
     def electrical_inventory(self, token, rows):
         return ()

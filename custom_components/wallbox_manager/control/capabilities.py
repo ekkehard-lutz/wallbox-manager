@@ -9,7 +9,7 @@ from ..core.capabilities import (
     EvidenceState,
 )
 from ..core.electrical import resolve_capabilities
-from ..core.models import ConnectorId, Phase, PhaseMode
+from ..core.models import ConnectorId, PhaseMode
 from .reference import ConfiguredReference
 
 
@@ -63,14 +63,9 @@ class CapabilityResolver:
             return c.value if c and c.evidence.state == EvidenceState.VERIFIED else None
 
         counts = value("supported_phases") or ()
-        modes = set(self.reference.modes if target == self.reference.target else ())
-        current = self.current_mode(target)
-        if current:
-            modes = {m for m in modes if m.count != current.count}
-            modes.add(current)
-        # Three conductors have only one possible subset. One/two counts do not.
-        if 3 in counts:
-            modes.add(PhaseMode(tuple(Phase)))
+        # Counts identify canonical EVSE-local modes, never building conductors.
+        # Legacy reference_modes options remain readable but are unnecessary here.
+        modes = {PhaseMode.canonical(count) for count in counts}
         envelopes = []
         minimum, step = value("minimum_current"), value("current_step")
         if minimum is not None and step is not None:

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from .authority import AuthorityObservation
 from .capabilities import CapabilityEvidence, CapabilitySnapshot
 from .electrical import ElectricalCapability
 from .models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
@@ -56,6 +57,8 @@ class StationSnapshot:
     observations: tuple[Observation, ...] = ()
     physical_phases: tuple[PhysicalPhaseObservation, ...] = ()
     electrical: tuple[ElectricalCapability, ...] = ()
+    authority: AuthorityObservation | None = None
+    authority_revision: int = 0
 
     def __post_init__(self):
         for name, expected in (

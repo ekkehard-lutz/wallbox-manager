@@ -131,12 +131,22 @@ def create_control_runtime(runtime, server, source=None):
         ]
         return None if len(active) == 1 else "transaction_unavailable"
 
+    def authority_adapter(station):
+        session = server.sessions.get(station)
+        live = session.adapter if session is not None else None
+        return (
+            live.bind_authority()
+            if isinstance(live, Adapter) and runtime.current(live.token)
+            else None
+        )
+
     control = ControlRuntime(
         runtime,
         inputs,
         adapter,
         blocker,
         electrical_capabilities=getattr(source, "resolved", lambda target: ()),
+        authority_adapter=authority_adapter,
     )
     control.capability_source = source
     return control

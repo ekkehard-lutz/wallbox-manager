@@ -103,9 +103,9 @@ def solve(
                     )
                 )
 
-    # Incomplete eligible electrical data inhibits selection: it cannot prove a
-    # directional optimum and must not be mistaken for zero available capacity.
-    if missing_voltage:
+    # Missing voltage excludes only modes requiring that phase. Never infer a
+    # voltage or let an unavailable multi-phase mode suppress a valid 1p point.
+    if missing_voltage and not any(point.charging for point in candidates):
         return SolverResult(ResultStatus.UNREACHABLE, Reason.VOLTAGE_UNAVAILABLE)
     if not candidates:
         return SolverResult(

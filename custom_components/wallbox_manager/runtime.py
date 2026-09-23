@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from .core.authority import AuthorityObservation, ControlAuthority
 from .core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
 from .core.events import SessionToken, StationIdentity, StationSnapshot
 from .core.models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
@@ -167,6 +168,47 @@ class Runtime:
                 electrical=tuple(electrical),
                 charging_schedule=charging_schedule,
                 discovery=discovery,
+            )
+        )
+        return True
+
+    def authority(self, station):
+        state = self.get(station)
+        return (
+            state.authority.authority
+            if state and state.connected and state.authority
+            else ControlAuthority.UNKNOWN
+        )
+
+    def observe_authority(self, token, observation: AuthorityObservation):
+        """Event-driven authority lasts only within this connection/boot generation.
+
+        Revision fences also catch Local -> Remote changes during an in-flight
+        command. An older inventory/read cannot overwrite newer local feedback.
+        """
+        if not self.current(token):
+            return False
+        if observation.scope != token.station:
+            raise ValueError("authority belongs to another station")
+        if (
+            not self._phase_epoch[token.station]
+            <= observation.observed_at
+            <= datetime.now(UTC)
+        ):
+            return False
+        state = self.get(token.station)
+        old = state.authority
+        if old and observation.observed_at < old.observed_at:
+            return False
+        if old and observation.observed_at == old.observed_at:
+            if old.authority == observation.authority:
+                return False
+            observation = replace(observation, authority=ControlAuthority.UNKNOWN)
+        self._publish(
+            replace(
+                state,
+                authority=observation,
+                authority_revision=state.authority_revision + 1,
             )
         )
         return True

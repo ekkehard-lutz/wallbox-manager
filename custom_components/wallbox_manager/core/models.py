@@ -65,6 +65,17 @@ class PhaseMode:
             raise ValueError("duplicate phase")
         object.__setattr__(self, "phases", tuple(sorted(phases)))
 
+    @classmethod
+    def canonical(cls, count: int):
+        """1p=L1, 2p=L1+L2, 3p=L1+L2+L3 at the EVSE interface.
+
+        These are EVSE-local labels, not installation/grid conductor identities.
+        Explicit subsets remain representable for other normalized adapters.
+        """
+        if type(count) is not int or count not in (1, 2, 3):
+            raise ValueError("canonical phase count must be 1, 2 or 3")
+        return cls(tuple(Phase)[:count])
+
     @property
     def count(self) -> int:
         return len(self.phases)
