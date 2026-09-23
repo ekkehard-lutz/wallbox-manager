@@ -1,10 +1,11 @@
 # Wallbox Manager architecture
 
-Status: design with initial pure-core implementation, 2026-09-21. Immutable
-identity/capability/request contracts and the operating-point solver are implemented.
+Status: design with initial pure-core implementation, 2026-09-23. Immutable
+identity/capability/request contracts, the operating-point solver and the
+protocol-independent control command boundary are implemented.
 The read-only OCPP transport/discovery and scoped metering/runtime-state foundations
-and persistent session tracking are implemented. Charging control and remaining
-runtime behavior below are planned.
+and persistent session tracking are implemented. Wire-level charging control and
+remaining runtime behavior below are planned.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -27,8 +28,8 @@ never authorize it. Non-OCPP adapters implement the same internal contracts.
 ## Proposed package layout
 
 Paths below are beneath `custom_components/wallbox_manager/`. The core models,
-capabilities, control requests, solver, generic discovery/runtime snapshots and
-read-only OCPP adapters now exist; remaining runtime modules are proposed.
+capabilities, control requests/commands, solver, generic discovery/runtime
+snapshots and read-only OCPP adapters now exist; remaining runtime modules are proposed.
 
 ```text
 __init__.py              HA setup/unload and config-entry runtime wiring
@@ -55,6 +56,7 @@ control/
   profiles.py            OFF/PV_SURPLUS/PV_OPTIMUM/PV_MAXIMUM/GRID policies
   energy_inputs.py       normalized energy-input snapshots and validity rules
   requests.py            PowerRequest and rounding direction
+  commands.py            async control adapter contract, outcomes and validity fence
   ownership.py           state transitions and command fencing
   leases.py              authenticated owner leases and monotonic deadlines
   controller.py          intent -> solve -> dispatch -> reconcile
@@ -63,7 +65,7 @@ solver/
   power.py               pure constrained candidate selection
   transitions.py         phase-switch hysteresis and dwell planning
 protocols/
-  base.py                adapter contracts, normalized results and events
+  base.py                future shared protocol adapter lifecycle
   ocpp/
     common/
       transport.py       WebSocket lifecycle and explicit subprotocol selection
@@ -84,6 +86,38 @@ may bypass ownership via an adapter reference. Core and solver modules must not
 import HA or OCPP types. Adapters translate protocol objects into immutable core
 events; entity updates subscribe to snapshots. Setup/unload owns all tasks,
 subscriptions, timers and connections. No server starts as a side effect of import.
+
+## Implemented control command boundary
+
+`control.commands.apply_operating_point` forwards an already actionable
+`solver.operating_point.OperatingPoint` unchanged to a scope-bound asynchronous
+`ControlAdapter`. It does not solve again or apply profile/HA/energy policy.
+Charging permission, current setpoint and physical phase mode remain distinct:
+OFF carries neither phases nor current and is never converted to a generic 0 A
+command. A whole point is one coordinated adapter operation, allowing a future
+adapter to handle transitions such as 1p/16 A to 3p/7 A without exposing independent
+phase/current commands to a coordinator.
+
+The immutable `CommandResult` contains a `CommandStatus`, affected `ControlArea`,
+optional `CommandReason` and protocol-neutral diagnostic text. APPLIED means the
+whole operation was confirmed, not that the EV consumes the offered power.
+TEMPORARILY_REJECTED (for example busy or phase-switch lockout) is normal runtime
+behavior. UNSUPPORTED signals missing/inconsistent capability knowledge at runtime.
+FAILED represents a technical/protocol/hardware failure. These are returned values;
+invalid arguments/results and unexpected internal errors may raise exceptions.
+
+The caller supplies a synchronous `is_current` predicate capturing its target
+generation. It must stay false once superseded. The boundary checks it before
+calling the adapter; adapters must recheck after queue/lock waits and immediately
+before each device side effect. A stale target returns TEMPORARILY_REJECTED with
+STALE. Device-specific serialization and atomicity remain the adapter's job.
+This cooperative fence cannot retract an already dispatched command or guarantee
+rollback of a partial operation. The future controller must also fence late
+results before publishing active state and reconcile partial operations.
+
+Only the contract and pure fake-adapter tests exist: no OCPP charging commands,
+HA controls, ownership/leases, retry scheduling or failure counters are implemented
+by this boundary. Wallboxes cannot yet be controlled through it.
 
 ## Implemented transport/discovery foundation
 
