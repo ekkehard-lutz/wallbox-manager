@@ -99,13 +99,12 @@ async def test_reference_options_form_serializes():
         result = await flow.async_step_init()
         payload = FlowManagerIndexView(None)._prepare_result_json(result)
         fields = {f["name"]: f for f in payload["data_schema"]}
-        assert fields["reference_verified"]["type"] == "boolean"
-        assert fields["reference_min_a"]["type"] == "float"
-        for key in ("reference_vendor", "reference_model", "reference_serial"):
-            assert fields[key]["type"] == "string"
-        result = await flow.async_step_init({"reference_verified": True})
+        assert "reference_verified" not in fields
+        assert fields["reference_min_a"]["type"] == "string"
+        assert fields["reference_evse_id"]["type"] == "integer"
+        result = await flow.async_step_init({"reference_min_a": "6.5"})
         assert result["errors"] == {"base": "invalid_reference"}
-        result = await flow.async_step_init({"reference_verified": False})
+        result = await flow.async_step_init({})
         assert result["type"] == "create_entry" and result["data"] == {}
     finally:
         await hass.async_stop()
@@ -114,15 +113,14 @@ async def test_reference_options_form_serializes():
 @pytest.mark.parametrize(
     "change",
     [
-        {"reference_firmware": ""},
         {"reference_station_id": ""},
-        {"reference_min_a": 20},
-        {"reference_min_a": 6.5},
-        {"limit_1a": -1},
-        {"reference_max_3a": float("nan")},
+        {"reference_min_a": "20"},
+        {"reference_step_a": "0"},
+        {"reference_max_3a": "nan"},
+        {"reference_phases": "1,2"},
     ],
 )
-def test_reference_options_require_explicit_valid_evidence(change):
+def test_invalid_reference(change):
     from test_control_runtime import REFERENCE
 
     from custom_components.wallbox_manager.config_flow import validate_reference_options
@@ -131,36 +129,13 @@ def test_reference_options_require_explicit_valid_evidence(change):
         validate_reference_options({**REFERENCE, **change})
 
 
-def test_reference_verification_and_limits_are_separate():
-    from test_control_runtime import REFERENCE
-
+def test_partial_fractional_reference():
     from custom_components.wallbox_manager.config_flow import validate_reference_options
 
-    data = validate_reference_options({**REFERENCE, "limit_1a": 7.5})
-    assert data["reference_max_1a"] == 16
-    assert data["limit_1a"] == 7.5
-
-
-@pytest.mark.parametrize("key", ["reference_vendor", "reference_model"])
-@pytest.mark.parametrize("value", [None, "", " ", " padded "])
-def test_identity_attestation_required(key, value):
-    from test_control_runtime import REFERENCE
-
-    from custom_components.wallbox_manager.config_flow import validate_reference_options
-
-    options = dict(REFERENCE)
-    if value is None:
-        options.pop(key)
-    else:
-        options[key] = value
-    with pytest.raises(ValueError):
-        validate_reference_options(options)
-
-
-def test_serial_attestation_is_optional():
-    from test_control_runtime import REFERENCE
-
-    from custom_components.wallbox_manager.config_flow import validate_reference_options
-
-    options = {k: v for k, v in REFERENCE.items() if k != "reference_serial"}
-    assert validate_reference_options(options) == options
+    data = {
+        "reference_station_id": "station",
+        "reference_evse_id": 2,
+        "reference_connector_id": 7,
+        "reference_step_a": "0.125",
+    }
+    assert validate_reference_options(data) == data

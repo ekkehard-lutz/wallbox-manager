@@ -130,19 +130,52 @@
       },
       "session_end_meter": {
         "name": "{scope} Session End-Zählerstand"
+      },
+      "supported_phases": {
+        "name": "{scope} Unterstützte Phasen"
+      },
+      "minimum_current": {
+        "name": "{scope} Minimaler Strom"
+      },
+      "current_step": {
+        "name": "{scope} Stromschrittweite"
+      },
+      "phase_switching": {
+        "name": "{scope} Phasenumschaltung unterstützt"
+      },
+      "enable_disable": {
+        "name": "{scope} Ladefreigabe unterstützt"
+      },
+      "maximum_current_1": {
+        "name": "{scope} Maximaler Strom 1p"
+      },
+      "maximum_current_2": {
+        "name": "{scope} Maximaler Strom 2p"
+      },
+      "maximum_current_3": {
+        "name": "{scope} Maximaler Strom 3p"
       }
     },
     "switch": {
       "charging_enabled": {
-        "name": "{scope} Laden erlaubt (Wunsch)"
+        "name": "{scope} Laden erlaubt"
       }
     },
     "number": {
       "desired_charging_power": {
-        "name": "{scope} Gewünschte Ladeleistung"
+        "name": "{scope} Gewünschte Leistung"
       },
       "phase_switch_deviation_pct": {
-        "name": "{scope} Abweichung für Phasenbeibehaltung"
+        "name": "{scope} Max. Abweichung ohne Phasenumschaltung"
+      },
+      "allowed_current_1p": {
+        "name": "{scope} Zulässiger Strom 1p"
+      },
+      "allowed_current_2p": {
+        "name": "{scope} Zulässiger Strom 2p"
+      },
+      "allowed_current_3p": {
+        "name": "{scope} Zulässiger Strom 3p"
       }
     },
     "select": {
@@ -159,25 +192,26 @@
   "options": {
     "step": {
       "init": {
-        "title": "wallbox-stationary Referenzprüfung",
-        "description": "Nur für manuell geprüfte wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomarer Phasenwechsel, 1-A-Raster. Identität und Firmware müssen übereinstimmen. Alle Pflichtwerte vor Aktivierung eingeben. Deaktivieren entfernt die Freigabe; es sendet keinen Stopp. Die Seriennummer ist optional; Hersteller und Modell müssen der tatsächlichen OCPP-Identität entsprechen.",
+        "title": "Fähigkeiten als Referenz",
+        "description": "Nur fehlende Fähigkeiten ergänzen. Verifizierte OCPP-Werte haben immer Vorrang. Station, EVSE und Konnektor explizit zuordnen; einzelne Felder sind optional. Dezimalwerte und Brüche wie 6.5 oder 13/2 sind erlaubt. Normale Stromgrenzen werden an den Steuerelementen eingestellt.",
         "data": {
-          "reference_verified": "Referenzgerät und sicheren Phasenwechsel geprüft (aktivieren)",
-          "reference_station_id": "Exakte verifizierte Stations-ID",
-          "reference_firmware": "Exakt geprüfte Firmware",
-          "reference_min_a": "Geprüfter Mindeststrom (A)",
-          "reference_max_1a": "Geprüfter Maximalstrom einphasig (A)",
-          "reference_max_3a": "Geprüfter Maximalstrom dreiphasig (A)",
-          "limit_1a": "Konfiguriertes Stromlimit einphasig (A)",
-          "limit_3a": "Konfiguriertes Stromlimit dreiphasig (A)",
-          "reference_vendor": "Exakter verifizierter OCPP-Hersteller",
-          "reference_model": "Exaktes verifiziertes OCPP-Modell",
-          "reference_serial": "Exakte verifizierte Seriennummer (optional)"
+          "reference_station_id": "Stations-ID",
+          "reference_evse_id": "EVSE-ID",
+          "reference_connector_id": "Konnektor-ID",
+          "reference_phases": "Unterstützte Phasenanzahlen (z. B. 1,3)",
+          "reference_modes": "Explizite Leiterzuordnung (z. B. l1;l1,l2,l3)",
+          "reference_min_a": "Minimaler Strom (A)",
+          "reference_step_a": "Stromschrittweite (A)",
+          "reference_phase_switching": "Phasenumschaltung unterstützt",
+          "reference_enable_disable": "Ladefreigabe unterstützt",
+          "reference_max_1a": "Maximaler Strom 1p (A)",
+          "reference_max_2a": "Maximaler Strom 2p (A)",
+          "reference_max_3a": "Maximaler Strom 3p (A)"
         }
       }
     },
     "error": {
-      "invalid_reference": "Identität, Firmware, geprüfte Stromgrenzen und konfigurierte Limits vollständig und gültig eingeben."
+      "invalid_reference": "Gültige Zuordnung und widerspruchsfreie Referenzwerte eingeben."
     }
   }
 }

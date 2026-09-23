@@ -79,11 +79,14 @@ async def test_registered_and_retained_offline(controls):
     control, bound, peer, _, source, _ = manual
     assert set(entities) == {
         "charging_enabled",
+        "allowed_current_1p",
+        "allowed_current_2p",
+        "allowed_current_3p",
         "desired_charging_power",
         "power_approximation",
         "phase_switch_deviation_pct",
     }
-    assert len(er.async_get(hass).entities) == 4
+    assert len(er.async_get(hass).entities) == 7
     assert len(dr.async_get(hass).devices) == 1
     assert not peer.requests
     ids = {key: e.unique_id for key, e in entities.items()}
@@ -96,7 +99,7 @@ async def test_registered_and_retained_offline(controls):
     await unload()
     entities = await setup()
     assert {key: e.unique_id for key, e in entities.items()} == ids
-    assert len(er.async_get(hass).entities) == 4
+    assert len(er.async_get(hass).entities) == 7
     assert not peer.requests
 
 
@@ -123,8 +126,8 @@ async def test_power_permission_direction_and_retention_entities(controls):
     assert enabled.extra_state_attributes["command_status"] == "applied"
     await enabled.async_turn_off()
     assert not enabled.is_on and power.native_value == 4000
-    assert enabled.extra_state_attributes["solver_reason"] == "stop_unverified"
-    assert enabled.extra_state_attributes["command_status"] is None
+    assert enabled.extra_state_attributes["solver_reason"] is None
+    assert enabled.extra_state_attributes["command_status"] == "applied"
     assert len(peer.requests) == 1
     await retention.async_set_native_value(10)
     assert control.intent(bound.target).phase_switch_deviation_pct == 10
@@ -144,6 +147,9 @@ async def test_ha_restoration_never_sends(controls, monkeypatch):
                 "desired_charging_power": "5000",
                 "power_approximation": "down",
                 "phase_switch_deviation_pct": "7",
+                "allowed_current_1p": "30.25",
+                "allowed_current_2p": "17.125",
+                "allowed_current_3p": "43.5",
             }[self.key],
         )
 
@@ -161,13 +167,21 @@ async def test_other_known_evse_exists_without_inventing_capabilities(controls):
     control, bound, peer, _, _, _ = manual
     from test_control_runtime import measured
 
-    from custom_components.wallbox_manager.core.models import EvseId, StationId
+    from custom_components.wallbox_manager.core.models import (
+        ConnectorId,
+        EvseId,
+        StationId,
+    )
 
     runtime = bound.adapter.runtime
-    target = EvseId(bound.target.station, "2")
+    evse = EvseId(bound.target.station, "2")
+    measured(runtime, bound.token, evse)
+    await hass.async_block_till_done()
+    assert len(er.async_get(hass).entities) == 7
+    target = ConnectorId(evse, "5")
     measured(runtime, bound.token, target)
     await hass.async_block_till_done()
-    assert len(er.async_get(hass).entities) == 8
+    assert len(er.async_get(hass).entities) == 14
     await control.change(target, target_w=4000, allowed=True)
     assert control.intent(target).status == "capabilities_unavailable"
     other = runtime.connect(
@@ -175,5 +189,21 @@ async def test_other_known_evse_exists_without_inventing_capabilities(controls):
     )
     measured(runtime, other, EvseId(other.station, "1"))
     await hass.async_block_till_done()
-    assert len(er.async_get(hass).entities) == 8
+    assert len(er.async_get(hass).entities) == 14
     assert not peer.requests
+
+
+async def test_fractional_limits_are_independent_desired_state(controls):
+    _, entities, manual, _, _ = controls
+    control, bound, peer, _, _, _ = manual
+    for count, value in ((1, 40.125), (2, 17.375), (3, 0)):
+        entity = entities[f"allowed_current_{count}p"]
+        assert entity.native_min_value == 0
+        assert entity.native_unit_of_measurement == "A"
+        await entity.async_set_native_value(value)
+        assert entity.native_value == value
+    assert not peer.requests and not peer.permissions
+    await control.change(bound.target, target_w=10000, allowed=True)
+    assert control.intent(bound.target).solver_result.point.mode.count == 1
+    assert control.intent(bound.target).solver_result.point.current_a <= 32
+    assert control.intent(bound.target).current_limits[2] > 17

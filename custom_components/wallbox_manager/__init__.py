@@ -65,14 +65,10 @@ async def async_setup_entry(
     except OSError as exc:
         await storage.close()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
-    from .control.reference_wallbox_stationary import WallboxStationaryReference
+    from .control.reference import ConfiguredReference
     from .protocols.ocpp.v21.control_runtime import create_control_runtime
 
-    source = (
-        WallboxStationaryReference(state, entry.options)
-        if entry.options.get("reference_verified") is True
-        else None
-    )
+    source = ConfiguredReference(entry.options)
     control = create_control_runtime(state, server, source)
     entry.runtime_data = EntryRuntime(state, server, storage, control)
 

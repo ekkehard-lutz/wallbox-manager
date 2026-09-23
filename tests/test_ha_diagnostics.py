@@ -35,7 +35,15 @@ async def diagnostics(tmp_path):
     platforms = []
 
     async def setup():
-        config.runtime_data = SimpleNamespace(state=Runtime())
+        from custom_components.wallbox_manager.control.capabilities import (
+            CapabilityResolver,
+        )
+
+        runtime = Runtime()
+        config.runtime_data = SimpleNamespace(
+            state=runtime,
+            control=SimpleNamespace(capability_source=CapabilityResolver(runtime)),
+        )
         for domain, module in [("binary_sensor", binary_sensor), ("sensor", sensor)]:
             platform = EntityPlatform(
                 hass=hass,
@@ -80,7 +88,7 @@ async def test_dynamic_diagnostics_and_reload(diagnostics):
     registry = dr.async_get(hass)
     entity_registry = er.async_get(hass)
     assert not registry.devices and not entity_registry.entities
-    assert len(runtime._listeners) == 2
+    assert len(runtime._listeners) == 3
     station = StationId("garage")
     token = runtime.connect(station, protocol="ocpp", protocol_version="2.1")
     await hass.async_block_till_done()

@@ -62,7 +62,8 @@ control/
   requests.py            PowerRequest and rounding direction
   commands.py            async control adapter contract, outcomes and validity fence
   runtime.py             implemented manual intent -> solve -> dispatch
-  reference_wallbox_stationary.py  explicit operator-attested reference source
+  reference.py  optional per-capability operator fallback
+  capabilities.py  normalized per-field resolution
   ownership.py           state transitions and command fencing
   leases.py              authenticated owner leases and monotonic deadlines
   controller.py          intent -> solve -> dispatch -> reconcile
@@ -173,153 +174,72 @@ rechecks command validity, live generation, transaction identity, the envelope
 and phase-operation evidence. Revoked capabilities or changed transactions send
 nothing. Already dispatched commands are not cancelled or rolled back.
 
-wallbox-stationary is the first reference/test device: its EVSE 1, 1 A grid,
-physical L1 and L1/L2/L3 mappings, atomic phase switching and transaction behavior
-are explicit reference fixture data, not general OCPP rules. Wire tests also cover
-EVSE 2 and fixed L2 fractional-current devices with real 2.1 message schemas.
-Current inventory discovery does not verify min/max/step, physical phase mapping,
-phase-switch operation safety, or immediate TxProfile behavior. Advertisements,
-registration and protocol version cannot supply these proofs; production bindings
-must obtain them explicitly. No universal OCPP 2.1 compatibility is claimed.
+## Implemented capability resolution and connector control
 
-OFF/enable-disable remains unsupported and never becomes a 0 A profile. OCPP
-1.6J/2.0.1 control, charging strategies, Energy Manager,
-ownership/leases, retries and failure counters remain unimplemented.
+`core/electrical.py` represents individually scoped values with source/evidence.
+`v21/capabilities.py` parses descriptive FullInventory extensions into this model;
+only complete accepted reports are published under their captured connection and
+boot token. Generic SmartCharging advertisement never becomes electrical proof.
+`control/capabilities.py` resolves each field independently: verified OCPP first,
+explicit `control/reference.py` operator fallback second, unknown otherwise.
+False, invalid and conflicting OCPP assertions cannot be hidden by references.
+Supported counts exclude contradictory reference maxima. Envelopes require a
+complete positive minimum/step/maximum and a known conductor mapping.
 
-## Implemented manual intent runtime and HA entities
+Counts and conductor subsets remain distinct. Three phases have one subset;
+one/two-phase mappings require actual physical feedback or explicit configured
+mapping. No implicit L1/L2 assignment is made for a reported two-phase count.
+References associate exact station, EVSE and connector IDs, without vendor/model
+or serial requirements. All fields are optional independently; decimal and
+fractional values are exact. They never override verified observations.
 
-`control/runtime.py` owns one `ManualIntent` per EVSE: existing PowerRequest,
-phase-retention percentage (default 5), generation, SolverResult and CommandResult.
-`ControlInputs` only groups existing CapabilitySnapshot, VoltageObservation,
-CurrentLimit, eligible modes and optional current physical mode; it is not a
-capability registry. Providers are read on demand. The generic runtime imports
-neither HA nor OCPP and uses the existing solve/apply_operating_point boundaries.
+`ControlRuntime` owns `ManualIntent` by connector (generic callers can also bind
+EVSE scope). It stores power/direction/permission, three independent fractional
+current ceilings, retention tolerance and generation/results. The solver sees the
+intersection of resolved envelopes and desired limits. An unsupported 2p limit
+remains stored and harmless; limits above capability cannot expand it; zero removes
+only that mode. Limits never become evidence or modify the capability grid.
 
-`switch.py`, `number.py` and `select.py` expose charging permission, desired watts
-(0–100,000 W / 100 W UI step), DOWN/NEAREST/UP approximation and retention tolerance
-(0–25% / 1%, default 5). Direction values remain stable while en/de labels are
-localized. Control identity includes config entry, station, EVSE and entity key.
-Known numeric OCPP 2.1 EVSEs get entities independently of verified capabilities.
-Registry identity restores offline entities; temporary disconnect, missing evidence
-or voltage expiry never removes them. Desired values remain editable and separate
-from execution/solver/command status attributes. No raw current or phase selector
-is added. The number's UI maximum is not a capability.
-
-The entry creates a generic ControlRuntime via `v21/control_runtime.py`. This
-protocol-layer binder selects only a live v21 station adapter and explicitly binds
-target EVSE, current capability provider and verified phase-operation evidence.
-Eligible modes require VERIFIED envelopes and VERIFIED operation proof. Voltage
-normalization uses exact EVSE-scoped, positive L-N phase readings with timestamps
-and deadlines, never nominal values, station-wide guesses or nonzero-current
-phase inference. Applicable CurrentLimits remain separate from capability data.
-The canonical session ledger must contain exactly one active transaction under
-the target EVSE; the wire adapter rechecks identity after its outbound lock.
-
-Every explicit edit increments an intent generation before any await. Resolving
-uses live capabilities, limits, voltages and known physical mode. The validity
-closure rechecks generation, connection/boot, fresh inputs and the resolved point,
-including after the OCPP queue wait. New requests may enqueue concurrently on the
-existing library serialization lock so older queued targets can be fenced. Late
-success cannot overwrite newer intent or claim current confirmation after inputs
-changed; no rollback is invented. There is no retry, auto-resume or command on
-telemetry. A telemetry/freshness timer only refreshes readiness attributes. An
-APPLIED result means protocol/device acceptance, never measured power.
-
-RestoreEntity restores desired fields only; loading enabled=True does not execute.
-Live user edits win over later restoration of the same field. Initial intent is
-allowed=False / 0 W. Permission off retains requested watts. If stop evidence is
-unverified the solver exposes STOP_UNVERIFIED; if it resolves OFF, v21 still
-returns UNSUPPORTED with no outbound request. Desired switch state never claims
-that the physical wallbox stopped. A new explicit edit is required after blocked
-execution or reconnection. Unload invalidates pending work before transport teardown.
-
-### Explicit reference capability source
-
-`control/reference_wallbox_stationary.py` is an isolated operator-attested source,
-selected only through an explicit options-flow acknowledgement and complete
-station ID, vendor, model, exact firmware, verified minimum/per-mode maximum
-currents and separate configured per-mode limits. `wallbox-stationary` is the
-reference implementation name, not an OCPP vendor/model requirement. The live
-BootNotification/runtime identity must exactly match `reference_station_id`,
-`reference_vendor`, `reference_model` and `reference_firmware`; if configured,
-`reference_serial` must match too. No identity values are defaulted. Older options
-missing the new vendor/model attestations fail closed. A single reference identity
-predicate gates both capability access and phase-feedback ingestion; no configured
-reference means no trusted phase feedback, even with the standard event name.
-These checks
-are not authentication or automated verification. They scope previously established
-manual device evidence to the live connection/boot. This source explicitly covers
-EVSE 1, physical L1 and L1/L2/L3, 1 A grid and verified atomic phase switching;
-none are defaults for generic adapters or unknown chargers. Stop evidence remains
-UNSUPPORTED. Options changes reload without sending control.
-
-Current discovery still cannot verify electrical envelopes, physical mappings,
-atomic switching safety or immediate transaction-profile behavior. Without the
-explicit source (or another verified provider), execution fails closed while
-entities stay present. Physical feedback supplies current mode, not capability
-verification. Requested mode and vehicle current never substitute for feedback.
+HA has seven controls per reported connector, with stable entry/station/EVSE/
+connector/key identities and `EVSE N / M` labels on the existing station device.
+EVSE-only topology creates no invented connector controls. Read-only capability
+sensors use their actual EVSE or connector scope and expose source/evidence.
+Only known resolved fields initially create sensors; registry identity preserves
+offline entities, while invalidated evidence makes their values unavailable.
+Desired RestoreEntity values never send commands. Reconnect/boot and telemetry
+also never dispatch. New explicit edits fence older queued and late commands.
 
 ### Physical phase feedback
 
-The reference station samples its existing GPIO 5 phase-switch feedback through
-`WallboxDomain.read_physical_phase_mode()`: 0 means L1 and 1 means L1/L2/L3.
-It reads the hardware rather than the cached/requested `wb_phase_mode`. Startup
-before readiness, an active transition/pulse, an unavailable domain lock, invalid
-signal or read failure yields unknown. After a failed transition a readable,
-settled physical position may still be reported; it is never replaced by the
-failed request. No additional persistent phase state is introduced.
+Standard OCPP 2.1 NotifyEvent `Connector.PhaseRotation` with explicit EVSE and
+connector IDs and HardWiredNotification is interpreted generically: Rxx means L1,
+RST means L1/L2/L3, other values mean unknown. There is no product identity gate.
+Observation time must follow the current boot/connection epoch, not be in the
+future, and be within five seconds. Older updates cannot overwrite newer ones;
+equal-time conflicts invalidate the physical mode. All feedback remains exact
+connector scope. Physical state is not evidence of switching capability.
 
-Standard OCPP 2.1 is sufficient: the OCA Device Model defines `PhaseRotation`
-as actual wiring relative to the upstream phases, with `x` for a disconnected
-phase and an empty value for unknown. See the
-[OCA OCPP 2.1 appendices](https://openchargealliance.org/my-oca/ocpp/).
-The station sends `NotifyEvent` with `Connector` EVSE 1 / connector 1,
-`PhaseRotation`, `HardWiredNotification`, `Periodic`, and Actual values `Rxx`,
-`RST` or empty. `SupplyPhases` or a profile's `numberPhases` alone would not prove
-physical conductor selection. No vendor variable or DataTransfer is required;
-the GPIO-to-conductor interpretation remains reference-device-specific.
+### Permission and phase retention
 
-The station samples every second after registration (outbound call waits can
-lengthen this interval), using fresh UTC timestamps, including after reconnect.
-The manager normalizes accepted reference reports into `PhysicalPhaseObservation`
-in the existing station snapshot. Evidence expires five seconds after observation.
-It requires the current connection token, a timestamp at or after the current
-boot/connection epoch, and a non-future timestamp. Older reports cannot overwrite
-newer ones; conflicting equal-time reports invalidate the mode. Boot/disconnect
-clears observations. Synchronize the hosts' clocks; stale/future data fails closed.
-Unknown/expired feedback inhibits reference phase operations and retention.
-Generic station capability discovery is unchanged. The explicitly enabled source
-still requires matching station identity and exact firmware; the station's optional
-`[ocpp] firmware_version` must identify the manually verified installed build.
+`apply_charging_permission(enabled)` is a distinct protocol-neutral operation.
+OCPP requires resolved enable/disable support plus a current-generation inventory
+entry exposing writable WallboxController.ChargingEnabled. SetVariables targets
+that exact component. A station-global variable is usable only for a single-known-
+connector station. The response must identify the same variable/component and be
+Accepted. Generation, intent, evidence and endpoint are checked after queue waits
+and after the result. Desired power is retained on disable. Permission is never
+encoded as a zero-ampere profile. The observed charging state remains separate.
 
-Existing control entities expose `physical_phase_mode` as phase names or null.
-Expiry refreshes diagnostics without issuing commands. All pre-dispatch fences,
-including after OCPP queue waits, remain active. Post-dispatch result handling
-allows the expected physical-mode/eligibility change during a successful transition
-while preserving intent, generation, electrical evidence, limits and voltage fences.
-Acceptance itself does not establish physical state. The solver is unchanged.
+An explicit enable with positive target prepares the transaction profile before
+enabling permission. Zero-power pause dispatch remains unsupported and fails
+closed. There is no automatic retry or resume after restore/reconnect.
 
-The automated suites exercise both real OCPP message paths without hardware.
-The supervised physical retention/transition test is software-ready, conditional
-on verifying the installation's GPIO feedback and reference electrical limits.
-GPIO feedback is not an independent measurement of power-contact continuity:
-welded contacts and a broken pulled-down signal wire cannot be excluded by this
-single input. No hardware validation or universal OCPP compatibility is claimed.
-
-### Phase-retention solver preference
-
-After verification, eligible modes, voltage freshness, device current grid,
-CurrentLimits and Direction filtering, select the closest valid current-mode
-candidate. For target > 0, retain it when
-`abs(offered_power - target_power) * 100 <= target_power * tolerance`.
-Otherwise use the existing closest directional candidate/tie-breaking. No division
-is needed at target zero; existing OFF/stop behavior remains authoritative. At 0%
-only an exact current-mode candidate receives this preference. The standalone
-solver's optional argument defaults to 0 for existing callers; manual control
-explicitly supplies its 5% default. The solver remains exact and deterministic;
-there is no time-based lockout. For example, at 230 V and 1 A grids, current 3P can
-retain 4,140 W for a 4,000 W NEAREST target at 5%, even though 1P/3,910 W is closer.
-For DOWN the same 4,140 W candidate is forbidden regardless of tolerance.
+The solver receives explicit active-charging context. Only fresh positive measured
+charging with permitted intent can retain its known physical mode; initial enable,
+disabled and zero-target states bypass retention. For positive targets the exact
+comparison is `abs(reachable - target) * 100 <= target * tolerance`. Direction,
+voltage freshness, current grid and all limits apply first. DOWN/UP never violate
+their direction to retain a phase. No dwell timer or lockout is introduced.
 
 ## Implemented transport/discovery foundation
 
@@ -353,7 +273,7 @@ Sessions expose nine entities while retaining charging state internally. See the
 normalization, freshness, scope, invalidation and limitations. Session ledgers are
 implemented separately as described below; authority/authorization logic remains
 unimplemented. NotifyEvent stays ACK-only except for the isolated OCPP 2.1
-reference physical-phase observation above;
+generic connector physical-phase observation above;
 tokenless transaction events receive an empty result, and optional idToken inputs
 receive Unknown token status without authorization processing.
 

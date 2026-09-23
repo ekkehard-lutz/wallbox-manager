@@ -16,7 +16,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
         async_add_entities,
         lambda c, e, t: [
             ControlNumber(c, e, t, key)
-            for key in ("desired_charging_power", "phase_switch_deviation_pct")
+            for key in (
+                "desired_charging_power",
+                "phase_switch_deviation_pct",
+                "allowed_current_1p",
+                "allowed_current_2p",
+                "allowed_current_3p",
+            )
         ],
     )
 
@@ -33,9 +39,17 @@ class ControlNumber(ControlEntity, NumberEntity):
         self._attr_native_step = 100 if power else 1
         self._attr_native_unit_of_measurement = "W" if power else "%"
         self._attr_entity_category = None if power else EntityCategory.CONFIG
+        if key.startswith("allowed_current_"):
+            self.field = key
+            self._attr_native_max_value = 100000
+            self._attr_native_step = 0.001
+            self._attr_native_unit_of_measurement = "A"
 
     @property
     def native_value(self):
+        if self.field.startswith("allowed_current_"):
+            value = self.intent.current_limits.get(int(self.field[-2]))
+            return float(value) if value is not None else None
         return float(
             self.intent.request.target_w
             if self.field == "target_w"

@@ -8,13 +8,14 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .core.models import EvseId, StationId
+from .core.models import ConnectorId, EvseId, StationId
 from .entity import device_info
 
 
 def control_id(entry_id, target, key):
     return f"{entry_id}:control:" + json.dumps(
-        [target.station.value, target.value, key], separators=(",", ":")
+        [target.station.value, target.evse.value, target.value, key],
+        separators=(",", ":"),
     )
 
 
@@ -33,7 +34,7 @@ def setup_control_entities(hass, entry, add_entities, factory):
     @callback
     def changed(snapshot):
         if snapshot.protocol_version == "2.1":
-            for target in snapshot.evses:
+            for target in snapshot.connectors:
                 if (
                     target.value.isascii()
                     and target.value.isdecimal()
@@ -48,8 +49,10 @@ def setup_control_entities(hass, entry, add_entities, factory):
     for entity in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id):
         if entity.unique_id.startswith(prefix):
             try:
-                station, evse, _ = json.loads(entity.unique_id[len(prefix) :])
-                add(EvseId(StationId(station), evse))
+                station, evse, connector, _ = json.loads(
+                    entity.unique_id[len(prefix) :]
+                )
+                add(ConnectorId(EvseId(StationId(station), evse), connector))
             except ValueError, TypeError:
                 continue
     for snapshot in runtime.stations:
@@ -69,7 +72,9 @@ class ControlEntity(RestoreEntity):
         self._expire = None
         self._attr_unique_id = control_id(entry_id, target, key)
         self._attr_translation_key = key
-        self._attr_translation_placeholders = {"scope": f"EVSE {target.value}"}
+        self._attr_translation_placeholders = {
+            "scope": f"EVSE {target.evse.value} / {target.value}"
+        }
 
     @property
     def device_info(self):
@@ -86,7 +91,8 @@ class ControlEntity(RestoreEntity):
     @property
     def extra_state_attributes(self):
         return {
-            "evse_id": self.target.value,
+            "evse_id": self.target.evse.value,
+            "connector_id": self.target.value,
             "state_represents": "desired_intent",
             **self.control.attributes(self.target),
         }

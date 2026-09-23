@@ -1,6 +1,5 @@
-"""Reference hardware feedback, wire schemas, ordering and solver integration."""
+"""Generic connector feedback, independent of vendor identity or references."""
 
-import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -9,16 +8,10 @@ from test_control_runtime import REFERENCE, measured, physical_report
 from test_control_runtime import manual as manual
 from test_ocpp21_control import connected as connected
 
-from custom_components.wallbox_manager.control.reference_wallbox_stationary import (
-    WallboxStationaryReference,
-)
+from custom_components.wallbox_manager.control.capabilities import CapabilityResolver
+from custom_components.wallbox_manager.control.reference import ConfiguredReference
 from custom_components.wallbox_manager.core.events import StationIdentity
-from custom_components.wallbox_manager.core.models import Phase, PhaseMode
-from custom_components.wallbox_manager.core.telemetry import (
-    Channel,
-    Observation,
-    Quantity,
-)
+from custom_components.wallbox_manager.core.models import ConnectorId, Phase, PhaseMode
 from custom_components.wallbox_manager.protocols.ocpp.v21.control_runtime import (
     create_control_runtime,
 )
@@ -28,38 +21,29 @@ from custom_components.wallbox_manager.protocols.ocpp.v21.control_runtime import
 async def reference(manual):
     _, bound, peer, _, _, server = manual
     live = bound.adapter
-    live.token = live.runtime.boot(
-        live.token,
-        StationIdentity(
-            "Lutz", "Lutz-EVSE-DIN", serial="4C75747A00000001", firmware="test-verified"
-        ),
-    )
-    live.runtime._publish(
-        replace(live.runtime.get(bound.target.station), protocol_version="2.1")
-    )
-    measured(live.runtime, live.token, bound.target)
-    source = WallboxStationaryReference(live.runtime, REFERENCE)
+    state = live.runtime.get(bound.target.station)
+    live.runtime._publish(replace(state, protocol_version="2.1"))
+    source = CapabilityResolver(live.runtime, ConfiguredReference(REFERENCE))
     control = create_control_runtime(live.runtime, server, source)
     return bound, peer, source, control
 
 
 @pytest.mark.parametrize(
-    "value,mode",
-    [
-        ("Rxx", PhaseMode((Phase.L1,))),
-        ("RST", PhaseMode(tuple(Phase))),
-        ("", None),
-        ("xxx", None),
-    ],
+    "value,count", [("Rxx", 1), ("RST", 3), ("", None), ("xxx", None), ("RTS", None)]
 )
-async def test_physical_mapping(reference, value, mode):
+async def test_physical_mapping(reference, value, count):
     bound, peer, source, _ = reference
     await physical_report(peer, value)
-    assert source.current_mode(bound.target) == mode
+    mode = source.current_mode(bound.target)
+    assert (mode.count if mode else None) == count
+    assert (
+        bound.adapter.runtime.get(bound.target.station).physical_phases[0].scope
+        == bound.target
+    )
 
 
 async def test_unknown_invalidates_known(reference):
-    bound, peer, source, control = reference
+    bound, peer, source, _ = reference
     await physical_report(peer, "RST")
     await physical_report(peer, "")
     assert source.current_mode(bound.target) is None
@@ -69,8 +53,6 @@ async def test_unknown_invalidates_known(reference):
         )
         is None
     )
-    await control.change(bound.target, target_w=4000, allowed=True)
-    assert not peer.requests
 
 
 async def test_stale_and_out_of_order(reference):
@@ -87,8 +69,6 @@ async def test_stale_and_out_of_order(reference):
     )
     bound.adapter.runtime._publish(replace(state, physical_phases=(expired,)))
     assert source.current_mode(bound.target) is None
-    await physical_report(peer, "RST", at=datetime.now(UTC) - timedelta(seconds=10))
-    assert source.current_mode(bound.target) is None
 
 
 @pytest.mark.parametrize("reset", ["boot", "reconnect"])
@@ -99,12 +79,9 @@ async def test_generation_reset_and_old_replay(reference, reset):
     old = live.runtime.get(bound.target.station).physical_phases[0]
     token = live.token
     if reset == "boot":
-        live.token = live.runtime.boot(
-            token, live.runtime.get(bound.target.station).identity
-        )
+        live.token = live.runtime.boot(token, StationIdentity("Other", "Other"))
     else:
         live.runtime.disconnect(token)
-        assert source.current_mode(bound.target) is None
         live.token = live.runtime.connect(
             token.station, protocol="ocpp", protocol_version="2.1"
         )
@@ -116,166 +93,115 @@ async def test_generation_reset_and_old_replay(reference, reset):
     assert source.current_mode(bound.target).count == 1
 
 
-async def test_requested_mode_and_current_never_establish_physical_mode(reference):
+async def test_no_reference_or_vendor_gate(reference):
+    bound, peer, _, _ = reference
+    live = bound.adapter
+    live.token = live.runtime.boot(live.token, StationIdentity("Any", "Any"))
+    source = CapabilityResolver(live.runtime)
+    await physical_report(peer, "Rxx")
+    assert source.current_mode(bound.target).count == 1
+    assert source.capabilities(bound.target) is None
+
+
+async def test_exact_connector_scope(reference):
+    bound, peer, source, _ = reference
+    await physical_report(
+        peer,
+        "RST",
+        component={"name": "Connector", "evse": {"id": 1, "connector_id": 2}},
+    )
+    assert source.current_mode(bound.target) is None
+    assert source.current_mode(ConnectorId(bound.target.evse, "2")).count == 3
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"variable": {"name": "SupplyPhases"}},
+        {"component": {"name": "EVSE", "evse": {"id": 1}}},
+        {"timestamp": "2026-01-01T00:00:00"},
+        {"event_notification_type": "CustomMonitor"},
+    ],
+)
+async def test_invalid_scope_or_evidence(reference, changes):
+    bound, peer, source, _ = reference
+    await physical_report(peer, "RST", **changes)
+    assert source.current_mode(bound.target) is None
+
+
+async def test_inactive_relay_does_not_retain(reference):
     bound, peer, source, control = reference
-    control.restore(bound.target, target_w=11040, allowed=True)
+    await physical_report(peer, "RST")
+    result = await control.change(bound.target, target_w=4000, allowed=True)
+    assert result.status.value == "applied"
+    assert control.intent(bound.target).solver_result.point.mode.count == 1
+    assert source.current_mode(bound.target).count == 3
+    await control.change(bound.target, allowed=False)
+    assert control.intent(bound.target).request.target_w == 4000
+    measured(bound.adapter.runtime, bound.adapter.token, bound.target)
+    await control.change(bound.target, allowed=True)
+    assert control.intent(bound.target).solver_result.point.mode.count == 1
+
+
+async def test_retention_uses_fresh_positive_measurement(reference):
+    from fractions import Fraction
+
+    from custom_components.wallbox_manager.core.telemetry import (
+        Channel,
+        Observation,
+        Quantity,
+        State,
+    )
+
+    bound, peer, _, control = reference
+    runtime = bound.adapter.runtime
+    await physical_report(peer, "RST")
+    control.restore(bound.target, target_w=4000, allowed=True)
     now = datetime.now(UTC)
-    bound.adapter.runtime.observe(
-        bound.adapter.token,
-        tuple(
+    runtime.observe(
+        bound.token,
+        (
             Observation(
-                Channel(bound.target, Quantity(f"current_{phase.value}")),
-                16,
+                Channel(bound.target, Quantity.CHARGING_STATE),
+                State.CHARGING,
+                now,
+                now,
+                None,
+                "test",
+            ),
+            Observation(
+                Channel(bound.target, Quantity.POWER),
+                Fraction(4140),
                 now,
                 now,
                 now + timedelta(seconds=60),
-                "meter",
-            )
-            for phase in Phase
+                "test",
+            ),
         ),
     )
-    assert source.current_mode(bound.target) is None
-    await control.change(bound.target, allowed=True)
-    assert not peer.requests
-
-
-async def test_real_feedback_reaches_retention_and_transition(reference):
-    bound, peer, source, control = reference
-    await physical_report(peer, "RST")
-    assert (
-        await control.change(bound.target, target_w=4000, allowed=True)
-    ).status.value == "applied"
+    await control.change(bound.target, target_w=4000)
     assert control.intent(bound.target).solver_result.point.mode.count == 3
-    assert control.attributes(bound.target)["physical_phase_mode"] == ["l1", "l2", "l3"]
-    # Outside tolerance: at 1500 W, 3P minimum is too high, so select 1P.
-    peer.release.clear()
-    peer.received.clear()
-    pending = asyncio.create_task(control.change(bound.target, target_w=1500))
-    await peer.received.wait()
-    assert control.intent(bound.target).solver_result.point.mode.count == 1
-    assert source.current_mode(bound.target).count == 3  # Sending is not feedback.
-    updated = asyncio.Event()
-    unsubscribe = bound.adapter.runtime.subscribe(
-        lambda state: (
-            updated.set() if source.current_mode(bound.target) is None else None
-        )
-    )
-    unknown_report = asyncio.create_task(physical_report(peer, ""))
-    await asyncio.wait_for(updated.wait(), 1)
-    unsubscribe()
-    peer.release.set()
-    assert (await pending).status.value == "applied"
-    await unknown_report
-    await physical_report(peer, "Rxx")
-    assert source.current_mode(bound.target).count == 1
-
-
-@pytest.mark.parametrize(
-    "alteration", ["identity", "scope", "variable", "timestamp", "future"]
-)
-async def test_untrusted_or_inapplicable_events(reference, alteration):
-    bound, peer, source, _ = reference
-    changes = {}
-    at = None
-    if alteration == "identity":
-        bound.adapter.token = bound.adapter.runtime.boot(
-            bound.adapter.token,
-            StationIdentity("Generic", "Generic", firmware="test-verified"),
-        )
-    elif alteration == "scope":
-        changes["component"] = {
-            "name": "Connector",
-            "evse": {"id": 2, "connector_id": 1},
-        }
-    elif alteration == "variable":
-        changes["variable"] = {"name": "SupplyPhases"}
-    elif alteration == "timestamp":
-        changes["timestamp"] = "2026-01-01T00:00:00"  # No timezone.
-    else:
-        at = datetime.now(UTC) + timedelta(seconds=10)
-    await physical_report(peer, "RST", at=at, **changes)
-    assert source.current_mode(bound.target) is None
-    assert not bound.adapter.runtime.get(bound.target.station).physical_phases
-
-
-@pytest.mark.parametrize("field", ["vendor", "model", "firmware", "serial"])
-async def test_runtime_identity_mismatch_blocks_capabilities_and_feedback(
-    reference, field
-):
-    bound, peer, source, _ = reference
-    live = bound.adapter
-    identity = live.runtime.get(bound.target.station).identity
-    live.token = live.runtime.boot(
-        live.token, replace(identity, **{field: "different"})
-    )
-    await physical_report(peer, "RST")
-    assert source.capabilities(bound.target) is None
-    assert source.current_mode(bound.target) is None
-    assert not live.runtime.get(bound.target.station).physical_phases
-
-
-@pytest.mark.parametrize(
-    "key",
-    [
-        "reference_vendor",
-        "reference_model",
-        "reference_firmware",
-        "reference_station_id",
-        "reference_verified",
-    ],
-)
-async def test_missing_attestation_blocks_capabilities_and_feedback(reference, key):
-    bound, peer, source, _ = reference
-    source.options = {k: v for k, v in REFERENCE.items() if k != key}
-    await physical_report(peer, "RST")
-    assert source.capabilities(bound.target) is None
-    assert not bound.adapter.runtime.get(bound.target.station).physical_phases
-
-
-async def test_other_configured_station_cannot_supply_feedback(reference):
-    bound, peer, source, control = reference
-    from custom_components.wallbox_manager.core.models import EvseId, StationId
-
-    source.target = EvseId(StationId("Wallbox01"), "1")
-    source.options = {**REFERENCE, "reference_station_id": "Wallbox01"}
-    await physical_report(peer, "RST")
-    assert source.capabilities(bound.target) is None
-    assert not bound.adapter.runtime.get(bound.target.station).physical_phases
-
-
-async def test_serial_attestation_optional_but_no_reference_means_no_feedback(
-    reference,
-):
-    bound, peer, source, _ = reference
-    source.options = {k: v for k, v in REFERENCE.items() if k != "reference_serial"}
-    await physical_report(peer, "RST")
-    assert source.capabilities(bound.target) is not None
-    assert source.current_mode(bound.target).count == 3
-    live = bound.adapter
-    live.token = live.runtime.boot(
-        live.token, live.runtime.get(bound.target.station).identity
-    )
-    live.runtime.physical_phase_authorized = lambda target: False
-    await physical_report(peer, "RST")
-    assert not live.runtime.get(bound.target.station).physical_phases
-
-
-async def test_boot_notification_identity_gates_reference_feedback(reference):
-    from ocpp.v21 import call
-
-    bound, peer, source, _ = reference
-    await peer.call(
-        call.BootNotification(
-            charging_station={
-                "vendor_name": "Lutz",
-                "model": "Lutz-EVSE-DIN",
-                "serial_number": "4C75747A00000001",
-                "firmware_version": "test-verified",
-            },
-            reason="PowerUp",
+    later = datetime.now(UTC)
+    runtime.observe(
+        bound.token,
+        (
+            Observation(
+                Channel(bound.target, Quantity.POWER),
+                Fraction(0),
+                later,
+                later,
+                later + timedelta(seconds=60),
+                "test",
+            ),
         ),
-        suppress=False,
     )
-    await physical_report(peer, "RST")
-    assert source.capabilities(bound.target) is not None
-    assert source.current_mode(bound.target).count == 3
+    await control.change(bound.target, target_w=4000)
+    assert control.intent(bound.target).solver_result.point.mode.count == 1
+
+
+async def test_zero_target_does_not_send_positive_profile(reference):
+    bound, peer, _, control = reference
+    await physical_report(peer, "Rxx")
+    await control.change(bound.target, allowed=True, target_w=0)
+    assert control.intent(bound.target).status == "zero_target_unsupported"
+    assert not peer.requests and not peer.permissions

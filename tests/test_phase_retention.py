@@ -32,6 +32,7 @@ def test_retention(
         now=now,
         eligible_modes=(one, three),
         current_mode=three,
+        actively_charging=True,
         phase_switch_deviation_pct=tolerance,
     )
     assert result.point.mode.count == expected_count
@@ -49,6 +50,7 @@ def test_retention_cannot_override_limit(capabilities, voltage, now, one, three)
         now=now,
         eligible_modes=(one, three),
         current_mode=three,
+        actively_charging=True,
         phase_switch_deviation_pct=25,
         limits=(CurrentLimit(three, 0, 0, "inhibit"),),
     )
@@ -64,6 +66,7 @@ def test_zero(capabilities, voltage, now, one, three, tolerance):
         now=now,
         eligible_modes=(one, three),
         current_mode=three,
+        actively_charging=True,
         phase_switch_deviation_pct=tolerance,
     )
     assert not result.point.charging
@@ -86,6 +89,38 @@ def test_zero_without_stop_preserves_solver_semantics(
         now=now,
         eligible_modes=(one, three),
         current_mode=three,
+        actively_charging=True,
         phase_switch_deviation_pct=25,
     )
     assert result.point.offered_power_w == 1380
+
+
+@pytest.mark.parametrize("active,expected", [(True, 3), (False, 1)])
+def test_retention_requires_positive_active_state(
+    capabilities, voltage, now, one, three, active, expected
+):
+    result = solve(
+        PowerRequest(4000, Direction.NEAREST, True),
+        capabilities,
+        voltage,
+        now=now,
+        eligible_modes=(one, three),
+        current_mode=three,
+        actively_charging=active,
+        phase_switch_deviation_pct=5,
+    )
+    assert result.point.mode.count == expected
+
+
+def test_disabled_ignores_physical_position(capabilities, voltage, now, one, three):
+    result = solve(
+        PowerRequest(4000, Direction.NEAREST, False),
+        capabilities,
+        voltage,
+        now=now,
+        eligible_modes=(one, three),
+        current_mode=three,
+        actively_charging=True,
+        phase_switch_deviation_pct=25,
+    )
+    assert not result.point.charging

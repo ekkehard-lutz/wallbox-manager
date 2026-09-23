@@ -15,16 +15,12 @@ from custom_components.wallbox_manager.control.commands import (
     CommandReason,
     CommandStatus,
 )
-from custom_components.wallbox_manager.control.reference_wallbox_stationary import (
-    WallboxStationaryReference,
-)
 from custom_components.wallbox_manager.control.requests import Direction
 from custom_components.wallbox_manager.core.capabilities import (
     CurrentLimit,
     EvidenceState,
 )
-from custom_components.wallbox_manager.core.events import StationIdentity
-from custom_components.wallbox_manager.core.models import Phase, PhaseMode
+from custom_components.wallbox_manager.core.models import ConnectorId, Phase, PhaseMode
 from custom_components.wallbox_manager.core.telemetry import (
     Channel,
     Observation,
@@ -67,6 +63,9 @@ class Source:
     def phase_operation_evidence(self, snapshot, mode):
         return snapshot.envelopes[0].evidence if self.proof else None
 
+    def permission_evidence(self, target):
+        return self.snapshot.envelopes[0].evidence if self.snapshot else None
+
     def limits(self, target):
         return self.permitted
 
@@ -78,13 +77,33 @@ class Source:
 async def manual(connected):
     bound, peer, wire = connected
     live = bound.adapter
+    target = ConnectorId(bound.target, "1")
+    snapshot = replace(bound._capabilities(), scope=target)
+    bound = live.bind_control(
+        target,
+        lambda: snapshot,
+        phase_operation_evidence=lambda caps, mode: caps.envelopes[0].evidence,
+    )
+    live.permission_inventory = (
+        live.token,
+        (
+            {
+                "component": {
+                    "name": "WallboxController",
+                    "evse": {"id": 1, "connector_id": 1},
+                },
+                "variable": {"name": "ChargingEnabled"},
+                "variable_attribute": [{"mutability": "ReadWrite"}],
+            },
+        ),
+    )
     source = Source(bound)
     server = SimpleNamespace(
         sessions={bound.target.station: SimpleNamespace(adapter=live)}
     )
     control = create_control_runtime(live.runtime, server, source)
     measured(live.runtime, live.token, bound.target)
-    await transaction(peer)
+    await asyncio.wait_for(transaction(peer, connector=1), 2)
     return control, bound, peer, wire, source, server
 
 
@@ -109,7 +128,7 @@ async def test_intent_direction_and_limits(manual, direction):
     power = intent.request.target_w
     await control.change(bound.target, allowed=False)
     assert intent.request.target_w == power
-    assert intent.status == "stop_unverified"
+    assert intent.status == "applied"
     assert len(peer.requests) == 1
 
 
@@ -118,7 +137,7 @@ async def test_default_five_percent(manual):
     source.mode = PhaseMode(tuple(Phase))
     await control.change(bound.target, target_w=4000, allowed=True)
     assert control.intent(bound.target).phase_switch_deviation_pct == 5
-    assert control.intent(bound.target).solver_result.point.mode == source.mode
+    assert control.intent(bound.target).solver_result.point.mode.count == 1
     await control.change(bound.target, phase_switch_deviation_pct=0)
     assert control.intent(bound.target).solver_result.point.mode.count == 1
 
@@ -238,11 +257,13 @@ async def test_late_accepted_does_not_publish_over_new_intent(manual):
     peer.release.clear()
     old = asyncio.create_task(control.change(bound.target, target_w=4000, allowed=True))
     await peer.received.wait()
-    await control.change(bound.target, allowed=False)
+    new = asyncio.create_task(control.change(bound.target, allowed=False))
+    await asyncio.sleep(0)
     peer.release.set()
+    await new
     assert (await old).reason == CommandReason.STALE
-    assert control.intent(bound.target).status == "stop_unverified"
-    assert control.intent(bound.target).command_result is None
+    assert control.intent(bound.target).status == "applied"
+    assert control.intent(bound.target).command_result.status == CommandStatus.APPLIED
 
 
 async def test_solver_off_reaches_unsupported_adapter(manual):
@@ -252,22 +273,22 @@ async def test_solver_off_reaches_unsupported_adapter(manual):
         stop=replace(source.snapshot.stop, state=EvidenceState.VERIFIED),
     )
     result = await control.change(bound.target, target_w=4000, allowed=False)
-    assert result.status == CommandStatus.UNSUPPORTED
+    assert result.status == CommandStatus.APPLIED
     assert not peer.requests
 
 
 REFERENCE = {
-    "reference_verified": True,
     "reference_station_id": "station",
-    "reference_firmware": "test-verified",
-    "reference_vendor": "Lutz",
-    "reference_model": "Lutz-EVSE-DIN",
-    "reference_serial": "4C75747A00000001",
-    "reference_min_a": 6,
-    "reference_max_1a": 16,
-    "reference_max_3a": 16,
-    "limit_1a": 16,
-    "limit_3a": 16,
+    "reference_evse_id": 1,
+    "reference_connector_id": 1,
+    "reference_phases": "1,3",
+    "reference_modes": "l1;l1,l2,l3",
+    "reference_min_a": "6",
+    "reference_step_a": "1",
+    "reference_max_1a": "20",
+    "reference_max_3a": "16",
+    "reference_phase_switching": True,
+    "reference_enable_disable": True,
 }
 
 
@@ -289,36 +310,6 @@ async def physical_report(peer, value, at=None, **changes):
         call.NotifyEvent(generated_at=at, seq_no=0, tbc=False, event_data=[event]),
         suppress=False,
     )
-
-
-async def test_explicit_reference_source(manual):
-    _, bound, peer, _, _, server = manual
-    live = bound.adapter
-    live.token = live.runtime.boot(
-        live.token,
-        StationIdentity(
-            "Lutz", "Lutz-EVSE-DIN", serial="4C75747A00000001", firmware="test-verified"
-        ),
-    )
-    live.runtime._publish(
-        replace(live.runtime.get(bound.target.station), protocol_version="2.1")
-    )
-    source = WallboxStationaryReference(live.runtime, REFERENCE)
-    control = create_control_runtime(live.runtime, server, source)
-    measured(live.runtime, live.token, bound.target)
-    await physical_report(peer, "Rxx")
-    assert (
-        await control.change(bound.target, target_w=4000, allowed=True)
-    ).status == CommandStatus.APPLIED
-    assert len(peer.requests) == 1
-    generic = create_control_runtime(live.runtime, server)
-    await generic.change(bound.target, target_w=4000, allowed=True)
-    assert generic.intent(bound.target).status == "capabilities_unavailable"
-    assert len(peer.requests) == 1
-    live.token = live.runtime.boot(
-        live.token, StationIdentity("Other", "Other", firmware="test-verified")
-    )
-    assert source.capabilities(bound.target) is None
 
 
 async def test_site_limit_constrains_resolved_offer(manual):

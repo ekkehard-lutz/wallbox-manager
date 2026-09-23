@@ -20,6 +20,7 @@ def solve(
     now: datetime,
     eligible_modes: Iterable[PhaseMode],
     current_mode: PhaseMode | None = None,
+    actively_charging: bool = False,
     limits: Iterable[CurrentLimit] = (),
     phase_switch_deviation_pct: Fraction = Fraction(0),
 ) -> SolverResult:
@@ -41,11 +42,15 @@ def solve(
     tolerance = scalar(phase_switch_deviation_pct)
     if tolerance > 25:
         raise ValueError("phase retention tolerance must be between 0 and 25 percent")
+    if type(actively_charging) is not bool:
+        raise ValueError("active charging state must be boolean")
     eligible = frozenset(eligible_modes)
     if any(not isinstance(mode, PhaseMode) for mode in eligible):
         raise ValueError("invalid eligible phase mode")
     if current_mode is not None and not isinstance(current_mode, PhaseMode):
         raise ValueError("invalid current mode")
+    if not actively_charging or not request.allowed:
+        current_mode = None
     limits = tuple(limits)
     if any(not isinstance(limit, CurrentLimit) for limit in limits):
         raise ValueError("invalid current limit")

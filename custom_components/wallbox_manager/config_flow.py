@@ -8,6 +8,7 @@ Copyright (c) 2021 lbbrhzn, MIT; see THIRD_PARTY_NOTICES.md.
 from __future__ import annotations
 
 import ipaddress
+from fractions import Fraction
 from typing import Any
 
 import voluptuous as vol
@@ -65,45 +66,69 @@ class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 REFERENCE_FIELDS = {
-    "reference_verified": bool,
     "reference_station_id": str,
-    "reference_firmware": str,
-    "reference_vendor": str,
-    "reference_model": str,
-    "reference_serial": str,
-    "reference_min_a": vol.Coerce(float),
-    "reference_max_1a": vol.Coerce(float),
-    "reference_max_3a": vol.Coerce(float),
-    "limit_1a": vol.Coerce(float),
-    "limit_3a": vol.Coerce(float),
+    "reference_evse_id": vol.Coerce(int),
+    "reference_connector_id": vol.Coerce(int),
+    "reference_phases": str,
+    "reference_modes": str,
+    "reference_min_a": str,
+    "reference_step_a": str,
+    "reference_max_1a": str,
+    "reference_max_2a": str,
+    "reference_max_3a": str,
+    "reference_phase_switching": bool,
+    "reference_enable_disable": bool,
 }
 
 
 def validate_reference_options(data):
-    if data.get("reference_verified") is not True:
-        return {}
-    if any(key not in data for key in REFERENCE_FIELDS if key != "reference_serial"):
-        raise ValueError("complete reference verification required")
-    for key in (
-        "reference_station_id",
-        "reference_firmware",
-        "reference_vendor",
-        "reference_model",
-        *(["reference_serial"] if "reference_serial" in data else []),
-    ):
-        if not data[key].strip() or data[key] != data[key].strip():
-            raise ValueError("nonempty reference identity required")
-    from .core.models import StationId
+    from .control.reference import ConfiguredReference
+    from .core.electrical import phase_modes, validate_value
 
-    StationId(data["reference_station_id"])
-    for key in ("reference_min_a", "reference_max_1a", "reference_max_3a"):
-        value = scalar(data[key], positive=True)
-        if value.denominator != 1:
-            raise ValueError("reference device has a whole ampere grid")
-    for count in (1, 3):
-        if data[f"reference_max_{count}a"] < data["reference_min_a"]:
-            raise ValueError("invalid reference interval")
-        scalar(data[f"limit_{count}a"])
+    if not data:
+        return {}
+    if set(data) - set(REFERENCE_FIELDS):
+        raise ValueError("unknown reference option")
+    station = data.get("reference_station_id")
+    if (
+        not isinstance(station, str)
+        or not station.strip()
+        or station != station.strip()
+    ):
+        raise ValueError("explicit station association required")
+    for key in ("reference_evse_id", "reference_connector_id"):
+        if type(data.get(key)) is not int or data[key] <= 0:
+            raise ValueError("explicit positive topology identity required")
+    counts = (
+        validate_value(
+            "supported_phases",
+            tuple(int(n.strip()) for n in data["reference_phases"].split(",")),
+        )
+        if "reference_phases" in data
+        else None
+    )
+    minimum = (
+        scalar(Fraction(data["reference_min_a"]), positive=True)
+        if "reference_min_a" in data
+        else None
+    )
+    if "reference_step_a" in data:
+        scalar(Fraction(data["reference_step_a"]), positive=True)
+    for count in (1, 2, 3):
+        key = f"reference_max_{count}a"
+        if key in data:
+            maximum = scalar(Fraction(str(data[key])), positive=True)
+            if minimum is not None and maximum < minimum:
+                raise ValueError("maximum below minimum")
+            if counts is not None and count not in counts:
+                raise ValueError("maximum for explicitly unsupported mode")
+    if "reference_modes" in data:
+        modes = phase_modes(data["reference_modes"])
+        if counts is not None and any(mode.count not in counts for mode in modes):
+            raise ValueError("mapping contradicts phase counts")
+        if len({m.count for m in modes}) != len(modes):
+            raise ValueError("count-only execution needs an unambiguous mapping")
+    ConfiguredReference(data)
     return data
 
 
@@ -122,7 +147,7 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
         if user_input is not None:
             try:
                 data = validate_reference_options(schema(user_input))
-            except ValueError, vol.Invalid:
+            except ValueError, TypeError, ZeroDivisionError, OverflowError, vol.Invalid:
                 errors["base"] = "invalid_reference"
             else:
                 return self.async_create_entry(title="", data=data)

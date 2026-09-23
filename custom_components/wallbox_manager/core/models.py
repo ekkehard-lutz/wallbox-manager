@@ -37,6 +37,10 @@ class ConnectorId:
             raise ValueError("connector requires an EVSE")
         nonempty(self.value)
 
+    @property
+    def station(self):
+        return self.evse.station
+
 
 type Scope = StationId | EvseId | ConnectorId
 
@@ -126,15 +130,15 @@ class VoltageObservation:
 class PhysicalPhaseObservation:
     """Hardware-backed conductor state; unknown is explicit, never desired state."""
 
-    scope: EvseId
+    scope: ConnectorId
     mode: PhaseMode | None
     observed_at: datetime
     valid_until: datetime
     source: str
 
     def __post_init__(self):
-        if not isinstance(self.scope, EvseId):
-            raise ValueError("physical phase state requires EVSE scope")
+        if not isinstance(self.scope, ConnectorId):
+            raise ValueError("physical phase state requires connector scope")
         if self.mode is not None and not isinstance(self.mode, PhaseMode):
             raise ValueError("invalid physical phase state")
         timestamp(self.observed_at)

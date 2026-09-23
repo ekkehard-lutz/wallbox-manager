@@ -41,6 +41,9 @@ DESCRIPTIONS = tuple(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    from .capability_entity import setup_capability_entities
+
+    setup_capability_entities(hass, entry, async_add_entities)
     setup_session_entities(hass, entry, async_add_entities, binary=False)
     async_setup_station_entities(
         hass,

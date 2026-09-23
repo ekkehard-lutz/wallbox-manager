@@ -1,30 +1,32 @@
-"""Reference wiring interpretation of standard Connector.PhaseRotation events.
-
-No advertisement, meter current or requested phase count establishes this proof.
-Other devices need their own verified mapping; this is not generic OCPP discovery.
-"""
+"""Strictly scoped standard physical conductor feedback, never capability proof."""
 
 from datetime import datetime, timedelta
 
-from ....core.models import EvseId, Phase, PhaseMode, PhysicalPhaseObservation
+from ....core.models import Phase, PhaseMode, PhysicalPhaseObservation
+from ..common.inventory import connector_identity
 
-SOURCE = "ocpp2.1:wallbox-stationary:Connector.PhaseRotation"
+SOURCE = "ocpp2.1:Connector.PhaseRotation"
 LIFETIME = timedelta(seconds=5)
 
 
 def accept_phase_events(runtime, token, events):
-    target = EvseId(token.station, "1")
-    if not runtime.current(token) or not runtime.physical_phase_authorized(target):
+    if not runtime.current(token):
         return
     for event in events:
+        component = event.get("component", {})
+        scope = component.get("evse", {})
         if (
-            event.get("component")
-            != {"name": "Connector", "evse": {"id": 1, "connector_id": 1}}
+            component.get("name") != "Connector"
+            or set(component) != {"name", "evse"}
+            or set(scope) != {"id", "connector_id"}
             or event.get("variable") != {"name": "PhaseRotation"}
             or event.get("event_notification_type") != "HardWiredNotification"
         ):
             continue
         try:
+            target = connector_identity(
+                token.station, scope["id"], scope["connector_id"]
+            )
             observed_at = datetime.fromisoformat(
                 event["timestamp"].replace("Z", "+00:00")
             )

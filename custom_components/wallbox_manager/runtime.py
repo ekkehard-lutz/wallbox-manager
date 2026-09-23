@@ -23,7 +23,6 @@ class Runtime:
         self.sessions = SessionLedger()
         self._stations: dict[StationId, StationSnapshot] = {}
         self._phase_epoch = {}
-        self.physical_phase_authorized: Callable[[EvseId], bool] = lambda target: False
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
     @property
@@ -139,6 +138,7 @@ class Runtime:
         charging_schedule: CapabilityEvidence,
         evses: tuple[EvseId, ...] = (),
         connectors: tuple[ConnectorId, ...] = (),
+        electrical: tuple = (),
     ) -> bool:
         if not self.current(token):
             return False
@@ -147,6 +147,8 @@ class Runtime:
             c.evse.station != token.station for c in connectors
         ):
             raise ValueError("discovery identity belongs to another station")
+        if any(c.scope.station != token.station for c in electrical):
+            raise ValueError("electrical capability belongs to another station")
         known_evses = set(old.evses) | set(evses) | {c.evse for c in connectors}
         known_connectors = set(old.connectors) | set(connectors)
         self._publish(
@@ -162,6 +164,7 @@ class Runtime:
                     observed_at=discovery.observed_at,
                     source=discovery.source,
                 ),
+                electrical=tuple(electrical),
                 charging_schedule=charging_schedule,
                 discovery=discovery,
             )

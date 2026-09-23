@@ -53,11 +53,26 @@ class Peer(ChargePoint):
     def __init__(self, wire):
         super().__init__("station", wire)
         self.requests = []
+        self.permissions = []
         self.status = "Accepted"
         self.error = None
         self.received = asyncio.Event()
         self.release = asyncio.Event()
         self.release.set()
+
+    @on("SetVariables")
+    async def variables(self, set_variable_data):
+        self.permissions.extend(set_variable_data)
+        return call_result.SetVariables(
+            set_variable_result=[
+                {
+                    "component": item["component"],
+                    "variable": item["variable"],
+                    "attribute_status": self.status,
+                }
+                for item in set_variable_data
+            ]
+        )
 
     @on("SetChargingProfile")
     async def profile(self, evse_id, charging_profile):

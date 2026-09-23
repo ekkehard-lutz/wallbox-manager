@@ -1,18 +1,22 @@
 """Manual charging orchestration; no HA or protocol types and no automatic retry."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fractions import Fraction
 
 from ..core.capabilities import CapabilitySnapshot, CurrentLimit
-from ..core.models import EvseId, PhaseMode, VoltageObservation
+from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
 from ..solver.operating_point import SolverResult
 from ..solver.power import solve
 from .commands import (
+    CommandReason,
     CommandResult,
     CommandStatus,
+    ControlArea,
+    apply_charging_permission,
     apply_operating_point,
+    permission_available,
     stale_command_result,
 )
 from .requests import Direction, PowerRequest
@@ -27,12 +31,14 @@ class ControlInputs:
     eligible_modes: tuple[PhaseMode, ...]
     limits: tuple[CurrentLimit, ...] = ()
     current_mode: PhaseMode | None = None
+    actively_charging: bool = False
 
 
 @dataclass
 class ManualIntent:
     request: PowerRequest = PowerRequest(0, Direction.NEAREST, False)
     phase_switch_deviation_pct: Fraction = Fraction(5)
+    current_limits: dict[int, Fraction] = field(default_factory=dict)
     generation: int = 0
     status: str = "idle"
     solver_result: SolverResult | None = None
@@ -53,9 +59,10 @@ class ControlRuntime:
         self.adapter = adapter
         self.blocker = blocker
         self._edited = {}
-        self.intents: dict[EvseId, ManualIntent] = {}
+        self.intents: dict[EvseId | ConnectorId, ManualIntent] = {}
         self._listeners = set()
         self._closed = False
+        self._inactive = set()
 
     def intent(self, target):
         return self.intents.setdefault(target, ManualIntent())
@@ -92,7 +99,13 @@ class ControlRuntime:
             raise ValueError(
                 "phase retention tolerance must be between 0 and 25 percent"
             )
+        limits = dict(intent.current_limits)
+        for count in (1, 2, 3):
+            key = f"allowed_current_{count}p"
+            if key in changes:
+                limits[count] = scalar(changes.pop(key))
         request = replace(intent.request, **changes)
+        intent.current_limits = limits
         intent.request = request
         intent.phase_switch_deviation_pct = tolerance
         intent.generation += 1
@@ -116,14 +129,35 @@ class ControlRuntime:
         ):
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
+        if intent.request.allowed and intent.request.target_w == 0:
+            from ..solver.operating_point import Reason, ResultStatus
+
+            return (
+                inputs,
+                SolverResult(ResultStatus.UNREACHABLE, Reason.STOP_UNVERIFIED),
+                "zero_target_unsupported",
+            )
         result = solve(
             intent.request,
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
             eligible_modes=inputs.eligible_modes,
-            limits=inputs.limits,
+            limits=inputs.limits
+            + tuple(
+                CurrentLimit(
+                    e.mode,
+                    0,
+                    intent.current_limits[e.mode.count],
+                    "desired_control_limit",
+                )
+                for e in caps.envelopes
+                if e.mode.count in intent.current_limits
+            ),
             current_mode=inputs.current_mode,
+            actively_charging=inputs.actively_charging
+            and intent.request.allowed
+            and target not in self._inactive,
             phase_switch_deviation_pct=intent.phase_switch_deviation_pct,
         )
         return (
@@ -155,11 +189,38 @@ class ControlRuntime:
         }
 
     async def change(self, target, **changes):
+        was_allowed = self.intent(target).request.allowed
         intent = self._edit(target, changes)
+        if (
+            not was_allowed
+            or not intent.request.allowed
+            or intent.request.target_w == 0
+        ):
+            self._inactive.add(target)
         self._edited.setdefault(target, set()).update(changes)
         generation = intent.generation
+        if "allowed" in changes and not intent.request.allowed:
+            return await self._permission(target, intent, generation, False)
+        if not intent.request.allowed:
+            intent.status = "charging_disabled"
+            self.publish(target)
+            return None
         inputs, resolved, blocked = self.resolve(target)
         intent.solver_result = resolved
+        if (
+            inputs is not None
+            and "allowed" in changes
+            and not permission_available(self.adapter(target))
+        ):
+            result = CommandResult(
+                CommandStatus.UNSUPPORTED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.UNSUPPORTED_OPERATION,
+            )
+            intent.command_result = result
+            intent.status = result.status.value
+            self.publish(target)
+            return result
         adapter = self.adapter(target) if blocked is None else None
         if blocked is not None or adapter is None:
             intent.status = blocked or "adapter_unavailable"
@@ -182,6 +243,7 @@ class ControlRuntime:
                 fresh = replace(
                     fresh,
                     current_mode=inputs.current_mode,
+                    actively_charging=inputs.actively_charging,
                     eligible_modes=inputs.eligible_modes,
                 )
                 return fresh == inputs and (
@@ -198,11 +260,60 @@ class ControlRuntime:
         result = await apply_operating_point(
             adapter, resolved.point, is_current=current
         )
+        if (
+            result.status == CommandStatus.APPLIED
+            and "allowed" in changes
+            and intent.request.allowed
+        ):
+            result = await self._permission(
+                target,
+                intent,
+                generation,
+                True,
+                publish=False,
+                fence=lambda: current(after_dispatch=True),
+            )
         if generation != intent.generation or (
             result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
         ):
             result = stale_command_result()
         if generation == intent.generation:
+            if result.status == CommandStatus.APPLIED and resolved.point.charging:
+                self._inactive.discard(target)
+            intent.command_result = result
+            intent.status = result.status.value
+            self.publish(target)
+        return result
+
+    async def _permission(
+        self, target, intent, generation, enabled, *, publish=True, fence=lambda: True
+    ):
+        state = self.runtime.get(target.station)
+        adapter = self.adapter(target)
+        if self._closed or state is None or not state.connected or adapter is None:
+            intent.status = "adapter_unavailable"
+            self.publish(target)
+            return CommandResult(
+                CommandStatus.UNSUPPORTED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.UNSUPPORTED_OPERATION,
+            )
+        token = state.token
+
+        def current():
+            return (
+                not self._closed
+                and intent.generation == generation
+                and self.runtime.current(token)
+                and fence()
+            )
+
+        intent.status = "pending"
+        self.publish(target)
+        result = await apply_charging_permission(adapter, enabled, is_current=current)
+        if not current():
+            result = stale_command_result()
+        if publish and generation == intent.generation:
             intent.command_result = result
             intent.status = result.status.value
             self.publish(target)

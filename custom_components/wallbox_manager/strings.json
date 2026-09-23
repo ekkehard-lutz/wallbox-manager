@@ -130,11 +130,35 @@
       },
       "session_end_meter": {
         "name": "{scope} Session end meter"
+      },
+      "supported_phases": {
+        "name": "{scope} Supported phases"
+      },
+      "minimum_current": {
+        "name": "{scope} Minimum current"
+      },
+      "current_step": {
+        "name": "{scope} Current step"
+      },
+      "phase_switching": {
+        "name": "{scope} Phase switching supported"
+      },
+      "enable_disable": {
+        "name": "{scope} Enable/disable supported"
+      },
+      "maximum_current_1": {
+        "name": "{scope} Maximum current 1p"
+      },
+      "maximum_current_2": {
+        "name": "{scope} Maximum current 2p"
+      },
+      "maximum_current_3": {
+        "name": "{scope} Maximum current 3p"
       }
     },
     "switch": {
       "charging_enabled": {
-        "name": "{scope} Charging enabled (requested)"
+        "name": "{scope} Charging enabled"
       }
     },
     "number": {
@@ -142,7 +166,16 @@
         "name": "{scope} Desired charging power"
       },
       "phase_switch_deviation_pct": {
-        "name": "{scope} Phase retention deviation"
+        "name": "{scope} Maximum deviation without phase switching"
+      },
+      "allowed_current_1p": {
+        "name": "{scope} Allowed current 1p"
+      },
+      "allowed_current_2p": {
+        "name": "{scope} Allowed current 2p"
+      },
+      "allowed_current_3p": {
+        "name": "{scope} Allowed current 3p"
       }
     },
     "select": {
@@ -159,25 +192,26 @@
   "options": {
     "step": {
       "init": {
-        "title": "wallbox-stationary reference verification",
-        "description": "Only for manually verified wallbox-stationary: EVSE 1, L1/L1-L2-L3, atomic switching, 1 A grid. Identity and firmware must match. Complete all required fields before enabling; serial number is optional. Disabling removes this evidence source; it does not send a stop.",
+        "title": "Capability fallback references",
+        "description": "Fill only missing capabilities. Verified OCPP values always take precedence. Explicitly associate station, EVSE and connector; individual capability fields are optional. Decimal values and fractions such as 6.5 or 13/2 are accepted. Set normal current limits using the control entities.",
         "data": {
-          "reference_verified": "I verified the reference device and safe phase switching (enable)",
-          "reference_station_id": "Exact verified station ID",
-          "reference_firmware": "Exact verified firmware",
-          "reference_min_a": "Verified minimum current (A)",
-          "reference_max_1a": "Verified one-phase maximum (A)",
-          "reference_max_3a": "Verified three-phase maximum (A)",
-          "limit_1a": "Configured one-phase current limit (A)",
-          "limit_3a": "Configured three-phase current limit (A)",
-          "reference_vendor": "Exact verified OCPP vendor",
-          "reference_model": "Exact verified OCPP model",
-          "reference_serial": "Exact verified serial number (optional)"
+          "reference_station_id": "Station ID",
+          "reference_evse_id": "EVSE ID",
+          "reference_connector_id": "Connector ID",
+          "reference_phases": "Supported phase counts (e.g. 1,3)",
+          "reference_modes": "Explicit conductor mappings (e.g. l1;l1,l2,l3)",
+          "reference_min_a": "Minimum current (A)",
+          "reference_step_a": "Current step (A)",
+          "reference_phase_switching": "Phase switching supported",
+          "reference_enable_disable": "Enable/disable supported",
+          "reference_max_1a": "Maximum current 1p (A)",
+          "reference_max_2a": "Maximum current 2p (A)",
+          "reference_max_3a": "Maximum current 3p (A)"
         }
       }
     },
     "error": {
-      "invalid_reference": "Provide complete valid identity, firmware, verified current bounds and configured limits."
+      "invalid_reference": "Provide valid topology identity and consistent reference values."
     }
   }
 }
