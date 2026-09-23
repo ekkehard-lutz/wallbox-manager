@@ -116,31 +116,69 @@ This cooperative fence cannot retract an already dispatched command or guarantee
 rollback of a partial operation. The future controller must also fence late
 results before publishing active state and reconcile partial operations.
 
-The live v21 adapter implements this contract for wallbox-stationary, the first
-verified control target, not a universal charger assumption. It sends one
-immediate Absolute TxProfile (stack 0, amperes, one schedule and period) containing
-both current and numberPhases. The device performs safe atomic phase/current
-transitions. APPLIED means accepted control, not measured power confirmation.
+The live v21 station adapter exposes `bind_control(target, capabilities,
+phase_operation_evidence=...)`, returning an EVSE-bound `ControlAdapter`. The
+validated target is an `EvseId` for this station with a canonical positive numeric
+OCPP EVSE ID. Multiple bindings share the live station's OCPP queue; there is no
+implicit EVSE 1 binding. Each binding is valid only for its captured connection
+and boot generation; reconnect/reboot requires a new binding and fresh evidence.
 
-This reference adapter is bound to EVSE 1 of its station. It selects exactly one
-active record from the canonical runtime session ledger, including connector
-scopes under that EVSE; other EVSEs/stations are excluded. No transaction or
-multiple active records returns TEMPORARILY_REJECTED/TRANSACTION_UNAVAILABLE.
-The ledger retains active transaction identity across disconnect/restart until
-an end/superseding event; this mapping assumes that identity still describes the
-transaction, with the peer enforcing the final transaction match. The adapter
-checks the live runtime generation and rechecks transaction identity and command
-validity after the library's outbound lock, immediately before sending. A changed
-transaction is refused. No independent transaction tracker is introduced.
+`capabilities` is a synchronous provider of the existing `CapabilitySnapshot` (or
+None), scoped exactly to the EVSE and matching generation and firmware. It supplies
+the existing normalized model; no parallel capability registry is added. Only a
+VERIFIED `ChargingEnvelope` for the exact physical `PhaseMode` authorizes its
+current range/grid: `min_current_a + n * current_step_a`, bounded by maximum.
+The adapter validates an already solved point; it does not solve or apply policy.
+Fractional currents are allowed when on that grid. The pinned OCPP schema accepts
+JSON numbers; the adapter checks the serialized decimal against the exact Fraction.
+Values such as 6.5 and 6.1 are representable; a value such as 19/3 is UNSUPPORTED,
+never rounded or truncated to a different setpoint.
 
-Whole-ampere Fraction values serialize without rounding. Fractional currents and
-unverified phase mappings return UNSUPPORTED: reference mappings are physical L1
-and L1/L2/L3, encoded as 1 and 3 without phase_to_use. Capability/solver callers
-must supply realizable points; inventory advertisements alone do not verify them.
-OFF/enable-disable semantics remain unsupported and never become a 0 A profile.
-OCPP 1.6J/2.0.1 control, HA control entities, charging strategies, ownership/leases,
-retries and failure counters remain unimplemented. Wire tests use genuine 2.1
-message schemas and a fake peer; they require no hardware.
+The existing snapshot has no protocol phase-operation/transition evidence field.
+The minimal additional dependency is a synchronous, side-effect-free
+`phase_operation_evidence(snapshot, requested_mode)` provider returning existing
+`CapabilityEvidence` (or None). VERIFIED must establish that sending numberPhases
+for this physical mode preserves the correct conductors and safely performs any
+required transition from the current device state. This proof is distinct from
+an envelope: two verified modes alone do not prove switchability between them.
+A fixed-phase device may verify its fixed mode without supporting switching. A
+single-phase L2 installation may verify count 1 for L2; count 1 never implies L1
+or arbitrary conductor selection. Missing/unverified operation evidence refuses
+the command. No phase_to_use, inferred topology or automatic device defaults exist.
+The evidence supplier owns verification and current-state applicability; this
+injection does not itself discover or verify a device's physical behavior.
+
+A supported point produces one immediate Absolute TxProfile (stack 0, amperes,
+one schedule and period) containing current and numberPhases together. Profile
+IDs use the target EVSE ID so bindings do not replace each other's profiles.
+The peer must support this immediate transaction-scoped subset; other standard
+OCPP operations are not implied. APPLIED means accepted control, not measured
+power confirmation. The adapter never splits a phase/current transition.
+
+Exactly one active record from the canonical runtime session ledger must belong
+to the target EVSE, including its connector scopes; other EVSEs/stations are
+excluded. Missing or ambiguous transactions return
+TEMPORARILY_REJECTED/TRANSACTION_UNAVAILABLE. The ledger retains active transaction
+identity across disconnect/restart until an end/superseding event; this assumes
+that the retained identity still describes the transaction, with the peer
+performing the final transaction match. No second transaction tracker is added.
+After the library's outbound lock and immediately before sending, the adapter
+rechecks command validity, live generation, transaction identity, the envelope
+and phase-operation evidence. Revoked capabilities or changed transactions send
+nothing. Already dispatched commands are not cancelled or rolled back.
+
+wallbox-stationary is the first reference/test device: its EVSE 1, 1 A grid,
+physical L1 and L1/L2/L3 mappings, atomic phase switching and transaction behavior
+are explicit reference fixture data, not general OCPP rules. Wire tests also cover
+EVSE 2 and fixed L2 fractional-current devices with real 2.1 message schemas.
+Current inventory discovery does not verify min/max/step, physical phase mapping,
+phase-switch operation safety, or immediate TxProfile behavior. Advertisements,
+registration and protocol version cannot supply these proofs; production bindings
+must obtain them explicitly. No universal OCPP 2.1 compatibility is claimed.
+
+OFF/enable-disable remains unsupported and never becomes a 0 A profile. OCPP
+1.6J/2.0.1 control, HA control entities, charging strategies, Energy Manager,
+ownership/leases, retries and failure counters remain unimplemented.
 
 ## Implemented transport/discovery foundation
 
@@ -148,7 +186,7 @@ An entry-owned async CSMS listener accepts `ws://host:port/station-id`, with an
 explicit negotiated subprotocol: `ocpp2.1`, `ocpp2.0.1`, then `ocpp1.6` in server
 preference order. Missing/unsupported subprotocols are rejected; each version uses
 its own library messages and schemas. The pinned `ocpp==2.1.0` library provides a
-real v21 module; discovery and the reference charging subset are supported, not full
+real v21 module; discovery and verified-device charging operations are supported, not full
 feature parity or conformance. No server starts at import time. Configuration
 contains only bind IP and port; runtime objects live in `entry.runtime_data`.
 The current listener is plain WebSocket for trusted local networks; TLS and station

@@ -1,6 +1,10 @@
-"""OCPP 2.1 discovery and reference-device transaction-scoped charging control."""
+"""EVSE-bound execution of verified operating points using OCPP 2.1."""
 
+import json
+import math
+from collections.abc import Callable
 from contextvars import ContextVar
+from fractions import Fraction
 
 from ocpp.exceptions import OCPPError
 from ocpp.v21 import ChargePoint, call
@@ -15,7 +19,8 @@ from ....control.commands import (
     command_is_current,
     stale_command_result,
 )
-from ....core.models import EvseId, Phase
+from ....core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
+from ....core.models import EvseId, PhaseMode
 from ....solver.operating_point import OperatingPoint
 from ..common.inventory import InventoryAdapter
 
@@ -30,20 +35,19 @@ class _DispatchRefused(Exception):
 
 
 class Adapter(InventoryAdapter, ChargePoint):
-    """ControlAdapter for the verified reference mapping: station EVSE 1.
+    """Station transport; control bindings share its serialized outbound queue."""
 
-    One-phase means physical L1; other single-phase selections require explicit
-    topology support and cannot be expressed merely by numberPhases.
-    """
-
-    def _active_transaction(self):
-        target = EvseId(self.token.station, "1")
-        sessions = [
-            session
-            for session in self.runtime.sessions.latest
-            if session.active and session.evse_id == target
-        ]
-        return sessions[0].external_transaction_id if len(sessions) == 1 else None
+    def bind_control(
+        self,
+        target: EvseId,
+        capabilities: Callable[[], CapabilitySnapshot | None],
+        *,
+        phase_operation_evidence: Callable[
+            [CapabilitySnapshot, PhaseMode], CapabilityEvidence | None
+        ],
+    ) -> EvseControlAdapter:
+        """Bind an EVSE explicitly; no inferred device or topology defaults."""
+        return EvseControlAdapter(self, target, capabilities, phase_operation_evidence)
 
     async def _send(self, message):
         # ocpp==2.1.0 invokes this after schema validation and _call_lock.
@@ -51,6 +55,115 @@ class Adapter(InventoryAdapter, ChargePoint):
         if guard is not None:
             guard()
         await super()._send(message)
+
+
+class EvseControlAdapter:
+    """ControlAdapter scoped to one EVSE and one connection/boot generation.
+
+    capabilities supplies the canonical normalized snapshot, not a second registry.
+    phase_operation_evidence is a synchronous, side-effect-free verifier for the
+    *current* operation: does sending numberPhases for this mode preserve the
+    verified physical mapping and safely perform any needed transition? A fixed
+    device can verify its fixed mode without claiming switching support. An
+    envelope alone is not evidence of this protocol-to-physical mapping.
+
+    Both providers are read again at dispatch. Evidence must apply to the supplied
+    snapshot and current physical state; unknown/unavailable proof fails closed.
+    No conductor selection is inferred from the phase count, and no phase_to_use
+    is emitted. More complex mappings need a separately verified execution path.
+    """
+
+    def __init__(self, adapter, target, capabilities, phase_operation_evidence):
+        if (
+            not isinstance(target, EvseId)
+            or target.station != adapter.token.station
+            or not target.value.isascii()
+            or not target.value.isdecimal()
+            or int(target.value) <= 0
+            or str(int(target.value)) != target.value
+        ):
+            raise ValueError("target must be a canonical positive EVSE of this station")
+        if not callable(capabilities) or not callable(phase_operation_evidence):
+            raise ValueError(
+                "explicit capability and phase operation providers required"
+            )
+        self.adapter = adapter
+        self.target = target
+        self.token = adapter.token
+        self._capabilities = capabilities
+        self._phase_operation_evidence = phase_operation_evidence
+
+    def _active_transaction(self):
+        sessions = [
+            session
+            for session in self.adapter.runtime.sessions.latest
+            if session.active and session.evse_id == self.target
+        ]
+        return sessions[0].external_transaction_id if len(sessions) == 1 else None
+
+    @staticmethod
+    def _unsupported(area, detail):
+        return CommandResult(
+            CommandStatus.UNSUPPORTED, area, CommandReason.UNSUPPORTED_OPERATION, detail
+        )
+
+    def _validate_capabilities(self, point):
+        snapshot = self._capabilities()
+        state = self.adapter.runtime.get(self.target.station)
+        if snapshot is not None and not isinstance(snapshot, CapabilitySnapshot):
+            raise ValueError("capability provider must return a CapabilitySnapshot")
+        if (
+            snapshot is None
+            or snapshot.scope != self.target
+            or snapshot.connection_generation != self.token.connection_generation
+            or snapshot.boot_generation != self.token.boot_generation
+            or state is None
+            or snapshot.firmware != state.identity.firmware
+        ):
+            return self._unsupported(
+                ControlArea.OPERATING_POINT,
+                "Matching current EVSE capabilities required.",
+            )
+        envelope = next((e for e in snapshot.envelopes if e.mode == point.mode), None)
+        if envelope is None or envelope.evidence.state != EvidenceState.VERIFIED:
+            return self._unsupported(
+                ControlArea.PHASE_MODE,
+                "The requested operating envelope is not verified.",
+            )
+        if (
+            not envelope.min_current_a <= point.current_a <= envelope.max_current_a
+            or (
+                (point.current_a - envelope.min_current_a) / envelope.current_step_a
+            ).denominator
+            != 1
+        ):
+            return self._unsupported(
+                ControlArea.CURRENT, "Current is outside the verified device grid."
+            )
+        evidence = self._phase_operation_evidence(snapshot, point.mode)
+        if evidence is not None and not isinstance(evidence, CapabilityEvidence):
+            raise ValueError("phase operation provider must return CapabilityEvidence")
+        if evidence is None or evidence.state != EvidenceState.VERIFIED:
+            return self._unsupported(
+                ControlArea.PHASE_MODE,
+                "Physical phase mapping and any required transition are not verified.",
+            )
+        return None
+
+    @staticmethod
+    def _wire_current(current):
+        # The pinned library uses JSON numbers (int/float), not Fraction/Decimal.
+        # Compare the actual JSON decimal to the exact setpoint, including values
+        # like 6.1 which have an inexact binary float but an exact JSON spelling.
+        if current.denominator == 1:
+            return int(current)
+        try:
+            value = float(current)
+        except OverflowError:
+            return None
+        if not math.isfinite(value) or Fraction(json.dumps(value)) != current:
+            return None
+        return value
 
     async def apply_operating_point(
         self, point: OperatingPoint, *, is_current: CommandValidity
@@ -66,19 +179,14 @@ class Adapter(InventoryAdapter, ChargePoint):
                 CommandReason.UNSUPPORTED_OPERATION,
                 "Stop/disable semantics are not implemented yet.",
             )
-        if point.current_a.denominator != 1:
-            return CommandResult(
-                CommandStatus.UNSUPPORTED,
+        refusal = self._validate_capabilities(point)
+        if refusal is not None:
+            return refusal
+        current = self._wire_current(point.current_a)
+        if current is None:
+            return self._unsupported(
                 ControlArea.CURRENT,
-                CommandReason.UNSUPPORTED_OPERATION,
-                "Capability knowledge must resolve current to whole amperes.",
-            )
-        if point.mode.phases not in ((Phase.L1,), (Phase.L1, Phase.L2, Phase.L3)):
-            return CommandResult(
-                CommandStatus.UNSUPPORTED,
-                ControlArea.PHASE_MODE,
-                CommandReason.UNSUPPORTED_OPERATION,
-                "The requested physical phase mapping is not verified.",
+                "Current cannot be represented exactly on this transport.",
             )
         token = self.token
         transaction = self._active_transaction()
@@ -86,7 +194,7 @@ class Adapter(InventoryAdapter, ChargePoint):
         def guard():
             if not command_is_current(is_current):
                 raise _DispatchRefused(stale_command_result())
-            if self.token != token or not self.runtime.current(token):
+            if self.adapter.token != token or not self.adapter.runtime.current(token):
                 raise _DispatchRefused(
                     CommandResult(
                         CommandStatus.FAILED, reason=CommandReason.COMMUNICATION_ERROR
@@ -101,14 +209,18 @@ class Adapter(InventoryAdapter, ChargePoint):
                     )
                 )
 
+            refusal = self._validate_capabilities(point)
+            if refusal is not None:
+                raise _DispatchRefused(refusal)
+
         context = _dispatch_guard.set(guard)
         try:
             guard()
-            response = await self.call(
+            response = await self.adapter.call(
                 call.SetChargingProfile(
-                    evse_id=1,
+                    evse_id=int(self.target.value),
                     charging_profile={
-                        "id": 1,
+                        "id": int(self.target.value),
                         "stack_level": 0,
                         "charging_profile_purpose": "TxProfile",
                         "charging_profile_kind": "Absolute",
@@ -120,7 +232,7 @@ class Adapter(InventoryAdapter, ChargePoint):
                                 "charging_schedule_period": [
                                     {
                                         "start_period": 0,
-                                        "limit": int(point.current_a),
+                                        "limit": current,
                                         "number_phases": point.mode.count,
                                     }
                                 ],

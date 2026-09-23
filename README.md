@@ -58,11 +58,19 @@ history survive reload/restart. Disconnect and boot do not end a session. See
 accounting, restoration, query access and limitations.
 
 OCPP 2.1 transaction-scoped charging OperatingPoint dispatch is implemented for
-wallbox-stationary, the first verified control target. One immediate TxProfile
-sets current and phase count atomically. This does not establish generic OCPP 2.1
-charger compatibility. OFF/enable-disable, HA control entities, OCPP 1.6J/2.0.1
-charging control, charging strategies, Energy Manager and EV learning remain
-unimplemented.
+explicitly bound EVSEs with verified device capabilities. One immediate TxProfile
+sets current and phase count together. Current bounds and resolution come from the
+EVSE's verified ChargingEnvelope; representable fractional currents are supported.
+Physical mappings and any required phase transition need separate verified
+operation evidence: numberPhases alone does not select conductors or prove
+switching support. Fixed-phase devices can use their verified fixed mode.
+
+wallbox-stationary is the first reference/test device (EVSE 1, 1 A grid, verified
+1-/3-phase switching), not a default for other devices. Current discovery does not
+verify electrical envelopes or physical phase operations; control requires explicit
+capability/evidence providers. This does not establish universal OCPP 2.1 charger
+compatibility. OFF/enable-disable, HA control entities, OCPP 1.6J/2.0.1 charging
+control, charging strategies, Energy Manager and EV learning remain unimplemented.
 
 ## Architecture
 
