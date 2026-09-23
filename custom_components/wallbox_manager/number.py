@@ -56,6 +56,20 @@ class ControlNumber(ControlEntity, NumberEntity):
             else self.intent.phase_switch_deviation_pct
         )
 
+    @property
+    def extra_state_attributes(self):
+        attrs = super().extra_state_attributes
+        if self.field.startswith("allowed_current_"):
+            value = self.intent.current_limits.get(int(self.field[-2]))
+            attrs["exact_current_limit_a"] = str(value) if value is not None else None
+        return attrs
+
+    def restore_state(self, previous):
+        value = previous.state
+        if self.field.startswith("allowed_current_"):
+            value = previous.attributes.get("exact_current_limit_a") or value
+        self.restore_value(value)
+
     def _value(self, value):
         value = scalar(value)
         if value > self.native_max_value:

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fractions import Fraction
 
-from ..core.capabilities import CapabilitySnapshot, CurrentLimit
+from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
 from ..solver.operating_point import SolverResult
@@ -53,7 +53,15 @@ class ControlRuntime:
     over newer intent. There is no auto-resume, retry or state-restoration dispatch.
     """
 
-    def __init__(self, runtime, inputs, adapter, blocker=lambda target: None):
+    def __init__(
+        self,
+        runtime,
+        inputs,
+        adapter,
+        blocker=lambda target: None,
+        *,
+        electrical_capabilities=lambda target: (),
+    ):
         self.runtime = runtime
         self.inputs = inputs
         self.adapter = adapter
@@ -63,6 +71,58 @@ class ControlRuntime:
         self._listeners = set()
         self._closed = False
         self._inactive = set()
+        self.electrical_capabilities = electrical_capabilities
+        self._unsubscribe_defaults = runtime.subscribe(self._initialize_defaults)
+        for snapshot in runtime.stations:
+            self._initialize_defaults(snapshot)
+
+    def _initialize_defaults(self, snapshot):
+        if self._closed or not snapshot.connected:
+            return
+        for target in snapshot.connectors:
+            self.initialize_current_limits(target)
+
+    def initialize_current_limits(self, target):
+        """Fill absent intent only. No dispatch and no capability mutation.
+
+        Restore may replace an initial default when HA loads saved state later.
+        Defaults never mark fields as explicitly edited; live edits still fence
+        both initialization and late restoration. This synchronous read/write has
+        no await at which a user/controller edit could race it.
+        """
+        if self._closed or not isinstance(target, ConnectorId):
+            return
+        maxima = {
+            c.key: c.value
+            for c in self.electrical_capabilities(target)
+            if c.scope == target
+            and c.evidence.state == EvidenceState.VERIFIED
+            and c.value is not None
+            and c.key
+            in (
+                "maximum_current",
+                "maximum_current_1",
+                "maximum_current_2",
+                "maximum_current_3",
+            )
+        }
+        generic = maxima.get("maximum_current")
+        highest = max(
+            (v for k, v in maxima.items() if k != "maximum_current"), default=None
+        )
+        intent = self.intent(target)
+        changes = {}
+        for count in (1, 2, 3):
+            if count in intent.current_limits:
+                continue
+            value = maxima.get(
+                f"maximum_current_{count}", generic if generic is not None else highest
+            )
+            if value is not None:
+                changes[f"allowed_current_{count}p"] = value
+        if changes:
+            self._edit(target, changes)
+            self.publish(target)
 
     def intent(self, target):
         return self.intents.setdefault(target, ManualIntent())
@@ -77,6 +137,7 @@ class ControlRuntime:
 
     def close(self):
         self._closed = True
+        self._unsubscribe_defaults()
         for intent in self.intents.values():
             intent.generation += 1
 

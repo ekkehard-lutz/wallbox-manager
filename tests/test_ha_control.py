@@ -207,3 +207,82 @@ async def test_fractional_limits_are_independent_desired_state(controls):
     assert control.intent(bound.target).solver_result.point.mode.count == 1
     assert control.intent(bound.target).solver_result.point.current_a <= 32
     assert control.intent(bound.target).current_limits[2] > 17
+
+
+async def test_defaults_persist_exactly_through_ha_reload(controls):
+    from datetime import UTC, datetime
+    from fractions import Fraction
+
+    from custom_components.wallbox_manager.core.capabilities import (
+        CapabilityEvidence,
+        EvidenceState,
+    )
+    from custom_components.wallbox_manager.core.electrical import ElectricalCapability
+
+    hass, entities, manual, setup, unload = controls
+    control, bound, peer, _, _, _ = manual
+    maximum = Fraction(80, 3)
+    proof = CapabilityEvidence(
+        EvidenceState.VERIFIED, "test_inventory", datetime.now(UTC)
+    )
+    control.electrical_capabilities = lambda target: (
+        ElectricalCapability(target, "maximum_current", maximum, proof),
+    )
+    control.initialize_current_limits(bound.target)
+    ids = {key: e.unique_id for key, e in entities.items()}
+    for count in (1, 2, 3):
+        entity = entities[f"allowed_current_{count}p"]
+        state = hass.states.get(entity.entity_id)
+        assert state.attributes["exact_current_limit_a"] == "80/3"
+    await entities["allowed_current_1p"].async_set_native_value(0)
+    await unload()
+    # Simulate fresh in-memory intent and changed capabilities before HA restores.
+    control.intents.clear()
+    control._edited.clear()
+    maximum = Fraction(40)
+    control.initialize_current_limits(bound.target)
+    entities = await setup()
+    assert control.intent(bound.target).current_limits == {
+        1: 0,
+        2: Fraction(80, 3),
+        3: Fraction(80, 3),
+    }
+    assert {key: e.unique_id for key, e in entities.items()} == ids
+    assert not peer.requests and not peer.permissions
+
+
+async def test_discovery_during_restore_cannot_replace_saved_or_live_values(
+    controls, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from custom_components.wallbox_manager.core.capabilities import (
+        CapabilityEvidence,
+        EvidenceState,
+    )
+    from custom_components.wallbox_manager.core.electrical import ElectricalCapability
+
+    _, _, manual, setup, unload = controls
+    control, bound, peer, _, _, _ = manual
+    await unload()
+    proof = CapabilityEvidence(
+        EvidenceState.VERIFIED, "test_inventory", datetime.now(UTC)
+    )
+    control.electrical_capabilities = lambda target: (
+        ElectricalCapability(target, "maximum_current_1", 20, proof),
+        ElectricalCapability(target, "maximum_current_3", 27, proof),
+    )
+
+    async def restored(entity):
+        if entity.key == "allowed_current_1p":
+            control.initialize_current_limits(bound.target)
+            await control.change(bound.target, allowed_current_2p=0)
+            return State(entity.entity_id, "16")
+        if entity.key == "allowed_current_2p":
+            return State(entity.entity_id, "18")
+        return None
+
+    monkeypatch.setattr(ControlEntity, "async_get_last_state", restored)
+    await setup()
+    assert control.intent(bound.target).current_limits == {1: 16, 2: 0, 3: 27}
+    assert not peer.requests and not peer.permissions

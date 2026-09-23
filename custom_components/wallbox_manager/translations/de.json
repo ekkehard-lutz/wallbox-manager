@@ -154,6 +154,9 @@
       },
       "maximum_current_3": {
         "name": "{scope} Maximaler Strom 3p"
+      },
+      "maximum_current": {
+        "name": "{scope} Maximaler Strom"
       }
     },
     "switch": {

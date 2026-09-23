@@ -102,7 +102,7 @@ class ControlEntity(RestoreEntity):
         previous = await self.async_get_last_state()
         if previous is not None:
             try:
-                self.restore_value(previous.state)
+                self.restore_state(previous)
             except ValueError, TypeError:
                 pass  # Unknown/unavailable or obsolete state cannot authorize work.
         self.async_on_remove(self._cancel_expiry)
@@ -112,6 +112,9 @@ class ControlEntity(RestoreEntity):
         self.async_on_remove(
             self.control.runtime.sessions.subscribe(self._session_changed)
         )
+
+    def restore_state(self, previous):
+        self.restore_value(previous.state)
 
     @callback
     def _cancel_expiry(self):

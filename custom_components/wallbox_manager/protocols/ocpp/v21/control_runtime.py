@@ -131,6 +131,12 @@ def create_control_runtime(runtime, server, source=None):
         ]
         return None if len(active) == 1 else "transaction_unavailable"
 
-    control = ControlRuntime(runtime, inputs, adapter, blocker)
+    control = ControlRuntime(
+        runtime,
+        inputs,
+        adapter,
+        blocker,
+        electrical_capabilities=getattr(source, "resolved", lambda target: ()),
+    )
     control.capability_source = source
     return control

@@ -72,7 +72,15 @@ Known OCPP 2.1 connectors receive seven stable Home Assistant controls, named
 power approximation (DOWN/NEAREST/UP), and maximum deviation without phase
 switching (0–25%, default 5%). Desired values survive offline periods and reloads.
 Restoration, telemetry and reconnects never dispatch commands; explicit edits do.
-An unset current limit imposes no additional restriction. Current limits accept
+Missing allowed-current controls initialize once from verified connector maxima:
+the matching phase-specific maximum, then a generic maximum, then the highest
+known phase-specific maximum. Thus 20 A (1p) / 27 A (3p) initializes 20 / 27 / 27 A
+without creating 2p support. Existing saved values (including zero), live edits
+and already initialized values survive later capability changes and reconnects.
+Discovery may initialize them after startup; initialization never sends commands.
+HA restoration retains exact fractions alongside the displayed numeric state.
+Without trustworthy maxima, controls remain unset and impose no additional limit.
+Current limits accept
 non-negative fractions, including values above the device maximum and values for
 unsupported modes. Zero inhibits only that mode. They never establish capability.
 
@@ -90,7 +98,12 @@ Completed accepted OCPP 2.1 FullInventory reports recognize the descriptive
 extensions `SupportedPhaseModes`, `MinimumCurrent`, `CurrentStep` and
 `PhaseSwitchingSupported` on EVSE components, and `MaximumCurrent1Phase`,
 `MaximumCurrent2Phase`, `MaximumCurrent3Phase`, `ChargingEnableDisableSupported`
-on explicitly scoped Connector components. These extensions are not universal
+on explicitly scoped Connector components. The implementation-defined connector
+extension `MaximumCurrent` (amperes) is also recognized for generic current-limit
+facts, with the same complete-inventory, scope and validation requirements. It is
+not an alias for arbitrary similarly named variables or evidence of any supported
+phase count, conductor mapping or switching support; it never creates an envelope.
+These extensions are not universal
 OCA variables. SmartChargingCtrlr/Available remains advertisement only.
 Reconnection and BootNotification invalidate discovered evidence and rediscover it.
 
