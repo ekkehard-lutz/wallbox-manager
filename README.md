@@ -57,8 +57,12 @@ history survive reload/restart. Disconnect and boot do not end a session. See
 [session tracking and persistence](docs/session-tracking.md) for lifecycle,
 accounting, restoration, query access and limitations.
 
-There are no charging controls, profiles, phase switching, vendor extensions,
-Energy Manager functionality or EV learning yet.
+OCPP 2.1 transaction-scoped charging OperatingPoint dispatch is implemented for
+wallbox-stationary, the first verified control target. One immediate TxProfile
+sets current and phase count atomically. This does not establish generic OCPP 2.1
+charger compatibility. OFF/enable-disable, HA control entities, OCPP 1.6J/2.0.1
+charging control, charging strategies, Energy Manager and EV learning remain
+unimplemented.
 
 ## Architecture
 
@@ -68,8 +72,8 @@ boundaries, ownership transitions, power solving and reuse decisions. These are
 design documents; the implemented subset now includes pure solving, a
 protocol-independent control command boundary and read-only OCPP
 transport/discovery, metering/runtime state and session tracking/persistence.
-The command boundary forwards resolved operating points to future adapters and
-normalizes their outcomes; wire-level charging control is still not implemented.
+The command boundary forwards resolved operating points to the OCPP 2.1 adapter
+and normalizes its outcomes; acceptance does not confirm measured power.
 
 Wallbox Manager separates charging strategy from wallbox-specific communication.
 
@@ -179,8 +183,9 @@ automations.
 
 ## Development status
 
-Version 0.1.0 establishes the stable read-only scope described above. Charging
-controls and the planned Energy Manager interface remain future work.
+Version 0.1.0 establishes the stable read-only scope described above. Development
+now includes the OCPP 2.1 charging adapter; HA controls and the planned Energy
+Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
 phase envelopes, voltage observations, power requests and solver results are

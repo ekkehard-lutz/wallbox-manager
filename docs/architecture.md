@@ -4,8 +4,9 @@ Status: design with initial pure-core implementation, 2026-09-23. Immutable
 identity/capability/request contracts, the operating-point solver and the
 protocol-independent control command boundary are implemented.
 The read-only OCPP transport/discovery and scoped metering/runtime-state foundations
-and persistent session tracking are implemented. Wire-level charging control and
-remaining runtime behavior below are planned.
+and persistent session tracking are implemented. OCPP 2.1 transaction-scoped
+charging OperatingPoint dispatch is implemented; remaining runtime behavior
+below is planned.
 The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evidence
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
@@ -29,7 +30,7 @@ never authorize it. Non-OCPP adapters implement the same internal contracts.
 
 Paths below are beneath `custom_components/wallbox_manager/`. The core models,
 capabilities, control requests/commands, solver, generic discovery/runtime
-snapshots and read-only OCPP adapters now exist; remaining runtime modules are proposed.
+snapshots and OCPP adapters now exist; remaining runtime modules are proposed.
 
 ```text
 __init__.py              HA setup/unload and config-entry runtime wiring
@@ -115,9 +116,31 @@ This cooperative fence cannot retract an already dispatched command or guarantee
 rollback of a partial operation. The future controller must also fence late
 results before publishing active state and reconcile partial operations.
 
-Only the contract and pure fake-adapter tests exist: no OCPP charging commands,
-HA controls, ownership/leases, retry scheduling or failure counters are implemented
-by this boundary. Wallboxes cannot yet be controlled through it.
+The live v21 adapter implements this contract for wallbox-stationary, the first
+verified control target, not a universal charger assumption. It sends one
+immediate Absolute TxProfile (stack 0, amperes, one schedule and period) containing
+both current and numberPhases. The device performs safe atomic phase/current
+transitions. APPLIED means accepted control, not measured power confirmation.
+
+This reference adapter is bound to EVSE 1 of its station. It selects exactly one
+active record from the canonical runtime session ledger, including connector
+scopes under that EVSE; other EVSEs/stations are excluded. No transaction or
+multiple active records returns TEMPORARILY_REJECTED/TRANSACTION_UNAVAILABLE.
+The ledger retains active transaction identity across disconnect/restart until
+an end/superseding event; this mapping assumes that identity still describes the
+transaction, with the peer enforcing the final transaction match. The adapter
+checks the live runtime generation and rechecks transaction identity and command
+validity after the library's outbound lock, immediately before sending. A changed
+transaction is refused. No independent transaction tracker is introduced.
+
+Whole-ampere Fraction values serialize without rounding. Fractional currents and
+unverified phase mappings return UNSUPPORTED: reference mappings are physical L1
+and L1/L2/L3, encoded as 1 and 3 without phase_to_use. Capability/solver callers
+must supply realizable points; inventory advertisements alone do not verify them.
+OFF/enable-disable semantics remain unsupported and never become a 0 A profile.
+OCPP 1.6J/2.0.1 control, HA control entities, charging strategies, ownership/leases,
+retries and failure counters remain unimplemented. Wire tests use genuine 2.1
+message schemas and a fake peer; they require no hardware.
 
 ## Implemented transport/discovery foundation
 
@@ -125,7 +148,7 @@ An entry-owned async CSMS listener accepts `ws://host:port/station-id`, with an
 explicit negotiated subprotocol: `ocpp2.1`, `ocpp2.0.1`, then `ocpp1.6` in server
 preference order. Missing/unsupported subprotocols are rejected; each version uses
 its own library messages and schemas. The pinned `ocpp==2.1.0` library provides a
-real v21 module, but only this tested read-only subset is supported here, not full
+real v21 module; discovery and the reference charging subset are supported, not full
 feature parity or conformance. No server starts at import time. Configuration
 contains only bind IP and port; runtime objects live in `entry.runtime_data`.
 The current listener is plain WebSocket for trusted local networks; TLS and station
@@ -199,7 +222,7 @@ evidence and retains known identity metadata in memory; reconnect needs no reloa
 Persisted HA listener configuration is untouched. Integration restart creates a
 fresh runtime and rediscovery. HA Device Registry retains station identities and
 learned metadata; runtime capabilities and control state are not persisted. This
-phase exposes read-only diagnostic entities, no charging-control API, and no
+phase exposes read-only diagnostic entities, no HA charging-control API, and no
 EV-acceptance learning.
 
 ## Implemented session tracking and persistence
@@ -228,7 +251,7 @@ creates connector meter entities. Completed power is zero. Saved active power do
 become live after restart. Store loads before listener admission, coalesces writes
 and flushes on unload/shutdown. `runtime.sessions.history(scope=None)` exposes
 immutable completed records for a future UI; no per-history HA entities exist.
-Charging controls, authorization services and EV learning remain unimplemented.
+HA charging controls, authorization services and EV learning remain unimplemented.
 
 ## Capability model
 
