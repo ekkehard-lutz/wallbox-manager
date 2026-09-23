@@ -65,8 +65,11 @@ Energy Manager functionality or EV learning yet.
 See the [proposed architecture](docs/architecture.md) and the
 [pinned upstream OCPP adoption analysis](docs/upstream-ocpp-analysis.md) for module
 boundaries, ownership transitions, power solving and reuse decisions. These are
-design documents; the implemented subset now includes pure solving and read-only
-OCPP transport/discovery, metering/runtime state and session tracking/persistence.
+design documents; the implemented subset now includes pure solving, a
+protocol-independent control command boundary and read-only OCPP
+transport/discovery, metering/runtime state and session tracking/persistence.
+The command boundary forwards resolved operating points to future adapters and
+normalizes their outcomes; wire-level charging control is still not implemented.
 
 Wallbox Manager separates charging strategy from wallbox-specific communication.
 
