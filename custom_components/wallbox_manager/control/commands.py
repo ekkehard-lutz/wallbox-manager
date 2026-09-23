@@ -26,6 +26,7 @@ class ControlArea(StrEnum):
 class CommandReason(StrEnum):
     STALE = "stale"
     BUSY = "busy"
+    TRANSACTION_UNAVAILABLE = "transaction_unavailable"
     PHASE_SWITCH_LOCKOUT = "phase_switch_lockout"
     UNSUPPORTED_OPERATION = "unsupported_operation"
     TIMEOUT = "timeout"
