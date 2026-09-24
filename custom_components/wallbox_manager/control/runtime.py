@@ -195,7 +195,7 @@ class ControlRuntime:
         intent.status = "idle"
         return intent
 
-    def resolve(self, target):
+    def resolve(self, target, *, substitute_mode=None):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
             return None, None, "disconnected"
@@ -226,7 +226,10 @@ class ControlRuntime:
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
-            eligible_modes=inputs.eligible_modes,
+            eligible_modes=inputs.eligible_modes
+            if substitute_mode is None
+            else tuple(m for m in inputs.eligible_modes if m == substitute_mode),
+            charging_only=substitute_mode is not None,
             limits=inputs.limits
             + tuple(
                 CurrentLimit(
@@ -253,7 +256,22 @@ class ControlRuntime:
     def attributes(self, target):
         intent = self.intent(target)
         inputs, _, blocked = self.resolve(target)
+        applied = (
+            intent.solver_result.point
+            if intent.solver_result
+            and intent.command_result
+            and intent.command_result.status == CommandStatus.APPLIED
+            and intent.command_result.area == ControlArea.OPERATING_POINT
+            else None
+        )
         return {
+            "applied_current_a": float(applied.current_a or 0) if applied else None,
+            "applied_phase_count": applied.mode.count
+            if applied and applied.mode
+            else None,
+            "applied_offered_power_w": float(applied.offered_power_w)
+            if applied
+            else None,
             "actual_enabled": self.runtime.enabled(target),
             "control_authority": self.runtime.authority(target.station).value,
             "physical_phase_mode": [p.value for p in inputs.current_mode.phases]
@@ -378,6 +396,8 @@ class ControlRuntime:
         token = state.token
         authority_revision = state.authority_revision
 
+        substitute_mode = None
+
         def current(*, after_dispatch=False, permission_confirmed=False):
             if (
                 self._closed
@@ -397,7 +417,9 @@ class ControlRuntime:
                 != authority_revision
             ):
                 return False
-            fresh, result, reason = self.resolve(target)
+            fresh, result, reason = self.resolve(
+                target, substitute_mode=substitute_mode
+            )
             if fresh is None:
                 return False
             if resolved.point.charging:
@@ -434,6 +456,27 @@ class ControlRuntime:
         result = await apply_operating_point(
             adapter, resolved.point, is_current=current
         )
+        if (
+            result.status == CommandStatus.TEMPORARILY_REJECTED
+            and result.area == ControlArea.PHASE_MODE
+            and result.reason == CommandReason.PHASE_SWITCH_LOCKOUT
+            and resolved.point.charging
+            and inputs.current_mode is not None
+            and inputs.current_mode != resolved.point.mode
+            and current()
+        ):
+            # One synchronous recalculation within this explicit command only.
+            # Keep all original fences, including confirmed physical phase state.
+            substitute_mode = inputs.current_mode
+            _, substitute, blocked = self.resolve(
+                target, substitute_mode=substitute_mode
+            )
+            if blocked is None and substitute.point is not None:
+                resolved = substitute
+                intent.solver_result = resolved
+                result = await apply_operating_point(
+                    adapter, resolved.point, is_current=current
+                )
         if generation != intent.generation or (
             result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
         ):

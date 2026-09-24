@@ -23,6 +23,7 @@ def solve(
     actively_charging: bool = False,
     limits: Iterable[CurrentLimit] = (),
     phase_switch_deviation_pct: Fraction = Fraction(0),
+    charging_only: bool = False,
 ) -> SolverResult:
     """Select among verified modes within all supplied hard current intervals.
 
@@ -68,7 +69,9 @@ def solve(
     ):
         return SolverResult(ResultStatus.UNREACHABLE, Reason.OBSERVATION_MISMATCH)
 
-    candidates = [off] if can_stop else []
+    # A blocked phase transition may require a positive-current substitute.
+    # Explicit zero requests above still retain immediate stop semantics.
+    candidates = [off] if can_stop and not charging_only else []
     missing_voltage = False
     has_mode = False
     for envelope in capabilities.envelopes:
