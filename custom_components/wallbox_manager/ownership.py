@@ -3,11 +3,15 @@
 import asyncio
 import json
 
+from homeassistant.core import callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.storage import Store
 
+from .const import DOMAIN
 from .control.commands import CommandReason, CommandResult, CommandStatus, ControlArea
 from .core.authority import ControlAuthority
 from .core.models import ConnectorId, EvseId, StationId
+from .entity import station_identifier
 
 
 def identity(entry_id, target):
@@ -64,10 +68,19 @@ class ProfileOwnership:
         control.ownership = self
         control.entry_id = entry.entry_id
         unsubscribe = control.runtime.subscribe(lambda snapshot: self.changed())
+
+        @callback
+        def device_changed(event):
+            self.publish()
+
+        unsubscribe_device = self.hass.bus.async_listen(
+            "device_registry_updated", device_changed
+        )
         self.publish()
 
         def remove():
             unsubscribe()
+            unsubscribe_device()
             self.entries.pop(entry.entry_id, None)
             self.changed()
 
@@ -103,10 +116,17 @@ class ProfileOwnership:
                 targets, key=lambda t: (t.station.value, t.evse.value, t.value)
             ):
                 state = control.runtime.get(target.station)
+                device = dr.async_get(self.hass).async_get_device(
+                    identifiers={(DOMAIN, station_identifier(entry_id, target.station))}
+                )
+                display_name = (
+                    (device.name_by_user or device.name)
+                    if device
+                    else target.station.value
+                )
                 items[identity(entry_id, target)] = {
-                    "name": (
-                        f"{target.station.value} / {target.evse.value} / {target.value}"
-                    ),
+                    "display_name": display_name,
+                    "name": (f"{display_name} / {target.evse.value} / {target.value}"),
                     "connected": bool(
                         state and state.connected and target in state.connectors
                     ),

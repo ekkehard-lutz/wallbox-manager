@@ -1,6 +1,6 @@
 # Grid (`NETZ`) profile and installation ownership
 
-This is the implemented beta.2 refinement of the v0.3.x Grid contract. It
+This is the implemented beta.3 refinement of the v0.3.x Grid contract. It
 supersedes the older conceptual Grid, takeover and battery-read-only proposals
 in `architecture.md`. PV_SURPLUS, PV_DAILY_OPTIMUM, PV_MAXIMUM and the Energy
 Manager interface remain deferred. This change does not prepare a release.
@@ -79,12 +79,26 @@ shortcut. Removing inventory never makes the card target an unrelated entity.
 ## Backend Grid settings and bounded control
 
 `profiles.py` retains connector-scoped Store values: profile NETZ, `soll_power`
-(0–100 kW) and `min_soc` (0–100%). Switching active wallboxes does not copy settings.
+(kW, bounded by known effective technical limits; storage range 0–100) and
+`min_soc` (0–100%, whole percent for new edits). Existing beta.2 stores remain readable. Switching active wallboxes does not copy settings.
 The select currently offers only NETZ. Selecting/reselecting the profile requests
 permission OFF and invalidates work; it never acquires authority.
 
 After takeover, choose Grid, adjust power and enable charging. While active and
-enabled, power edits immediately resolve and apply a point. Settings may be saved
+enabled, power edits use a **one-second trailing-edge backend debounce**. For edits
+at 0.0, 0.2, 0.5 and 0.8 seconds, only the last value is resolved/applied at about
+1.8 seconds. `GridProfiles.set_value` updates intent and publishes it immediately,
+saves normally, cancels the preceding task and creates a connector-scoped task
+with `asyncio.sleep(1)`. No intermediate requested operating point is solved.
+Entity services, automations and the card all enter this same path. Pure technical
+bounds are independent of the request and share the solver's exact current grid.
+Task epochs and intent generations fence late work, alongside the primitive
+connection, authority and permission checks. OFF, profile changes, owner changes,
+authority loss, disconnect and unload invalidate pending work. There is no delayed
+permission ON. Explicit enable cancels the timer and applies the latest value
+immediately; explicit permission OFF and a zero-power stop also bypass the timer.
+
+Settings may be saved
 for an inactive wallbox, but cannot dispatch power. Permission remains confirmed
 hardware state. The primitive W target, approximation policy and installation
 current limits remain available for advanced use; the next Grid start uses its
@@ -96,6 +110,14 @@ maxima, fresh voltages, installation limits and phase retention. The primitive
 runtime still owns protocol queues, sequencing, confirmation and connection,
 authority and generation fences. Zero power uses the verified zero-current
 contract without toggling permission. No PV or continuous regulation was added.
+
+Grid reads the connector's existing `phase_switch_deviation_pct` setting (default
+5%). With enabled, positively charging state, the solver retains the current
+physical mode if its reachable power is within tolerance **and** satisfies
+DOWN/NEAREST/UP. For example, 3p at 4.14 kW may be retained for a 4 kW NEAREST
+request at 5%, but not at 3%, and not for DOWN. Disabled charging and an applied
+OFF/0-A point do not retain a phase mode, even if old positive telemetry remains.
+All current ceilings, supported modes, phase lockouts and cooldowns still apply.
 
 Only a phase-switch lockout causes minute retries, using a valid substitute and
 fresh inputs. Observation begins one minute after the desired point is applied,
@@ -216,16 +238,41 @@ friendly names. Renames, additions and inventory changes are discovered on state
 updates. Disconnected targets show inhibited controls. With multiple central
 listener entries, their selects are views of the same global ownership coordinator.
 
-The card displays profile, power and permission, plus reserve/actual charging only
-with battery configuration. Authority takeover, failed transitions, phase lockouts,
-observations and battery errors remain visible. The card merely invokes backend
-operations; all exclusivity and stale-command rules hold without it. Use standard
-HA cards for additional metering.
+The theme-aware header uses `mdi:ev-station`, the optional presentation title, and
+the real device display name (`name_by_user`, then device/station name) beneath it.
+The multi-wallbox selector lives in the header; single-wallbox cards omit it.
+Takeover remains explicit. Narrow, keyboard-accessible power buttons step by
+0.1 kW below 10, and 1 kW above: 9.8 → 9.9 → 10 → 11 and the reverse. Direct input
+also accepts fractions above 10. The card formats the HA language's decimal
+separator. `technical_max_kw` comes from verified envelopes, fresh voltages and
+effective current limits; the buttons clamp to it and direct overflow is rejected.
+Unknown limits are not replaced with a fictitious 99/100 kW rating; backend
+validation errors remain visible. Power edits stay interactive during service
+responses. Reserve is labelled **Entladereserve / Discharge reserve**, with integer
+steps from 0 to 100, and appears only with both central battery references.
+
+A separated two-column, three-row section shows connection/charging state,
+current session energy/measured power, and duration/measured phases and current.
+Permission ON is never used as evidence of actual charging. Session energy uses
+its attributed meter deadline; unknown starts, completed sessions, stale meters,
+disconnections and missing data show a neutral dash. Differing phase currents
+show a range; requested currents and phases never substitute for measurements.
+If only some current samples exist, fresh physical phase feedback must qualify
+which conductors can be used. A one-second display timer expires stale values;
+it performs no service calls or power regulation.
+
+Observation and session entities expose stable roles and scoped join metadata.
+Connector observations take priority. EVSE/station aggregates are offered to the
+card only when runtime topology maps them to exactly one connector; ambiguous
+aggregates are omitted. Entity renames cannot redirect readings to another box.
+Normal internal status messages are hidden. Actionable command, takeover and
+battery errors remain visible. All backend guards apply independently of the card.
 
 ## Validation boundary
 
 Tests exercise real OCPP simulated peers, HA config/entity behavior, reserve
-recovery and isolated JavaScript discovery/rendering. They do not replace a real
+recovery and isolated JavaScript discovery/rendering. A local browser preview
+checks narrow light/dark layouts with mock HA components. These do not replace a real
 HA browser or physical station test. Writable profile control retains the existing
 OCPP 2.1 support; other OCPP versions' discovery support does not imply writable
 profile support. No release version or tag is changed by this iteration.

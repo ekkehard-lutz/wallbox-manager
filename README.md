@@ -271,8 +271,8 @@ wallbox. Both are explicit authority requests: the backend stops/confirms the ol
 Remote wallbox, acquires the selected station, explicitly sends OFF and confirms
 OFF before completing selection. **Every takeover forces charging permission OFF.**
 A separate user action starts charging. Startup/reload, profile selection and
-background events never acquire authority. Power edits while active/enabled apply
-immediately. Per-wallbox settings persist separately; profile selection disables
+background events never acquire authority. Power edits while active/enabled apply after a one-second trailing-edge backend
+debounce; explicit enable and stop remain immediate. Per-wallbox settings persist separately; profile selection disables
 permission.
 
 The backend retains phase-lockout retries, bounded vehicle-current observation,
@@ -291,6 +291,13 @@ The integration automatically serves/registers the JS module. No entity mapping 
 copy to `/config/www` is required. Discovery uses stable backend role/identity
 metadata and survives entity renames. When upgrading from beta.1, remove the old
 manually registered `/local/wallbox-manager-card.js` resource once.
+
+The compact card includes a device-name header, progressive 0.1/1 kW buttons,
+locale-aware direct numeric input and a two-column live session/metering section.
+Known backend technical limits bound requests. The optional battery control is
+labelled **Discharge reserve / Entladereserve**. Grid uses the per-wallbox
+`phase_switch_deviation_pct` preference without relaxing approximation policies;
+disabled charging and OFF/0 A do not retain the previous phase mode.
 
 See [Grid profile, ownership, migration and card installation](docs/grid-profile.md)
 for the exact state model, guarded sequence, station-scoped capability subentries,

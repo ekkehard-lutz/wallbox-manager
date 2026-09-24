@@ -29,6 +29,8 @@ class GridProfiles:
         self.store = Store(hass, 1, f"wallbox_manager.{entry.entry_id}.profiles")
         self.settings = {}
         self.tasks = {}
+        self.debounce_tasks = {}
+        self.debounce_wait = asyncio.sleep
         self.epochs = {}
         self.status = {}
         self.closed = False
@@ -99,9 +101,10 @@ class GridProfiles:
 
     def invalidate(self, target):
         self.epochs[target] = self.epochs.get(target, 0) + 1
-        task = self.tasks.pop(target, None)
-        if task and task is not asyncio.current_task():
-            task.cancel()
+        for tasks in (self.tasks, self.debounce_tasks):
+            task = tasks.pop(target, None)
+            if task and task is not asyncio.current_task():
+                task.cancel()
         self.control.intent(target).generation += 1
         self.status[target] = "idle"
 
@@ -124,12 +127,19 @@ class GridProfiles:
         value = scalar(value)
         if field not in ("power_kw", "min_soc") or value > 100:
             raise ValueError("invalid profile setting")
+        maximum = self.control.power_ceiling(target) if field == "power_kw" else None
+        if maximum is not None and value * 1000 > maximum:
+            raise ValueError(
+                "Requested power exceeds available limit "
+                f"({float(maximum / 1000):g} kW)"
+            )
+        if field == "min_soc" and value.denominator != 1:
+            raise ValueError("discharge reserve must be a whole percent")
         self.setting(target)[field] = float(value)
         if field == "power_kw":
             self.invalidate(target)
             self.control._edit(target, {"target_w": value * 1000})
         epoch = self.epochs.get(target, 0)
-        await self.save()
         if (
             field == "power_kw"
             and self.epochs.get(target, 0) == epoch
@@ -137,8 +147,38 @@ class GridProfiles:
             and self.control.profile_permitted(target)
             and self.control.runtime.enabled(target) is True
         ):
-            await self.start(target)
+            # Schedule before persistence: the deadline is measured from the edit,
+            # not from disk latency. Every edit advances both command and task fences.
+            self.debounce_tasks[target] = self.hass.async_create_background_task(
+                self.debounced_start(
+                    target,
+                    epoch,
+                    self.control.intent(target).generation,
+                    delay=value != 0,
+                ),
+                "Grid power debounce",
+            )
         self.control.publish(target)
+        await self.save()
+
+    async def debounced_start(self, target, epoch, generation, *, delay=True):
+        try:
+            if delay:
+                await self.debounce_wait(1)
+            if (
+                self.valid(target, epoch)
+                and self.control.intent(target).generation == generation
+            ):
+                await self.start(target)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.status[target] = "error"
+            _LOGGER.exception("Grid power application failed")
+        finally:
+            if self.debounce_tasks.get(target) is asyncio.current_task():
+                self.debounce_tasks.pop(target, None)
+                self.control.publish(target)
 
     async def permission(self, target, enabled):
         self.invalidate(target)
@@ -278,7 +318,7 @@ class GridProfiles:
             self.control.publish(target)
 
     def changed(self, snapshot):
-        for target in tuple(self.tasks):
+        for target in self.tasks.keys() | self.debounce_tasks.keys():
             if target.station == snapshot.token.station and (
                 not snapshot.connected
                 or self.control.runtime.enabled(target) is not True
@@ -326,8 +366,8 @@ class GridProfiles:
         self.unsubscribe_battery()
         self.unsubscribe()
         self.session_unsubscribe()
-        tasks = list(self.tasks.values())
-        for target in tuple(self.tasks):
+        tasks = [*self.tasks.values(), *self.debounce_tasks.values()]
+        for target in self.tasks.keys() | self.debounce_tasks.keys():
             self.invalidate(target)
         await asyncio.gather(*tasks, return_exceptions=True)
         if self.battery_task:

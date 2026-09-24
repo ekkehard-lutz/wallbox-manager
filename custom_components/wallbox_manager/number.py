@@ -112,6 +112,26 @@ class ProfileNumber(ControlEntity, NumberEntity):
     def native_value(self):
         return self.control.profiles.setting(self.target)[self.field]
 
+    @property
+    def native_max_value(self):
+        if self.field == "power_kw":
+            maximum = self.control.power_ceiling(self.target)
+            if maximum is not None:
+                return float(maximum / 1000)
+        # HA requires a numeric input range; this is storage validation only.
+        # Consumers must use technical_max_kw, not this fallback, as capability.
+        return 100
+
+    @property
+    def extra_state_attributes(self):
+        attrs = super().extra_state_attributes
+        if self.field == "power_kw":
+            maximum = self.control.power_ceiling(self.target)
+            attrs["technical_max_kw"] = (
+                float(maximum / 1000) if maximum is not None else None
+            )
+        return attrs
+
     def restore_state(self, previous):
         pass
 

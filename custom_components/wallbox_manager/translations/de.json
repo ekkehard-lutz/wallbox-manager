@@ -195,7 +195,7 @@
         "name": "Sollleistung {scope}"
       },
       "min_soc": {
-        "name": "Temporäre Batteriereserve {scope}"
+        "name": "{scope} Entladereserve"
       }
     },
     "select": {

@@ -195,7 +195,7 @@
         "name": "Requested power {scope}"
       },
       "min_soc": {
-        "name": "Temporary battery reserve {scope}"
+        "name": "{scope} Discharge reserve"
       }
     },
     "select": {

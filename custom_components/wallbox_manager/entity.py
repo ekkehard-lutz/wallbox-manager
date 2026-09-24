@@ -43,6 +43,35 @@ def device_info(entry_id: str, station: StationId, snapshot: StationSnapshot | N
     return info
 
 
+def scope_attributes(runtime, entry_id, scope):
+    """Expose safe card joins; broader telemetry is usable only if unambiguous."""
+    from .ownership import identity
+
+    station = scope.station if isinstance(scope, (EvseId, ConnectorId)) else scope
+    snapshot = runtime.get(station)
+    matches = (
+        [
+            t
+            for t in snapshot.connectors
+            if t == scope or t.evse == scope or t.station == scope
+        ]
+        if snapshot
+        else []
+    )
+    attrs = {
+        "wallbox_manager_scope": "connector"
+        if isinstance(scope, ConnectorId)
+        else "evse"
+        if isinstance(scope, EvseId)
+        else "station"
+    }
+    if isinstance(scope, ConnectorId):
+        attrs["wallbox_manager_target"] = identity(entry_id, scope)
+    elif len(matches) == 1:
+        attrs["wallbox_manager_targets"] = [identity(entry_id, matches[0])]
+    return attrs
+
+
 def observation_unique_id(entry_id, channel, projection=None):
     scope = channel.scope
     evse = (

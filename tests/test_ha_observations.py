@@ -217,3 +217,42 @@ async def test_canonical_charging_enum_keeps_suspension_states(diagnostics, stat
         if p.domain == "binary_sensor"
         for e in p.entities.values()
     )
+
+
+async def test_card_scope_join_rejects_ambiguous_parent_meter(diagnostics):
+    from custom_components.wallbox_manager.ownership import identity
+
+    hass, config, runtime, platforms, _, _ = diagnostics
+    station = StationId("garage")
+    evse = EvseId(station, "1")
+    connector = ConnectorId(evse, "1")
+    token = runtime.connect(station)
+    runtime.observe(
+        token,
+        (
+            observation(connector, Quantity.CHARGING_STATE, State.CHARGING),
+            observation(evse, Quantity.POWER, 4000),
+        ),
+    )
+    await hass.async_block_till_done()
+    power = next(
+        e for e in operational(platforms) if e.channel.quantity == Quantity.POWER
+    )
+    attrs = power.extra_state_attributes
+    assert attrs["wallbox_manager_role"] == "power"
+    assert attrs["wallbox_manager_targets"] == [identity(config.entry_id, connector)]
+    assert attrs["valid_until"]
+    runtime.observe(
+        token,
+        (
+            observation(
+                ConnectorId(evse, "2"), Quantity.CHARGING_STATE, State.CONNECTED
+            ),
+        ),
+    )
+    await hass.async_block_till_done()
+    assert "wallbox_manager_targets" not in power.extra_state_attributes
+    exact = next(e for e in operational(platforms) if e.channel.scope == connector)
+    assert exact.extra_state_attributes["wallbox_manager_target"] == identity(
+        config.entry_id, connector
+    )

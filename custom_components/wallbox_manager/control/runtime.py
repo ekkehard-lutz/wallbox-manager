@@ -9,7 +9,7 @@ from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
 from ..solver.operating_point import SolverResult
-from ..solver.power import solve
+from ..solver.power import maximum_power, solve
 from .commands import (
     CommandReason,
     CommandResult,
@@ -259,9 +259,49 @@ class ControlRuntime:
             self.blocker(target) if result.point is not None else result.reason.value,
         )
 
+    def power_ceiling(self, target):
+        """Known feasible ceiling, independent of the requested operating point.
+
+        Unknown/stale evidence is not a station rating. Reuse the electrical
+        solver's hard limits and current grid; never synthesize 230 V.
+        """
+        state = self.runtime.get(target.station)
+        inputs = self.inputs(target) if state and state.connected else None
+        if inputs is None:
+            return None
+        caps = inputs.capabilities
+        now = datetime.now(UTC)
+        if (
+            caps.scope != target
+            or caps.connection_generation != state.token.connection_generation
+            or caps.boot_generation != state.token.boot_generation
+            or caps.firmware != state.identity.firmware
+        ):
+            return None
+        return maximum_power(
+            caps,
+            inputs.voltage,
+            now=now,
+            eligible_modes=inputs.eligible_modes,
+            limits=inputs.limits
+            + tuple(
+                CurrentLimit(
+                    e.mode,
+                    0,
+                    self.intent(target).current_limits[e.mode.count],
+                    "desired_control_limit",
+                )
+                for e in caps.envelopes
+                if e.mode.count in self.intent(target).current_limits
+            ),
+        )
+
     def attributes(self, target):
         intent = self.intent(target)
-        inputs, _, blocked = self.resolve(target)
+        if hasattr(self, "profiles") and target in self.profiles.debounce_tasks:
+            inputs, blocked = self.inputs(target), "power_edit_pending"
+        else:
+            inputs, _, blocked = self.resolve(target)
         applied = (
             intent.solver_result.point
             if intent.solver_result
@@ -282,6 +322,16 @@ class ControlRuntime:
             "control_authority": self.runtime.authority(target.station).value,
             "physical_phase_mode": [p.value for p in inputs.current_mode.phases]
             if inputs and inputs.current_mode
+            else None,
+            "physical_phase_valid_until": next(
+                (
+                    o.valid_until.isoformat()
+                    for o in self.runtime.get(target.station).physical_phases
+                    if o.scope == target
+                ),
+                None,
+            )
+            if self.runtime.get(target.station)
             else None,
             "execution_ready": blocked is None and self.adapter(target) is not None,
             "execution_blocked_reason": blocked
@@ -327,6 +377,8 @@ class ControlRuntime:
                 "inactive_wallbox",
             )
         intent = self.intent(target)
+        if not enabled:
+            self._inactive.add(target)
         intent.generation += 1
         intent.command_result = intent.solver_result = None
         generation = intent.generation
@@ -510,8 +562,11 @@ class ControlRuntime:
         ):
             result = stale_command_result()
         if generation == intent.generation:
-            if result.status == CommandStatus.APPLIED and resolved.point.charging:
-                self._inactive.discard(target)
+            if result.status == CommandStatus.APPLIED:
+                if resolved.point.charging:
+                    self._inactive.discard(target)
+                else:
+                    self._inactive.add(target)
             intent.command_result = result
             intent.status = result.status.value
             self.publish(target)

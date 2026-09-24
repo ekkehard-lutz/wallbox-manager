@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from test_control_authority import authority
 from test_control_runtime import manual
 from test_ocpp21_control import connected
@@ -25,6 +26,8 @@ from custom_components.wallbox_manager.profiles import GridProfiles
 @pytest.fixture
 async def site(tmp_path):
     hass = HomeAssistant(str(tmp_path))
+    dr.async_setup(hass)
+    await dr.async_load(hass, load_empty=True)
     owner = ProfileOwnership(hass)
     await owner.load()
     peers = []

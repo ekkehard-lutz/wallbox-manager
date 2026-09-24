@@ -129,3 +129,27 @@ async def test_offline_session_power_does_not_replace_live_reading(diagnostics):
         (observation(scope, Quantity.POWER, 2000, at + timedelta(seconds=1)),),
     )
     assert power.native_value is None
+
+
+async def test_card_session_metadata_includes_scoped_role_and_meter_expiry(diagnostics):
+    from custom_components.wallbox_manager.core.models import ConnectorId
+    from custom_components.wallbox_manager.ownership import identity
+
+    hass, config, runtime, platforms, _, _ = diagnostics
+    scope = ConnectorId(EvseId(StationId("garage"), "1"), "1")
+    token = runtime.connect(scope.station)
+    at = datetime.now(UTC) - timedelta(seconds=10)
+    runtime.session_event(
+        token, SessionEvent(scope, "tx", Kind.STARTED, at, meter_wh=1000)
+    )
+    sample = observation(scope, Quantity.ENERGY, 1500, at + timedelta(seconds=1))
+    runtime.observe(token, (sample,))
+    await hass.async_block_till_done()
+    entity = sessions(platforms)["energy"]
+    attrs = entity.extra_state_attributes
+    assert attrs["wallbox_manager_role"] == "session_energy"
+    assert attrs["wallbox_manager_target"] == identity(config.entry_id, scope)
+    assert attrs["session_active"] and attrs["connected"]
+    assert attrs["valid_until"] == sample.valid_until.isoformat()
+    runtime.disconnect(token)
+    assert not entity.extra_state_attributes["connected"]

@@ -47,7 +47,9 @@ async def test_settings_permission_selection_and_storage(grid):
     assert control.intent(target).request.target_w == 5500
     count = len(peer.requests)
     await profile.set_value(target, "power_kw", 7)
-    assert len(peer.requests) > count
+    assert len(peer.requests) == count
+    await profile.debounce_tasks[target]
+    assert len(peer.requests) == count + 1
     await profile.select(target, "NETZ")
     assert not control.runtime.enabled(target)
     assert target not in profile.tasks
@@ -77,7 +79,7 @@ async def test_multiphase_detection_obeys_single_phase_limit(grid, phases):
                 replace(source.snapshot.envelopes[-1], mode=PhaseMode.canonical(2)),
             ),
         )
-    await profile.set_value(target, "power_kw", 22)
+    await profile.set_value(target, "power_kw", 22 if phases == 3 else 14)
 
     async def wait(seconds):
         assert seconds == 60
@@ -294,6 +296,7 @@ async def test_new_power_supersedes_sleeping_observation(grid):
     await asyncio.sleep(0)
     await profile.set_value(target, "power_kw", 2)
     assert old.cancelling()
+    await profile.debounce_tasks[target]
     count = len(peer.requests)
     gate.set()
     await asyncio.gather(old, profile.tasks[target], return_exceptions=True)
