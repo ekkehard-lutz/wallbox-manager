@@ -153,3 +153,63 @@ async def test_card_session_metadata_includes_scoped_role_and_meter_expiry(diagn
     assert attrs["valid_until"] == sample.valid_until.isoformat()
     runtime.disconnect(token)
     assert not entity.extra_state_attributes["connected"]
+
+
+async def test_duration_ticks_and_honors_ha_display_unit(diagnostics):
+    """Real HA states advance and may advertise hours instead of native seconds."""
+    import asyncio
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    scope = EvseId(StationId("garage"), "1")
+    token = runtime.connect(scope.station)
+    at = datetime.now(UTC) - timedelta(hours=25, minutes=12)
+    runtime.session_event(
+        token, SessionEvent(scope, "duration", Kind.STARTED, at, State.CHARGING)
+    )
+    await hass.async_block_till_done()
+    duration = sessions(platforms)["duration"]
+    before = hass.states.get(duration.entity_id)
+    assert before.attributes["wallbox_manager_role"] == "session_duration"
+    assert before.attributes["unit_of_measurement"] == "s"
+    await asyncio.sleep(1.1)
+    after = hass.states.get(duration.entity_id)
+    assert float(after.state) > float(before.state)
+    assert (
+        after.attributes["duration_sampled_at"]
+        > before.attributes["duration_sampled_at"]
+    )
+    er.async_get(hass).async_update_entity_options(
+        duration.entity_id, "sensor", {"unit_of_measurement": "h"}
+    )
+    await hass.async_block_till_done()
+    converted = hass.states.get(duration.entity_id)
+    assert converted.attributes["unit_of_measurement"] == "h"
+    assert 25.2 <= float(converted.state) < 25.21
+    runtime.session_event(
+        token,
+        SessionEvent(
+            scope, "duration", Kind.UPDATED, datetime.now(UTC), State.SUSPENDED_VEHICLE
+        ),
+    )
+    await hass.async_block_till_done()
+    assert duration.session.active
+    assert float(hass.states.get(duration.entity_id).state) >= float(converted.state)
+    end = datetime.now(UTC)
+    runtime.session_event(
+        token, SessionEvent(scope, "duration", Kind.ENDED, end, State.IDLE)
+    )
+    await hass.async_block_till_done()
+    final = hass.states.get(duration.entity_id)
+    assert not final.attributes["session_active"]
+    assert final.attributes["duration_valid_until"] is None
+    assert duration.native_value == (end - at).total_seconds()
+    duration._tick(end + timedelta(minutes=5))
+    assert hass.states.get(duration.entity_id).state == final.state
+    runtime.session_event(
+        token,
+        SessionEvent(scope, "next", Kind.STARTED, datetime.now(UTC), State.CONNECTED),
+    )
+    await hass.async_block_till_done()
+    reset = hass.states.get(duration.entity_id)
+    assert reset.attributes["session_id"] != final.attributes["session_id"]
+    assert float(reset.state) < 0.01

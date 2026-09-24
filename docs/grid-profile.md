@@ -1,6 +1,6 @@
 # Grid (`NETZ`) profile and installation ownership
 
-This is the implemented beta.3 refinement of the v0.3.x Grid contract. It
+This is the implemented beta.4 refinement of the v0.3.x Grid contract. It
 supersedes the older conceptual Grid, takeover and battery-read-only proposals
 in `architecture.md`. PV_SURPLUS, PV_DAILY_OPTIMUM, PV_MAXIMUM and the Energy
 Manager interface remain deferred. This change does not prepare a release.
@@ -238,10 +238,12 @@ friendly names. Renames, additions and inventory changes are discovered on state
 updates. Disconnected targets show inhibited controls. With multiple central
 listener entries, their selects are views of the same global ownership coordinator.
 
-The theme-aware header uses `mdi:ev-station`, the optional presentation title, and
+The theme-aware header uses a 48 × 48 px `mdi:ev-station` (twice the original
+24 px dimensions), the optional presentation title, and
 the real device display name (`name_by_user`, then device/station name) beneath it.
 The multi-wallbox selector lives in the header; single-wallbox cards omit it.
-Takeover remains explicit. Narrow, keyboard-accessible power buttons step by
+Takeover remains explicit. Both numeric fields use the former narrow reserve
+width (4 em), including mobile layouts. Keyboard-accessible power buttons step by
 0.1 kW below 10, and 1 kW above: 9.8 → 9.9 → 10 → 11 and the reverse. Direct input
 also accepts fractions above 10. The card formats the HA language's decimal
 separator. `technical_max_kw` comes from verified envelopes, fresh voltages and
@@ -251,15 +253,60 @@ validation errors remain visible. Power edits stay interactive during service
 responses. Reserve is labelled **Entladereserve / Discharge reserve**, with integer
 steps from 0 to 100, and appears only with both central battery references.
 
+Pressing either numeric control's +/- button applies one step immediately.
+Holding repeats after 450 ms, then every 150 ms without acceleration. Pointer
+capture handles mouse/touch release; cancellation, leaving the button, focus
+loss, disabling the control, changing the selected wallbox, reconfiguration and
+card removal stop repetition and clear timers. Pointer-generated clicks do not
+apply a duplicate step. Native keyboard/assistive clicks remain supported. These
+are input-repeat timers only: every power edit still uses the single existing
+one-second backend debounce, applying only the final value after release.
+
 A separated two-column, three-row section shows connection/charging state,
-current session energy/measured power, and duration/measured phases and current.
-Permission ON is never used as evidence of actual charging. Session energy uses
-its attributed meter deadline; unknown starts, completed sessions, stale meters,
-disconnections and missing data show a neutral dash. Differing phase currents
-show a range; requested currents and phases never substitute for measurements.
-If only some current samples exist, fresh physical phase feedback must qualify
-which conductors can be used. A one-second display timer expires stale values;
-it performs no service calls or power regulation.
+current session energy/measured power, and session duration/applied operating point.
+Permission ON is never used as evidence of actual charging. Energy and power
+continue using session accounting and actual meters with their freshness deadlines.
+
+**Duration:** discovery uses `session_duration` and the existing scope metadata,
+including renamed entities; no entity ID is hardcoded. Beta.3 treated the numeric
+HA state as seconds unconditionally. HA can expose this seconds-native duration
+sensor in minutes, hours or other duration units, so the card could advance at
+only 1/60 or 1/3600 of the intended speed. The real HA entity regression confirms
+its existing one-second backend tick works, including a registry conversion to
+hours. The card now converts the state's advertised unit. It formats total hours
+and minutes without seconds or a 24-hour wrap: `0:22`, `1:23`, `25:12`, `49:05`.
+
+The duration entity also exposes a read-only sample timestamp and a 90-second
+validity window for active sessions. The card's existing one-second display tick
+can interpolate from that valid reading while active, even if HA publishes
+periodically. It never extrapolates an unavailable, disconnected, unknown-start,
+future-dated or expired source. Session duration continues during a charging
+pause. On completion the final duration stays fixed, including while disconnected;
+a new session uses the new entity state and session identity without cached offsets.
+This is session elapsed time, not accumulated charging-active time.
+
+**Applied operating point:** the bottom-right cell shows the confirmed phase count
+and charging-current limit, for example `1-phasig · 16 A` / `1-phase · 16 A`. It is
+not measured vehicle current. The existing stable control attributes
+`applied_phase_count` and `applied_current_a` now project a read-only snapshot of
+the primitive command boundary's successfully fenced `APPLIED` result. The snapshot
+survives desired-power edits and the separately confirmed ON command. No control
+policy, solver decision, command sequencing or retry depends on it, and it is not
+persisted or restored.
+
+During a phase lockout, a confirmed substitute remains displayed while the retry
+waits: a desired 3p/9 A target with an applied 1p/16 A substitute displays 1p/16 A.
+Once dispatch begins, the display is conservatively unknown until the complete
+operation is confirmed; a rejected, partial, cancelled or stale result never
+publishes the target. It changes to 3p/9 A only after confirmation. Explicit OFF
+and takeover clear the snapshot. Connection/boot token, authority revision,
+permission revision and active ownership guard its visibility; reconnect, reload,
+lost authority or expired permission cannot resurrect a previous confirmation.
+A confirmed zero-current point while permission remains ON displays `Off · 0 A`;
+otherwise missing confirmation is a neutral dash. The cell's tooltip distinguishes
+the current limit from a measurement. Measured charging power remains unchanged.
+
+The display timer performs no service calls or power regulation.
 
 Observation and session entities expose stable roles and scoped join metadata.
 Connector observations take priority. EVSE/station aggregates are offered to the

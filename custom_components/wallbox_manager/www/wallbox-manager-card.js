@@ -33,6 +33,21 @@ function fresh(state, now = Date.now()) {
     (!state.attributes.observed_at || Date.parse(state.attributes.observed_at) <= now) &&
     Number.isFinite(Date.parse(state.attributes.valid_until)) && Date.parse(state.attributes.valid_until) > now;
 }
+function sessionDuration(state, connected, now) {
+  if (!available(state) || state.attributes.start_known === false) return "—";
+  const factors = {s:1,min:60,h:3600,d:86400,ms:0.001,"µs":0.000001};
+  let seconds = Number(state.state) * factors[state.attributes.unit_of_measurement];
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  if (state.attributes.session_active === true) {
+    const sampled = Date.parse(state.attributes.duration_sampled_at || state.last_updated);
+    const deadline = state.attributes.duration_valid_until ? Date.parse(state.attributes.duration_valid_until) : sampled + 90000;
+    if (!connected || state.attributes.connected === false || !Number.isFinite(sampled) || sampled > now || !(now < deadline)) return "—";
+    seconds += (now - sampled) / 1000;
+  } else if (state.attributes.session_active !== false) return "—";
+  const minutes = Math.floor(seconds / 60);
+  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2,"0")}`;
+}
+
 function liveValues(states, discovery, language, now = Date.now()) {
   const state = role => states[discovery.roles[role]];
   const de = language?.startsWith("de"), empty = "—";
@@ -42,47 +57,39 @@ function liveValues(states, discovery, language, now = Date.now()) {
   const connection = text("connector_state", de ? {available:"Frei", occupied:"Belegt", reserved:"Reserviert", faulted:"Störung"} : {available:"Available", occupied:"Occupied", reserved:"Reserved", faulted:"Faulted"});
   const charging = text("charging_state", de ? {idle:"Bereit",connected:"Verbunden",preparing:"Vorbereitung",charging:"Lädt",suspended_vehicle:"Vom Fahrzeug pausiert",suspended_station:"Von Wallbox pausiert",finishing:"Beendet"} : {idle:"Idle",connected:"Connected",preparing:"Preparing",charging:"Charging",suspended_vehicle:"Paused by vehicle",suspended_station:"Paused by wallbox",finishing:"Finishing"});
   const session = role => connected && available(state(role)) && state(role).attributes.connected !== false && state(role).attributes.session_active === true ? Number(state(role).state) : NaN;
-  const energy = fresh(state("session_energy"),now) ? session("session_energy") : NaN, duration = state("session_duration")?.attributes.start_known === false ? NaN : session("session_duration");
+  const energy = fresh(state("session_energy"),now) ? session("session_energy") : NaN;
   const powerState = state("power");
   const power = connected && fresh(powerState, now) ? Number(powerState.state) / (powerState.attributes.unit_of_measurement === "kW" ? 1 : 1000) : NaN;
-  const samples = [1,2,3].map(n => state(`current_l${n}`));
-  const currents = samples.map(s => connected && fresh(s, now) ? Number(s.state) : NaN);
-  let measured = currents;
-  if (!currents.every(Number.isFinite)) {
-    const attrs = state("charging_profile")?.attributes || {};
-    const phases = attrs.physical_phase_mode;
-    measured = Date.parse(attrs.physical_phase_valid_until) > now && Array.isArray(phases) && phases.length ? phases.map(p => currents[Number(String(p).replace(/\D/g, "")) - 1]) : [];
-  }
+  const applied = state("charging_profile")?.attributes || {};
+  const phases = applied.applied_phase_count, current = applied.applied_current_a;
   let actual = empty;
-  if (measured.length && measured.every(Number.isFinite)) {
-    const active = measured.filter(a => a > 0);
-    const low = Math.min(...active), high = Math.max(...active);
-    const amps = active.length ? (high - low > 0.05 ? `${number(low)}–${number(high)}` : number(high)) : "0";
-    actual = `${active.length}${de ? "-phasig" : "-phase"} · ${amps} A`;
+  if (connected && available(state("charging_profile")) && applied.profile_control_ready && discovery.state?.attributes.profile_control_ready && discovery.active === discovery.displayed && applied.actual_enabled === true && applied.control_authority === "remote" && typeof current === "number" && Number.isFinite(current)) {
+    if ([1,2,3].includes(phases) && current > 0) actual = `${phases}${de ? "-phasig" : "-phase"} · ${number(current)} A`;
+    else if (phases === null && current === 0) actual = `${de ? "Aus" : "Off"} · 0 A`;
   }
-  const seconds = Math.max(0, Math.floor(duration));
   return {connection,charging,energy:Number.isFinite(energy) ? `${number(energy)} kWh` : empty,
     power:Number.isFinite(power) ? `${number(power)} kW` : empty,
-    duration:Number.isFinite(duration) ? `${Math.floor(seconds / 3600)}:${String(Math.floor(seconds / 60) % 60).padStart(2,"0")}:${String(seconds % 60).padStart(2,"0")}` : empty, actual};
+    duration:sessionDuration(state("session_duration"),connected,now), actual};
 }
 
 class WallboxManagerCard extends HTMLElement {
   setConfig(config) {
+    this.stopHold();
     this.config = config;
     this.edits = {};
     if (!this.shadowRoot) this.attachShadow({mode: "open"});
     this.shadowRoot.innerHTML = `<style>
       :host {display:block;color:var(--primary-text-color)}
       ha-card {padding:16px;font-family:var(--paper-font-body1_-_font-family,inherit)}
-      header {display:flex;align-items:center;gap:12px;margin-bottom:12px}
-      ha-icon {color:var(--primary-color);flex:none} .heading {min-width:0;flex:1}
-      h2 {font-size:var(--ha-card-header-font-size,20px);font-weight:500;margin:0;line-height:1.3}
+      header {display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:12px}
+      ha-icon {--mdc-icon-size:48px;width:48px;height:48px;color:var(--primary-color);flex:none} .heading {min-width:0;flex:1}
+      h2 {overflow-wrap:anywhere;font-size:var(--ha-card-header-font-size,20px);font-weight:500;margin:0;line-height:1.3}
       #station {font-size:14px;font-weight:400;color:var(--secondary-text-color);margin-top:3px;overflow-wrap:anywhere}
       .row {display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0;font-size:14px}
       input,select,button {font:inherit;color:var(--primary-text-color);border:1px solid var(--divider-color);background:var(--card-background-color);border-radius:var(--ha-border-radius-sm,8px);box-sizing:border-box;min-height:40px}
       select {padding:6px 8px;max-width:55%} #wallbox-row {margin:0;max-width:48%} #wallbox {max-width:100%;width:100%}
-      .numeric {display:flex;align-items:center;gap:4px;flex:none} input {width:5.3em;text-align:center;padding:6px 3px;font-variant-numeric:tabular-nums}
-      #reserve {width:4em} .step {width:34px;padding:0;font-size:19px} .unit {color:var(--secondary-text-color);font-size:13px;width:2em}
+      .numeric {display:flex;align-items:center;gap:4px;flex:none} input {width:4em;text-align:center;padding:6px 3px;font-variant-numeric:tabular-nums}
+      .step {width:34px;padding:0;font-size:19px;touch-action:none;user-select:none;-webkit-user-select:none} .unit {color:var(--secondary-text-color);font-size:13px;width:2em}
       button {cursor:pointer} button:hover:not(:disabled) {background:var(--secondary-background-color)}
       :is(input,select,button):focus-visible {outline:2px solid var(--primary-color);outline-offset:2px}
       :disabled {opacity:.5;cursor:default} #permission,#takeover {width:100%;padding:9px 12px;margin-top:6px;font-size:14px}
@@ -92,7 +99,7 @@ class WallboxManagerCard extends HTMLElement {
       .caption {font-size:12px;color:var(--secondary-text-color);margin-bottom:3px} .reading {font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
       #actual {align-self:end} .notice {font-size:13px;color:var(--error-color);line-height:1.4;margin:12px 0 0}
       [hidden] {display:none!important}
-      @media(max-width:360px) {ha-card {padding:12px} .row {gap:8px} header {gap:8px;flex-wrap:wrap} #wallbox-row {max-width:100%;width:100%} .numeric {gap:2px} input {width:4.5em} .step {width:32px}}
+      @media(max-width:360px) {ha-card {padding:12px} .row {gap:8px} header {gap:8px;flex-wrap:wrap} #wallbox-row {max-width:100%;width:100%} .numeric {gap:2px} .step {width:32px}}
     </style><ha-card>
       <header><ha-icon icon="mdi:ev-station"></ha-icon><div class="heading"><h2 id="title"></h2><div id="station"></div></div><label id="wallbox-row"><select id="wallbox" aria-label="Active wallbox"></select></label></header>
       <button id="takeover"></button>
@@ -113,7 +120,25 @@ class WallboxManagerCard extends HTMLElement {
         if (["ArrowUp", "ArrowDown"].includes(e.key)) { e.preventDefault(); this.stepNumber(id, e.key === "ArrowUp" ? 1 : -1); }
         if (e.key === "Enter") { e.preventDefault(); this.editNumber(id); }
       };
-      for (const [suffix, direction] of [["down",-1],["up",1]]) get(`${id}-${suffix}`).onclick = () => this.stepNumber(id,direction);
+      for (const [suffix, direction] of [["down",-1],["up",1]]) {
+        const button = get(`${id}-${suffix}`);
+        button.onpointerdown = e => this.startHold(button,id,direction,e);
+        for (const event of ["pointerup","pointercancel","pointerleave","lostpointercapture"]) button[`on${event}`] = () => {
+          if (this.hold?.button === button) this.stopHold();
+        };
+        button.onpointermove = e => {
+          if (this.hold?.button !== button) return;
+          const rect = button.getBoundingClientRect();
+          if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) this.stopHold();
+        };
+        button.oncontextmenu = e => e.preventDefault();
+        button.onclick = e => {
+          // Native keyboard/assistive clicks have detail 0 and no pointer press.
+          const pointer = button._pointerStep && e?.detail !== 0;
+          button._pointerStep = false;
+          if (!pointer && !button.disabled) this.stepNumber(id,direction);
+        };
+      }
     }
     get("permission").onclick = () => {
       const id = this.discovery.roles.charging_enabled;
@@ -123,10 +148,42 @@ class WallboxManagerCard extends HTMLElement {
   }
   connectedCallback() {
     this.disconnectedCallback();
+    this._blur = () => this.stopHold();
+    window.addEventListener("blur",this._blur);
     // Expire displayed meter samples even when HA has no new state to push.
     this.timer = setInterval(() => { if (this._hass) this.hass = this._hass; },1000);
   }
-  disconnectedCallback() { if (this.timer) clearInterval(this.timer); this.timer = null; }
+  disconnectedCallback() {
+    this.stopHold();
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (this._blur) window.removeEventListener("blur",this._blur);
+    this._blur = null;
+  }
+  startHold(button, id, direction, event) {
+    if (button.disabled || event.button !== 0 || event.isPrimary === false) return;
+    event.preventDefault();
+    this.stopHold();
+    button._pointerStep = true;
+    button.focus({preventScroll:true});
+    button.setPointerCapture(event.pointerId);
+    const hold = this.hold = {button,id,pointerId:event.pointerId,timer:null};
+    const repeat = () => {
+      if (this.hold !== hold) return;
+      if (button.disabled) { this.stopHold(); return; }
+      this.stepNumber(id,direction);
+      if (this.hold === hold) hold.timer = setTimeout(repeat,150);
+    };
+    this.stepNumber(id,direction);
+    if (this.hold === hold) hold.timer = setTimeout(repeat,450);
+  }
+  stopHold() {
+    const hold = this.hold;
+    this.hold = null;
+    if (!hold) return;
+    clearTimeout(hold.timer);
+    if (hold.button.hasPointerCapture(hold.pointerId)) hold.button.releasePointerCapture(hold.pointerId);
+  }
   format(value) { return new Intl.NumberFormat(this._hass.language, {maximumFractionDigits:6,useGrouping:false}).format(value); }
   maximum(id) {
     if (id === "reserve") return 100;
@@ -186,7 +243,7 @@ class WallboxManagerCard extends HTMLElement {
     const get = id => this.shadowRoot.getElementById(id), de = hass.language?.startsWith("de");
     const previous = this.discovery?.displayed;
     const d = this.discovery = discoverWallboxManager(hass.states);
-    if (previous !== d.displayed) { this.edits = {}; get("error").hidden = true; }
+    if (previous !== d.displayed) { this.stopHold(); this.edits = {}; get("error").hidden = true; }
     const state = role => hass.states[d.roles[role]], attrs = state("charging_profile")?.attributes || {};
     const ready = !!(attrs.profile_control_ready && d.state?.attributes.profile_control_ready && d.active === d.displayed);
     const busy = !!(this.busy || d.state?.attributes.transition_pending);
@@ -220,6 +277,8 @@ class WallboxManagerCard extends HTMLElement {
     get("permission").disabled = busy || !ready || !available(permission);
     get("permission").textContent = busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     get("reserve-row").hidden = !attrs.battery_configured;
+    if (this.hold && (this.hold.button.disabled || (this.hold.id === "reserve" && !attrs.battery_configured))) this.stopHold();
+    get("actual").title = de ? "Bestätigter Betriebspunkt · Stromlimit, kein Messwert" : "Confirmed operating point · current limit, not measured current";
     const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Energie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Energy",power:"Power",duration:"Duration"};
     for (const [key,value] of Object.entries(liveValues(hass.states,d,hass.language))) {
       const id = key === "power" ? "live-power" : key;

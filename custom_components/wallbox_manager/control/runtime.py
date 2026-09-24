@@ -88,6 +88,7 @@ class ControlRuntime:
         self.intents: dict[EvseId | ConnectorId, ManualIntent] = {}
         self._listeners = set()
         self._closed = False
+        self._confirmed_points = {}
         self._inactive = set()
         self.authority_adapter = authority_adapter
         self._takeover_generations = {}
@@ -158,6 +159,7 @@ class ControlRuntime:
 
     def close(self):
         self._closed = True
+        self._confirmed_points.clear()
         self._unsubscribe_defaults()
         for intent in self.intents.values():
             intent.generation += 1
@@ -296,20 +298,38 @@ class ControlRuntime:
             ),
         )
 
+    def confirmed_point(self, target):
+        """Read-only projection of an APPLIED result in its confirmed context.
+
+        Intent edits do not change hardware. No persistence, retries or command
+        decisions depend on this snapshot; uncertain dispatch clears it.
+        """
+        record = self._confirmed_points.get(target)
+        state = self.runtime.get(target.station)
+        enabled = self.runtime.enabled_observation(target)
+        if (
+            not record
+            or self._closed
+            or not state
+            or not state.connected
+            or record[1] != state.token
+            or record[2] != state.authority_revision
+            or not enabled
+            or record[3] != enabled.revision
+            or self.runtime.enabled(target) is not True
+            or self.runtime.authority(target.station) != ControlAuthority.REMOTE
+            or not self.profile_permitted(target)
+        ):
+            return None
+        return record[0]
+
     def attributes(self, target):
         intent = self.intent(target)
         if hasattr(self, "profiles") and target in self.profiles.debounce_tasks:
             inputs, blocked = self.inputs(target), "power_edit_pending"
         else:
             inputs, _, blocked = self.resolve(target)
-        applied = (
-            intent.solver_result.point
-            if intent.solver_result
-            and intent.command_result
-            and intent.command_result.status == CommandStatus.APPLIED
-            and intent.command_result.area == ControlArea.OPERATING_POINT
-            else None
-        )
+        applied = self.confirmed_point(target)
         return {
             "applied_current_a": float(applied.current_a or 0) if applied else None,
             "applied_phase_count": applied.mode.count
@@ -379,6 +399,7 @@ class ControlRuntime:
         intent = self.intent(target)
         if not enabled:
             self._inactive.add(target)
+            self._confirmed_points.pop(target, None)
         intent.generation += 1
         intent.command_result = intent.solver_result = None
         generation = intent.generation
@@ -424,13 +445,25 @@ class ControlRuntime:
                 != observation.revision
             ):
                 return stale_command_result()
-        return await self._permission(
+        result = await self._permission(
             target,
             intent,
             generation,
             enabled,
             fence=prepared.get("fence", fence),
         )
+        if enabled and generation == intent.generation:
+            record = self._confirmed_points.get(target)
+            if result.status == CommandStatus.APPLIED and record:
+                # The separately confirmed ON advances the permission revision.
+                self._confirmed_points[target] = (
+                    *record[:3],
+                    self.runtime.enabled_observation(target).revision,
+                )
+            else:
+                self._confirmed_points.pop(target, None)
+            self.publish(target)
+        return result
 
     async def apply_stored(
         self, target, *, prepare=False, fence=lambda: True, prepared=None
@@ -530,6 +563,7 @@ class ControlRuntime:
                 after_dispatch=True, permission_confirmed=True
             )
             prepared["fence"] = prepared_fence
+        self._confirmed_points.pop(target, None)
         intent.status = "pending"
         self.publish(target)
         result = await apply_operating_point(
@@ -563,6 +597,12 @@ class ControlRuntime:
             result = stale_command_result()
         if generation == intent.generation:
             if result.status == CommandStatus.APPLIED:
+                self._confirmed_points[target] = (
+                    resolved.point,
+                    token,
+                    authority_revision,
+                    self.runtime.enabled_observation(target).revision,
+                )
                 if resolved.point.charging:
                     self._inactive.discard(target)
                 else:
@@ -638,6 +678,9 @@ class ControlRuntime:
     async def _take_control(self, station):
         """Acquire authority, explicitly disable every connector and confirm OFF."""
         state = self.runtime.get(station)
+        for target in tuple(self._confirmed_points):
+            if target.station == station:
+                self._confirmed_points.pop(target, None)
         adapter = self.authority_adapter(station)
         if (
             self._closed

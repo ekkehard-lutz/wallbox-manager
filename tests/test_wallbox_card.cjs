@@ -5,9 +5,28 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function runtime() {
+  let ms=0, next=0;
+  const timers=new Map(), listeners=new Map();
+  const schedule=(fn,delay,interval=0)=>{ const id=++next; timers.set(id,{fn,at:ms+delay,interval}); return id; };
+  const clock={advance(delta) {
+    const end=ms+delta;
+    while (true) {
+      const due=[...timers].filter(([,t])=>t.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];
+      if (!due) break;
+      const [id,t]=due; ms=t.at; timers.delete(id);
+      if(t.interval) timers.set(id,{...t,at:ms+t.interval});
+      t.fn();
+    }
+    ms=end;
+  },get pending(){return timers.size;},listeners};
   class Node {
     constructor() { this.children = []; this.value = ''; this.textContent = ''; }
     replaceChildren(...nodes) { this.children = nodes; }
+    focus() {}
+    setPointerCapture(id) { this.pointer=id; }
+    hasPointerCapture(id) { return this.pointer===id; }
+    releasePointerCapture() { this.pointer=null; }
+    getBoundingClientRect() { return {left:0,top:0,right:34,bottom:40}; }
   }
   class HTMLElement {
     attachShadow() {
@@ -16,9 +35,9 @@ function runtime() {
     }
   }
   const registry = new Map();
-  const context = vm.createContext({HTMLElement, document:{createElement: () => new Node()}, window:{}, customElements:{get: key=>registry.get(key),define:(key,value)=>registry.set(key,value)}});
+  const context = vm.createContext({HTMLElement, document:{createElement: () => new Node()}, setTimeout:(fn,delay)=>schedule(fn,delay),clearTimeout:id=>timers.delete(id),setInterval:(fn,delay)=>schedule(fn,delay,delay),clearInterval:id=>timers.delete(id),window:{addEventListener:(event,fn)=>listeners.set(event,fn),removeEventListener:(event)=>listeners.delete(event)}, customElements:{get: key=>registry.get(key),define:(key,value)=>registry.set(key,value)}});
   vm.runInContext(fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8'), context);
-  return {Card:registry.get('wallbox-manager-card'), discover:vm.runInContext('discoverWallboxManager',context), step:vm.runInContext('powerStep',context), live:vm.runInContext('liveValues',context)};
+  return {clock, duration:vm.runInContext('sessionDuration',context), Card:registry.get('wallbox-manager-card'), discover:vm.runInContext('discoverWallboxManager',context), step:vm.runInContext('powerStep',context), live:vm.runInContext('liveValues',context)};
 }
 function state(role, target, value, extra={}) {
   return {state:value,attributes:{wallbox_manager_role:role,wallbox_manager_target:target,...extra}};
@@ -33,12 +52,12 @@ function states(ready=false) {
   };
 }
 function card(data) {
-  const {Card} = runtime();
+  const {Card,clock} = runtime();
   const card = new Card();
   card.setConfig({type:'custom:wallbox-manager-card'});
   const calls = [];
   card.hass = {states:data, language:'en',callService:async (...args)=>calls.push(args)};
-  return {card,calls,get:id=>card.shadowRoot.getElementById(id)};
+  return {card,calls,clock,get:id=>card.shadowRoot.getElementById(id)};
 }
 
 test('only type required; single wallbox hides selector, shows explicit takeover',async()=>{
@@ -195,7 +214,7 @@ test('device subtitle is independent of optional card title, header selector upd
 function metered() {
   const data=states(true), valid_until=new Date(Date.now()+60000).toISOString();
   for (const [role,value] of Object.entries({connector_state:'occupied',charging_state:'charging',power:'4100',current_l1:'18',current_l2:'0',current_l3:'0',session_energy:'9.3',session_duration:'4980',energy:'10000'}))
-    data[`sensor.renamed_${role}`]=state(role,'A',value,{valid_until,connected:true,session_active:true,unit_of_measurement:role==='power'?'W':undefined});
+    data[`sensor.renamed_${role}`]=state(role,'A',value,{valid_until,connected:true,session_active:true,unit_of_measurement:role==='power'?'W':role==='session_duration'?'s':undefined,duration_sampled_at:new Date().toISOString()});
   return data;
 }
 
@@ -206,8 +225,8 @@ test('live status uses measured state and current session despite permission OFF
   assert.equal(get('charging').textContent,'Lädt');
   assert.equal(get('energy').textContent,'9,3 kWh');
   assert.equal(get('live-power').textContent,'4,1 kW');
-  assert.equal(get('duration').textContent,'1:23:00');
-  assert.equal(get('actual').textContent,'1-phasig · 18 A');
+  assert.equal(get('duration').textContent,'1:23');
+  assert.equal(get('actual').textContent,'—'); // Permission/meter data do not prove an applied point.
   assert.equal(get('status').hidden,true);
   data['switch.another_name'].state='on';
   data['sensor.renamed_charging_state'].state='suspended_vehicle';
@@ -215,12 +234,13 @@ test('live status uses measured state and current session despite permission OFF
   assert.equal(get('charging').textContent,'Vom Fahrzeug pausiert');
 });
 
-test('unbalanced phase currents display a range, not the requested current',()=>{
+test('applied current replaces measured-current range while power remains measured',()=>{
   const data=metered();
   data['sensor.renamed_current_l2'].state='16'; data['sensor.renamed_current_l3'].state='17';
-  data['select.anything'].attributes.applied_current_a=32;
+  Object.assign(data['select.anything'].attributes,{applied_current_a:9,applied_phase_count:3,actual_enabled:true,control_authority:'remote'});
   const {get}=card(data);
-  assert.equal(get('actual').textContent,'3-phase · 16–18 A');
+  assert.equal(get('actual').textContent,'3-phase · 9 A');
+  assert.equal(get('live-power').textContent,'4.1 kW');
 });
 
 test('stale, unavailable, completed-session and disconnected data use placeholders',()=>{
@@ -247,12 +267,12 @@ test('only explicit unambiguous scope metadata permits broader telemetry joins',
   assert.equal(discover(data).roles.power,undefined);
 });
 
-test('fresh physical feedback can qualify a single available current sample',()=>{
+test('physical feedback and current samples cannot masquerade as applied limits',()=>{
   const data=metered(); delete data['sensor.renamed_current_l2']; delete data['sensor.renamed_current_l3'];
   const {card:c,get}=card(data);
   assert.equal(get('actual').textContent,'—');
   Object.assign(data['select.anything'].attributes,{physical_phase_mode:['l1'],physical_phase_valid_until:new Date(Date.now()+60000).toISOString()});
-  c.hass={...c._hass}; assert.equal(get('actual').textContent,'1-phase · 18 A');
+  c.hass={...c._hass}; assert.equal(get('actual').textContent,'—');
   data['select.anything'].attributes.physical_phase_valid_until=new Date(Date.now()-1).toISOString();
   c.hass={...c._hass}; assert.equal(get('actual').textContent,'—');
 });
@@ -307,5 +327,116 @@ test('expiry timer only rerenders and stops on removal; stale session energy is 
   assert.equal(get('duration').textContent,'—');
   const js=fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8');
   assert.match(js,/setInterval\(\(\) => \{ if \(this\._hass\) this\.hass = this\._hass; \},1000\)/);
-  assert.match(js,/disconnectedCallback\(\).*clearInterval/);
+  assert.match(js,/disconnectedCallback\(\)[\s\S]*clearInterval/);
+});
+
+const press={button:0,isPrimary:true,pointerId:1,preventDefault(){}};
+test('icon is 48px and both numeric fields use the former narrow 4em width',()=>{
+  const {card:c}=card(states(true)), html=c.shadowRoot.innerHTML;
+  assert.match(html,/--mdc-icon-size:48px;width:48px;height:48px/);
+  assert.match(html,/input \{width:4em;/);
+  assert.doesNotMatch(html,/#reserve \{width:|width:5.3em|width:4.5em/);
+});
+
+test('short pointer click changes once, keyboard clicks still work',()=>{
+  const {get,calls,clock}=card(states(true));
+  get('power-up').onpointerdown(press);
+  assert.equal(calls.length,1);
+  get('power-up').onpointerup();
+  get('power-up').onclick({detail:1});
+  clock.advance(2000);
+  assert.equal(calls.length,1);
+  get('power-up').onclick({detail:0});
+  assert.equal(calls.length,2);
+  assert.equal(clock.pending,0);
+});
+
+test('hold repeats after 450ms at 150ms intervals across 9.9/10 boundary',()=>{
+  const data=states(true);data['number.renamed_power'].state='9.8';
+  const {get,calls,clock}=card(data);
+  get('power-up').onpointerdown(press);
+  assert.equal(calls[0][2].value,9.9);
+  clock.advance(449);assert.equal(calls.length,1);
+  clock.advance(1);assert.equal(calls[1][2].value,10);
+  clock.advance(150);assert.equal(calls[2][2].value,11);
+  get('power-up').onpointerup();clock.advance(3000);
+  assert.equal(calls.length,3);
+  get('power-down').onpointerdown(press);clock.advance(600);
+  assert.deepEqual(calls.slice(3).map(x=>x[2].value),[10,9.9,9.8]);
+  get('power-down').onpointerup();
+});
+
+for (const event of ['pointerup','pointercancel','pointerleave','lostpointercapture','outside','disconnect','disabled','wallbox','blur','reconfigure'])
+  test(`hold ends and clears timers on ${event}`,()=>{
+    const data=states(true), {card:c,get,calls,clock}=card(data);
+    c.connectedCallback();get('power-up').onpointerdown(press);
+    if(event==='outside')get('power-up').onpointermove({clientX:50,clientY:20});
+    else if(event==='disconnect')c.disconnectedCallback();
+    else if(event==='disabled'){data['select.renamed_owner'].attributes.transition_pending=true;c.hass={...c._hass};}
+    else if(event==='wallbox'){data['select.renamed_owner'].attributes.wallboxes.B={name:'B',connected:true};data['select.renamed_owner'].attributes.active_wallbox='B';c.hass={...c._hass};}
+    else if(event==='blur')clock.listeners.get('blur')();
+    else if(event==='reconfigure')c.setConfig({type:'custom:wallbox-manager-card'});
+    else get('power-up')[`on${event}`]();
+    clock.advance(3000);assert.equal(calls.length,1);
+    assert.equal(c.hold,null);c.disconnectedCallback();
+    assert.equal(clock.pending,0);assert.equal(clock.listeners.size,0);
+  });
+
+test('reserve hold stops at 100 and 0; power hold stops at backend ceiling',()=>{
+  const data=states(true);data['select.anything'].attributes.battery_configured=true;
+  data['number.x'].state='99';data['number.renamed_power'].attributes.technical_max_kw=11.04;
+  const {get,calls,clock}=card(data);
+  get('reserve-up').onpointerdown(press);clock.advance(3000);
+  assert.equal(calls.length,1);assert.equal(calls[0][2].value,100);
+  get('reserve').value='1';get('reserve-down').onpointerdown(press);clock.advance(3000);
+  assert.equal(calls.length,2);assert.equal(calls[1][2].value,0);
+  get('power-up').onpointerdown(press);clock.advance(3000);
+  assert.equal(calls.length,3);assert.equal(calls[2][2].value,11.04);
+  assert.equal(clock.pending,0);
+});
+
+for (const [value,unit,expected] of [[1320,'s','0:22'],[83,'min','1:23'],[23+59/60,'h','23:59'],[25.2,'h','25:12'],[2945,'min','49:05'],[4980000,'ms','1:23'],[1.05,'d','25:12']])
+  test(`duration converts ${value} ${unit} into ${expected}`,()=>{
+    const {duration}=runtime();const now=Date.now();
+    const s=state('session_duration','A',String(value),{unit_of_measurement:unit,session_active:true,connected:true});s.last_updated=new Date(now).toISOString();
+    assert.equal(duration(s,true,now),expected);
+  });
+
+test('duration advances during pause, freezes at session end and resets on next session',()=>{
+  const {duration}=runtime(),now=Date.now();
+  const s=state('session_duration','A','1379',{unit_of_measurement:'s',session_active:true,connected:true,session_id:'one',duration_sampled_at:new Date(now).toISOString(),duration_valid_until:new Date(now+90000).toISOString()});
+  assert.equal(duration(s,true,now),'0:22');
+  assert.equal(duration(s,true,now+1000),'0:23');
+  s.attributes.charging_state='suspended_vehicle';
+  assert.equal(duration(s,true,now+61000),'0:24');
+  s.attributes.session_active=false;s.state='1500';
+  assert.equal(duration(s,false,now+3600000),'0:25');
+  Object.assign(s.attributes,{session_active:true,session_id:'two',duration_sampled_at:new Date(now+3600000).toISOString(),duration_valid_until:new Date(now+3690000).toISOString()});s.state='0';
+  assert.equal(duration(s,true,now+3600000),'0:00');
+});
+
+test('active duration never extrapolates unavailable, stale, future or disconnected data',()=>{
+  const {duration}=runtime(),now=Date.now();
+  const s=state('session_duration','A','4980',{unit_of_measurement:'s',session_active:true,connected:true});
+  assert.equal(duration(s,true,now),'—');
+  s.last_updated=new Date(now-90000).toISOString();assert.equal(duration(s,true,now),'—');
+  s.last_updated=new Date(now+1000).toISOString();assert.equal(duration(s,true,now),'—');
+  s.last_updated=new Date(now).toISOString();assert.equal(duration(s,false,now),'—');
+  s.state='unavailable';assert.equal(duration(s,true,now),'—');
+  s.state='invalid';assert.equal(duration(s,true,now),'—');
+  s.state='20';s.attributes.unit_of_measurement='unknown';assert.equal(duration(s,true,now),'—');
+});
+
+test('renamed duration role and independent applied snapshots follow wallbox selection',()=>{
+  const data=metered(),{card:c,get}=card(data);
+  data['sensor.random_name']=data['sensor.renamed_session_duration'];delete data['sensor.renamed_session_duration'];
+  Object.assign(data['select.anything'].attributes,{applied_current_a:16,applied_phase_count:1,actual_enabled:true,control_authority:'remote',profile_status:'phase_lockout',requested_phase_count:3});
+  c.hass={...c._hass};assert.equal(get('duration').textContent,'1:23');assert.equal(get('actual').textContent,'1-phase · 16 A');
+  data['select.renamed_owner'].attributes.wallboxes.B={name:'B',connected:true};
+  data['select.renamed_owner'].attributes.active_wallbox='B';
+  data['select.renamed_b']=state('charging_profile','B','NETZ',{profile_control_ready:true,applied_current_a:9,applied_phase_count:3,actual_enabled:true,control_authority:'remote'});
+  c.hass={...c._hass,language:'de'};assert.equal(get('actual').textContent,'3-phasig · 9 A');assert.equal(get('duration').textContent,'—');
+  for(const attrs of [{applied_current_a:null},{applied_current_a:9,actual_enabled:false},{actual_enabled:true,control_authority:'local'}]){
+    Object.assign(data['select.renamed_b'].attributes,attrs);c.hass={...c._hass};assert.equal(get('actual').textContent,'—');
+  }
 });

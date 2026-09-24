@@ -292,8 +292,11 @@ copy to `/config/www` is required. Discovery uses stable backend role/identity
 metadata and survives entity renames. When upgrading from beta.1, remove the old
 manually registered `/local/wallbox-manager-card.js` resource once.
 
-The compact card includes a device-name header, progressive 0.1/1 kW buttons,
-locale-aware direct numeric input and a two-column live session/metering section.
+The compact card includes a device-name header, equal narrow numeric fields,
+progressive 0.1/1 kW buttons with press-and-hold repeat (450 ms, then every 150 ms),
+and locale-aware direct input. Its two-column status section shows measured
+power, session duration as total `H:MM`, and the confirmed applied phase/current
+limit, including any phase-lockout substitute.
 Known backend technical limits bound requests. The optional battery control is
 labelled **Discharge reserve / Entladereserve**. Grid uses the per-wallbox
 `phase_switch_deviation_pct` preference without relaxing approximation policies;

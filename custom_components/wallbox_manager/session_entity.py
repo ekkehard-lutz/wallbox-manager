@@ -94,8 +94,20 @@ class SessionEntity(StationEntity):
         energy = self.runtime.sessions.measurement(
             self.scope, Quantity.ENERGY, datetime.now(UTC)
         )
+        now = datetime.now(UTC)
         return {
             **super().extra_state_attributes,
+            **(
+                {
+                    "duration_sampled_at": now.isoformat(),
+                    "duration_valid_until": (now + timedelta(seconds=90)).isoformat()
+                    if self.session.active
+                    else None,
+                }
+                if self.key == "duration"
+                else {}
+            ),
+            "session_id": self.session.session_id,
             **scope_attributes(self.runtime, self.entry_id, self.scope),
             "session_active": self.session.active,
             "valid_until": energy.valid_until.isoformat()
