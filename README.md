@@ -114,8 +114,8 @@ unsupported maxima do not create sensors (in particular no invented 2p maximum).
 Existing entity identities remain in the registry offline. Diagnostic source and
 evidence attributes distinguish OCPP observations from configured operator fallback.
 
-Configure fallback fields individually in integration options, associated with
-explicit station/EVSE/connector IDs. No vendor, model, firmware, serial or global
+Select a discovered station/EVSE/connector in integration options to configure
+its missing fallback fields. Complete OCPP inventory requires no manual entries. No vendor, model, firmware, serial or global
 verification checkbox is required. Decimal and fractional currents are accepted.
 References never override verified wallbox values. Normal current limits belong
 to the runtime controls, not the reference form.
@@ -259,63 +259,28 @@ Wallbox
 Standard OCPP functionality is preferred whenever possible. Vendor-specific
 functionality may be implemented through isolated OCPP DataTransfer extensions.
 
-## Planned charging profiles and control ownership
+## Grid charging profile (v0.3.x)
 
-The planned user-selectable Wallbox Manager profiles are:
+The implemented **Grid (`NETZ`)** profile charges at a requested fixed power in kW.
+Select the profile, adjust its settings and activate the existing charging-permission
+switch. Profile selection disables permission; changing power while enabled takes
+effect immediately. Local authority is never acquired automatically.
 
-- OFF
-- PV_SURPLUS
-- PV_OPTIMUM
-- PV_MAXIMUM
-- GRID
+The backend persists profile settings, retries phase lockouts once per minute and
+performs a bounded vehicle-current observation after applying the desired point.
+It preserves separate station current limits and all primitive command safeguards.
+Optional battery entity references live in integration options; both are required.
+A temporary battery reserve is held only while actual vehicle charging occurs,
+with durable restoration and external-change conflict handling.
 
-The PV profiles work standalone using configured, vendor-neutral HA sensors:
-separate non-negative grid import/export and battery charge/discharge power in W,
-battery SOC and observed reserve in %, plus remaining-current-day PV forecast in
-kWh for PV_OPTIMUM. Signed vendor readings can be split with HA template/helper
-sensors; Wallbox Manager does not write inverter registers.
+See [Grid profile, migration and card installation](docs/grid-profile.md) for the
+configuration, operating sequence, battery lifecycle and custom Lovelace card.
+The compact card exposes profile, requested power and permission, adding reserve
+and actual charging state only when the battery references are configured.
 
-- PV_SURPLUS preserves a configurable high battery SOC while using current surplus.
-- PV_OPTIMUM has separate daytime minimum and evening battery SOC targets, with
-  a configured average household consumption in W, battery capacity in kWh and
-  forecast/safety reserve in kWh. The forecast means total PV generation remaining
-  today, before household consumption. Predicted household energy shortfall until
-  sunset is converted to additional SOC above the evening target, clamped between
-  minimum SOC and 100%. HA supplies today’s sunset; after sunset the remaining
-  duration and forecast contribution are zero, without planning against tomorrow.
-- PV_MAXIMUM maximizes PV plus permitted battery contribution using its own minimum
-  SOC, independent of PV_OPTIMUM.
-
-Known battery reserves take precedence over lower profile minima. If expected
-battery discharge becomes unavailable while grid import persists, flow-based
-fallback reduces charging toward PV-only surplus. Small grid-import tolerance
-covers control resolution and latency; it is not an intentional charging budget.
-Missing/stale required inputs inhibit the dependent profile.
-
-Two additional states represent control ownership and cannot be selected as
-normal Wallbox Manager profiles:
-
-- LOCAL: control was taken locally at the wallbox.
-- REMOTE: control was explicitly granted to an external Energy Manager.
-
-Selecting a normal Wallbox Manager profile is an explicit user action and may
-therefore acquire remote/OCPP authority from the wallbox. A fresh explicit “Take
-control” action in Energy Manager can also directly leave LOCAL and acquire REMOTE
-through a trusted HA/Wallbox Manager user-action mechanism; selecting a normal
-profile first is not required. Keep LOCAL latched until device authority is verified.
-Failure leaves LOCAL with no usable lease or background retry. On success, create
-a fresh lease and require a fresh target before REMOTE becomes ACTIVE.
-
-If the wallbox is switched to local control, Wallbox Manager must not
-automatically reacquire remote authority.
-
-REMOTE control uses an owner-specific runtime lease and heartbeat. Technical
-interruptions preserve the desired profile and existing owner authorization. After
-reconciliation, normal profiles resume automatically; REMOTE requires an
-authenticated recovery handshake, a fresh lease and a fresh target, without another
-user click. A deliberate LOCAL takeover blocks automatic recovery and requires
-a new explicit user action to leave LOCAL. Ordinary API calls, heartbeats and
-recovery handshakes cannot assert that authorization or bypass the LOCAL latch.
+PV_SURPLUS, PV_DAILY_OPTIMUM and PV_MAXIMUM are deferred pending detailed
+specifications. No PV algorithms or external Energy Manager interface are
+implemented in this iteration.
 
 ## Planned Energy Manager interface
 
@@ -344,7 +309,8 @@ automations.
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
 now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
-Charging profiles and the planned Energy Manager interface remain future work.
+The v0.3.x Grid profile builds on these controls. PV profiles and the planned
+Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
 phase envelopes, voltage observations, power requests and solver results are
@@ -353,7 +319,7 @@ uses actual per-phase voltages, and returns an offered operating point, logical 
 or an explicit unreachable reason. A deferred-result contract is reserved for the
 future phase-transition planner. It does not command a charger or claim measured
 EV consumption. Metering and runtime state are reported separately by adapters.
-Ownership and charging profiles remain future work.
+External ownership leases and PV charging profiles remain future work.
 
 Run development checks with `.venv/bin/ruff check .`,
 `.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running

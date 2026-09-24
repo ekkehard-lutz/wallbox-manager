@@ -11,6 +11,16 @@ The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evide
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
 
+## Implemented v0.3.x Grid profile
+
+[Grid profile architecture and lifecycle](grid-profile.md) is the authoritative
+contract for this iteration: persistent NETZ settings, per-station capability
+references, primitive-control orchestration, bounded vehicle observation and
+journaled temporary battery reserve. It supersedes older proposals below about
+Grid budgets, profile-selection takeover, automatic profile restart and a strictly
+read-only reserve. The broader ownership/PV sections below are historical design
+proposals awaiting separate agreement; they are not implemented algorithms.
+
 ## Product and boundaries
 
 `wallbox_manager` is the Home Assistant integration domain. OCPP is an internal

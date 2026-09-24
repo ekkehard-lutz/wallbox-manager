@@ -14,16 +14,26 @@ async def async_setup_entry(hass, entry, async_add_entities):
         hass,
         entry,
         async_add_entities,
-        lambda c, e, t: [
-            ControlNumber(c, e, t, key)
-            for key in (
-                "desired_charging_power",
-                "phase_switch_deviation_pct",
-                "allowed_current_1p",
-                "allowed_current_2p",
-                "allowed_current_3p",
+        lambda c, e, t: (
+            [
+                ControlNumber(c, e, t, key)
+                for key in (
+                    "desired_charging_power",
+                    "phase_switch_deviation_pct",
+                    "allowed_current_1p",
+                    "allowed_current_2p",
+                    "allowed_current_3p",
+                )
+            ]
+            + (
+                [
+                    ProfileNumber(c, e, t, "soll_power"),
+                    ProfileNumber(c, e, t, "min_soc"),
+                ]
+                if hasattr(c, "profiles")
+                else []
             )
-        ],
+        ),
     )
 
 
@@ -81,3 +91,29 @@ class ControlNumber(ControlEntity, NumberEntity):
 
     async def async_set_native_value(self, value):
         await self.control.change(self.target, **{self.field: self._value(value)})
+
+
+class ProfileNumber(ControlEntity, NumberEntity):
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, control, entry_id, target, key):
+        super().__init__(control, entry_id, target, key)
+        self.field = "power_kw" if key == "soll_power" else "min_soc"
+        self._attr_native_unit_of_measurement = "kW" if key == "soll_power" else "%"
+        self._attr_native_step = 0.1 if key == "soll_power" else 1
+
+    @property
+    def available(self):
+        return self.field == "power_kw" or self.control.profiles.battery.configured
+
+    @property
+    def native_value(self):
+        return self.control.profiles.setting(self.target)[self.field]
+
+    def restore_state(self, previous):
+        pass
+
+    async def async_set_native_value(self, value):
+        await self.control.profiles.set_value(self.target, self.field, value)

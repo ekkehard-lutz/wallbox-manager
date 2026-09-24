@@ -190,6 +190,12 @@
       },
       "allowed_current_3p": {
         "name": "{scope} Allowed current 3p"
+      },
+      "soll_power": {
+        "name": "Requested power {scope}"
+      },
+      "min_soc": {
+        "name": "Temporary battery reserve {scope}"
       }
     },
     "select": {
@@ -199,6 +205,12 @@
           "down": "Do not exceed",
           "nearest": "Nearest power",
           "up": "Do not fall below"
+        }
+      },
+      "charging_profile": {
+        "name": "Charging profile {scope}",
+        "state": {
+          "NETZ": "Grid"
         }
       }
     },
@@ -211,14 +223,19 @@
   "options": {
     "step": {
       "init": {
-        "title": "Capability fallback references",
-        "description": "Fill only missing capabilities. Verified OCPP values always take precedence. Explicitly associate station, EVSE and connector; individual capability fields are optional. Decimal values and fractions such as 6.5 or 13/2 are accepted. Set normal current limits using the control entities.",
+        "title": "Wallbox Manager",
+        "description": "Battery references are optional. Select a station to supply missing technical capabilities.",
         "data": {
-          "reference_station_id": "Station ID",
-          "reference_evse_id": "EVSE ID",
-          "reference_connector_id": "Connector ID",
+          "min_soc_speicher": "Battery minimum reserve",
+          "soc_speicher_aktuell": "Current battery state of charge",
+          "station": "Station"
+        }
+      },
+      "station": {
+        "title": "Station capabilities",
+        "description": "Supply only missing OCPP values. An empty form needs no additional information.",
+        "data": {
           "reference_phases": "Supported phase counts (e.g. 1,3)",
-          "reference_modes": "Explicit conductor mappings (e.g. l1;l1,l2,l3)",
           "reference_min_a": "Minimum current (A)",
           "reference_step_a": "Current step (A)",
           "reference_phase_switching": "Phase switching supported",

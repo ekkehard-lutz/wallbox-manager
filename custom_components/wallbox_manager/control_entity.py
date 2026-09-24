@@ -95,6 +95,11 @@ class ControlEntity(RestoreEntity):
             "connector_id": self.target.value,
             "state_represents": "desired_intent",
             **self.control.attributes(self.target),
+            **(
+                self.control.profiles.attributes(self.target)
+                if hasattr(self.control, "profiles")
+                else {}
+            ),
         }
 
     async def async_added_to_hass(self):

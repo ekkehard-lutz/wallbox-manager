@@ -54,6 +54,8 @@ class ManualIntent:
     phase_switch_deviation_pct: Fraction = Fraction(5)
     current_limits: dict[int, Fraction] = field(default_factory=dict)
     generation: int = 0
+    profile_modes: tuple[int, ...] | None = None
+    phase_retry: bool = False
     status: str = "idle"
     solver_result: SolverResult | None = None
     command_result: CommandResult | None = None
@@ -226,7 +228,11 @@ class ControlRuntime:
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
-            eligible_modes=inputs.eligible_modes
+            eligible_modes=tuple(
+                m
+                for m in inputs.eligible_modes
+                if intent.profile_modes is None or m.count in intent.profile_modes
+            )
             if substitute_mode is None
             else tuple(m for m in inputs.eligible_modes if m == substitute_mode),
             charging_only=substitute_mode is not None,
@@ -296,6 +302,7 @@ class ControlRuntime:
         # Compatibility for callers: permission is a transient command, not intent.
         enabled = changes.pop("allowed", None)
         if changes:
+            self.intent(target).profile_modes = None
             intent = self._edit(target, changes)
             if intent.request.target_w == 0 or self.runtime.enabled(target) is not True:
                 self._inactive.add(target)
@@ -397,6 +404,7 @@ class ControlRuntime:
         authority_revision = state.authority_revision
 
         substitute_mode = None
+        intent.phase_retry = False
 
         def current(*, after_dispatch=False, permission_confirmed=False):
             if (
@@ -465,6 +473,7 @@ class ControlRuntime:
             and inputs.current_mode != resolved.point.mode
             and current()
         ):
+            intent.phase_retry = True
             # One synchronous recalculation within this explicit command only.
             # Keep all original fences, including confirmed physical phase state.
             substitute_mode = inputs.current_mode

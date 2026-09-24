@@ -42,9 +42,17 @@ class ChargingEnabled(ControlEntity, SwitchEntity):
         """Ignore old desired permission, including legacy ON restore records."""
 
     async def async_turn_on(self, **kwargs):
-        await self.control.request_enabled(self.target, True)
+        await (
+            self.control.profiles.permission(self.target, True)
+            if hasattr(self.control, "profiles")
+            else self.control.request_enabled(self.target, True)
+        )
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs):
-        await self.control.request_enabled(self.target, False)
+        await (
+            self.control.profiles.permission(self.target, False)
+            if hasattr(self.control, "profiles")
+            else self.control.request_enabled(self.target, False)
+        )
         self.async_write_ha_state()

@@ -32,6 +32,7 @@ class EntryRuntime:
     server: CentralSystem
     sessions: SessionStorage
     control: ControlRuntime
+    profiles: object = None
 
 
 type WallboxManagerConfigEntry = ConfigEntry[EntryRuntime]
@@ -65,16 +66,27 @@ async def async_setup_entry(
     except OSError as exc:
         await storage.close()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
+    from .config_flow import migrate_options
     from .control.reference import ConfiguredReference
     from .protocols.ocpp.v21.control_runtime import create_control_runtime
 
-    source = ConfiguredReference(entry.options)
+    source = ConfiguredReference(migrate_options(entry.options))
     control = create_control_runtime(state, server, source)
-    entry.runtime_data = EntryRuntime(state, server, storage, control)
+    from .battery import BatteryReserve
+    from .profiles import GridProfiles
 
+    profiles = None
     try:
+        battery = BatteryReserve(hass, entry)
+        await battery.load()
+        profiles = GridProfiles(hass, entry, control, battery)
+        await profiles.load()
+        control.profiles = profiles
+        entry.runtime_data = EntryRuntime(state, server, storage, control, profiles)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
+        if profiles is not None:
+            await profiles.close()
         control.close()
         await server.stop()
         await storage.close()
@@ -82,6 +94,7 @@ async def async_setup_entry(
         raise
 
     async def shutdown(event):
+        await profiles.close()
         control.close()
         await server.stop()
         await storage.close()
@@ -98,6 +111,7 @@ async def async_unload_entry(
     """Close the listener and join owned sessions before completing unload."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
+    await entry.runtime_data.profiles.close()
     entry.runtime_data.control.close()
     await entry.runtime_data.server.stop()
     await entry.runtime_data.sessions.close()
@@ -114,4 +128,10 @@ async def async_migrate_entry(
             data={"host": DEFAULT_HOST, "port": DEFAULT_PORT, **entry.data},
             version=2,
         )
-    return entry.version == 2
+    if entry.version == 2:
+        from .config_flow import migrate_options
+
+        hass.config_entries.async_update_entry(
+            entry, options=migrate_options(entry.options), version=3
+        )
+    return entry.version == 3

@@ -40,7 +40,7 @@ LISTENER_SCHEMA = vol.Schema(
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 2
+    VERSION = 3
 
     @staticmethod
     @callback
@@ -132,23 +132,151 @@ def validate_reference_options(data):
     return data
 
 
+def migrate_options(options):
+    """Preserve explicit legacy topology; quarantine ambiguous references."""
+    data = dict(options)
+    legacy = {key: data.pop(key) for key in REFERENCE_FIELDS if key in data}
+    if legacy:
+        try:
+            validate_reference_options(legacy)
+        except ValueError, TypeError, ZeroDivisionError, OverflowError:
+            data["unassigned_references"] = legacy
+        else:
+            stations = {
+                k: dict(v) for k, v in data.get("station_references", {}).items()
+            }
+            station = stations.setdefault(legacy["reference_station_id"], {})
+            key = f"{legacy['reference_evse_id']}:{legacy['reference_connector_id']}"
+            station.setdefault(key, legacy)
+            data["station_references"] = stations
+    return data
+
+
 class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
     async def async_step_init(self, user_input=None):
-        errors = {}
-        schema = vol.Schema(
+        from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+
+        self.data = migrate_options(self.config_entry.options)
+        self.targets = {}
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        if runtime:
+            for state in runtime.state.stations:
+                for target in state.connectors:
+                    self.targets[
+                        f"{target.station.value} / {target.evse.value} / {target.value}"
+                    ] = target
+        for station, connectors in self.data.get("station_references", {}).items():
+            from .core.models import ConnectorId, EvseId, StationId
+
+            for key in connectors:
+                evse, connector = key.split(":")
+                self.targets.setdefault(
+                    f"{station} / {evse} / {connector}",
+                    ConnectorId(EvseId(StationId(station), evse), connector),
+                )
+        fields = {
+            vol.Optional(
+                "min_soc_speicher",
+                description={"suggested_value": self.data.get("min_soc_speicher")},
+            ): EntitySelector(EntitySelectorConfig(domain=["number", "input_number"])),
+            vol.Optional(
+                "soc_speicher_aktuell",
+                description={"suggested_value": self.data.get("soc_speicher_aktuell")},
+            ): EntitySelector(EntitySelectorConfig()),
+        }
+        if self.targets:
+            fields[vol.Optional("station")] = vol.In(list(self.targets))
+        if user_input is not None:
+            for key in ("min_soc_speicher", "soc_speicher_aktuell"):
+                self.data.pop(key, None)
+                if user_input.get(key):
+                    self.data[key] = user_input[key]
+            if user_input.get("station") in self.targets:
+                self.target = self.targets[user_input["station"]]
+                return await self.async_step_station()
+            return self.async_create_entry(title="", data=self.data)
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields))
+
+    async def async_step_station(self, user_input=None):
+        from .control.reference import FIELDS
+        from .core.capabilities import EvidenceState
+
+        target = self.target
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        state = runtime.state.get(target.station) if runtime else None
+        known = (
             {
-                vol.Optional(
-                    key,
-                    description={"suggested_value": self.config_entry.options.get(key)},
-                ): value
-                for key, value in REFERENCE_FIELDS.items()
+                c.key
+                for c in state.electrical
+                if c.scope in (target, target.evse)
+                and c.evidence.state
+                in (
+                    EvidenceState.VERIFIED,
+                    EvidenceState.UNSUPPORTED,
+                    EvidenceState.DEGRADED,
+                )
             }
+            if state and state.connected
+            else set()
         )
+        fields = {
+            key: value
+            for key, value in REFERENCE_FIELDS.items()
+            if key in FIELDS and FIELDS[key] not in known
+        }
+        # Maxima for an explicitly unsupported phase count are irrelevant.
+        counts = (
+            next(
+                (
+                    c.value
+                    for c in state.electrical
+                    if c.scope == target.evse
+                    and c.key == "supported_phases"
+                    and c.evidence.state == EvidenceState.VERIFIED
+                ),
+                None,
+            )
+            if state
+            else None
+        )
+        if counts:
+            fields = {
+                k: v
+                for k, v in fields.items()
+                if not k.startswith("reference_max_") or int(k[-2]) in counts
+            }
+        saved = (
+            self.data.get("station_references", {})
+            .get(target.station.value, {})
+            .get(f"{target.evse.value}:{target.value}", {})
+        )
+        errors = {}
         if user_input is not None:
             try:
-                data = validate_reference_options(schema(user_input))
-            except ValueError, TypeError, ZeroDivisionError, OverflowError, vol.Invalid:
+                data = validate_reference_options(
+                    {
+                        **user_input,
+                        "reference_station_id": target.station.value,
+                        "reference_evse_id": int(target.evse.value),
+                        "reference_connector_id": int(target.value),
+                    }
+                )
+                if set(user_input) - set(fields):
+                    raise ValueError("OCPP capability is authoritative")
+            except ValueError, TypeError, ZeroDivisionError, OverflowError:
                 errors["base"] = "invalid_reference"
             else:
-                return self.async_create_entry(title="", data=data)
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+                self.data.setdefault("station_references", {}).setdefault(
+                    target.station.value, {}
+                )[f"{target.evse.value}:{target.value}"] = data
+                return self.async_create_entry(title="", data=self.data)
+        return self.async_show_form(
+            step_id="station",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(k, description={"suggested_value": saved.get(k)}): v
+                    for k, v in fields.items()
+                }
+            ),
+            errors=errors,
+        )
