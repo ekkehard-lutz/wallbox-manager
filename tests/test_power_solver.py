@@ -31,6 +31,7 @@ def run(capabilities, voltage, now, one, three):
             kwargs.pop("voltage", voltage),
             now=kwargs.pop("now", now),
             eligible_modes=kwargs.pop("eligible_modes", (one, three)),
+            actively_charging=kwargs.pop("actively_charging", True),
             **kwargs,
         )
 
@@ -229,7 +230,7 @@ def test_single_phase_mapping_uses_actual_phase(run, capabilities, voltage):
 
 def test_missing_voltage_inhibits_without_inventing_phases(run, voltage, one):
     partial = replace(voltage, phases=voltage.phases[:1])
-    assert run(4000, voltage=partial).reason == Reason.VOLTAGE_UNAVAILABLE
+    assert run(4000, voltage=partial).point.mode == one
     assert (
         run(4000, voltage=partial, eligible_modes=(one,)).point.offered_power_w == 3910
     )
@@ -428,6 +429,7 @@ def test_two_phase_becomes_ineligible(run, ac_modes, one, three):
             voltage=observation,
             eligible_modes=(one, three),
             current_mode=current_mode,
+            actively_charging=True,
         )
         assert result.point.mode == one
         assert result.point.current_a == 16
@@ -460,6 +462,7 @@ def test_ties_across_one_two_three_phases(run, ac_modes, one, three, direction):
                 voltage=observation,
                 eligible_modes=tuple(e.mode for e in envelopes),
                 current_mode=current_mode,
+                actively_charging=True,
             )
             assert result.point.mode == (current_mode or one)
             assert result.point.offered_power_w == target
@@ -486,6 +489,7 @@ def test_two_phase_lower_power_tie(run, ac_modes):
         voltage=observation,
         eligible_modes=(two,),
         current_mode=two,
+        actively_charging=True,
     )
     assert result.point.current_a == 7
     assert result.point.offered_power_w == 7 * voltage_sum
@@ -552,3 +556,49 @@ def test_explicit_session_limit_does_not_change_wallbox_capability(run, ac_modes
     assert result.point.current_a == 32
     assert all(e.max_current_a == 32 for e in cap.envelopes)
     assert all(e.evidence.state == EvidenceState.VERIFIED for e in cap.envelopes)
+
+
+@pytest.mark.parametrize("missing", [Phase.L2, Phase.L3])
+@pytest.mark.parametrize("direction", list(Direction))
+def test_unavailable_phase_excludes_only_affected_modes(
+    run, ac_modes, missing, direction
+):
+    cap, observation, _ = ac_modes
+    observation = replace(
+        observation, phases=tuple(p for p in observation.phases if p.phase != missing)
+    )
+    result = run(
+        3400,
+        direction,
+        capabilities=cap,
+        voltage=observation,
+        eligible_modes=tuple(e.mode for e in cap.envelopes),
+    )
+    assert result.point.charging
+    assert missing not in result.point.mode.phases
+    if direction == Direction.DOWN:
+        assert result.point.offered_power_w <= 3400
+    elif direction == Direction.UP:
+        assert result.point.offered_power_w >= 3400
+
+
+@pytest.mark.parametrize("bad_phase", [Phase.L2, Phase.L3])
+def test_expired_phase_does_not_exclude_other_modes(run, ac_modes, now, bad_phase):
+    cap, observation, _ = ac_modes
+    observation = replace(
+        observation,
+        phases=tuple(
+            replace(p, observed_at=now - timedelta(seconds=60), valid_until=now)
+            if p.phase == bad_phase
+            else p
+            for p in observation.phases
+        ),
+    )
+    result = run(
+        2300,
+        capabilities=cap,
+        voltage=observation,
+        eligible_modes=tuple(e.mode for e in cap.envelopes),
+    )
+    assert bad_phase not in result.point.mode.phases
+    assert result.point.charging

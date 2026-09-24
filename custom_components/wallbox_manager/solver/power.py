@@ -8,7 +8,7 @@ from math import ceil, floor
 from ..control.requests import Direction, PowerRequest
 from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import PhaseMode, VoltageObservation
-from ..core.values import timestamp
+from ..core.values import scalar, timestamp
 from .operating_point import OperatingPoint, Reason, ResultStatus, SolverResult
 
 
@@ -20,7 +20,10 @@ def solve(
     now: datetime,
     eligible_modes: Iterable[PhaseMode],
     current_mode: PhaseMode | None = None,
+    actively_charging: bool = False,
     limits: Iterable[CurrentLimit] = (),
+    phase_switch_deviation_pct: Fraction = Fraction(0),
+    charging_only: bool = False,
 ) -> SolverResult:
     """Select among verified modes within all supplied hard current intervals.
 
@@ -29,17 +32,26 @@ def solve(
     normalize broader/narrower readings to that scope after checking applicability.
     Caller supplies fresh installation/station/session limits on every solve.
     No measured EV consumption is inspected and no acceptance limit is inferred.
+    Optional current-mode retention applies only after direction/hard constraints.
+    Existing callers default to 0%; the manual runtime explicitly supplies 5%.
 
     Each mode's linear power grid needs only its endpoints and the two indices
     bracketing the target. This is equivalent to full enumeration without memory
     or runtime proportional to the number of current steps.
     """
     timestamp(now)
+    tolerance = scalar(phase_switch_deviation_pct)
+    if tolerance > 25:
+        raise ValueError("phase retention tolerance must be between 0 and 25 percent")
+    if type(actively_charging) is not bool:
+        raise ValueError("active charging state must be boolean")
     eligible = frozenset(eligible_modes)
     if any(not isinstance(mode, PhaseMode) for mode in eligible):
         raise ValueError("invalid eligible phase mode")
     if current_mode is not None and not isinstance(current_mode, PhaseMode):
         raise ValueError("invalid current mode")
+    if not actively_charging or not request.allowed:
+        current_mode = None
     limits = tuple(limits)
     if any(not isinstance(limit, CurrentLimit) for limit in limits):
         raise ValueError("invalid current limit")
@@ -57,7 +69,9 @@ def solve(
     ):
         return SolverResult(ResultStatus.UNREACHABLE, Reason.OBSERVATION_MISMATCH)
 
-    candidates = [off] if can_stop else []
+    # A blocked phase transition may require a positive-current substitute.
+    # Explicit zero requests above still retain immediate stop semantics.
+    candidates = [off] if can_stop and not charging_only else []
     missing_voltage = False
     has_mode = False
     for envelope in capabilities.envelopes:
@@ -92,9 +106,9 @@ def solve(
                     )
                 )
 
-    # Incomplete eligible electrical data inhibits selection: it cannot prove a
-    # directional optimum and must not be mistaken for zero available capacity.
-    if missing_voltage:
+    # Missing voltage excludes only modes requiring that phase. Never infer a
+    # voltage or let an unavailable multi-phase mode suppress a valid 1p point.
+    if missing_voltage and not any(point.charging for point in candidates):
         return SolverResult(ResultStatus.UNREACHABLE, Reason.VOLTAGE_UNAVAILABLE)
     if not candidates:
         return SolverResult(
@@ -143,6 +157,14 @@ def solve(
             suggested=min(candidates, key=nearest_key),
         )
     chosen = min(directional, key=nearest_key)
+    if request.target_w > 0 and current_mode is not None:
+        retained = [p for p in directional if p.charging and p.mode == current_mode]
+        if retained:
+            candidate = min(retained, key=nearest_key)
+            if abs(candidate.offered_power_w - request.target_w) * 100 <= (
+                request.target_w * tolerance
+            ):
+                chosen = candidate
     return SolverResult(
         ResultStatus.FEASIBLE if chosen.charging else ResultStatus.OFF,
         Reason.SELECTED if chosen.charging else Reason.OFF_SELECTED,

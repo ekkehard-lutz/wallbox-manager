@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from fractions import Fraction
 
-from .models import EvseId, PhaseMode, StationId
+from .models import ConnectorId, EvseId, PhaseMode, StationId
 from .values import generation, nonempty, scalar, timestamp
 
 
@@ -102,7 +102,7 @@ class CurrentLimit:
 
 @dataclass(frozen=True)
 class CapabilitySnapshot:
-    scope: StationId | EvseId
+    scope: StationId | EvseId | ConnectorId
     firmware: str | None
     connection_generation: int
     boot_generation: int
@@ -114,8 +114,8 @@ class CapabilitySnapshot:
     overrides: tuple[CapabilityOverride, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scope, (StationId, EvseId)):
-            raise ValueError("capabilities must be station- or EVSE-scoped")
+        if not isinstance(self.scope, (StationId, EvseId, ConnectorId)):
+            raise ValueError("capabilities require station, EVSE or connector scope")
         if self.firmware is not None:
             nonempty(self.firmware)
         for value in (self.connection_generation, self.boot_generation, self.revision):

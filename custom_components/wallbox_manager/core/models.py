@@ -37,6 +37,10 @@ class ConnectorId:
             raise ValueError("connector requires an EVSE")
         nonempty(self.value)
 
+    @property
+    def station(self):
+        return self.evse.station
+
 
 type Scope = StationId | EvseId | ConnectorId
 
@@ -60,6 +64,17 @@ class PhaseMode:
         if len(set(phases)) != len(phases):
             raise ValueError("duplicate phase")
         object.__setattr__(self, "phases", tuple(sorted(phases)))
+
+    @classmethod
+    def canonical(cls, count: int):
+        """1p=L1, 2p=L1+L2, 3p=L1+L2+L3 at the EVSE interface.
+
+        These are EVSE-local labels, not installation/grid conductor identities.
+        Explicit subsets remain representable for other normalized adapters.
+        """
+        if type(count) is not int or count not in (1, 2, 3):
+            raise ValueError("canonical phase count must be 1, 2 or 3")
+        return cls(tuple(Phase)[:count])
 
     @property
     def count(self) -> int:
@@ -120,3 +135,28 @@ class VoltageObservation:
         if any(p not in samples for p in mode.phases):
             return None
         return tuple(samples[p] for p in mode.phases)
+
+
+@dataclass(frozen=True)
+class PhysicalPhaseObservation:
+    """Hardware-backed conductor state; unknown is explicit, never desired state."""
+
+    scope: ConnectorId
+    mode: PhaseMode | None
+    observed_at: datetime
+    valid_until: datetime
+    source: str
+
+    def __post_init__(self):
+        if not isinstance(self.scope, ConnectorId):
+            raise ValueError("physical phase state requires connector scope")
+        if self.mode is not None and not isinstance(self.mode, PhaseMode):
+            raise ValueError("invalid physical phase state")
+        timestamp(self.observed_at)
+        timestamp(self.valid_until)
+        nonempty(self.source)
+        if self.valid_until <= self.observed_at:
+            raise ValueError("physical phase evidence requires a positive lifetime")
+
+    def fresh(self, now):
+        return self.observed_at <= now < self.valid_until

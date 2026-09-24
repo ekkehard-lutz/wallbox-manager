@@ -41,6 +41,20 @@ DESCRIPTIONS = tuple(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    from .capability_entity import setup_capability_entities
+
+    setup_capability_entities(hass, entry, async_add_entities)
+    from .authority_entity import setup_authority_entities
+
+    setup_authority_entities(
+        hass,
+        entry,
+        async_add_entities,
+        "control_authority",
+        lambda station: AuthoritySensor(
+            entry.runtime_data.state, entry.entry_id, station
+        ),
+    )
     setup_session_entities(hass, entry, async_add_entities, binary=False)
     async_setup_station_entities(
         hass,
@@ -123,3 +137,31 @@ class ObservationSensor(ObservationEntity, SensorEntity):
         if self.channel.quantity == Quantity.ENERGY:
             value /= 1000
         return float(value)
+
+
+class AuthoritySensor(StationEntity, SensorEntity):
+    """Observed authority; desired charging permission is a separate entity."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = None
+    _attr_options = ["unknown", "local", "remote"]
+
+    def __init__(self, runtime, entry_id, station):
+        super().__init__(runtime, entry_id, station, "control_authority")
+
+    @property
+    def available(self):
+        return bool(self.snapshot and self.snapshot.connected)
+
+    @property
+    def native_value(self):
+        return self.runtime.authority(self.station).value
+
+    @property
+    def extra_state_attributes(self):
+        observation = self.snapshot.authority if self.snapshot else None
+        return {
+            **super().extra_state_attributes,
+            "source": observation.source if observation else None,
+            "observed_at": observation.observed_at.isoformat() if observation else None,
+        }
