@@ -287,3 +287,27 @@ async def test_discovery_during_restore_cannot_replace_saved_or_live_values(
     await setup()
     assert control.intent(bound.target).current_limits == {1: 16, 2: 0, 3: 27}
     assert not peer.requests and not peer.permissions
+
+
+async def test_semantic_roles_do_not_depend_on_entity_ids(controls):
+    import json
+
+    hass, entities, (_, bound, *_), _, _ = controls
+    power = entities["desired_charging_power"]
+    metadata = power.extra_state_attributes
+    assert metadata["wallbox_manager_role"] == "desired_charging_power"
+    assert json.loads(metadata["wallbox_manager_target"])[1:] == [
+        bound.target.station.value,
+        bound.target.evse.value,
+        bound.target.value,
+    ]
+    registry = er.async_get(hass)
+    registry.async_update_entity(
+        power.entity_id, new_entity_id="number.renamed_by_user"
+    )
+    await hass.async_block_till_done()
+    assert power.entity_id == "number.renamed_by_user"
+    assert (
+        power.extra_state_attributes["wallbox_manager_target"]
+        == metadata["wallbox_manager_target"]
+    )

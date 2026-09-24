@@ -13,7 +13,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .core.telemetry import Quantity
-from .entity import StationEntity, device_info
+from .entity import StationEntity, device_info, scope_attributes
 from .session_ledger import scope_parts
 
 SENSOR_KEYS = (
@@ -91,7 +91,30 @@ class SessionEntity(StationEntity):
 
     @property
     def extra_state_attributes(self):
+        energy = self.runtime.sessions.measurement(
+            self.scope, Quantity.ENERGY, datetime.now(UTC)
+        )
+        now = datetime.now(UTC)
         return {
+            **super().extra_state_attributes,
+            **(
+                {
+                    "duration_sampled_at": now.isoformat(),
+                    "duration_valid_until": (now + timedelta(seconds=90)).isoformat()
+                    if self.session.active
+                    else None,
+                }
+                if self.key == "duration"
+                else {}
+            ),
+            "session_id": self.session.session_id,
+            **scope_attributes(self.runtime, self.entry_id, self.scope),
+            "session_active": self.session.active,
+            "valid_until": energy.valid_until.isoformat()
+            if self.key == "energy"
+            and energy
+            and energy.observed_at == self.session.energy_at
+            else None,
             "station_id": self.station.value,
             "evse_id": self.session.evse_id.value,
             "connector_id": self.session.connector_id.value

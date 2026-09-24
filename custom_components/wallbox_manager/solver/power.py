@@ -12,6 +12,40 @@ from ..core.values import scalar, timestamp
 from .operating_point import OperatingPoint, Reason, ResultStatus, SolverResult
 
 
+def current_indices(envelope, limits):
+    """Hard intervals on the device's exact current grid, shared with UI bounds."""
+    lower, upper = envelope.min_current_a, envelope.max_current_a
+    for limit in limits:
+        if limit.mode == envelope.mode:
+            lower = max(lower, limit.min_current_a)
+            upper = min(upper, limit.max_current_a)
+    origin, step = envelope.min_current_a, envelope.current_step_a
+    return max(0, ceil((lower - origin) / step)), floor((upper - origin) / step)
+
+
+def maximum_power(capabilities, voltage, *, now, eligible_modes, limits):
+    """Known ceiling only; does not select any requested operating point."""
+    if (
+        voltage.scope != capabilities.scope
+        or voltage.connection_generation != capabilities.connection_generation
+    ):
+        return None
+    maxima = []
+    for envelope in capabilities.envelopes:
+        if envelope.mode not in eligible_modes:
+            continue
+        volts = voltage.active_voltages(envelope.mode, now)
+        if envelope.evidence.state != EvidenceState.VERIFIED or volts is None:
+            return None
+        first, last = current_indices(envelope, limits)
+        maxima.append(
+            (envelope.min_current_a + last * envelope.current_step_a) * sum(volts)
+            if first <= last
+            else Fraction(0)
+        )
+    return max(maxima) if maxima else None
+
+
 def solve(
     request: PowerRequest,
     capabilities: CapabilitySnapshot,
@@ -85,14 +119,8 @@ def solve(
         if volts is None:
             missing_voltage = True
             continue
-        lower, upper = envelope.min_current_a, envelope.max_current_a
-        for limit in limits:
-            if limit.mode == envelope.mode:
-                lower = max(lower, limit.min_current_a)
-                upper = min(upper, limit.max_current_a)
         origin, step = envelope.min_current_a, envelope.current_step_a
-        first = max(0, ceil((lower - origin) / step))
-        last = floor((upper - origin) / step)
+        first, last = current_indices(envelope, limits)
         if first > last:
             continue
         voltage_sum = sum(volts, Fraction(0))

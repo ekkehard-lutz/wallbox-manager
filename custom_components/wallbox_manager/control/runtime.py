@@ -9,7 +9,7 @@ from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
 from ..solver.operating_point import SolverResult
-from ..solver.power import solve
+from ..solver.power import maximum_power, solve
 from .commands import (
     CommandReason,
     CommandResult,
@@ -54,6 +54,8 @@ class ManualIntent:
     phase_switch_deviation_pct: Fraction = Fraction(5)
     current_limits: dict[int, Fraction] = field(default_factory=dict)
     generation: int = 0
+    profile_modes: tuple[int, ...] | None = None
+    phase_retry: bool = False
     status: str = "idle"
     solver_result: SolverResult | None = None
     command_result: CommandResult | None = None
@@ -86,6 +88,7 @@ class ControlRuntime:
         self.intents: dict[EvseId | ConnectorId, ManualIntent] = {}
         self._listeners = set()
         self._closed = False
+        self._confirmed_points = {}
         self._inactive = set()
         self.authority_adapter = authority_adapter
         self._takeover_generations = {}
@@ -156,6 +159,7 @@ class ControlRuntime:
 
     def close(self):
         self._closed = True
+        self._confirmed_points.clear()
         self._unsubscribe_defaults()
         for intent in self.intents.values():
             intent.generation += 1
@@ -226,7 +230,11 @@ class ControlRuntime:
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
-            eligible_modes=inputs.eligible_modes
+            eligible_modes=tuple(
+                m
+                for m in inputs.eligible_modes
+                if intent.profile_modes is None or m.count in intent.profile_modes
+            )
             if substitute_mode is None
             else tuple(m for m in inputs.eligible_modes if m == substitute_mode),
             charging_only=substitute_mode is not None,
@@ -253,17 +261,75 @@ class ControlRuntime:
             self.blocker(target) if result.point is not None else result.reason.value,
         )
 
+    def power_ceiling(self, target):
+        """Known feasible ceiling, independent of the requested operating point.
+
+        Unknown/stale evidence is not a station rating. Reuse the electrical
+        solver's hard limits and current grid; never synthesize 230 V.
+        """
+        state = self.runtime.get(target.station)
+        inputs = self.inputs(target) if state and state.connected else None
+        if inputs is None:
+            return None
+        caps = inputs.capabilities
+        now = datetime.now(UTC)
+        if (
+            caps.scope != target
+            or caps.connection_generation != state.token.connection_generation
+            or caps.boot_generation != state.token.boot_generation
+            or caps.firmware != state.identity.firmware
+        ):
+            return None
+        return maximum_power(
+            caps,
+            inputs.voltage,
+            now=now,
+            eligible_modes=inputs.eligible_modes,
+            limits=inputs.limits
+            + tuple(
+                CurrentLimit(
+                    e.mode,
+                    0,
+                    self.intent(target).current_limits[e.mode.count],
+                    "desired_control_limit",
+                )
+                for e in caps.envelopes
+                if e.mode.count in self.intent(target).current_limits
+            ),
+        )
+
+    def confirmed_point(self, target):
+        """Read-only projection of an APPLIED result in its confirmed context.
+
+        Intent edits do not change hardware. No persistence, retries or command
+        decisions depend on this snapshot; uncertain dispatch clears it.
+        """
+        record = self._confirmed_points.get(target)
+        state = self.runtime.get(target.station)
+        enabled = self.runtime.enabled_observation(target)
+        if (
+            not record
+            or self._closed
+            or not state
+            or not state.connected
+            or record[1] != state.token
+            or record[2] != state.authority_revision
+            or not enabled
+            or record[3] != enabled.revision
+            or self.runtime.enabled(target) is not True
+            or self.runtime.authority(target.station) != ControlAuthority.REMOTE
+            or not self.profile_permitted(target)
+        ):
+            return None
+        return record[0]
+
     def attributes(self, target):
         intent = self.intent(target)
-        inputs, _, blocked = self.resolve(target)
-        applied = (
-            intent.solver_result.point
-            if intent.solver_result
-            and intent.command_result
-            and intent.command_result.status == CommandStatus.APPLIED
-            and intent.command_result.area == ControlArea.OPERATING_POINT
-            else None
-        )
+        if hasattr(self, "profiles") and target in self.profiles.debounce_tasks:
+            inputs, blocked = self.inputs(target), "power_edit_pending"
+        else:
+            inputs, _, blocked = self.resolve(target)
+        applied = self.confirmed_point(target)
         return {
             "applied_current_a": float(applied.current_a or 0) if applied else None,
             "applied_phase_count": applied.mode.count
@@ -276,6 +342,16 @@ class ControlRuntime:
             "control_authority": self.runtime.authority(target.station).value,
             "physical_phase_mode": [p.value for p in inputs.current_mode.phases]
             if inputs and inputs.current_mode
+            else None,
+            "physical_phase_valid_until": next(
+                (
+                    o.valid_until.isoformat()
+                    for o in self.runtime.get(target.station).physical_phases
+                    if o.scope == target
+                ),
+                None,
+            )
+            if self.runtime.get(target.station)
             else None,
             "execution_ready": blocked is None and self.adapter(target) is not None,
             "execution_blocked_reason": blocked
@@ -296,6 +372,7 @@ class ControlRuntime:
         # Compatibility for callers: permission is a transient command, not intent.
         enabled = changes.pop("allowed", None)
         if changes:
+            self.intent(target).profile_modes = None
             intent = self._edit(target, changes)
             if intent.request.target_w == 0 or self.runtime.enabled(target) is not True:
                 self._inactive.add(target)
@@ -304,10 +381,25 @@ class ControlRuntime:
             return await self.request_enabled(target, enabled)
         return await self.apply_stored(target)
 
-    async def request_enabled(self, target, enabled):
+    def profile_permitted(self, target):
+        return not hasattr(self, "ownership") or self.ownership.permits(self, target)
+
+    async def request_enabled(self, target, enabled, *, fence=lambda: True):
         if type(enabled) is not bool:
             raise ValueError("enabled must be boolean")
+        if enabled and not self.profile_permitted(target):
+            self.intent(target).status = "inactive_wallbox"
+            self.publish(target)
+            return CommandResult(
+                CommandStatus.TEMPORARILY_REJECTED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.NO_AUTHORITY,
+                "inactive_wallbox",
+            )
         intent = self.intent(target)
+        if not enabled:
+            self._inactive.add(target)
+            self._confirmed_points.pop(target, None)
         intent.generation += 1
         intent.command_result = intent.solver_result = None
         generation = intent.generation
@@ -341,7 +433,9 @@ class ControlRuntime:
         if enabled:
             self._inactive.add(target)
             observation = self.runtime.enabled_observation(target)
-            result = await self.apply_stored(target, prepare=True, prepared=prepared)
+            result = await self.apply_stored(
+                target, prepare=True, prepared=prepared, fence=fence
+            )
             if result is None or result.status != CommandStatus.APPLIED:
                 return result
             if (
@@ -351,18 +445,34 @@ class ControlRuntime:
                 != observation.revision
             ):
                 return stale_command_result()
-        return await self._permission(
+        result = await self._permission(
             target,
             intent,
             generation,
             enabled,
-            fence=prepared.get("fence", lambda: True),
+            fence=prepared.get("fence", fence),
         )
+        if enabled and generation == intent.generation:
+            record = self._confirmed_points.get(target)
+            if result.status == CommandStatus.APPLIED and record:
+                # The separately confirmed ON advances the permission revision.
+                self._confirmed_points[target] = (
+                    *record[:3],
+                    self.runtime.enabled_observation(target).revision,
+                )
+            else:
+                self._confirmed_points.pop(target, None)
+            self.publish(target)
+        return result
 
     async def apply_stored(
         self, target, *, prepare=False, fence=lambda: True, prepared=None
     ):
         """Apply a target once; never change hardware permission."""
+        if not self.profile_permitted(target):
+            self.intent(target).status = "inactive_wallbox"
+            self.publish(target)
+            return None
         intent = self.intent(target)
         generation = intent.generation
         state = self.runtime.get(target.station)
@@ -397,11 +507,13 @@ class ControlRuntime:
         authority_revision = state.authority_revision
 
         substitute_mode = None
+        intent.phase_retry = False
 
         def current(*, after_dispatch=False, permission_confirmed=False):
             if (
                 self._closed
                 or not fence()
+                or not self.profile_permitted(target)
                 or generation != intent.generation
                 or (
                     not permission_confirmed
@@ -451,6 +563,7 @@ class ControlRuntime:
                 after_dispatch=True, permission_confirmed=True
             )
             prepared["fence"] = prepared_fence
+        self._confirmed_points.pop(target, None)
         intent.status = "pending"
         self.publish(target)
         result = await apply_operating_point(
@@ -465,6 +578,7 @@ class ControlRuntime:
             and inputs.current_mode != resolved.point.mode
             and current()
         ):
+            intent.phase_retry = True
             # One synchronous recalculation within this explicit command only.
             # Keep all original fences, including confirmed physical phase state.
             substitute_mode = inputs.current_mode
@@ -482,8 +596,17 @@ class ControlRuntime:
         ):
             result = stale_command_result()
         if generation == intent.generation:
-            if result.status == CommandStatus.APPLIED and resolved.point.charging:
-                self._inactive.discard(target)
+            if result.status == CommandStatus.APPLIED:
+                self._confirmed_points[target] = (
+                    resolved.point,
+                    token,
+                    authority_revision,
+                    self.runtime.enabled_observation(target).revision,
+                )
+                if resolved.point.charging:
+                    self._inactive.discard(target)
+                else:
+                    self._inactive.add(target)
             intent.command_result = result
             intent.status = result.status.value
             self.publish(target)
@@ -511,6 +634,7 @@ class ControlRuntime:
             return (
                 not self._closed
                 and intent.generation == generation
+                and (not enabled or self.profile_permitted(target))
                 and self.runtime.current(token)
                 and self.runtime.authority(target.station) == ControlAuthority.REMOTE
                 and self.runtime.get(target.station).authority_revision
@@ -546,14 +670,25 @@ class ControlRuntime:
         return result
 
     async def take_control(self, station):
-        """Explicit acquisition, followed by one fenced application of saved intent.
+        """An explicit takeover participates in the installation ownership guard."""
+        if hasattr(self, "ownership"):
+            return await self.ownership.activate_station(self, station)
+        return await self._take_control(station)
 
-        Ordinary edits never call this. Future profile selection can intentionally
-        reuse it. Concurrent edits/new presses invalidate the pending synchronization.
-        """
+    async def _take_control(self, station):
+        """Acquire authority, explicitly disable every connector and confirm OFF."""
         state = self.runtime.get(station)
+        for target in tuple(self._confirmed_points):
+            if target.station == station:
+                self._confirmed_points.pop(target, None)
         adapter = self.authority_adapter(station)
-        if self._closed or state is None or not state.connected or adapter is None:
+        if (
+            self._closed
+            or state is None
+            or not state.connected
+            or adapter is None
+            or not state.connectors
+        ):
             return CommandResult(
                 CommandStatus.UNSUPPORTED,
                 ControlArea.AUTHORITY,
@@ -577,21 +712,36 @@ class ControlRuntime:
         result = await take_control(adapter, is_current=current)
         if not current():
             result = stale_command_result()
-        if generation == self._takeover_generations.get(station):
-            self.takeover_results[station] = result
-        if (
-            result.status == CommandStatus.APPLIED
-            and self.runtime.authority(station) == ControlAuthority.REMOTE
-        ):
+        if result.status == CommandStatus.APPLIED:
             for target in targets:
-                if not current():
-                    break
-                # Starting after acquisition cannot retain a relay parked by Local.
-                self._inactive.add(target)
                 bound = self.adapter(target)
                 if bound is None:
-                    continue
+                    result = CommandResult(
+                        CommandStatus.UNSUPPORTED,
+                        ControlArea.CHARGING_PERMISSION,
+                        CommandReason.UNSUPPORTED_OPERATION,
+                    )
+                    break
                 await bound.read_enabled()
-                if current():
-                    await self.apply_stored(target, fence=current)
+                if not current():
+                    result = stale_command_result()
+                    break
+                # Account for the generation advance owned by this OFF request.
+                intents[target] += 1
+                result = await self.request_enabled(target, False, fence=current)
+                if (
+                    not result
+                    or result.status != CommandStatus.APPLIED
+                    or self.runtime.enabled(target) is not False
+                ):
+                    result = result or CommandResult(
+                        CommandStatus.FAILED,
+                        ControlArea.CHARGING_PERMISSION,
+                        CommandReason.HARDWARE_ERROR,
+                    )
+                    break
+            if not current():
+                result = stale_command_result()
+        if generation == self._takeover_generations.get(station):
+            self.takeover_results[station] = result
         return result

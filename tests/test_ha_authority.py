@@ -73,7 +73,9 @@ async def authority_entities(tmp_path, authority):
         await hass.async_stop()
 
 
-async def test_one_way_button_confirms_and_applies_saved_intent(authority_entities):
+async def test_one_way_button_confirms_off_and_never_applies_saved_intent(
+    authority_entities,
+):
     hass, entities, (control, bound, peer, _), _, _ = authority_entities
     assert set(entities) == {"control_authority", "take_control"}
     action = entities["take_control"]
@@ -91,9 +93,12 @@ async def test_one_way_button_confirms_and_applies_saved_intent(authority_entiti
         "authority_set",
         "authority_get",
         "enabled_get",
-        "profile",
+        "permission",
+        "enabled_get",
     ]
     assert hass.states.get(status.entity_id).state == "remote"
+    assert not peer.requests
+    assert control.runtime.enabled(bound.target) is False
     buttons = [e for e in er.async_get(hass).entities.values() if e.domain == "button"]
     assert len(buttons) == 1 and buttons[0].unique_id == action.unique_id
 

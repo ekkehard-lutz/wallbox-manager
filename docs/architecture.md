@@ -11,6 +11,33 @@ The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evide
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
 
+## Implemented v0.3.x Grid profile (beta.2 refinement)
+
+[Grid profile architecture and lifecycle](grid-profile.md) is authoritative for
+this iteration. `ProfileOwnership` is a singleton per HA installation, shared by
+all loaded listener entries. It persists one entry/station/EVSE/connector identity;
+readiness and transitions are transient. The central `ControlRuntime` gates ON and
+operating-point dispatch by that ownership, including queued-command fences.
+
+Explicit active-wallbox selection acquires authority only after the prior Remote
+wallbox is confirmed OFF. Every successful takeover explicitly sends and confirms
+OFF on the new station. Only then is the selection persisted/ready; ON is a separate
+user action. Non-active Local wallboxes are independent external loads. Startup,
+profile selection and background events cannot take authority. Unavailable previous
+owners inhibit replacement rather than being silently forgotten.
+
+Profile settings remain per connector. Battery references remain central entry
+options, and only the active profile can own the reserve journal. Discovered HA
+subentries own station/connector technical fallbacks; they do not manufacture extra
+devices or listeners. Existing registry identities remain stable. Frontend discovery
+uses explicit entity-role and target metadata. HA serves and registers the bundled
+extra frontend module; the card owns no safety or persistence logic.
+
+This supersedes older proposals below about Grid budgets, profile-selection
+takeover, automatic profile restart and a strictly read-only reserve. The broader
+ownership/PV sections below are historical design proposals awaiting separate
+agreement, not implemented algorithms.
+
 ## Product and boundaries
 
 `wallbox_manager` is the Home Assistant integration domain. OCPP is an internal
@@ -1149,10 +1176,11 @@ The current implementation is deliberately smaller than the future profile/lease
 ownership design above. `ControlAuthority` and timestamped `AuthorityObservation`
 are protocol-neutral station observations. Unknown/local authority inhibits normal
 power and permission dispatch while edits continue to persist. Explicit acquisition
-uses a generic authority adapter operation, confirms authority, then synchronizes
-stored targets once without changing desired values. Actual Disabled remains
-disabled; there is no persistent desired permission. No automatic acquisition, restoration dispatch, retry or return action is
-implemented. Future profile selection may explicitly invoke this same operation.
+uses a generic authority adapter operation. Since the beta.2 profile refinement,
+it confirms authority, then explicitly sends OFF and confirms OFF, without a stored
+target application. There is no persistent desired permission. Active-wallbox
+selection uses the installation guard; ordinary profile selection cannot acquire
+authority. No automatic acquisition or return-to-Local action is implemented.
 
 The OCPP 2.1 binding uses discovered station-scoped Actual
 `WallboxController.ControlAuthority` (`Local`/`OCPP`), an implementation-defined
@@ -1179,9 +1207,10 @@ Legacy switch restore records are ignored while entity identity remains stable.
 
 `request_enabled` is transient: ON prepares the saved operating point, revalidates
 it after queue waits, requests permission and reads actual state; OFF requests
-permission directly. Failed/LOCAL requests never become future work. Takeover
-reads permission and never writes it; only already-enabled hardware receives a
-one-time saved target application. Read-only polling begins after discovery and
+permission directly. Failed/LOCAL requests never become future work. Beta.2
+takeover always explicitly disables and confirms permission; it never applies a
+saved target. ON and operating points also require active ownership. Read-only
+polling begins after discovery and
 is owned/cancelled by the transport session. No observation triggers a write.
 
 `ZeroCurrentSupported` on the Connector is an implementation-defined verified

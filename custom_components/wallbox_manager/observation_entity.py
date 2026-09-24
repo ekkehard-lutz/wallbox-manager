@@ -2,7 +2,7 @@
 
 from .core.models import ConnectorId, EvseId
 from .core.telemetry import station_of
-from .entity import StationEntity, observation_unique_id
+from .entity import StationEntity, observation_unique_id, scope_attributes
 
 
 class ObservationEntity(StationEntity):
@@ -45,6 +45,7 @@ class ObservationEntity(StationEntity):
     def extra_state_attributes(self):
         attrs = super().extra_state_attributes
         scope = self.channel.scope
+        attrs.update(scope_attributes(self.runtime, self.entry_id, scope))
         if isinstance(scope, (EvseId, ConnectorId)):
             attrs["evse_id"] = (
                 scope.value if isinstance(scope, EvseId) else scope.evse.value

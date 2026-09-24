@@ -86,19 +86,33 @@ async def test_config_flow_validation_and_duplicate_port():
 
 
 async def test_migrate_scaffold_entry():
-    config = SimpleNamespace(version=1, data={})
+    config = SimpleNamespace(version=1, data={}, options={})
 
     def update(e, **kwargs):
-        e.version = kwargs["version"]
-        e.data = kwargs["data"]
+        for key, value in kwargs.items():
+            setattr(e, key, value)
 
     hass = SimpleNamespace(config_entries=SimpleNamespace(async_update_entry=update))
     assert await async_migrate_entry(hass, config)
     assert config.data == {"host": "0.0.0.0", "port": 9000}
-    assert config.version == 2
+    assert config.version == 3
 
 
 async def test_platform_setup_failure_closes_listener(monkeypatch):
+    from custom_components.wallbox_manager import battery, ownership, profiles
+
+    monkeypatch.setattr(
+        ownership,
+        "async_get_ownership",
+        AsyncMock(return_value=Mock(register=Mock(return_value=lambda: None))),
+    )
+
+    monkeypatch.setattr(battery, "BatteryReserve", lambda *args: Mock(load=AsyncMock()))
+    monkeypatch.setattr(
+        profiles,
+        "GridProfiles",
+        lambda *args: Mock(load=AsyncMock(), close=AsyncMock()),
+    )
     from custom_components.wallbox_manager import session_storage
 
     storage = Mock(load=AsyncMock(), close=AsyncMock())

@@ -1,4 +1,4 @@
-name: Python checks
+name: Python and frontend checks
 
 on:
   push:
@@ -16,8 +16,13 @@ jobs:
         with:
           python-version: '3.14'
           cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - run: python -m venv .venv
       - run: .venv/bin/python -m pip install -r requirements-dev.txt
       - run: .venv/bin/ruff check .
       - run: .venv/bin/ruff format --check .
       - run: .venv/bin/pytest
+      - run: node --check custom_components/wallbox_manager/www/wallbox-manager-card.js
+      - run: node tests/test_wallbox_card.cjs

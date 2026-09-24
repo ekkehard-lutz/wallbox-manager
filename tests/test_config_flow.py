@@ -100,10 +100,9 @@ async def test_reference_options_form_serializes():
         payload = FlowManagerIndexView(None)._prepare_result_json(result)
         fields = {f["name"]: f for f in payload["data_schema"]}
         assert "reference_verified" not in fields
-        assert fields["reference_min_a"]["type"] == "string"
-        assert fields["reference_evse_id"]["type"] == "integer"
-        result = await flow.async_step_init({"reference_min_a": "6.5"})
-        assert result["errors"] == {"base": "invalid_reference"}
+        assert "reference_min_a" not in fields
+        assert "min_soc_speicher" in fields
+        assert "soc_speicher_aktuell" in fields
         result = await flow.async_step_init({})
         assert result["type"] == "create_entry" and result["data"] == {}
     finally:
@@ -139,3 +138,51 @@ def test_partial_fractional_reference():
         "reference_step_a": "0.125",
     }
     assert validate_reference_options(data) == data
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_station_form_only_missing_ocpp_fields(missing):
+    from dataclasses import replace
+
+    from homeassistant.config_entries import ConfigEntries
+    from homeassistant.core import HomeAssistant
+    from test_electrical_capabilities import CONNECTOR, STATION, inventory
+    from test_ha_lifecycle import entry
+
+    from custom_components.wallbox_manager.config_flow import WallboxCapabilityFlow
+    from custom_components.wallbox_manager.protocols.ocpp.v21.capabilities import (
+        parse_capabilities,
+    )
+    from custom_components.wallbox_manager.runtime import Runtime
+    from custom_components.wallbox_manager.station_config import ensure_subentry
+
+    hass = HomeAssistant("/tmp")
+    hass.config_entries = ConfigEntries(hass, {})
+    config = entry()
+    runtime = Runtime()
+    runtime.connect(STATION)
+    caps = parse_capabilities(STATION, inventory())
+    if missing:
+        caps = tuple(c for c in caps if c.key != "minimum_current")
+    runtime._publish(
+        replace(runtime.get(STATION), connectors=(CONNECTOR,), electrical=caps)
+    )
+    config.runtime_data = SimpleNamespace(state=runtime)
+    hass.config_entries._entries[config.entry_id] = config
+    subentry = ensure_subentry(hass, config, STATION.value, "4", "7")
+    flow = WallboxCapabilityFlow()
+    flow.hass, flow.handler = hass, (config.entry_id, "wallbox")
+    flow.context = {"source": "reconfigure", "subentry_id": subentry.subentry_id}
+    try:
+        result = await flow.async_step_reconfigure()
+        payload = FlowManagerIndexView(None)._prepare_result_json(result)
+        fields = {f["name"] for f in payload["data_schema"]}
+        assert fields == ({"reference_min_a"} if missing else set())
+        result = await flow.async_step_reconfigure(
+            {"reference_min_a": "6"} if missing else {}
+        )
+        assert result["type"] == "abort"
+        assert result["reason"] == "reconfigure_successful"
+        assert config.subentries[subentry.subentry_id].data["station"] == STATION.value
+    finally:
+        await hass.async_stop()
