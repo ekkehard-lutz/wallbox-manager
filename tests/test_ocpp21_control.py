@@ -61,6 +61,7 @@ class Peer(ChargePoint):
         self.enabled = False
         self.enabled_read_value = None
         self.status = "Accepted"
+        self.profile_response = None
         self.authority = "OCPP"
         self.authority_status = "Accepted"
         self.authority_read_value = None
@@ -153,6 +154,8 @@ class Peer(ChargePoint):
         await self.release.wait()
         if self.error:
             raise self.error
+        if self.profile_response is not None:
+            return self.profile_response(charging_profile)
         return call_result.SetChargingProfile(status=self.status)
 
 

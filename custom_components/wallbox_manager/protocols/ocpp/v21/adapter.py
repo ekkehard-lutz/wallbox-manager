@@ -333,6 +333,17 @@ class EvseControlAdapter:
         if response.status == "Accepted":
             return CommandResult(CommandStatus.APPLIED)
         if response.status == "Rejected":
+            info = getattr(response, "status_info", None)
+            if (
+                point.charging
+                and isinstance(info, dict)
+                and info.get("reason_code") == "PhaseSwitchLockout"
+            ):
+                return CommandResult(
+                    CommandStatus.TEMPORARILY_REJECTED,
+                    ControlArea.PHASE_MODE,
+                    CommandReason.PHASE_SWITCH_LOCKOUT,
+                )
             return CommandResult(
                 CommandStatus.TEMPORARILY_REJECTED, reason=CommandReason.BUSY
             )
