@@ -311,9 +311,21 @@ class ControlRuntime:
             return await self.request_enabled(target, enabled)
         return await self.apply_stored(target)
 
-    async def request_enabled(self, target, enabled):
+    def profile_permitted(self, target):
+        return not hasattr(self, "ownership") or self.ownership.permits(self, target)
+
+    async def request_enabled(self, target, enabled, *, fence=lambda: True):
         if type(enabled) is not bool:
             raise ValueError("enabled must be boolean")
+        if enabled and not self.profile_permitted(target):
+            self.intent(target).status = "inactive_wallbox"
+            self.publish(target)
+            return CommandResult(
+                CommandStatus.TEMPORARILY_REJECTED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.NO_AUTHORITY,
+                "inactive_wallbox",
+            )
         intent = self.intent(target)
         intent.generation += 1
         intent.command_result = intent.solver_result = None
@@ -348,7 +360,9 @@ class ControlRuntime:
         if enabled:
             self._inactive.add(target)
             observation = self.runtime.enabled_observation(target)
-            result = await self.apply_stored(target, prepare=True, prepared=prepared)
+            result = await self.apply_stored(
+                target, prepare=True, prepared=prepared, fence=fence
+            )
             if result is None or result.status != CommandStatus.APPLIED:
                 return result
             if (
@@ -363,13 +377,17 @@ class ControlRuntime:
             intent,
             generation,
             enabled,
-            fence=prepared.get("fence", lambda: True),
+            fence=prepared.get("fence", fence),
         )
 
     async def apply_stored(
         self, target, *, prepare=False, fence=lambda: True, prepared=None
     ):
         """Apply a target once; never change hardware permission."""
+        if not self.profile_permitted(target):
+            self.intent(target).status = "inactive_wallbox"
+            self.publish(target)
+            return None
         intent = self.intent(target)
         generation = intent.generation
         state = self.runtime.get(target.station)
@@ -410,6 +428,7 @@ class ControlRuntime:
             if (
                 self._closed
                 or not fence()
+                or not self.profile_permitted(target)
                 or generation != intent.generation
                 or (
                     not permission_confirmed
@@ -520,6 +539,7 @@ class ControlRuntime:
             return (
                 not self._closed
                 and intent.generation == generation
+                and (not enabled or self.profile_permitted(target))
                 and self.runtime.current(token)
                 and self.runtime.authority(target.station) == ControlAuthority.REMOTE
                 and self.runtime.get(target.station).authority_revision
@@ -555,14 +575,22 @@ class ControlRuntime:
         return result
 
     async def take_control(self, station):
-        """Explicit acquisition, followed by one fenced application of saved intent.
+        """An explicit takeover participates in the installation ownership guard."""
+        if hasattr(self, "ownership"):
+            return await self.ownership.activate_station(self, station)
+        return await self._take_control(station)
 
-        Ordinary edits never call this. Future profile selection can intentionally
-        reuse it. Concurrent edits/new presses invalidate the pending synchronization.
-        """
+    async def _take_control(self, station):
+        """Acquire authority, explicitly disable every connector and confirm OFF."""
         state = self.runtime.get(station)
         adapter = self.authority_adapter(station)
-        if self._closed or state is None or not state.connected or adapter is None:
+        if (
+            self._closed
+            or state is None
+            or not state.connected
+            or adapter is None
+            or not state.connectors
+        ):
             return CommandResult(
                 CommandStatus.UNSUPPORTED,
                 ControlArea.AUTHORITY,
@@ -586,21 +614,36 @@ class ControlRuntime:
         result = await take_control(adapter, is_current=current)
         if not current():
             result = stale_command_result()
-        if generation == self._takeover_generations.get(station):
-            self.takeover_results[station] = result
-        if (
-            result.status == CommandStatus.APPLIED
-            and self.runtime.authority(station) == ControlAuthority.REMOTE
-        ):
+        if result.status == CommandStatus.APPLIED:
             for target in targets:
-                if not current():
-                    break
-                # Starting after acquisition cannot retain a relay parked by Local.
-                self._inactive.add(target)
                 bound = self.adapter(target)
                 if bound is None:
-                    continue
+                    result = CommandResult(
+                        CommandStatus.UNSUPPORTED,
+                        ControlArea.CHARGING_PERMISSION,
+                        CommandReason.UNSUPPORTED_OPERATION,
+                    )
+                    break
                 await bound.read_enabled()
-                if current():
-                    await self.apply_stored(target, fence=current)
+                if not current():
+                    result = stale_command_result()
+                    break
+                # Account for the generation advance owned by this OFF request.
+                intents[target] += 1
+                result = await self.request_enabled(target, False, fence=current)
+                if (
+                    not result
+                    or result.status != CommandStatus.APPLIED
+                    or self.runtime.enabled(target) is not False
+                ):
+                    result = result or CommandResult(
+                        CommandStatus.FAILED,
+                        ControlArea.CHARGING_PERMISSION,
+                        CommandReason.HARDWARE_ERROR,
+                    )
+                    break
+            if not current():
+                result = stale_command_result()
+        if generation == self._takeover_generations.get(station):
+            self.takeover_results[station] = result
         return result

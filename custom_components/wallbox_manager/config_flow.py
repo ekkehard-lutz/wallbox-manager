@@ -47,6 +47,11 @@ class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry):
         return ReferenceOptionsFlow()
 
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(cls, config_entry):
+        return {"wallbox": WallboxCapabilityFlow}
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -157,23 +162,6 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
         from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
         self.data = migrate_options(self.config_entry.options)
-        self.targets = {}
-        runtime = getattr(self.config_entry, "runtime_data", None)
-        if runtime:
-            for state in runtime.state.stations:
-                for target in state.connectors:
-                    self.targets[
-                        f"{target.station.value} / {target.evse.value} / {target.value}"
-                    ] = target
-        for station, connectors in self.data.get("station_references", {}).items():
-            from .core.models import ConnectorId, EvseId, StationId
-
-            for key in connectors:
-                evse, connector = key.split(":")
-                self.targets.setdefault(
-                    f"{station} / {evse} / {connector}",
-                    ConnectorId(EvseId(StationId(station), evse), connector),
-                )
         fields = {
             vol.Optional(
                 "min_soc_speicher",
@@ -184,25 +172,35 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 description={"suggested_value": self.data.get("soc_speicher_aktuell")},
             ): EntitySelector(EntitySelectorConfig()),
         }
-        if self.targets:
-            fields[vol.Optional("station")] = vol.In(list(self.targets))
         if user_input is not None:
             for key in ("min_soc_speicher", "soc_speicher_aktuell"):
                 self.data.pop(key, None)
                 if user_input.get(key):
                     self.data[key] = user_input[key]
-            if user_input.get("station") in self.targets:
-                self.target = self.targets[user_input["station"]]
-                return await self.async_step_station()
             return self.async_create_entry(title="", data=self.data)
         return self.async_show_form(step_id="init", data_schema=vol.Schema(fields))
 
-    async def async_step_station(self, user_input=None):
+
+class WallboxCapabilityFlow(config_entries.ConfigSubentryFlow):
+    """Reconfigure the already scoped wallbox, without a central station picker."""
+
+    async def async_step_user(self, user_input=None):
+        return self.async_abort(reason="discovered_automatically")
+
+    async def async_step_reconfigure(self, user_input=None):
+        from .core.models import ConnectorId, EvseId, StationId
+
+        entry = self._get_entry()
+        subentry = self._get_reconfigure_subentry()
+        identity = subentry.data
+        target = ConnectorId(
+            EvseId(StationId(identity["station"]), identity["evse"]),
+            identity["connector"],
+        )
         from .control.reference import FIELDS
         from .core.capabilities import EvidenceState
 
-        target = self.target
-        runtime = getattr(self.config_entry, "runtime_data", None)
+        runtime = getattr(entry, "runtime_data", None)
         state = runtime.state.get(target.station) if runtime else None
         known = (
             {
@@ -245,11 +243,7 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 for k, v in fields.items()
                 if not k.startswith("reference_max_") or int(k[-2]) in counts
             }
-        saved = (
-            self.data.get("station_references", {})
-            .get(target.station.value, {})
-            .get(f"{target.evse.value}:{target.value}", {})
-        )
+        saved = subentry.data.get("references", {})
         errors = {}
         if user_input is not None:
             try:
@@ -266,12 +260,11 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
             except ValueError, TypeError, ZeroDivisionError, OverflowError:
                 errors["base"] = "invalid_reference"
             else:
-                self.data.setdefault("station_references", {}).setdefault(
-                    target.station.value, {}
-                )[f"{target.evse.value}:{target.value}"] = data
-                return self.async_create_entry(title="", data=self.data)
+                return self.async_update_and_abort(
+                    entry, subentry, data={**identity, "references": data}
+                )
         return self.async_show_form(
-            step_id="station",
+            step_id="reconfigure",
             data_schema=vol.Schema(
                 {
                     vol.Optional(k, description={"suggested_value": saved.get(k)}): v

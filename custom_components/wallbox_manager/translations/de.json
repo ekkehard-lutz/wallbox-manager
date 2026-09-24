@@ -212,6 +212,9 @@
         "state": {
           "NETZ": "Netz"
         }
+      },
+      "active_wallbox": {
+        "name": "Aktive Wallbox"
       }
     },
     "button": {
@@ -224,30 +227,45 @@
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "Batteriereferenzen sind optional. Wählen Sie eine Station für fehlende technische Angaben.",
+        "description": "Optionale Referenzen für den gemeinsamen Hausspeicher. Stationsfähigkeiten bearbeiten Sie direkt in der Unterkonfiguration der Wallbox.",
         "data": {
           "min_soc_speicher": "Batterie-Mindestreserve",
-          "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand",
-          "station": "Station"
-        }
-      },
-      "station": {
-        "title": "Stationsfähigkeiten",
-        "description": "Nur fehlende OCPP-Angaben ergänzen. Ein leeres Formular benötigt keine Ergänzungen.",
-        "data": {
-          "reference_phases": "Unterstützte Phasenanzahlen (z. B. 1,3)",
-          "reference_min_a": "Minimaler Strom (A)",
-          "reference_step_a": "Stromschrittweite (A)",
-          "reference_phase_switching": "Phasenumschaltung unterstützt",
-          "reference_enable_disable": "Ladefreigabe unterstützt",
-          "reference_max_1a": "Maximaler Strom 1p (A)",
-          "reference_max_2a": "Maximaler Strom 2p (A)",
-          "reference_max_3a": "Maximaler Strom 3p (A)"
+          "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand"
         }
       }
-    },
-    "error": {
-      "invalid_reference": "Gültige Zuordnung und widerspruchsfreie Referenzwerte eingeben."
+    }
+  },
+  "config_subentries": {
+    "wallbox": {
+      "title": "Wallbox",
+      "initiate_flow": {
+        "user": "Wallbox",
+        "reconfigure": "Fähigkeiten konfigurieren"
+      },
+      "step": {
+        "reconfigure": {
+          "title": "Stationsfähigkeiten",
+          "description": "Nur fehlende OCPP-Angaben ergänzen. Ein leeres Formular benötigt keine Ergänzungen.",
+          "data": {
+            "reference_phases": "Unterstützte Phasenanzahlen (z. B. 1,3)",
+            "reference_min_a": "Minimaler Strom (A)",
+            "reference_step_a": "Stromschrittweite (A)",
+            "reference_phase_switching": "Phasenumschaltung unterstützt",
+            "reference_enable_disable": "Ladefreigabe unterstützt",
+            "reference_max_1a": "Maximaler Strom 1p (A)",
+            "reference_max_2a": "Maximaler Strom 2p (A)",
+            "reference_max_3a": "Maximaler Strom 3p (A)"
+          }
+        }
+      },
+      "error": {
+        "invalid_reference": "Gültige Zuordnung und widerspruchsfreie Referenzwerte eingeben."
+      },
+      "abort": {
+        "reconfigure_successful": "Stationsfähigkeiten gespeichert.",
+        "discovered_automatically": "Wallboxen werden automatisch über OCPP angelegt."
+      },
+      "entry_type": "Wallbox"
     }
   }
 }

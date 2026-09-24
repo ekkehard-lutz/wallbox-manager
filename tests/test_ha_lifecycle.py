@@ -99,7 +99,13 @@ async def test_migrate_scaffold_entry():
 
 
 async def test_platform_setup_failure_closes_listener(monkeypatch):
-    from custom_components.wallbox_manager import battery, profiles
+    from custom_components.wallbox_manager import battery, ownership, profiles
+
+    monkeypatch.setattr(
+        ownership,
+        "async_get_ownership",
+        AsyncMock(return_value=Mock(register=Mock(return_value=lambda: None))),
+    )
 
     monkeypatch.setattr(battery, "BatteryReserve", lambda *args: Mock(load=AsyncMock()))
     monkeypatch.setattr(

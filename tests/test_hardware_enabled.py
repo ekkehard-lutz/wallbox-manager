@@ -24,6 +24,22 @@ from custom_components.wallbox_manager.core.telemetry import Quantity
 from custom_components.wallbox_manager.protocols.ocpp.v21.enabled import poll_enabled
 
 
+async def acquire_for_test(control, bound, peer, *, start=False):
+    """Prepare primitive tests using beta.2's two separate user actions."""
+    result = await control.take_control(bound.target.station)
+    assert result.status == CommandStatus.APPLIED
+    assert control.runtime.enabled(bound.target) is False
+    assert peer.permissions[-1]["attribute_value"] == "false"
+    assert not peer.requests  # Takeover must never apply power or enable.
+    if start:
+        assert (
+            await control.request_enabled(bound.target, True)
+        ).status == CommandStatus.APPLIED
+    peer.permissions.clear()
+    peer.requests.clear()
+    peer.operations.clear()
+
+
 def observed(bound, value):
     at = datetime.now(UTC)
     bound.adapter.runtime.observe_enabled(
@@ -65,7 +81,7 @@ async def test_local_ha_attempt_returns_to_actual_without_intent(controls, value
 
 async def test_rejected_enable_is_not_replayed(authority):
     control, bound, peer, _ = authority
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     control.restore(bound.target, target_w=2300)
     peer.status = "Rejected"
     result = await control.request_enabled(bound.target, True)
@@ -79,7 +95,7 @@ async def test_rejected_enable_is_not_replayed(authority):
 
 async def test_readback_mismatch_is_not_confirmation(authority):
     control, bound, peer, _ = authority
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     control.restore(bound.target, target_w=2300)
     peer.enabled_read_value = "false"
     result = await control.request_enabled(bound.target, True)
@@ -91,7 +107,7 @@ async def test_zero_and_resume_preserve_permission_and_transaction(authority):
     control, bound, peer, _ = authority
     peer.enabled = True
     control.restore(bound.target, target_w=2300)
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     state = bound.adapter.runtime.get(bound.target.station)
     sessions = bound.adapter.runtime.sessions.latest
     await control.change(bound.target, target_w=0)
@@ -114,7 +130,7 @@ async def test_zero_and_resume_preserve_permission_and_transaction(authority):
 
 async def test_disabled_target_edits_do_not_enable_and_on_prepares_zero(authority):
     control, bound, peer, _ = authority
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     await control.change(bound.target, target_w=0)
     await control.change(bound.target, target_w=2300)
     assert not peer.requests and not peer.permissions
@@ -132,7 +148,7 @@ async def test_disabled_target_edits_do_not_enable_and_on_prepares_zero(authorit
 async def test_zero_needs_no_voltage_or_phase_feedback(authority):
     control, bound, peer, _ = authority
     peer.enabled = True
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     state = bound.adapter.runtime.get(bound.target.station)
     bound.adapter.runtime._publish(replace(state, observations=(), physical_phases=()))
     assert (
@@ -146,7 +162,7 @@ async def test_zero_needs_no_voltage_or_phase_feedback(authority):
 @pytest.mark.parametrize("change", ["refresh", "voltage", "hardware", "capability"])
 async def test_profile_inflight_semantic_fences(authority, change):
     control, bound, peer, _ = authority
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     control.restore(bound.target, target_w=2300)
     peer.release.clear()
     pending = asyncio.create_task(control.request_enabled(bound.target, True))
@@ -248,7 +264,7 @@ async def test_unknown_and_expired_state_never_restore_desired_permission(contro
 )
 async def test_enable_queue_rechecks_prepared_target(authority, change):
     control, bound, peer, _ = authority
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     control.restore(bound.target, target_w=2300)
     queued, release = asyncio.Event(), asyncio.Event()
     live = bound.adapter
@@ -331,7 +347,7 @@ async def test_zero_support_is_never_inferred_from_other_capabilities(authority)
     control, bound, peer, _ = authority
     peer.enabled = True
     control.restore(bound.target, target_w=2300)
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     state = bound.adapter.runtime.get(bound.target.station)
     bound.adapter.runtime._publish(
         replace(
@@ -354,7 +370,7 @@ async def test_late_enable_readback_cannot_override_authority_loss(
     )
 
     control, bound, peer, _ = authority
-    await control.take_control(bound.target.station)
+    await acquire_for_test(control, bound, peer, start=peer.enabled)
     control.restore(bound.target, target_w=2300)
     entered, release = asyncio.Event(), asyncio.Event()
     original = EvseControlAdapter.read_enabled

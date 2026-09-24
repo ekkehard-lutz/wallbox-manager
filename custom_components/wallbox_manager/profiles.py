@@ -67,6 +67,7 @@ class GridProfiles:
             "battery_configured": self.battery.configured,
             "battery_status": self.battery.status,
             "actual_charging": self.active(target),
+            "profile_control_ready": self.control.profile_permitted(target),
         }
 
     @callback
@@ -133,6 +134,7 @@ class GridProfiles:
             field == "power_kw"
             and self.epochs.get(target, 0) == epoch
             and target not in self.suppressed
+            and self.control.profile_permitted(target)
             and self.control.runtime.enabled(target) is True
         ):
             await self.start(target)
@@ -182,6 +184,7 @@ class GridProfiles:
         return (
             not self.closed
             and self.epochs.get(target, 0) == epoch
+            and self.control.profile_permitted(target)
             and self.control.runtime.enabled(target) is True
             and self.control.runtime.authority(target.station)
             == ControlAuthority.REMOTE
@@ -304,6 +307,7 @@ class GridProfiles:
             for t in s.connectors
             if t != exclude
             and t not in self.suppressed
+            and self.control.profile_permitted(t)
             and self.active(t)
             and self.control.runtime.enabled(t) is True
             and self.control.runtime.authority(t.station) == ControlAuthority.REMOTE

@@ -149,11 +149,12 @@ async def test_station_form_only_missing_ocpp_fields(missing):
     from test_electrical_capabilities import CONNECTOR, STATION, inventory
     from test_ha_lifecycle import entry
 
-    from custom_components.wallbox_manager.config_flow import ReferenceOptionsFlow
+    from custom_components.wallbox_manager.config_flow import WallboxCapabilityFlow
     from custom_components.wallbox_manager.protocols.ocpp.v21.capabilities import (
         parse_capabilities,
     )
     from custom_components.wallbox_manager.runtime import Runtime
+    from custom_components.wallbox_manager.station_config import ensure_subentry
 
     hass = HomeAssistant("/tmp")
     hass.config_entries = ConfigEntries(hass, {})
@@ -168,19 +169,20 @@ async def test_station_form_only_missing_ocpp_fields(missing):
     )
     config.runtime_data = SimpleNamespace(state=runtime)
     hass.config_entries._entries[config.entry_id] = config
-    flow = ReferenceOptionsFlow()
-    flow.hass, flow.handler = hass, config.entry_id
+    subentry = ensure_subentry(hass, config, STATION.value, "4", "7")
+    flow = WallboxCapabilityFlow()
+    flow.hass, flow.handler = hass, (config.entry_id, "wallbox")
+    flow.context = {"source": "reconfigure", "subentry_id": subentry.subentry_id}
     try:
-        await flow.async_step_init()
-        choice = next(iter(flow.targets))
-        result = await flow.async_step_init({"station": choice})
+        result = await flow.async_step_reconfigure()
         payload = FlowManagerIndexView(None)._prepare_result_json(result)
         fields = {f["name"] for f in payload["data_schema"]}
         assert fields == ({"reference_min_a"} if missing else set())
-        result = await flow.async_step_station(
+        result = await flow.async_step_reconfigure(
             {"reference_min_a": "6"} if missing else {}
         )
-        assert result["type"] == "create_entry"
-        assert STATION.value in result["data"]["station_references"]
+        assert result["type"] == "abort"
+        assert result["reason"] == "reconfigure_successful"
+        assert config.subentries[subentry.subentry_id].data["station"] == STATION.value
     finally:
         await hass.async_stop()

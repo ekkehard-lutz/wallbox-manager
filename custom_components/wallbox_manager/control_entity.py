@@ -91,6 +91,18 @@ class ControlEntity(RestoreEntity):
     @property
     def extra_state_attributes(self):
         return {
+            "wallbox_manager_role": self.key,
+            "wallbox_manager_entry": self.entry_id,
+            "wallbox_manager_target": json.dumps(
+                [
+                    self.entry_id,
+                    self.target.station.value,
+                    self.target.evse.value,
+                    self.target.value,
+                ],
+                separators=(",", ":"),
+            ),
+            "station_id": self.target.station.value,
             "evse_id": self.target.evse.value,
             "connector_id": self.target.value,
             "state_represents": "desired_intent",

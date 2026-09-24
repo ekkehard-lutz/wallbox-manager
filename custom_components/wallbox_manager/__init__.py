@@ -38,6 +38,13 @@ class EntryRuntime:
 type WallboxManagerConfigEntry = ConfigEntry[EntryRuntime]
 
 
+async def async_setup(hass, config):
+    from .frontend import async_setup_assets
+
+    await async_setup_assets(hass)
+    return True
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: WallboxManagerConfigEntry
 ) -> bool:
@@ -66,17 +73,21 @@ async def async_setup_entry(
     except OSError as exc:
         await storage.close()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
-    from .config_flow import migrate_options
-    from .control.reference import ConfiguredReference
-    from .protocols.ocpp.v21.control_runtime import create_control_runtime
-
-    source = ConfiguredReference(migrate_options(entry.options))
-    control = create_control_runtime(state, server, source)
     from .battery import BatteryReserve
     from .profiles import GridProfiles
+    from .protocols.ocpp.v21.control_runtime import create_control_runtime
+    from .station_config import EntryReference, setup_station_configuration
 
     profiles = None
+    control = None
     try:
+        setup_station_configuration(hass, entry, state)
+        source = EntryReference(entry)
+        control = create_control_runtime(state, server, source)
+        from .ownership import async_get_ownership
+
+        ownership = await async_get_ownership(hass)
+        entry.async_on_unload(ownership.register(entry, control))
         battery = BatteryReserve(hass, entry)
         await battery.load()
         profiles = GridProfiles(hass, entry, control, battery)
@@ -87,7 +98,8 @@ async def async_setup_entry(
     except BaseException:
         if profiles is not None:
             await profiles.close()
-        control.close()
+        if control is not None:
+            control.close()
         await server.stop()
         await storage.close()
         await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

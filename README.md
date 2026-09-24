@@ -114,8 +114,9 @@ unsupported maxima do not create sensors (in particular no invented 2p maximum).
 Existing entity identities remain in the registry offline. Diagnostic source and
 evidence attributes distinguish OCPP observations from configured operator fallback.
 
-Select a discovered station/EVSE/connector in integration options to configure
-its missing fallback fields. Complete OCPP inventory requires no manual entries. No vendor, model, firmware, serial or global
+Open the discovered wallbox configuration subentry to configure its missing
+fallback fields; no central station picker is needed. Complete OCPP inventory
+requires no manual entries. No vendor, model, firmware, serial or global
 verification checkbox is required. Decimal and fractional currents are accepted.
 References never override verified wallbox values. Normal current limits belong
 to the runtime controls, not the reference form.
@@ -148,12 +149,11 @@ The OCPP 2.1 adapter discovers the exact writable Actual variable, sends
 SetVariables with `OCPP`, requires a matching Accepted response, and then confirms
 Actual `OCPP` with GetVariables. `Local` means local control; other values remain
 unknown. This descriptive extension is not a universal standardized OCPP variable.
-After confirmation, takeover reads actual Enabled and preserves it. If enabled,
-it applies the stored operating target once, including zero. If disabled, it keeps
-the stored target without sending a profile or permission write. No restored
-permission value is used; desired targets do not change.
-The button result reports acquisition; connector diagnostics report application,
-which can still be blocked by missing transaction, voltage or capability evidence.
+After authority confirmation, takeover explicitly sends charging permission OFF
+and confirms it, including when hardware was already OFF. It does not apply a
+stored operating target. Completion requires confirmed OFF; charging ON is a
+separate subsequent user action. The active-wallbox coordinator also stops the
+previous Remote wallbox before switching. Desired targets remain unchanged.
 
 Connection/boot generations, newer edits, concurrent takeover requests and local
 loss events fence queued work and late results. Discovery/telemetry/reconnects never
@@ -162,8 +162,8 @@ connection, using the inspected station's hard-wired local-loss NotifyEvent path
 this assumes timely delivery of those events, not a remote ownership lease. A
 command already sent cannot be recalled. `wallbox-stationary` already supplies the
 read/write/readback and local-loss interface and needs no change. Hardware validation
-remains outstanding. Future profile selection can explicitly reuse the generic
-`take_control` operation instead of hiding takeover in ordinary edits.
+remains outstanding. Explicit active-wallbox selection and the Take control button
+use the same guarded operation. Ordinary profile selection never acquires authority.
 
 ### Physical feedback and phase retention
 
@@ -199,8 +199,8 @@ but unconfirmed state is unknown, never a restored value. The station must suppl
 a hardware-confirmed reader; its descriptive inventory value is not used as live
 state. Polls never initiate charging, retries, takeover or target synchronization.
 
-Explicit ON prepares the stored operating point first, then sends permission and
-reads actual state back. Missing transaction, capability or evidence prevents ON.
+Explicit ON is allowed only for the active, ready wallbox. It prepares the stored
+operating point first, then sends permission and reads actual state back. Missing transaction, capability or evidence prevents ON.
 OFF changes permission without changing the target and does not need a transaction.
 Writable station-scoped permission is usable only for one unambiguous connector.
 Queue, generation, authority, hardware-state and electrical safety fences apply.
@@ -262,21 +262,39 @@ functionality may be implemented through isolated OCPP DataTransfer extensions.
 ## Grid charging profile (v0.3.x)
 
 The implemented **Grid (`NETZ`)** profile charges at a requested fixed power in kW.
-Select the profile, adjust its settings and activate the existing charging-permission
-switch. Profile selection disables permission; changing power while enabled takes
-effect immediately. Local authority is never acquired automatically.
+Exactly one backend-selected active wallbox is eligible for profile control.
+**Active wallbox does not mean charging enabled.** Other wallboxes may independently
+charge in Local; they are external site loads for the profile controller.
 
-The backend persists profile settings, retries phase lockouts once per minute and
-performs a bounded vehicle-current observation after applying the desired point.
-It preserves separate station current limits and all primitive command safeguards.
-Optional battery entity references live in integration options; both are required.
-A temporary battery reserve is held only while actual vehicle charging occurs,
-with durable restoration and external-change conflict handling.
+With one wallbox, press **Take control**. With multiple wallboxes, select the active
+wallbox. Both are explicit authority requests: the backend stops/confirms the old
+Remote wallbox, acquires the selected station, explicitly sends OFF and confirms
+OFF before completing selection. **Every takeover forces charging permission OFF.**
+A separate user action starts charging. Startup/reload, profile selection and
+background events never acquire authority. Power edits while active/enabled apply
+immediately. Per-wallbox settings persist separately; profile selection disables
+permission.
 
-See [Grid profile, migration and card installation](docs/grid-profile.md) for the
-configuration, operating sequence, battery lifecycle and custom Lovelace card.
-The compact card exposes profile, requested power and permission, adding reserve
-and actual charging state only when the battery references are configured.
+The backend retains phase-lockout retries, bounded vehicle-current observation,
+station current limits and primitive safeguards. Optional battery references belong
+to the central integration; only the active actually charging wallbox owns a
+journaled temporary reserve, with restoration and external-change precedence.
+
+HACS installs the bundled card with the integration. After restart/browser refresh,
+add only:
+
+```yaml
+type: custom:wallbox-manager-card
+```
+
+The integration automatically serves/registers the JS module. No entity mapping or
+copy to `/config/www` is required. Discovery uses stable backend role/identity
+metadata and survives entity renames. When upgrading from beta.1, remove the old
+manually registered `/local/wallbox-manager-card.js` resource once.
+
+See [Grid profile, ownership, migration and card installation](docs/grid-profile.md)
+for the exact state model, guarded sequence, station-scoped capability subentries,
+battery lifecycle and failure behavior.
 
 PV_SURPLUS, PV_DAILY_OPTIMUM and PV_MAXIMUM are deferred pending detailed
 specifications. No PV algorithms or external Energy Manager interface are
@@ -322,7 +340,9 @@ EV consumption. Metering and runtime state are reported separately by adapters.
 External ownership leases and PV charging profiles remain future work.
 
 Run development checks with `.venv/bin/ruff check .`,
-`.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
+`.venv/bin/ruff format --check .`, `.venv/bin/pytest`,
+`node --check custom_components/wallbox_manager/www/wallbox-manager-card.js` and
+`node tests/test_wallbox_card.cjs`. Core tests require no running
 Home Assistant instance; Python 3.14 CI runs these same checks.
 
 ## Read-only OCPP endpoint

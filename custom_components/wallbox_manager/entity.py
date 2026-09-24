@@ -142,6 +142,7 @@ class StationEntity(Entity):
         self.runtime = runtime
         self.station = station
         self.entry_id = entry_id
+        self._semantic_role = key
         self.snapshot = runtime.get(station)
         self._attr_unique_id = f"{station_identifier(entry_id, station)}:{key}"
         self._attr_translation_key = key
@@ -157,6 +158,8 @@ class StationEntity(Entity):
     @property
     def extra_state_attributes(self):
         attrs = {
+            "wallbox_manager_role": self._semantic_role,
+            "wallbox_manager_entry": self.entry_id,
             "station_id": self.station.value,
             "runtime_incarnation": self.runtime.runtime_id,
         }
