@@ -400,3 +400,10 @@ and [MIT notices](custom_components/wallbox_manager/THIRD_PARTY_NOTICES.md).
 ## License
 
 Wallbox Manager is licensed under the MIT License. See `LICENSE`.
+
+### PV Surplus primitive profile
+
+The 0.3.x PV Surplus profile regulates charging from central PV/consumer power
+references, with optional battery SoC start/stop hysteresis. It reuses the common
+solver, explicit charging permission and active-wallbox ownership. See
+[PV Surplus configuration and behavior](docs/pv-surplus-profile.md).

@@ -196,6 +196,15 @@
       },
       "min_soc": {
         "name": "{scope} Discharge reserve"
+      },
+      "soll_soc_speicher": {
+        "name": "Battery target SoC"
+      },
+      "soc_hysterese": {
+        "name": "SoC hysteresis"
+      },
+      "regulation_interval": {
+        "name": "Regulation interval"
       }
     },
     "select": {
@@ -210,11 +219,19 @@
       "charging_profile": {
         "name": "Charging profile {scope}",
         "state": {
-          "NETZ": "Grid"
+          "NETZ": "Grid",
+          "PV_SURPLUS": "PV Surplus"
         }
       },
       "active_wallbox": {
         "name": "Active wallbox"
+      },
+      "pv_approximation": {
+        "name": "PV power approximation",
+        "state": {
+          "up": "Not below target",
+          "down": "Not above target"
+        }
       }
     },
     "button": {
@@ -230,7 +247,9 @@
         "description": "Optional references for the shared home battery. Edit station capabilities directly in its wallbox subentry.",
         "data": {
           "min_soc_speicher": "Battery minimum reserve",
-          "soc_speicher_aktuell": "Current battery state of charge"
+          "soc_speicher_aktuell": "Current battery state of charge",
+          "leistung_pv": "PV power",
+          "leistung_verbraucher": "Total consumer power (including selected wallbox)"
         }
       }
     }

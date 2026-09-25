@@ -1225,3 +1225,17 @@ The station owns all CP and connection-detection mechanics. Its actual enable
 reader confirms the EVSE register through existing command dispatch; unavailable
 hardware produces an unsuccessful read rather than a synthetic Disabled value.
 No lockout timers or timer configuration are implemented in Stage 1.
+
+## PV Surplus implementation (0.3.x)
+
+`GridProfiles` now owns both NETZ and PV_SURPLUS settings and task lifetimes.
+`pv_surplus.py` supplies measurement validation and the battery policy; it does
+not implement an electrical solver or protocol control. Positive targets and OFF
+use `ControlRuntime.resolve/apply_stored`, with the existing command fences,
+phase-lockout fallback and one-second power debounce. PV-only reuse of confirmed
+points avoids duplicate dispatch, including a retained phase-lockout fallback.
+The profile continuation latch is cleared by pauses, invalid measurements and
+lifecycle invalidation. Reference options and profile settings persist, while
+permission and continuation do not resume on reload. Grid battery reserve
+requests exclude PV profiles. See [PV Surplus](pv-surplus-profile.md) for the
+implemented rules and the distinction from future profile designs above.

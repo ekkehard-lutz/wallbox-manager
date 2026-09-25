@@ -172,8 +172,17 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 description={"suggested_value": self.data.get("soc_speicher_aktuell")},
             ): EntitySelector(EntitySelectorConfig()),
         }
+        for key in ("leistung_pv", "leistung_verbraucher"):
+            fields[
+                vol.Optional(key, description={"suggested_value": self.data.get(key)})
+            ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
         if user_input is not None:
-            for key in ("min_soc_speicher", "soc_speicher_aktuell"):
+            for key in (
+                "min_soc_speicher",
+                "soc_speicher_aktuell",
+                "leistung_pv",
+                "leistung_verbraucher",
+            ):
                 self.data.pop(key, None)
                 if user_input.get(key):
                     self.data[key] = user_input[key]

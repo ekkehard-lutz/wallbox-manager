@@ -466,7 +466,13 @@ class ControlRuntime:
         return result
 
     async def apply_stored(
-        self, target, *, prepare=False, fence=lambda: True, prepared=None
+        self,
+        target,
+        *,
+        prepare=False,
+        fence=lambda: True,
+        prepared=None,
+        reuse_applied=False,
     ):
         """Apply a target once; never change hardware permission."""
         if not self.profile_permitted(target):
@@ -563,6 +569,12 @@ class ControlRuntime:
                 after_dispatch=True, permission_confirmed=True
             )
             prepared["fence"] = prepared_fence
+        prior_point = self.confirmed_point(target)
+        if reuse_applied and prior_point == resolved.point and current():
+            intent.command_result = CommandResult(CommandStatus.APPLIED)
+            intent.status = "applied"
+            self.publish(target)
+            return intent.command_result
         self._confirmed_points.pop(target, None)
         intent.status = "pending"
         self.publish(target)
@@ -588,9 +600,12 @@ class ControlRuntime:
             if blocked is None and substitute.point is not None:
                 resolved = substitute
                 intent.solver_result = resolved
-                result = await apply_operating_point(
-                    adapter, resolved.point, is_current=current
-                )
+                if reuse_applied and prior_point == resolved.point and current():
+                    result = CommandResult(CommandStatus.APPLIED)
+                else:
+                    result = await apply_operating_point(
+                        adapter, resolved.point, is_current=current
+                    )
         if generation != intent.generation or (
             result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
         ):

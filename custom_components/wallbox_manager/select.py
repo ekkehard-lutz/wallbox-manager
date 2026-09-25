@@ -17,7 +17,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
         async_add_entities,
         lambda c, e, t: (
             [PowerApproximation(c, e, t)]
-            + ([ChargingProfile(c, e, t)] if hasattr(c, "profiles") else [])
+            + (
+                [ChargingProfile(c, e, t), PVApproximation(c, e, t)]
+                if hasattr(c, "profiles")
+                else []
+            )
         ),
     )
 
@@ -40,7 +44,7 @@ class PowerApproximation(ControlEntity, SelectEntity):
 
 
 class ChargingProfile(ControlEntity, SelectEntity):
-    _attr_options = ["NETZ"]
+    _attr_options = ["NETZ", "PV_SURPLUS"]
 
     def __init__(self, control, entry_id, target):
         super().__init__(control, entry_id, target, "charging_profile")
@@ -96,3 +100,20 @@ class ActiveWallbox(SelectEntity):
         result = await self.ownership.activate(option)
         if result.status.value != "applied":
             raise HomeAssistantError(self.ownership.status)
+
+
+class PVApproximation(ControlEntity, SelectEntity):
+    _attr_options = [Direction.UP.value, Direction.DOWN.value]
+
+    def __init__(self, control, entry_id, target):
+        super().__init__(control, entry_id, target, "pv_approximation")
+
+    @property
+    def current_option(self):
+        return self.control.profiles.setting(self.target)["approximation"]
+
+    def restore_state(self, previous):
+        pass
+
+    async def async_select_option(self, option):
+        await self.control.profiles.set_value(self.target, "approximation", option)

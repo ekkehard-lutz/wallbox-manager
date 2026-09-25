@@ -440,3 +440,28 @@ test('renamed duration role and independent applied snapshots follow wallbox sel
     Object.assign(data['select.renamed_b'].attributes,attrs);c.hass={...c._hass};assert.equal(get('actual').textContent,'—');
   }
 });
+
+for (const battery of [false,true]) for (const language of ['en','de']) {
+  test(`PV settings, discovery and labels: battery=${battery} language=${language}`,async()=>{
+    const data=states(true);
+    data['select.anything'].state='PV_SURPLUS';
+    Object.assign(data['select.anything'].attributes,{battery_configured:battery,options:['NETZ','PV_SURPLUS']});
+    for(const [role,value] of Object.entries({soll_soc_speicher:'95',soc_hysterese:'5',regulation_interval:'5'})) data[`number.random_${role}`]=state(role,'A',value);
+    data['select.random_pv']=state('pv_approximation','A','down');
+    const {card:c,calls,get}=card(data);c.hass={...c._hass,language};
+    assert.equal(get('power-row').hidden,true);
+    assert.equal(get('reserve-row').hidden,true);
+    assert.equal(get('approximation-row').hidden,battery);
+    assert.equal(get('soll_soc_speicher-row').hidden,!battery);
+    assert.equal(get('soc_hysterese-row').hidden,!battery);
+    assert.equal(get('regulation_interval-row').hidden,false);
+    assert.equal(get('regulation_interval-label').textContent,language==='de'?'Regelintervall (s)':'Regulation interval (s)');
+    assert.equal(get('permission').disabled,false);
+    await get('regulation_interval').onchange({target:{value:'10'}});
+    assert.equal(calls.at(-1)[2].entity_id,'number.random_regulation_interval');
+    assert.equal(calls.at(-1)[2].value,10);
+    await get('approximation').onchange({target:{value:'up'}});
+    assert.equal(calls.at(-1)[2].entity_id,'select.random_pv');
+    assert.equal(calls.at(-1)[2].option,'up');
+  });
+}

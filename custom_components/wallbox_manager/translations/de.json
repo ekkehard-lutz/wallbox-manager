@@ -196,6 +196,15 @@
       },
       "min_soc": {
         "name": "{scope} Entladereserve"
+      },
+      "soll_soc_speicher": {
+        "name": "Speicher-Ziel-SoC"
+      },
+      "soc_hysterese": {
+        "name": "SoC-Hysterese"
+      },
+      "regulation_interval": {
+        "name": "Regelintervall"
       }
     },
     "select": {
@@ -210,11 +219,19 @@
       "charging_profile": {
         "name": "Ladeprofil {scope}",
         "state": {
-          "NETZ": "Netz"
+          "NETZ": "Netz",
+          "PV_SURPLUS": "PV-Überschuss"
         }
       },
       "active_wallbox": {
         "name": "Aktive Wallbox"
+      },
+      "pv_approximation": {
+        "name": "PV-Leistungsannäherung",
+        "state": {
+          "up": "Nicht unter Soll",
+          "down": "Nicht über Soll"
+        }
       }
     },
     "button": {
@@ -230,7 +247,9 @@
         "description": "Optionale Referenzen für den gemeinsamen Hausspeicher. Stationsfähigkeiten bearbeiten Sie direkt in der Unterkonfiguration der Wallbox.",
         "data": {
           "min_soc_speicher": "Batterie-Mindestreserve",
-          "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand"
+          "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand",
+          "leistung_pv": "PV-Leistung",
+          "leistung_verbraucher": "Gesamtverbrauch (einschließlich ausgewählter Wallbox)"
         }
       }
     }
