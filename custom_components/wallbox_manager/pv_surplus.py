@@ -58,6 +58,63 @@ def decision(available, soc, settings, ongoing):
 class PVSurplus:
     """Mixin sharing profile persistence, epochs, ownership and primitive controls."""
 
+    def permits_point(self, target, point):
+        """Apply the existing PV policy at the shared command dispatch fence."""
+        if self.setting(target)["profile"] != "PV_SURPLUS":
+            return True
+        if not point.charging:
+            # OFF ends continuation even when another primitive control requested it.
+            self.pv_ongoing[target] = False
+            return True
+        if self.closed:
+            return False
+        power, direction, _ = self.pv_request(target)
+        return (
+            power > 0
+            and self.control.intent(target).request.direction == direction
+            and (direction != Direction.DOWN or point.offered_power_w <= power)
+        )
+
+    def pv_soc_changed(self, event):
+        """Fence unsafe queued work and wake the same regulator for immediate OFF.
+
+        Use the event's value: a later recovery must not hide a threshold crossing
+        that occurred while a command or regulation timer was waiting.
+        """
+        if self.closed or event.data.get("entity_id") != self.references.get(
+            "soc_speicher_aktuell"
+        ):
+            return
+        for target in tuple(self.control.intents):
+            settings = self.setting(target)
+            if settings["profile"] != "PV_SURPLUS":
+                continue
+            try:
+                soc = reading(event.data.get("new_state"), datetime.now(UTC), soc=True)
+                power, _, status = decision(
+                    Fraction(1), soc, settings, self.pv_ongoing.get(target, False)
+                )
+            except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                power, status = Fraction(0), "measurements_unavailable"
+            if power > 0:
+                continue
+            point = self.control.confirmed_point(target)
+            needs_stop = (
+                self.pv_ongoing.get(target, False)
+                or self.control.intent(target).request.target_w > 0
+                or (point and point.charging)
+            )
+            self.pv_ongoing[target] = False
+            if not needs_stop:
+                continue
+            self.invalidate(target)
+            self.control._edit(
+                target, {"target_w": Fraction(0), "direction": Direction.DOWN}
+            )
+            self.status[target] = status
+            if self.valid(target, self.epochs[target]):
+                self.launch(target, stop_first=True)
+
     def pv_measurements(self, target):
         now = datetime.now(UTC)
         pv = reading(self.hass.states.get(self.references.get("leistung_pv", "")), now)
@@ -153,8 +210,14 @@ class PVSurplus:
         ):
             self.status[target] = "awaiting_applied"
 
-    async def pv_sequence(self, target, epoch):
+    async def pv_sequence(self, target, epoch, *, stop_first=False):
         try:
+            if stop_first and self.valid(target, epoch):
+                # Do not let a quick recovery erase an already observed safety stop.
+                await self.control.apply_stored(
+                    target, fence=lambda: self.valid(target, epoch), reuse_applied=True
+                )
+                self.pv_confirm(target)
             while self.valid(target, epoch):
                 result = self.pv_edit(target)
                 point = result.point if result else None

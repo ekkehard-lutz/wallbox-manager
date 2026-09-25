@@ -78,8 +78,15 @@ restoration remains handled by the existing shared battery integration.
 `regulation_interval` defaults to 5 seconds (configurable 1–300 seconds). Every
 cycle reads current measurements and computes a fresh policy and solver result.
 Ordinary changed positive targets use the existing one-second debounce; OFF skips
-it. Measurements are re-read after debounce and positive command fences reject
-changed or stale policy inputs. Equal confirmed operating points produce no
+it. A battery SoC event that requires OFF immediately fences pending work and
+wakes this same regulator, including while its interval or debounce is waiting.
+The event value is checked so that a short dip below the threshold cannot be
+hidden by a later recovery. Measurements are re-read after debounce and positive
+command fences reject changed or stale policy inputs. The shared control runtime
+also applies the PV policy immediately before dispatch and after command replies;
+every OFF clears continuation, including OFF requested through primitive controls.
+An already dispatched frame cannot be recalled, but its delayed reply cannot
+restore continuation after a safety stop; a zero-power command follows. Equal confirmed operating points produce no
 redundant OCPP operating-point commands. Phase lockouts retain the existing retry
 and cooldown implementation, including avoiding resending an already applied
 fallback point. Unchanged requests retain the Grid profile’s 60-second phase

@@ -535,6 +535,10 @@ class ControlRuntime:
                 != authority_revision
             ):
                 return False
+            if hasattr(self, "profiles") and not self.profiles.permits_point(
+                target, resolved.point
+            ):
+                return False
             fresh, result, reason = self.resolve(
                 target, substitute_mode=substitute_mode
             )

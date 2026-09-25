@@ -88,6 +88,7 @@ class GridProfiles(PVSurplus):
 
     @callback
     def battery_changed(self, event):
+        self.pv_soc_changed(event)
         entity = event.data.get("entity_id")
         recovery = self.battery.record.get("entity") if self.battery.record else None
         if entity not in (self.battery.reserve, self.battery.soc, recovery):
@@ -281,11 +282,13 @@ class GridProfiles(PVSurplus):
         if self.epochs.get(target, 0) == epoch:
             self.launch(target)
 
-    def launch(self, target):
+    def launch(self, target, *, stop_first=False):
         if self.setting(target)["profile"] == "PV_SURPLUS":
             if target not in self.tasks or self.tasks[target].done():
                 self.tasks[target] = self.hass.async_create_background_task(
-                    self.pv_sequence(target, self.epochs.get(target, 0)),
+                    self.pv_sequence(
+                        target, self.epochs.get(target, 0), stop_first=stop_first
+                    ),
                     "PV regulation",
                 )
             return
