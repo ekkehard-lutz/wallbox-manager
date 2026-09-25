@@ -24,6 +24,12 @@ async def grid(base_grid):  # noqa: F811
         source.snapshot,
         stop=replace(source.snapshot.stop, state=EvidenceState.VERIFIED),
     )
+    profile, target, _ = base_grid
+    profile.references.update(
+        leistung_pv="sensor.pv", leistung_verbraucher="sensor.load"
+    )
+    # These beta.1 state-machine cases explicitly exercise immediate PV pauses.
+    profile.setting(target)["pv_stop_delay"] = 0
     return base_grid
 
 

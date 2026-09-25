@@ -35,6 +35,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
                             "soll_soc_speicher",
                             "soc_hysterese",
                             "regulation_interval",
+                            "pv_start_delay",
+                            "pv_stop_delay",
                         )
                     ],
                 ]
@@ -111,17 +113,20 @@ class ProfileNumber(ControlEntity, NumberEntity):
         self.field = "power_kw" if key == "soll_power" else key
         self._attr_native_unit_of_measurement = "kW" if key == "soll_power" else "%"
         self._attr_native_step = 0.1 if key == "soll_power" else 1
-        if key == "regulation_interval":
+        if key in ("regulation_interval", "pv_start_delay", "pv_stop_delay"):
             self._attr_native_unit_of_measurement = "s"
-            self._attr_native_min_value = 1
+            self._attr_native_min_value = 1 if key == "regulation_interval" else 0
 
     @property
     def available(self):
         if self.field == "min_soc":
             return self.control.profiles.battery.configured
-        return self.field in ("power_kw", "regulation_interval") or bool(
-            self.control.profiles.references.get("soc_speicher_aktuell")
-        )
+        return self.field in (
+            "power_kw",
+            "regulation_interval",
+            "pv_start_delay",
+            "pv_stop_delay",
+        ) or bool(self.control.profiles.references.get("soc_speicher_aktuell"))
 
     @property
     def native_value(self):
@@ -135,9 +140,12 @@ class ProfileNumber(ControlEntity, NumberEntity):
                 return float(maximum / 1000)
         # HA requires a numeric input range; this is storage validation only.
         # Consumers must use technical_max_kw, not this fallback, as capability.
-        return {"soll_soc_speicher": 99, "regulation_interval": 300}.get(
-            self.field, 100
-        )
+        return {
+            "soll_soc_speicher": 99,
+            "regulation_interval": 300,
+            "pv_start_delay": 3600,
+            "pv_stop_delay": 3600,
+        }.get(self.field, 100)
 
     @property
     def extra_state_attributes(self):

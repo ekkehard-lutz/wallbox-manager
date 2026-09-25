@@ -205,6 +205,12 @@
       },
       "regulation_interval": {
         "name": "Regulation interval"
+      },
+      "pv_start_delay": {
+        "name": "PV start delay"
+      },
+      "pv_stop_delay": {
+        "name": "PV stop delay"
       }
     },
     "select": {
@@ -244,7 +250,7 @@
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "Optional references for the shared home battery. Edit station capabilities directly in its wallbox subentry.",
+        "description": "PV Surplus requires both power references. Without battery SoC it operates without battery logic; the discharge-reserve reference is independent.",
         "data": {
           "min_soc_speicher": "Battery minimum reserve",
           "soc_speicher_aktuell": "Current battery state of charge",

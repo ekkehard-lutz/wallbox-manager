@@ -10,7 +10,7 @@ from fractions import Fraction
 from homeassistant.core import callback
 from homeassistant.helpers.storage import Store
 
-from .control.commands import CommandStatus
+from .control.commands import CommandReason, CommandResult, CommandStatus, ControlArea
 from .core.authority import ControlAuthority
 from .core.telemetry import Channel, Quantity
 from .core.values import scalar
@@ -33,6 +33,9 @@ class GridProfiles(PVSurplus):
         self.references = dict(entry.options)
         self.pv_ongoing = {}
         self.pv_sessions = {}
+        self.pv_start_since = {}
+        self.pv_stop_since = {}
+        self.pv_expiry = {}
         self.pv_retry_until = {}
         self.pv_retry_request = {}
         self.monotonic = time.monotonic
@@ -74,9 +77,59 @@ class GridProfiles(PVSurplus):
             {"profile": "NETZ", "power_kw": 11, "min_soc": 20, **PV_DEFAULTS},
         )
 
+    def available_profiles(self, target):
+        # Entity options are scoped to this connector's owning integration entry.
+        return (
+            ["NETZ", "PV_SURPLUS"]
+            if all(
+                self.references.get(key)
+                for key in ("leistung_pv", "leistung_verbraucher")
+            )
+            else ["NETZ"]
+        )
+
+    def can_control(self, target):
+        return (
+            not self.closed
+            and self.control.profile_permitted(target)
+            and self.control.runtime.authority(target.station)
+            == ControlAuthority.REMOTE
+        )
+
+    async def reconcile_availability(self):
+        for target in tuple(self.control.intents):
+            if self.setting(target)["profile"] in self.available_profiles(target):
+                continue
+            if self.status.get(target) != "profile_unavailable":
+                self.invalidate(target)
+                self.suppressed.add(target)
+                self.control._edit(target, {"target_w": Fraction(0)})
+                self.status[target] = "profile_unavailable"
+            epoch = self.epochs[target]
+            if (
+                self.can_control(target)
+                and self.control.runtime.enabled(target) is True
+            ):
+                await self.control.request_enabled(
+                    target,
+                    False,
+                    fence=lambda target=target, epoch=epoch: (
+                        not self.closed and self.epochs[target] == epoch
+                    ),
+                )
+            if (
+                not self.closed
+                and self.epochs[target] == epoch
+                and self.control.runtime.enabled(target) is False
+            ):
+                self.setting(target)["profile"] = "NETZ"
+                await self.save()
+            self.control.publish(target)
+
     def attributes(self, target):
         return {
             "profile_status": self.status.get(target, "idle"),
+            "available_profiles": self.available_profiles(target),
             "battery_configured": bool(self.references.get("soc_speicher_aktuell"))
             if self.setting(target)["profile"] == "PV_SURPLUS"
             else self.battery.configured,
@@ -88,6 +141,7 @@ class GridProfiles(PVSurplus):
 
     @callback
     def battery_changed(self, event):
+        self.pv_measurement_changed(event)
         self.pv_soc_changed(event)
         entity = event.data.get("entity_id")
         recovery = self.battery.record.get("entity") if self.battery.record else None
@@ -126,15 +180,22 @@ class GridProfiles(PVSurplus):
         self.pv_retry_until.pop(target, None)
         self.pv_retry_request.pop(target, None)
         self.pv_sessions.pop(target, None)
+        self.pv_start_since.pop(target, None)
+        self.pv_stop_since.pop(target, None)
+        self.pv_expiry.pop(target, None)
 
     async def select(self, target, profile):
-        if profile not in ("NETZ", "PV_SURPLUS"):
+        if profile not in self.available_profiles(target):
             raise ValueError("unsupported profile")
         # Reselecting is an explicit safe stop too; future profiles use this boundary.
         self.invalidate(target)
         self.suppressed.add(target)
         epoch = self.epochs[target]
-        await self.control.request_enabled(target, False)
+        if self.can_control(target):
+            result = await self.control.request_enabled(target, False)
+            if not result or result.status != CommandStatus.APPLIED:
+                return
+        self.control._edit(target, {"target_w": Fraction(0)})
         if self.epochs[target] != epoch:
             return
         self.setting(target)["profile"] = profile
@@ -151,7 +212,15 @@ class GridProfiles(PVSurplus):
         target = scalar(settings["soll_soc_speicher"])
         hysteresis = scalar(settings["soc_hysterese"])
         interval = scalar(settings["regulation_interval"])
-        if target > 99 or hysteresis > target or not 1 <= interval <= 300:
+        if (
+            target > 99
+            or hysteresis > target
+            or not 1 <= interval <= 300
+            or any(
+                scalar(settings[key]) > 3600
+                for key in ("pv_start_delay", "pv_stop_delay")
+            )
+        ):
             raise ValueError("invalid PV thresholds or interval")
 
     async def set_value(self, target, field, value):
@@ -195,7 +264,7 @@ class GridProfiles(PVSurplus):
             field == "power_kw"
             and self.epochs.get(target, 0) == epoch
             and target not in self.suppressed
-            and self.control.profile_permitted(target)
+            and self.can_control(target)
             and self.control.runtime.enabled(target) is True
         ):
             # Schedule before persistence: the deadline is measured from the edit,
@@ -232,6 +301,28 @@ class GridProfiles(PVSurplus):
                 self.control.publish(target)
 
     async def permission(self, target, enabled):
+        if enabled and (
+            not self.can_control(target)
+            or self.setting(target)["profile"] not in self.available_profiles(target)
+        ):
+            status = (
+                "profile_unavailable"
+                if self.setting(target)["profile"]
+                not in self.available_profiles(target)
+                else (
+                    "inactive_wallbox"
+                    if not self.control.profile_permitted(target)
+                    else "no_authority"
+                )
+            )
+            self.control.intent(target).status = status
+            self.control.publish(target)
+            return CommandResult(
+                CommandStatus.TEMPORARILY_REJECTED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.NO_AUTHORITY,
+                status,
+            )
         self.invalidate(target)
         epoch = self.epochs[target]
         if enabled:
@@ -243,7 +334,10 @@ class GridProfiles(PVSurplus):
             target, {"target_w": Fraction(str(self.setting(target)["power_kw"])) * 1000}
         )
         if self.setting(target)["profile"] == "PV_SURPLUS":
-            self.pv_edit(target)
+            if enabled:
+                self.pv_edit(target)
+            else:
+                self.control._edit(target, {"target_w": Fraction(0)})
         expected = (
             self.pv_request(target)
             if self.setting(target)["profile"] == "PV_SURPLUS"
@@ -312,6 +406,7 @@ class GridProfiles(PVSurplus):
             and self.control.runtime.enabled(target) is True
             and self.control.runtime.authority(target.station)
             == ControlAuthority.REMOTE
+            and self.setting(target)["profile"] in self.available_profiles(target)
         )
 
     async def sequence(self, target, epoch):
@@ -422,6 +517,7 @@ class GridProfiles(PVSurplus):
     async def battery_events(self):
         while self.battery_dirty and not self.closed:
             self.battery_dirty = False
+            await self.reconcile_availability()
             await self.reconcile_battery()
 
     async def reconcile_battery(self, exclude=None):

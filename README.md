@@ -272,8 +272,9 @@ Remote wallbox, acquires the selected station, explicitly sends OFF and confirms
 OFF before completing selection. **Every takeover forces charging permission OFF.**
 A separate user action starts charging. Startup/reload, profile selection and
 background events never acquire authority. Power edits while active/enabled apply after a one-second trailing-edge backend
-debounce; explicit enable and stop remain immediate. Per-wallbox settings persist separately; profile selection disables
-permission.
+debounce; explicit enable and stop remain immediate. Per-wallbox settings persist
+separately. With authority, profile selection disables permission; without authority,
+profile selection/settings are configuration-only and send no OCPP commands.
 
 The backend retains phase-lockout retries, bounded vehicle-current observation,
 station current limits and primitive safeguards. Optional battery references belong
@@ -289,8 +290,9 @@ type: custom:wallbox-manager-card
 
 The integration automatically serves/registers the JS module. No entity mapping or
 copy to `/config/www` is required. Discovery uses stable backend role/identity
-metadata and survives entity renames. When upgrading from beta.1, remove the old
-manually registered `/local/wallbox-manager-card.js` resource once.
+metadata and survives entity renames. After verifying automatic loading, remove
+temporary manually registered copies such as `/local/wallbox-manager-card.js`.
+See [automatic registration verification](docs/frontend-registration.md).
 
 The compact card includes a device-name header, equal narrow numeric fields,
 progressive 0.1/1 kW buttons with press-and-hold repeat (450 ms, then every 150 ms),
@@ -337,8 +339,8 @@ automations.
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
 now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
-The v0.3.x Grid profile builds on these controls. PV profiles and the planned
-Energy Manager interface remain future work.
+The v0.3.x Grid and PV Surplus profiles build on these controls. PV Daily Optimum,
+PV Maximum and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
 phase envelopes, voltage observations, power requests and solver results are
@@ -347,7 +349,7 @@ uses actual per-phase voltages, and returns an offered operating point, logical 
 or an explicit unreachable reason. A deferred-result contract is reserved for the
 future phase-transition planner. It does not command a charger or claim measured
 EV consumption. Metering and runtime state are reported separately by adapters.
-External ownership leases and PV charging profiles remain future work.
+External ownership leases remain future work.
 
 Run development checks with `.venv/bin/ruff check .`,
 `.venv/bin/ruff format --check .`, `.venv/bin/pytest`,
@@ -407,3 +409,10 @@ The 0.3.x PV Surplus profile regulates charging from central PV/consumer power
 references, with optional battery SoC start/stop hysteresis. It reuses the common
 solver, explicit charging permission and active-wallbox ownership. See
 [PV Surplus configuration and behavior](docs/pv-surplus-profile.md).
+
+PV beta.2 refinements add backend profile availability, configuration without
+control authority, and separate PV start/stop delays (defaults 0/60 seconds).
+Profile settings remain stored when hidden. See the
+[PV profile documentation](docs/pv-surplus-profile.md) and
+[automatic card registration and verification](docs/frontend-registration.md),
+including removal of temporary manual Lovelace resources.

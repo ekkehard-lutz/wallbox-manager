@@ -1,3 +1,5 @@
+(() => {
+if (customElements.get("wallbox-manager-card")) return;
 /* Stable roles and backend scope joins survive entity and device renames. */
 function discoverWallboxManager(states) {
   const entries = Object.entries(states || {});
@@ -103,11 +105,11 @@ class WallboxManagerCard extends HTMLElement {
     </style><ha-card>
       <header><ha-icon icon="mdi:ev-station"></ha-icon><div class="heading"><h2 id="title"></h2><div id="station"></div></div><label id="wallbox-row"><select id="wallbox" aria-label="Active wallbox"></select></label></header>
       <button id="takeover"></button>
-      <label class="row"><span id="profile-label"></span><select id="profile"></select></label>
+      <label class="row" id="profile-row"><span id="profile-label"></span><select id="profile"></select></label>
       <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
       <div class="row" id="reserve-row"><label id="reserve-label" for="reserve"></label><div class="numeric"><button id="reserve-down" class="step" type="button">−</button><input id="reserve" type="text" inputmode="numeric" autocomplete="off"><button id="reserve-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
       <label class="row" id="approximation-row"><span id="approximation-label"></span><select id="approximation"></select></label>
-      ${["soll_soc_speicher", "soc_hysterese", "regulation_interval"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="number" id="${id}" min="${id === "regulation_interval" ? 1 : 0}" max="${id === "regulation_interval" ? 300 : 99}" step="1"></label>`).join("")}
+      ${["soll_soc_speicher", "soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="number" id="${id}" min="${id === "regulation_interval" ? 1 : 0}" max="${id.endsWith("delay") ? 3600 : id === "regulation_interval" ? 300 : 99}" step="1"></label>`).join("")}
       <button id="permission"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div><div class="reading" id="actual"></div></div>
       <p id="status" class="notice" role="status" hidden></p><p id="error" class="notice" role="alert" hidden></p>
@@ -117,7 +119,7 @@ class WallboxManagerCard extends HTMLElement {
     get("takeover").onclick = () => this.activate(this.discovery.displayed);
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
     get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.pv_approximation, option:e.target.value});
-    for (const id of ["soll_soc_speicher", "soc_hysterese", "regulation_interval"]) {
+    for (const id of ["soll_soc_speicher", "soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay"]) {
       get(id).onchange = e => this.call("number", "set_value", {entity_id:this.discovery.roles[id], value:Number(e.target.value)});
     }
     for (const id of ["power", "reserve"]) {
@@ -267,12 +269,13 @@ class WallboxManagerCard extends HTMLElement {
     get("reserve-label").textContent = de ? "Entladereserve" : "Discharge reserve";
     this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(value => [value,value === "NETZ" ? (de ? "Netz" : "Grid") : value === "PV_SURPLUS" ? (de ? "PV-Überschuss" : "PV Surplus") : value]));
     get("profile").value = state("charging_profile")?.state || "";
-    get("profile").disabled = busy || !ready || !available(state("charging_profile"));
+    get("profile-row").hidden = (state("charging_profile")?.attributes.options || []).length <= 1;
+    get("profile").disabled = busy || !available(state("charging_profile"));
     for (const [id,role] of [["power","soll_power"],["reserve","min_soc"]]) {
       const s = state(role), edit = this.edits[id];
       if (edit && (edit.entity !== d.roles[role] || (available(s) && Number(s.state) === edit.value))) delete this.edits[id];
       if (previous !== d.displayed || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value) : available(s) ? this.format(Number(s.state)) : "";
-      const disabled = busy || !ready || !available(s);
+      const disabled = busy || !available(s);
       get(id).disabled = disabled;
       const value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
       for (const suffix of ["up","down"]) {
@@ -281,7 +284,7 @@ class WallboxManagerCard extends HTMLElement {
       }
     }
     get("permission").disabled = busy || !ready || !available(permission);
-    get("permission").textContent = busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
+    get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     const pv = state("charging_profile")?.state === "PV_SURPLUS";
     get("power-row").hidden = pv;
     get("reserve-row").hidden = pv || !attrs.battery_configured;
@@ -289,13 +292,13 @@ class WallboxManagerCard extends HTMLElement {
     get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
     this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"]]);
     get("approximation").value = state("pv_approximation")?.state || "down";
-    get("approximation").disabled = busy || !ready || !available(state("pv_approximation"));
-    const pvLabels = de ? {soll_soc_speicher:"Speicher-Ziel-SoC (%)",soc_hysterese:"SoC-Hysterese (Prozentpunkte)",regulation_interval:"Regelintervall (s)"} : {soll_soc_speicher:"Battery target SoC (%)",soc_hysterese:"SoC hysteresis (percentage points)",regulation_interval:"Regulation interval (s)"};
+    get("approximation").disabled = busy || !available(state("pv_approximation"));
+    const pvLabels = de ? {soll_soc_speicher:"Speicher-Ziel-SoC (%)",soc_hysterese:"SoC-Hysterese (Prozentpunkte)",regulation_interval:"Regelintervall (s)",pv_start_delay:"PV-Startverzögerung (s)",pv_stop_delay:"PV-Stoppverzögerung (s)"} : {soll_soc_speicher:"Battery target SoC (%)",soc_hysterese:"SoC hysteresis (percentage points)",regulation_interval:"Regulation interval (s)",pv_start_delay:"PV start delay (s)",pv_stop_delay:"PV stop delay (s)"};
     for (const [id,label] of Object.entries(pvLabels)) {
-      get(`${id}-row`).hidden = !pv || (id !== "regulation_interval" && !attrs.battery_configured);
+      get(`${id}-row`).hidden = !pv || (["soll_soc_speicher", "soc_hysterese"].includes(id) && !attrs.battery_configured);
       get(`${id}-label`).textContent = label;
       if (this.shadowRoot.activeElement !== get(id)) get(id).value = available(state(id)) ? state(id).state : "";
-      get(id).disabled = busy || !ready || !available(state(id));
+      get(id).disabled = busy || !available(state(id));
     }
     if (this.hold && (this.hold.button.disabled || (this.hold.id === "reserve" && !attrs.battery_configured))) this.stopHold();
     get("actual").title = de ? "Bestätigter Betriebspunkt · Stromlimit, kein Messwert" : "Confirmed operating point · current limit, not measured current";
@@ -312,7 +315,7 @@ class WallboxManagerCard extends HTMLElement {
       d.active && !d.inventory[d.active] ? (de ? "Aktive Wallbox fehlt. Bitte Verbindung prüfen." : "Active wallbox missing. Check its connection.") : "",
       ["error","write_unconfirmed"].includes(attrs.battery_status) ? (de ? "Batteriereserve konnte nicht gesetzt werden. Batterie prüfen." : "Could not set battery reserve. Check the battery.") : "",
       ["failed","unsupported","temporarily_rejected"].includes(attrs.command_status) && !["phase_lockout","observing"].includes(attrs.profile_status) ? (de ? "Ladeeinstellung nicht angewendet. Verbindung und Wallbox prüfen." : "Charging setting not applied. Check the connection and wallbox.") : "",
-      ({measurements_unavailable: de ? "PV-Regelung pausiert: Messwerte fehlen, sind ungültig oder veraltet." : "PV regulation paused: readings are missing, invalid or stale.",waiting_battery_soc:de ? "Warte auf Speicher-SoC über dem Zielwert." : "Waiting for battery SoC above target.",stopped_battery_soc:de ? "Laden wegen niedrigem Speicher-SoC gestoppt." : "Charging stopped due to low battery SoC.",paused_insufficient_pv:de ? "Laden wegen zu geringer PV-Leistung pausiert." : "Charging paused due to insufficient PV power."})[attrs.profile_status] || "",
+      ({profile_unavailable:de ? "Profil nicht verfügbar. Warte auf bestätigtes OFF für den Wechsel zu Netz." : "Profile unavailable. Waiting for confirmed OFF before falling back to Grid.",pv_start_delay:de ? "PV-Startverzögerung läuft." : "Waiting for PV start delay.",pv_stop_delay:de ? "PV-Stoppverzögerung: Laden mit Mindestleistung." : "PV stop delay: charging at minimum power.",measurements_unavailable: de ? "PV-Regelung pausiert: Messwerte fehlen, sind ungültig oder veraltet." : "PV regulation paused: readings are missing, invalid or stale.",waiting_battery_soc:de ? "Warte auf Speicher-SoC über dem Zielwert." : "Waiting for battery SoC above target.",stopped_battery_soc:de ? "Laden wegen niedrigem Speicher-SoC gestoppt." : "Charging stopped due to low battery SoC.",paused_insufficient_pv:de ? "Laden wegen zu geringer PV-Leistung pausiert." : "Charging paused due to insufficient PV power."})[attrs.profile_status] || "",
       attrs.profile_status === "error" ? (de ? "Ladeprofil fehlgeschlagen. Wallbox prüfen." : "Charging profile failed. Check the wallbox.") : ""].filter(Boolean);
     get("status").textContent = messages.join(" "); get("status").hidden = !messages.length;
   }
@@ -328,3 +331,5 @@ class WallboxManagerCard extends HTMLElement {
 if (!customElements.get("wallbox-manager-card")) customElements.define("wallbox-manager-card",WallboxManagerCard);
 window.customCards = window.customCards || [];
 if (!window.customCards.some(c => c.type === "wallbox-manager-card")) window.customCards.push({type:"wallbox-manager-card",name:"Wallbox Manager",description:"Automatically discovered wallboxes and primitive charging profiles"});
+
+})();

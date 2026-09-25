@@ -36,8 +36,9 @@ function runtime() {
   }
   const registry = new Map();
   const context = vm.createContext({HTMLElement, document:{createElement: () => new Node()}, setTimeout:(fn,delay)=>schedule(fn,delay),clearTimeout:id=>timers.delete(id),setInterval:(fn,delay)=>schedule(fn,delay,delay),clearInterval:id=>timers.delete(id),window:{addEventListener:(event,fn)=>listeners.set(event,fn),removeEventListener:(event)=>listeners.delete(event)}, customElements:{get: key=>registry.get(key),define:(key,value)=>registry.set(key,value)}});
-  vm.runInContext(fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8'), context);
-  return {clock, duration:vm.runInContext('sessionDuration',context), Card:registry.get('wallbox-manager-card'), discover:vm.runInContext('discoverWallboxManager',context), step:vm.runInContext('powerStep',context), live:vm.runInContext('liveValues',context)};
+  const source = fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8');
+  vm.runInContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testHelpers = {sessionDuration,discoverWallboxManager,powerStep,liveValues};})();'), context);
+  return {context, source, clock, duration:context.testHelpers.sessionDuration, Card:registry.get('wallbox-manager-card'), discover:context.testHelpers.discoverWallboxManager, step:context.testHelpers.powerStep, live:context.testHelpers.liveValues};
 }
 function state(role, target, value, extra={}) {
   return {state:value,attributes:{wallbox_manager_role:role,wallbox_manager_target:target,...extra}};
@@ -465,3 +466,66 @@ for (const battery of [false,true]) for (const language of ['en','de']) {
     assert.equal(calls.at(-1)[2].option,'up');
   });
 }
+
+test('automatic and manual duplicate loads do not execute or define the card twice',()=>{
+  const {context,source,Card}=runtime();
+  const cards=context.window.customCards;
+  context.customElements.define=()=>{throw new Error('duplicate definition');};
+  vm.runInContext(source,context,{filename:'automatic-module.js'});
+  vm.runInContext(source,context,{filename:'temporary-manual-resource.js'});
+  assert.equal(context.customElements.get('wallbox-manager-card'),Card);
+  assert.equal(cards.length,1);
+});
+
+for(const options of [['NETZ'],['NETZ','PV_SURPLUS']]) {
+  test(`profile selector visibility follows backend options: ${options.join(',')}`,()=>{
+    const data=states(true);data['select.anything'].attributes.options=options;
+    const {get}=card(data);
+    assert.equal(get('profile-row').hidden,options.length===1);
+  });
+}
+
+for(const battery of [false,true]) {
+  test(`profile settings remain editable without authority: battery=${battery}`,async()=>{
+    const data=states(false);
+    data['select.anything'].state='PV_SURPLUS';
+    Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS'],battery_configured:battery});
+    data['switch.another_name'].state='on';
+    for(const [role,value] of Object.entries({soll_soc_speicher:'95',soc_hysterese:'5',regulation_interval:'5',pv_start_delay:'0',pv_stop_delay:'60'})) data[`number.${role}`]=state(role,'A',value);
+    data['select.pv']=state('pv_approximation','A','down');
+    const {card:c,get,calls}=card(data);
+    assert.equal(get('permission').disabled,true);
+    assert.match(get('permission').textContent,/enabled.*no control/);
+    assert.equal(get('profile').disabled,false);
+    assert.equal(get('power').disabled,false);
+    assert.equal(get('reserve').disabled,false);
+    assert.equal(get('approximation').disabled,false);
+    assert.equal(get('approximation-row').hidden,battery);
+    assert.equal(get('soc_hysterese-row').hidden,!battery);
+    assert.equal(get('soll_soc_speicher-row').hidden,!battery);
+    for(const id of ['regulation_interval','pv_start_delay','pv_stop_delay']) {
+      assert.equal(get(`${id}-row`).hidden,false);
+      assert.equal(get(id).disabled,false);
+    }
+    await get('profile').onchange({target:{value:'NETZ'}});
+    await get('pv_stop_delay').onchange({target:{value:'75'}});
+    assert.deepEqual(calls.map(call=>call.slice(0,2)),[['select','select_option'],['number','set_value']]);
+    assert.equal(calls[0][2].entity_id,'select.anything');
+    assert.equal(calls[1][2].entity_id,'number.pv_stop_delay');
+    c.hass={...c._hass,language:'de'};
+    assert.equal(get('pv_stop_delay-label').textContent,'PV-Stoppverzögerung (s)');
+  });
+}
+
+test('profile availability is discovered separately for the displayed connector',()=>{
+  const data=states(true);
+  data['select.anything'].attributes.options=['NETZ'];
+  data['select.renamed_owner'].attributes.wallboxes.B={name:'B',connected:true};
+  data['select.b']=state('charging_profile','B','PV_SURPLUS',{options:['NETZ','PV_SURPLUS']});
+  const {card:c,get}=card(data);
+  assert.equal(get('profile-row').hidden,true);
+  data['select.renamed_owner'].attributes.active_wallbox='B';
+  c.hass={...c._hass};
+  assert.equal(get('profile-row').hidden,false);
+  assert.equal(get('profile').value,'PV_SURPLUS');
+});

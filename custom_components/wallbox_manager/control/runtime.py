@@ -199,7 +199,7 @@ class ControlRuntime:
         intent.status = "idle"
         return intent
 
-    def resolve(self, target, *, substitute_mode=None):
+    def resolve(self, target, *, substitute_mode=None, request=None):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
             return None, None, "disconnected"
@@ -217,7 +217,8 @@ class ControlRuntime:
         ):
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
-        if intent.request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
+        request = request or intent.request
+        if request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
             from ..solver.operating_point import Reason, ResultStatus
 
             return (
@@ -226,7 +227,7 @@ class ControlRuntime:
                 "zero_current_unverified",
             )
         result = solve(
-            PowerRequest(intent.request.target_w, intent.request.direction, True),
+            PowerRequest(request.target_w, request.direction, True),
             caps,
             inputs.voltage,
             now=datetime.now(UTC),

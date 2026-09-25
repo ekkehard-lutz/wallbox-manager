@@ -143,7 +143,7 @@ async def test_shared_primitive_cannot_restart_after_off(grid, soc):
 
 
 @pytest.mark.parametrize("soc", [90, 93, 95])
-async def test_soc_fall_during_positive_restart_debounce_prevents_dispatch(grid, soc):
+async def test_soc_fall_during_positive_restart_delay_prevents_dispatch(grid, soc):
     p, t, (c, _, peer, *_) = await started(grid)
     measurements(p, t, pv=0, soc=96)
     p.pv_edit(t)
@@ -154,8 +154,10 @@ async def test_soc_fall_during_positive_restart_debounce_prevents_dispatch(grid,
     async def debounce(_):
         entered.set()
         await release.wait()
+        release.clear()
 
-    p.debounce_wait = debounce
+    p.wait = debounce
+    p.setting(t)["pv_start_delay"] = 10
     measurements(p, t, soc=96)
     # Restart the existing regulator, with its original (cleared) continuation state.
     p.invalidate(t)

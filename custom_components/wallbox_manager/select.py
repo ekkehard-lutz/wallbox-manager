@@ -44,10 +44,12 @@ class PowerApproximation(ControlEntity, SelectEntity):
 
 
 class ChargingProfile(ControlEntity, SelectEntity):
-    _attr_options = ["NETZ", "PV_SURPLUS"]
-
     def __init__(self, control, entry_id, target):
         super().__init__(control, entry_id, target, "charging_profile")
+
+    @property
+    def options(self):
+        return self.control.profiles.available_profiles(self.target)
 
     @property
     def current_option(self):

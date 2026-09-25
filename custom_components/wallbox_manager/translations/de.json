@@ -205,6 +205,12 @@
       },
       "regulation_interval": {
         "name": "Regelintervall"
+      },
+      "pv_start_delay": {
+        "name": "PV-Startverzögerung"
+      },
+      "pv_stop_delay": {
+        "name": "PV-Stoppverzögerung"
       }
     },
     "select": {
@@ -244,7 +250,7 @@
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "Optionale Referenzen für den gemeinsamen Hausspeicher. Stationsfähigkeiten bearbeiten Sie direkt in der Unterkonfiguration der Wallbox.",
+        "description": "PV-Überschuss benötigt beide Leistungsreferenzen. Ohne Speicher-SoC arbeitet es ohne Speicher; die Entladereserve ist davon unabhängig.",
         "data": {
           "min_soc_speicher": "Batterie-Mindestreserve",
           "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand",

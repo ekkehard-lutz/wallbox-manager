@@ -2,10 +2,11 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
 from .control.requests import Direction
+from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
 
 PV_DEFAULTS = {
@@ -13,6 +14,8 @@ PV_DEFAULTS = {
     "soll_soc_speicher": 95,
     "soc_hysterese": 5,
     "regulation_interval": 5,
+    "pv_start_delay": 0,
+    "pv_stop_delay": 60,
 }
 MAX_AGE_SECONDS = 90
 _LOGGER = logging.getLogger(__name__)
@@ -66,11 +69,15 @@ class PVSurplus:
             # OFF ends continuation even when another primitive control requested it.
             self.pv_ongoing[target] = False
             return True
-        if self.closed:
+        if self.closed or "PV_SURPLUS" not in self.available_profiles(target):
             return False
-        power, direction, _ = self.pv_request(target)
+        power, direction, status, _ = self.pv_plan(target, advance=False)
         return (
             power > 0
+            and (
+                status != "pv_stop_delay"
+                or self.control.intent(target).request.target_w == 1
+            )
             and self.control.intent(target).request.direction == direction
             and (direction != Direction.DOWN or point.offered_power_w <= power)
         )
@@ -117,10 +124,11 @@ class PVSurplus:
 
     def pv_measurements(self, target):
         now = datetime.now(UTC)
-        pv = reading(self.hass.states.get(self.references.get("leistung_pv", "")), now)
-        load = reading(
-            self.hass.states.get(self.references.get("leistung_verbraucher", "")), now
+        pv_state = self.hass.states.get(self.references.get("leistung_pv", ""))
+        load_state = self.hass.states.get(
+            self.references.get("leistung_verbraucher", "")
         )
+        pv, load = reading(pv_state, now), reading(load_state, now)
         soc_entity = self.references.get("soc_speicher_aktuell")
         soc = (
             reading(self.hass.states.get(soc_entity), now, soc=True)
@@ -143,6 +151,18 @@ class PVSurplus:
         actual = reading(candidates[0], now)
         if actual < 0:
             raise ValueError("negative charging power")
+        states = [pv_state, load_state, candidates[0]]
+        if soc_entity:
+            states.append(self.hass.states.get(soc_entity))
+        expiry = []
+        for state in states:
+            expiry.append(
+                getattr(state, "last_reported", state.last_updated)
+                + timedelta(seconds=MAX_AGE_SECONDS)
+            )
+            if value := state.attributes.get("valid_until"):
+                expiry.append(datetime.fromisoformat(value))
+        self.pv_expiry[target] = min(expiry)
         return pv - load + actual, soc
 
     def pv_request(self, target):
@@ -159,51 +179,174 @@ class PVSurplus:
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
             return Fraction(0), Direction.DOWN, "measurements_unavailable"
 
-    def pv_edit(self, target):
+    def pv_plan(self, target, *, advance=True):
+        """Time policy around the common solver, never a second electrical solver."""
         power, direction, status = self.pv_request(target)
+        settings = self.setting(target)
+        now = self.monotonic()
         inputs = self.control.inputs(target)
-        if inputs is None or inputs.capabilities.stop.state != EvidenceState.VERIFIED:
+        if "PV_SURPLUS" not in self.available_profiles(target):
+            power, status = Fraction(0), "profile_unavailable"
+        elif inputs is None or inputs.capabilities.stop.state != EvidenceState.VERIFIED:
             power, status = Fraction(0), "safe_stop_unavailable"
         maximum = self.control.power_ceiling(target)
         if maximum is not None:
             power = min(power, maximum)
+
+        def resolve(watts, policy):
+            return self.control.resolve(target, request=PowerSettings(watts, policy))[1]
+
+        result = resolve(power, direction)
+        if (
+            status == "actively_charging"
+            and result
+            and result.point
+            and not result.point.charging
+        ):
+            status = "paused_insufficient_pv"
+        ongoing = self.pv_ongoing.get(target, False)
+        if status == "paused_insufficient_pv" and ongoing:
+            minimum = resolve(Fraction(1), Direction.UP)
+            if advance:
+                self.pv_start_since.pop(target, None)
+                self.pv_stop_since.setdefault(target, now)
+            since = self.pv_stop_since.get(target)
+            if (
+                since is not None
+                and now < since + settings["pv_stop_delay"]
+                and minimum
+                and minimum.point
+                and minimum.point.charging
+            ):
+                return Fraction(1), Direction.UP, "pv_stop_delay", minimum
+        elif advance:
+            self.pv_stop_since.pop(target, None)
+        if (
+            status == "actively_charging"
+            and result
+            and result.point
+            and result.point.charging
+        ):
+            if not ongoing and settings["pv_start_delay"] > 0:
+                if advance:
+                    self.pv_start_since.setdefault(target, now)
+                since = self.pv_start_since.get(target)
+                if since is None or now < since + settings["pv_start_delay"]:
+                    return (
+                        Fraction(0),
+                        Direction.DOWN,
+                        "pv_start_delay",
+                        resolve(Fraction(0), Direction.DOWN),
+                    )
+            return power, direction, status, result
+        if advance:
+            self.pv_start_since.pop(target, None)
+        return Fraction(0), Direction.DOWN, status, resolve(Fraction(0), Direction.DOWN)
+
+    def pv_edit(self, target):
+        power, direction, status, result = self.pv_plan(target)
         intent = self.control.intent(target)
         intent.profile_modes = None
         if intent.request.target_w != power or intent.request.direction != direction:
             self.control._edit(target, {"target_w": power, "direction": direction})
-        _, result, blocked = self.control.resolve(target)
-        # The common solver owns minimum-current feasibility and OFF selection.
-        if (
-            power > 0
-            and direction == Direction.DOWN
-            and result
-            and result.point is None
-            and blocked == "direction_unreachable"
-        ):
-            self.control._edit(target, {"target_w": Fraction(0)})
-            _, result, _ = self.control.resolve(target)
-        if (
-            result
-            and result.point
-            and not result.point.charging
-            and status == "actively_charging"
-        ):
-            status = "paused_insufficient_pv"
         self.status[target] = status
-        if status != "actively_charging":
+        if status not in ("actively_charging", "pv_stop_delay"):
             self.pv_ongoing[target] = False
         return result
+
+    def pv_wait_seconds(self, target):
+        now = self.monotonic()
+        settings = self.setting(target)
+        deadlines = [settings["regulation_interval"]]
+        for timers, field in (
+            (self.pv_start_since, "pv_start_delay"),
+            (self.pv_stop_since, "pv_stop_delay"),
+        ):
+            if target in timers and timers[target] + settings[field] > now:
+                deadlines.append(timers[target] + settings[field] - now)
+        if target in self.pv_expiry and self.status.get(target) in (
+            "actively_charging",
+            "pv_start_delay",
+            "pv_stop_delay",
+        ):
+            deadlines.append(
+                max(
+                    0.001,
+                    (self.pv_expiry[target] - datetime.now(UTC)).total_seconds()
+                    + 0.001,
+                )
+            )
+        return min(deadlines)
+
+    def pv_measurement_changed(self, event):
+        """Safety failures wake immediately; a waiting start observes fresh inputs."""
+        entity = event.data.get("entity_id")
+        if self.closed:
+            return
+        state = event.data.get("new_state")
+        for target in tuple(self.tasks):
+            if self.setting(target)["profile"] != "PV_SURPLUS":
+                continue
+            attrs = (
+                (state or event.data.get("old_state")).attributes
+                if state or event.data.get("old_state")
+                else {}
+            )
+            power = entity in (
+                self.references.get("leistung_pv"),
+                self.references.get("leistung_verbraucher"),
+            ) or (
+                attrs.get("wallbox_manager_role") == "session_power"
+                and attrs.get("wallbox_manager_entry") == self.entry_id
+                and attrs.get("station_id") == target.station.value
+                and attrs.get("evse_id") == target.evse.value
+                and attrs.get("connector_id") == target.value
+            )
+            soc = entity == self.references.get("soc_speicher_aktuell")
+            if not power and not soc:
+                continue
+            try:
+                reading(state, datetime.now(UTC), soc=soc)
+            except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                self.invalidate(target)
+                self.control._edit(
+                    target, {"target_w": Fraction(0), "direction": Direction.DOWN}
+                )
+                self.status[target] = "measurements_unavailable"
+                if self.valid(target, self.epochs[target]):
+                    self.launch(target, stop_first=True)
+                continue
+            if not self.pv_ongoing.get(target, False) and self.status.get(target) in (
+                "paused_insufficient_pv",
+                "waiting_battery_soc",
+                "stopped_battery_soc",
+                "measurements_unavailable",
+                "pv_start_delay",
+            ):
+                _, _, planned, _ = self.pv_plan(target)
+                if planned in (
+                    "actively_charging",
+                    "pv_start_delay",
+                ) and planned != self.status.get(target):
+                    start = self.pv_start_since.get(target)
+                    self.invalidate(target)
+                    if start is not None:
+                        self.pv_start_since[target] = start
+                    if self.valid(target, self.epochs[target]):
+                        self.launch(target)
 
     def pv_confirm(self, target):
         point = self.control.confirmed_point(target)
         session = self.control.runtime.sessions.get(target)
         self.pv_ongoing[target] = bool(
-            self.status.get(target) == "actively_charging"
+            self.status.get(target) in ("actively_charging", "pv_stop_delay")
             and point
             and point.charging
             and session
             and session.active
         )
+        if self.pv_ongoing[target]:
+            self.pv_start_since.pop(target, None)
         if (
             self.status.get(target) == "actively_charging"
             and not self.pv_ongoing[target]
@@ -238,6 +381,7 @@ class PVSurplus:
                         point
                         and point.charging
                         and point != self.control.confirmed_point(target)
+                        and self.pv_ongoing.get(target, False)
                     ):
                         await self.debounce_wait(1)
                         if not self.valid(target, epoch):
@@ -262,7 +406,7 @@ class PVSurplus:
                         self.pv_retry_request.pop(target, None)
                 self.pv_confirm(target)
                 self.control.publish(target)
-                await self.wait(self.setting(target)["regulation_interval"])
+                await self.wait(self.pv_wait_seconds(target))
         except asyncio.CancelledError:
             raise
         except Exception:
