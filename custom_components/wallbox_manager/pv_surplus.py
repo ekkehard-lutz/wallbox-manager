@@ -8,6 +8,7 @@ from fractions import Fraction
 from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
+from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
 
 PV_DEFAULTS = {
     "approximation": "down",
@@ -96,44 +97,49 @@ class PVSurplus:
             settings = self.setting(target)
             if settings["profile"] != "PV_SURPLUS":
                 continue
-            try:
-                soc = reading(event.data.get("new_state"), datetime.now(UTC), soc=True)
-                power, _, status = decision(
-                    Fraction(1), soc, settings, self.pv_ongoing.get(target, False)
+            with cycle(self, target, "soc_event"):
+                try:
+                    soc = reading(
+                        event.data.get("new_state"), datetime.now(UTC), soc=True
+                    )
+                    power, _, status = decision(
+                        Fraction(1), soc, settings, self.pv_ongoing.get(target, False)
+                    )
+                except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                    power, status = Fraction(0), "measurements_unavailable"
+                if record := active(self, target):
+                    record.data.update(
+                        policy_reason=status, soc_allows_charging=power > 0
+                    )
+                    record.data["soc_event"] = entity_sample(
+                        event.data.get("new_state"),
+                        event.data.get("entity_id"),
+                        datetime.now(UTC),
+                    )
+                if power > 0:
+                    continue
+                point = self.control.confirmed_point(target)
+                needs_stop = (
+                    self.pv_ongoing.get(target, False)
+                    or self.control.intent(target).request.target_w > 0
+                    or (point and point.charging)
                 )
-            except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                power, status = Fraction(0), "measurements_unavailable"
-            if power > 0:
-                continue
-            point = self.control.confirmed_point(target)
-            needs_stop = (
-                self.pv_ongoing.get(target, False)
-                or self.control.intent(target).request.target_w > 0
-                or (point and point.charging)
-            )
-            self.pv_ongoing[target] = False
-            if not needs_stop:
-                continue
-            self.invalidate(target)
-            self.control._edit(
-                target, {"target_w": Fraction(0), "direction": Direction.DOWN}
-            )
-            self.status[target] = status
-            if self.valid(target, self.epochs[target]):
-                self.launch(target, stop_first=True)
+                self.pv_ongoing[target] = False
+                if not needs_stop:
+                    continue
+                self.invalidate(target)
+                self.control._edit(
+                    target, {"target_w": Fraction(0), "direction": Direction.DOWN}
+                )
+                self.status[target] = status
+                if self.valid(target, self.epochs[target]):
+                    self.launch(target, stop_first=True)
 
     def pv_measurements(self, target):
         now = datetime.now(UTC)
         pv_state = self.hass.states.get(self.references.get("leistung_pv", ""))
         load_state = self.hass.states.get(
             self.references.get("leistung_verbraucher", "")
-        )
-        pv, load = reading(pv_state, now), reading(load_state, now)
-        soc_entity = self.references.get("soc_speicher_aktuell")
-        soc = (
-            reading(self.hass.states.get(soc_entity), now, soc=True)
-            if soc_entity
-            else None
         )
         candidates = [
             s
@@ -146,6 +152,15 @@ class PVSurplus:
             and s.attributes.get("runtime_incarnation")
             == self.control.runtime.runtime_id
         ]
+        if record := active(self, target):
+            record.capture_inputs(candidates)
+        pv, load = reading(pv_state, now), reading(load_state, now)
+        soc_entity = self.references.get("soc_speicher_aktuell")
+        soc = (
+            reading(self.hass.states.get(soc_entity), now, soc=True)
+            if soc_entity
+            else None
+        )
         if len(candidates) != 1:
             raise ValueError("selected connector power missing or ambiguous")
         actual = reading(candidates[0], now)
@@ -163,6 +178,12 @@ class PVSurplus:
             if value := state.attributes.get("valid_until"):
                 expiry.append(datetime.fromisoformat(value))
         self.pv_expiry[target] = min(expiry)
+        if record := active(self, target):
+            record.data.update(
+                site_load_w=number(load - actual),
+                surplus_w=number(pv - load + actual),
+                measured_power_w=number(actual),
+            )
         return pv - load + actual, soc
 
     def pv_request(self, target):
@@ -179,6 +200,7 @@ class PVSurplus:
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
             return Fraction(0), Direction.DOWN, "measurements_unavailable"
 
+    @diagnostic_plan
     def pv_plan(self, target, *, advance=True):
         """Time policy around the common solver, never a second electrical solver."""
         power, direction, status = self.pv_request(target)
@@ -356,56 +378,60 @@ class PVSurplus:
     async def pv_sequence(self, target, epoch, *, stop_first=False):
         try:
             if stop_first and self.valid(target, epoch):
-                # Do not let a quick recovery erase an already observed safety stop.
-                await self.control.apply_stored(
-                    target, fence=lambda: self.valid(target, epoch), reuse_applied=True
-                )
-                self.pv_confirm(target)
-            while self.valid(target, epoch):
-                result = self.pv_edit(target)
-                point = result.point if result else None
-                intent = self.control.intent(target)
-                waiting_retry = (
-                    intent.phase_retry
-                    and self.pv_retry_request.get(target) == intent.request
-                    and self.monotonic() < self.pv_retry_until.get(target, 0)
-                    and point
-                    and point.charging
-                )
-                if not waiting_retry and (
-                    point != self.control.confirmed_point(target)
-                    or intent.phase_retry
-                    or intent.command_result is None
-                ):
-                    if (
-                        point
-                        and point.charging
-                        and point != self.control.confirmed_point(target)
-                        and self.pv_ongoing.get(target, False)
-                    ):
-                        await self.debounce_wait(1)
-                        if not self.valid(target, epoch):
-                            return
-                        self.pv_edit(target)
-                    expected = self.pv_request(target)
-                    stopping = self.control.intent(target).request.target_w == 0
+                with cycle(self, target, "safety_stop"):
+                    # Do not let a quick recovery erase an already observed safety stop.
                     await self.control.apply_stored(
                         target,
-                        fence=lambda stopping=stopping, expected=expected: (
-                            self.valid(target, epoch)
-                            and (stopping or self.pv_request(target) == expected)
-                        ),
+                        fence=lambda: self.valid(target, epoch),
                         reuse_applied=True,
                     )
-                    if intent.phase_retry:
-                        self.pv_retry_request[target] = intent.request
-                        if self.monotonic() >= self.pv_retry_until.get(target, 0):
-                            self.pv_retry_until[target] = self.monotonic() + 60
-                    else:
-                        self.pv_retry_until.pop(target, None)
-                        self.pv_retry_request.pop(target, None)
-                self.pv_confirm(target)
-                self.control.publish(target)
+                    self.pv_confirm(target)
+            while self.valid(target, epoch):
+                with cycle(self, target, "regulation"):
+                    result = self.pv_edit(target)
+                    point = result.point if result else None
+                    intent = self.control.intent(target)
+                    waiting_retry = (
+                        intent.phase_retry
+                        and self.pv_retry_request.get(target) == intent.request
+                        and self.monotonic() < self.pv_retry_until.get(target, 0)
+                        and point
+                        and point.charging
+                    )
+                    if not waiting_retry and (
+                        point != self.control.confirmed_point(target)
+                        or intent.phase_retry
+                        or intent.command_result is None
+                    ):
+                        if (
+                            point
+                            and point.charging
+                            and point != self.control.confirmed_point(target)
+                            and self.pv_ongoing.get(target, False)
+                        ):
+                            await self.debounce_wait(1)
+                            if not self.valid(target, epoch):
+                                return
+                            self.pv_edit(target)
+                        expected = self.pv_request(target)
+                        stopping = self.control.intent(target).request.target_w == 0
+                        await self.control.apply_stored(
+                            target,
+                            fence=lambda stopping=stopping, expected=expected: (
+                                self.valid(target, epoch)
+                                and (stopping or self.pv_request(target) == expected)
+                            ),
+                            reuse_applied=True,
+                        )
+                        if intent.phase_retry:
+                            self.pv_retry_request[target] = intent.request
+                            if self.monotonic() >= self.pv_retry_until.get(target, 0):
+                                self.pv_retry_until[target] = self.monotonic() + 60
+                        else:
+                            self.pv_retry_until.pop(target, None)
+                            self.pv_retry_request.pop(target, None)
+                    self.pv_confirm(target)
+                    self.control.publish(target)
                 await self.wait(self.pv_wait_seconds(target))
         except asyncio.CancelledError:
             raise

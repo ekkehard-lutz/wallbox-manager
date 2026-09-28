@@ -1,11 +1,15 @@
-"""Register the bundled module with the frontend and Lovelace resource loader."""
+"""Register one frontend module; migrate obsolete Lovelace resource entries."""
 
 import asyncio
 import hashlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL, add_extra_js_url
+from homeassistant.components.frontend import (
+    DATA_EXTRA_MODULE_URL,
+    add_extra_js_url,
+    remove_extra_js_url,
+)
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.lovelace.const import LOVELACE_DATA
 from homeassistant.const import EVENT_COMPONENT_LOADED
@@ -35,37 +39,36 @@ async def async_setup_assets(hass):
     async with state["lock"]:
         if DATA_EXTRA_MODULE_URL not in hass.data:
             return  # Headless or not yet initialized; component event retries setup.
-        if state["url"] is None:
-            path = Path(__file__).parent / "www" / "wallbox-manager-card.js"
-            digest = await hass.async_add_executor_job(
-                lambda: hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+        path = Path(__file__).parent / "www" / "wallbox-manager-card.js"
+        digest = await hass.async_add_executor_job(
+            lambda: hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+        )
+        if not state["static_registered"]:
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(PATH, str(path), False)]
             )
-            if not state["static_registered"]:
-                await hass.http.async_register_static_paths(
-                    [StaticPathConfig(PATH, str(path), False)]
-                )
-                state["static_registered"] = True
-            state["url"] = f"{PATH}?v={digest}"
-        # Public HA API registers an ES module (es5=False), including YAML dashboards.
-        add_extra_js_url(hass, state["url"])
+            state["static_registered"] = True
+        url = f"{PATH}?v={digest}"
+        manager = hass.data[DATA_EXTRA_MODULE_URL]
+        for old_url in tuple(manager.urls):
+            if bundled_url(old_url) and old_url != url:
+                remove_extra_js_url(hass, old_url)
+        if url not in manager.urls:
+            add_extra_js_url(hass, url)
+        state["url"] = url
         lovelace = hass.data.get(LOVELACE_DATA)
         resources = getattr(lovelace, "resources", None)
         if resources is None or not hasattr(resources, "async_create_item"):
             return  # YAML resources are user-owned; the frontend module covers them.
-        # Use HA's collection API, never edit .storage or dashboard configuration.
+        # Migration only: the extra module API works with both dashboard modes.
+        # Do not leave an independent Lovelace loader racing the global loader.
         await resources.async_get_info()
-        matches = [
-            item
-            for item in resources.async_items()
-            if not urlsplit(item["url"]).netloc and urlsplit(item["url"]).path == PATH
-        ]
-        if not matches:
-            await resources.async_create_item(
-                {"res_type": "module", "url": state["url"]}
-            )
-        else:
-            for item in matches:
-                if item["url"] != state["url"] or item["type"] != "module":
-                    await resources.async_update_item(
-                        item["id"], {"res_type": "module", "url": state["url"]}
-                    )
+        for item in tuple(resources.async_items()):
+            if bundled_url(item["url"]):
+                await resources.async_delete_item(item["id"])
+
+
+def bundled_url(url):
+    """Only the integration-owned local route, never third-party card resources."""
+    parsed = urlsplit(url)
+    return not parsed.scheme and not parsed.netloc and parsed.path == PATH

@@ -255,7 +255,8 @@
           "min_soc_speicher": "Battery minimum reserve",
           "soc_speicher_aktuell": "Current battery state of charge",
           "leistung_pv": "PV power",
-          "leistung_verbraucher": "Total consumer power (including selected wallbox)"
+          "leistung_verbraucher": "Total consumer power (including selected wallbox)",
+          "pv_diagnostic_logging": "PV controller diagnostic logging"
         }
       }
     }

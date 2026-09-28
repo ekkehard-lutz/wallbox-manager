@@ -255,7 +255,8 @@
           "min_soc_speicher": "Batterie-Mindestreserve",
           "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand",
           "leistung_pv": "PV-Leistung",
-          "leistung_verbraucher": "Gesamtverbrauch (einschließlich ausgewählter Wallbox)"
+          "leistung_verbraucher": "Gesamtverbrauch (einschließlich ausgewählter Wallbox)",
+          "pv_diagnostic_logging": "PV-Regler-Diagnoseprotokoll"
         }
       }
     }

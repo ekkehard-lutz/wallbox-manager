@@ -14,6 +14,7 @@ from .control.commands import CommandReason, CommandResult, CommandStatus, Contr
 from .core.authority import ControlAuthority
 from .core.telemetry import Channel, Quantity
 from .core.values import scalar
+from .pv_diagnostics import diagnostic_permission
 from .pv_surplus import PV_DEFAULTS, PVSurplus
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class GridProfiles(PVSurplus):
     def __init__(self, hass, entry, control, battery):
         self.hass, self.control, self.battery = hass, control, battery
         self.store = Store(hass, 1, f"wallbox_manager.{entry.entry_id}.profiles")
+        self.entry = entry
         self.entry_id = entry.entry_id
         self.references = dict(entry.options)
         self.pv_ongoing = {}
@@ -300,6 +302,7 @@ class GridProfiles(PVSurplus):
                 self.debounce_tasks.pop(target, None)
                 self.control.publish(target)
 
+    @diagnostic_permission
     async def permission(self, target, enabled):
         if enabled and (
             not self.can_control(target)

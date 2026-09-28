@@ -153,3 +153,86 @@ restart from OFF, connector-specific power metadata and freshness, both phase
 transitions and lockout recovery, battery threshold crossings, sensor outages,
 authority handover and integration reload. Verified capabilities and simulated
 OCPP tests cannot replace these device checks.
+
+## Opt-in PV controller diagnostics
+
+Open **Settings → Devices & services → Wallbox Manager → Configure** and enable
+**PV controller diagnostic logging** (German: **PV-Regler-Diagnoseprotokoll**).
+It defaults to disabled, is saved in the integration options, and needs no OCPP
+control authority. A diagnostic-only change takes effect for subsequent evaluations
+without integration reload, charging/OCPP commands or changes to profile settings.
+Changing entity references at the same time still uses their existing reload path.
+Disable this option after troubleshooting: records are detailed and may be frequent.
+
+Each actual evaluation writes exactly one physical **INFO** record prefixed
+`PVCTRL`, followed by compact JSON with stable sorted keys. Normal HA logs suffice;
+no `logger:` configuration is needed. Nested solver checks, debounce replanning
+and dispatch freshness fences belong to the same record. `trigger` distinguishes
+periodic regulation, permission evaluation, safety-stop execution, SoC-event
+policy evaluation and standalone wake-up plans. Read-only dispatch fences alone
+do not create additional cycles; an inactive/unauthorized regulator does not
+invent periodic cycles. Records finish when evaluation/command processing ends,
+before the interval wait; cancellation and exceptions also produce one record.
+Concurrent event/permission records can finish out of start order, so compare
+`started_at`, `evaluated_at`, identity and `trigger` as well as log order.
+
+Records contain:
+
+- Station/EVSE/connector/profile, authority/ownership, connection, hardware enable,
+  vehicle/charging state; scoped measured power/current/voltage and their validity.
+- External entity IDs, raw state, numeric value, unit, availability, report timestamp,
+  report age and explicit missing/non-numeric/unknown/unavailable/stale/future/expired
+  status; selected connector power sources are identified separately.
+- Profile thresholds/hysteresis/interval/delays, electrical envelopes and limits,
+  calculated non-wallbox load and surplus, policy target/direction, solver bounds,
+  selected point and resulting current/phase/power approximation.
+- Applied point before/after, last commanded solver point, new and previous command
+  outcomes, pending target, phase retry/backoff and elapsed/remaining delay.
+  `command_evaluated` means a new execution result, which can include reuse of an
+  already confirmed point; it does **not** claim an OCPP frame was sent.
+- Explicit `decision` and `reason` (plus `policy_reason`, `solver_reason`,
+  `command_reason` where applicable). Examples: START, HOLD, INCREASE, DECREASE,
+  START_PENDING, STOP_PENDING, STOP, OFF, INPUT_UNAVAILABLE, WAIT_PHASE_LOCKOUT,
+  COMMAND_FAILED, NO_AUTHORITY, CANCELLED. PLANNED denotes policy-only evaluation,
+  not a claim of successful execution. There is currently no separate software
+  enable/re-enable lockout timer; `enable_lockout=not_implemented` makes that explicit.
+
+Null means absent/unknown, never a fabricated zero. Power is watts, current amps,
+voltage volts, delay/age seconds, SoC percent. A diagnostic collection failure is
+isolated from control; it is explicitly marked rather than triggering a stop.
+Only selected numeric/state metadata is collected, not credentials, arbitrary
+entity attributes, protocol messages or endpoint URLs.
+
+### Freshness remains the existing policy
+
+Power/SoC and selected wallbox-power inputs use HA `last_reported` (fallback
+`last_updated` only for objects without that property). `last_reported` advances
+when an entity reports even the same value; `last_updated` advances only when its
+state/attributes change. This is **HA report age**, not proof of a new physical
+sample inside an inverter. The existing acceptance window is 0–90 seconds, with
+valid units/numbers/ranges and any `valid_until` deadline also required. Battery
+reserve is logged for context; the PV policy does not regulate or reject charging
+based on the reserve reference's age. OCPP measurements have their own timestamps
+and deadlines. No freshness rules or controller defaults changed.
+
+Multiple 5-second evaluations may use the same upstream sample. Fronius PV Manager
+currently has a **30-second coordinator interval**, confirmed by repository analysis;
+changing Wallbox Manager's interval cannot speed up those source entities. No
+new-sample gate, smoothing, or Fronius fast polling is introduced here. See the
+[read-only polling analysis and proposed next step](fronius-polling-analysis.md).
+
+### Next hardware test
+
+1. Install/restart, verify the automatically loaded card as described in
+   [frontend verification](frontend-registration.md), and enable diagnostics.
+2. Record selected reference entities, target SoC/hysteresis, start/stop delays and
+   interval. Reproduce the approximately 39% SoC / 38% target / 3.5 kW PV case.
+3. Save consecutive `PVCTRL` lines from before charging starts through the stop,
+   including event/safety-stop records. Compare `decision/reason`, source ages,
+   site load/surplus, policy target, selected and confirmed points, and retry/delay
+   state. A SoC above target alone does not explain the other input/safety branches.
+4. Check that diagnostic-only toggles produce no charging command or disconnect;
+   compare normal behavior with logging disabled. Check invalid/stale source and
+   phase-lockout cases under the existing hardware test procedure.
+5. Disable diagnostic logging and retain the captured records for analysis before
+   changing the control algorithm or upstream polling.

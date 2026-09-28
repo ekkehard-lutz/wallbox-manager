@@ -416,3 +416,16 @@ Profile settings remain stored when hidden. See the
 [PV profile documentation](docs/pv-surplus-profile.md) and
 [automatic card registration and verification](docs/frontend-registration.md),
 including removal of temporary manual Lovelace resources.
+
+PV troubleshooting now offers an integration-level **PV controller diagnostic
+logging** option (disabled by default). It emits one structured `PVCTRL` INFO
+record per evaluation without changing charging behavior. See
+[enabling diagnostics and the next hardware test](docs/pv-surplus-profile.md#opt-in-pv-controller-diagnostics).
+Source sensor freshness is independent of the controller interval; the inspected
+Fronius PV Manager currently polls every 30 seconds. Its proposed fast/slow design
+is [analysis only](docs/fronius-polling-analysis.md).
+
+The bundled card now uses a single frontend extra-module registration. Stale
+integration-path Lovelace resources are migrated automatically; no Resources row
+or manual recreation is required. Restart/reload the integration and fully reload
+the browser after an update. See [lifecycle details](docs/frontend-registration.md).

@@ -52,9 +52,7 @@ async def test_assets_and_resource_registered_once_under_concurrent_setup(fronte
     url = next(iter(urls))
     assert url.startswith(PATH + "?v=")
     assert len(url.split("?v=")[1]) == 12
-    assert [(item["url"], item["type"]) for item in resources.async_items()] == [
-        (url, "module")
-    ]
+    assert resources.async_items() == []
 
 
 async def test_headless_then_late_frontend_and_lovelace(frontend):
@@ -70,19 +68,16 @@ async def test_headless_then_late_frontend_and_lovelace(frontend):
     frontend.data[LOVELACE_DATA] = SimpleNamespace(resources=resources)
     frontend.bus.async_fire(EVENT_COMPONENT_LOADED, {"component": "lovelace"})
     await frontend.async_block_till_done()
-    assert len(resources.async_items()) == 1
+    assert resources.async_items() == []
     frontend.http.async_register_static_paths.assert_awaited_once()
 
 
-async def test_existing_manual_resource_is_reused_and_updated(frontend):
+async def test_existing_bundled_resource_is_migrated_to_single_loader(frontend):
     resources = initialized(frontend)
-    manual = await resources.async_create_item({"url": PATH, "res_type": "js"})
+    await resources.async_create_item({"url": PATH, "res_type": "js"})
     await async_setup_assets(frontend)
-    items = resources.async_items()
-    assert len(items) == 1
-    assert items[0]["id"] == manual["id"]
-    assert items[0]["type"] == "module"
-    assert items[0]["url"].startswith(PATH + "?v=")
+    assert resources.async_items() == []
+    assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
 
 
 async def test_yaml_resources_remain_untouched(frontend):
@@ -99,5 +94,48 @@ async def test_beta1_in_memory_registration_is_upgraded_without_duplicate_route(
     frontend.data["wallbox_manager_frontend"] = True
     await async_setup_assets(frontend)
     frontend.http.async_register_static_paths.assert_not_awaited()
-    assert len(resources.async_items()) == 1
+    assert resources.async_items() == []
     assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
+
+
+async def test_content_change_removes_old_module_and_resource_duplicates(
+    frontend, monkeypatch
+):
+    resources = initialized(frontend)
+    other = await resources.async_create_item(
+        {"url": "https://example.org" + PATH, "res_type": "module"}
+    )
+    for url in (PATH, PATH + "?v=old", PATH + "?v=older"):
+        await resources.async_create_item({"url": url, "res_type": "module"})
+    await async_setup_assets(frontend)
+    before = frontend.data[DATA_EXTRA_MODULE_URL].urls
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.frontend.Path.read_bytes",
+        lambda _: b"changed module",
+    )
+    await async_setup_assets(frontend)
+    after = frontend.data[DATA_EXTRA_MODULE_URL].urls
+    assert len(after) == 1 and after != before
+    assert resources.async_items() == [other]
+    frontend.http.async_register_static_paths.assert_awaited_once()
+
+
+async def test_repeated_setup_does_not_publish_duplicate_add_events(frontend):
+    initialized(frontend)
+    events = []
+    frontend.data[DATA_EXTRA_MODULE_URL] = UrlManager(
+        lambda *args: events.append(args), []
+    )
+    await async_setup_assets(frontend)
+    await async_setup_assets(frontend)
+    assert len(events) == 1
+
+
+async def test_frontend_manager_replacement_registers_again(frontend):
+    initialized(frontend)
+    await async_setup_assets(frontend)
+    frontend.data[DATA_EXTRA_MODULE_URL] = UrlManager(lambda *args: None, [])
+    frontend.bus.async_fire(EVENT_COMPONENT_LOADED, {"component": "frontend"})
+    await frontend.async_block_till_done()
+    assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
+    frontend.http.async_register_static_paths.assert_awaited_once()
