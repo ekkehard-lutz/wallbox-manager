@@ -242,3 +242,31 @@ new-sample gate, smoothing, or Fronius fast polling is introduced here. See the
    phase-lockout cases under the existing hardware test procedure.
 5. Disable diagnostic logging and retain the captured records for analysis before
    changing the control algorithm or upstream polling.
+
+### First-start reconciliation
+
+An explicit ON first prepares the electrical point while ChargingEnabled is still
+false, then confirms permission independently. A temporary preparation/permission
+refusal now starts an in-memory startup worker with the existing 60-second retry
+interval, even when no prior applied point exists. It re-reads policy and fresh
+execution evidence for each attempt. Only successful preparation and permission
+confirmation hand over to normal PV regulation. OFF, changed intent, ownership or
+authority loss, disconnect/reboot and unload revoke this pending authorization;
+restart/reload never restores it. Phase feedback alone cannot prove the current
+setpoint, so an uncertain operation is retried rather than inferred as applied.
+
+After an accepted command, PV policy checks use its previously verified phase mode
+while continuing to check live power/SoC policy and electrical limits. The runtime
+still fences changes to voltage, capabilities, limits, transaction, intent,
+authority and permission. New writes always require fresh phase-operation proof.
+A temporary phase-feedback gap after confirmation keeps the positive desired
+request instead of manufacturing an OFF request. This does not extend the policy
+stop delay or bypass safety-invalidating inputs.
+
+PVCTRL adds `startup_pending` and `command_fence_reason`; `retry_remaining_s` now
+also includes first-start retries. `policy_reason=actively_charging` describes a
+positive policy decision, not permission or hardware confirmation;
+`policy_allows_charging` makes that distinction explicit. Use `enabled`, `applied`
+and `ongoing_after` to determine actual permission and confirmed continuation.
+Connector availability is diagnostic telemetry, not transport connectivity or
+authority, and is not a command fence by itself.

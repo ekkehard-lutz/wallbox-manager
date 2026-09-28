@@ -304,6 +304,10 @@ class Cycle:
             reason=reason,
             profile_status=p.status.get(t),
             control_status=intent.status,
+            command_fence_reason=intent.fence_reason,
+            startup_pending=t in p.pv_startups,
+            policy_allows_charging=self.data.get("policy_reason")
+            == "actively_charging",
             ongoing_before=self.ongoing_before,
             ongoing_after=p.pv_ongoing.get(t, False),
             applied_before=point(self.before),
@@ -400,11 +404,11 @@ def cycle(profile, target, trigger):
 
 def diagnostic_plan(method):
     @wraps(method)
-    def wrapped(self, target, *, advance=True):
+    def wrapped(self, target, *, advance=True, **kwargs):
         if not advance:
-            return method(self, target, advance=False)
+            return method(self, target, advance=False, **kwargs)
         with cycle(self, target, "plan"):
-            result = method(self, target, advance=True)
+            result = method(self, target, advance=True, **kwargs)
             if record := active(self, target):
                 record.plan = result[3]
                 record.data.update(

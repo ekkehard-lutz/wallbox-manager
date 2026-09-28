@@ -58,6 +58,7 @@ class ManualIntent:
     profile_modes: tuple[int, ...] | None = None
     phase_retry: bool = False
     status: str = "idle"
+    fence_reason: str | None = None
     solver_result: SolverResult | None = None
     command_result: CommandResult | None = None
 
@@ -203,7 +204,9 @@ class ControlRuntime:
         intent.status = "idle"
         return intent
 
-    def resolve(self, target, *, substitute_mode=None, request=None):
+    def resolve(
+        self, target, *, substitute_mode=None, request=None, dispatch_modes=None
+    ):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
             return None, None, "disconnected"
@@ -230,6 +233,11 @@ class ControlRuntime:
                 SolverResult(ResultStatus.UNREACHABLE, Reason.STOP_UNVERIFIED),
                 "zero_current_unverified",
             )
+        # Only post-dispatch policy validation supplies the already verified
+        # dispatched modes; all new writes use fresh phase-operation evidence.
+        eligible_modes = (
+            inputs.eligible_modes if dispatch_modes is None else dispatch_modes
+        )
         result = solve(
             PowerRequest(request.target_w, request.direction, True),
             caps,
@@ -237,11 +245,11 @@ class ControlRuntime:
             now=datetime.now(UTC),
             eligible_modes=tuple(
                 m
-                for m in inputs.eligible_modes
+                for m in eligible_modes
                 if intent.profile_modes is None or m.count in intent.profile_modes
             )
             if substitute_mode is None
-            else tuple(m for m in inputs.eligible_modes if m == substitute_mode),
+            else tuple(m for m in eligible_modes if m == substitute_mode),
             charging_only=substitute_mode is not None,
             limits=inputs.limits
             + tuple(
@@ -536,11 +544,16 @@ class ControlRuntime:
 
         substitute_mode = None
         intent.phase_retry = False
+        intent.fence_reason = None
 
         def current(*, after_dispatch=False, permission_confirmed=False):
             if (
                 self._closed
-                or not fence()
+                or not (
+                    getattr(fence, "after_dispatch", fence)()
+                    if after_dispatch
+                    else fence()
+                )
                 or not self.profile_permitted(target)
                 or generation != intent.generation
                 or (
@@ -556,15 +569,18 @@ class ControlRuntime:
                 or self.runtime.get(target.station).authority_revision
                 != authority_revision
             ):
+                intent.fence_reason = "intent_authority_permission_or_caller"
                 return False
             if hasattr(self, "profiles") and not self.profiles.permits_point(
-                target, resolved.point
+                target, resolved.point, after_dispatch=after_dispatch
             ):
+                intent.fence_reason = "pv_policy"
                 return False
             fresh, result, reason = self.resolve(
                 target, substitute_mode=substitute_mode
             )
             if fresh is None:
+                intent.fence_reason = "inputs_unavailable"
                 return False
             if resolved.point.charging:
                 if (
@@ -573,6 +589,7 @@ class ControlRuntime:
                     )
                     != resolved.point.phase_voltages_v
                 ):
+                    intent.fence_reason = "voltage_changed"
                     return False
             # Compare required electrical values, not sample timestamps.
             fresh = replace(fresh, voltage=inputs.voltage)
@@ -583,8 +600,16 @@ class ControlRuntime:
                     actively_charging=inputs.actively_charging,
                     eligible_modes=inputs.eligible_modes,
                 )
-                return fresh == inputs and self.blocker(target) is None
-            return reason is None and fresh == inputs and result.point == resolved.point
+                valid = fresh == inputs and self.blocker(target) is None
+            else:
+                valid = (
+                    reason is None
+                    and fresh == inputs
+                    and result.point == resolved.point
+                )
+            if not valid:
+                intent.fence_reason = "electrical_transaction_or_pre_dispatch_phase"
+            return valid
 
         if prepared is not None:
 

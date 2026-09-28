@@ -40,6 +40,7 @@ class GridProfiles(PVSurplus):
         self.pv_expiry = {}
         self.pv_retry_until = {}
         self.pv_retry_request = {}
+        self.pv_startups = {}
         self.monotonic = time.monotonic
         self.settings = {}
         self.tasks = {}
@@ -179,6 +180,7 @@ class GridProfiles(PVSurplus):
         self.control.intent(target).generation += 1
         self.status[target] = "idle"
         self.pv_ongoing[target] = False
+        self.pv_startups.pop(target, None)
         self.pv_retry_until.pop(target, None)
         self.pv_retry_request.pop(target, None)
         self.pv_sessions.pop(target, None)
@@ -341,30 +343,33 @@ class GridProfiles(PVSurplus):
                 self.pv_edit(target)
             else:
                 self.control._edit(target, {"target_w": Fraction(0)})
-        expected = (
-            self.pv_request(target)
-            if self.setting(target)["profile"] == "PV_SURPLUS"
-            else None
-        )
-        result = await self.control.request_enabled(
-            target,
-            enabled,
-            fence=lambda: (
-                self.epochs[target] == epoch
-                and (
-                    expected is None
-                    or not enabled
-                    or self.control.intent(target).request.target_w == 0
-                    or self.pv_request(target) == expected
-                )
-            ),
-        )
+        generation = self.control.intent(target).generation + 1
+        start_context = self.control.runtime.get(target.station)
+        if enabled and self.setting(target)["profile"] == "PV_SURPLUS":
+            result = await self.pv_enable_attempt(target, epoch)
+        else:
+            result = await self.control.request_enabled(
+                target, enabled, fence=lambda: self.epochs[target] == epoch
+            )
         if self.epochs[target] != epoch:
             return result
         if enabled and result and result.status == CommandStatus.APPLIED:
             if self.setting(target)["profile"] == "PV_SURPLUS":
                 self.pv_confirm(target)
             self.launch(target)
+        elif (
+            enabled
+            and self.setting(target)["profile"] == "PV_SURPLUS"
+            and result
+            and result.status == CommandStatus.TEMPORARILY_REJECTED
+            and self.can_control(target)
+            and self.control.intent(target).generation == generation
+            and start_context is not None
+            and self.control.runtime.current(start_context.token)
+            and self.control.runtime.get(target.station).authority_revision
+            == start_context.authority_revision
+        ):
+            self.pv_schedule_startup(target, epoch)
         if not enabled:
             await self.reconcile_battery(exclude=target)
         return result
@@ -503,7 +508,10 @@ class GridProfiles(PVSurplus):
         for target in self.tasks.keys() | self.debounce_tasks.keys():
             if target.station == snapshot.token.station and (
                 not snapshot.connected
-                or self.control.runtime.enabled(target) is not True
+                or (
+                    self.control.runtime.enabled(target) is not True
+                    and not self.pv_startup_valid(target, self.epochs.get(target, 0))
+                )
                 or self.control.runtime.authority(target.station)
                 != ControlAuthority.REMOTE
             ):

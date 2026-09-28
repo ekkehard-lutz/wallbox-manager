@@ -63,7 +63,7 @@ def decision(available, soc, settings, ongoing):
 class PVSurplus:
     """Mixin sharing profile persistence, epochs, ownership and primitive controls."""
 
-    def permits_point(self, target, point):
+    def permits_point(self, target, point, *, after_dispatch=False):
         """Apply the existing PV policy at the shared command dispatch fence."""
         if self.setting(target)["profile"] != "PV_SURPLUS":
             return True
@@ -73,7 +73,11 @@ class PVSurplus:
             return True
         if self.closed or "PV_SURPLUS" not in self.available_profiles(target):
             return False
-        power, direction, status, _ = self.pv_plan(target, advance=False)
+        power, direction, status, _ = self.pv_plan(
+            target,
+            advance=False,
+            transition_mode=point.mode if after_dispatch else None,
+        )
         if status == "pv_stop_delay":
             return point == self.control.confirmed_point(target)
         return (
@@ -200,7 +204,7 @@ class PVSurplus:
             return Fraction(0), Direction.DOWN, "measurements_unavailable"
 
     @diagnostic_plan
-    def pv_plan(self, target, *, advance=True):
+    def pv_plan(self, target, *, advance=True, transition_mode=None):
         """Time policy around the common solver, never a second electrical solver."""
         power, direction, status = self.pv_request(target)
         settings = self.setting(target)
@@ -215,7 +219,13 @@ class PVSurplus:
             power = min(power, maximum)
 
         def resolve(watts, policy):
-            return self.control.resolve(target, request=PowerSettings(watts, policy))[1]
+            return self.control.resolve(
+                target,
+                request=PowerSettings(watts, policy),
+                dispatch_modes=(transition_mode,)
+                if transition_mode is not None
+                else None,
+            )[1]
 
         result = resolve(power, direction)
         if (
@@ -267,6 +277,26 @@ class PVSurplus:
                         "pv_start_delay",
                         resolve(Fraction(0), Direction.DOWN),
                     )
+            return power, direction, status, result
+        if (
+            status == "actively_charging"
+            and ongoing
+            and inputs is not None
+            and inputs.current_mode is None
+            and not inputs.eligible_modes
+            and (confirmed := self.control.confirmed_point(target))
+            and confirmed.charging
+            and (
+                held := self.control.resolve(
+                    target,
+                    request=PowerSettings(confirmed.offered_power_w, Direction.DOWN),
+                    dispatch_modes=(confirmed.mode,),
+                )[1]
+            )
+            and held.point == confirmed
+        ):
+            # A telemetry gap after an accepted transition is not an OFF plan.
+            # Keep the desired request; fresh phase proof gates every new write.
             return power, direction, status, result
         if advance:
             self.pv_start_since.pop(target, None)
@@ -389,6 +419,93 @@ class PVSurplus:
             and not self.pv_ongoing[target]
         ):
             self.status[target] = "awaiting_applied"
+
+    async def pv_enable_attempt(self, target, epoch):
+        """Continue one explicitly authorized enable, never acquire authority."""
+        expected = self.pv_request(target)
+
+        def fence():
+            return self.epochs.get(target, 0) == epoch and (
+                self.control.intent(target).request.target_w == 0
+                or self.pv_request(target) == expected
+            )
+
+        # After dispatch the live PV policy still validates the prepared point.
+        # A changed but safe surplus is not a superseding user command.
+        fence.after_dispatch = lambda: self.epochs.get(target, 0) == epoch
+        return await self.control.request_enabled(target, True, fence=fence)
+
+    def pv_startup_valid(self, target, epoch):
+        context = self.pv_startups.get(target)
+        runtime = self.control.runtime
+        state = runtime.get(target.station)
+        enabled = runtime.enabled_observation(target)
+        return bool(
+            context
+            and not self.closed
+            and self.epochs.get(target, 0) == epoch
+            and self.setting(target)["profile"] == "PV_SURPLUS"
+            and "PV_SURPLUS" in self.available_profiles(target)
+            and self.can_control(target)
+            and state
+            and state.connected
+            and state.token == context[0]
+            and enabled
+            and enabled.revision == context[1]
+            and self.control.intent(target).generation == context[2]
+        )
+
+    def pv_schedule_startup(self, target, epoch):
+        runtime = self.control.runtime
+        self.pv_startups[target] = (
+            runtime.get(target.station).token,
+            runtime.enabled_observation(target).revision,
+            self.control.intent(target).generation,
+        )
+        self.pv_retry_until[target] = self.monotonic() + 60
+        self.status[target] = "awaiting_applied"
+        self.tasks[target] = self.hass.async_create_background_task(
+            self.pv_startup_sequence(target, epoch), "PV startup reconciliation"
+        )
+
+    async def pv_startup_sequence(self, target, epoch):
+        try:
+            while self.pv_startup_valid(target, epoch):
+                await self.wait(max(0, self.pv_retry_until[target] - self.monotonic()))
+                if not self.pv_startup_valid(target, epoch):
+                    return
+                if self.monotonic() < self.pv_retry_until[target]:
+                    continue
+                with cycle(self, target, "startup_retry"):
+                    self.pv_edit(target)
+                    # The edits below belong to this authorized retry. Other
+                    # edits between attempts still revoke its captured generation.
+                    context = self.pv_startups[target]
+                    self.pv_startups[target] = (
+                        *context[:2],
+                        self.control.intent(target).generation + 1,
+                    )
+                    result = await self.pv_enable_attempt(target, epoch)
+                    if self.epochs.get(target, 0) != epoch:
+                        return
+                    if result and result.status == CommandStatus.APPLIED:
+                        self.pv_startups.pop(target, None)
+                        self.pv_retry_until.pop(target, None)
+                        self.pv_confirm(target)
+                        self.tasks.pop(target, None)
+                        self.launch(target)
+                        return
+                    if result and result.status != CommandStatus.TEMPORARILY_REJECTED:
+                        return
+                    self.pv_retry_until[target] = self.monotonic() + 60
+                    self.status[target] = "awaiting_applied"
+                    self.control.publish(target)
+        finally:
+            if self.tasks.get(target) is asyncio.current_task():
+                self.tasks.pop(target, None)
+                self.pv_startups.pop(target, None)
+                self.pv_retry_until.pop(target, None)
+            self.control.publish(target)
 
     async def pv_sequence(self, target, epoch, *, stop_first=False):
         try:
