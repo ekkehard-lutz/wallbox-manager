@@ -1,11 +1,11 @@
-"""Real HA frontend managers and Lovelace collections, including late setup."""
+"""Exercise registration with real HA Lovelace storage and YAML collections."""
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL, UrlManager
 from homeassistant.components.lovelace.const import LOVELACE_DATA
 from homeassistant.components.lovelace.resources import (
     ResourceStorageCollection,
@@ -14,7 +14,7 @@ from homeassistant.components.lovelace.resources import (
 from homeassistant.const import EVENT_COMPONENT_LOADED
 from homeassistant.core import HomeAssistant
 
-from custom_components.wallbox_manager.frontend import PATH, async_setup_assets
+from custom_components.wallbox_manager.frontend import KEY, PATH, async_setup_assets
 
 
 @pytest.fixture
@@ -27,115 +27,154 @@ async def frontend(tmp_path):
         await hass.async_stop()
 
 
-def initialized(hass, *, yaml=False):
-    hass.data[DATA_EXTRA_MODULE_URL] = UrlManager(lambda *args: None, [])
-    resources = (
-        ResourceYAMLCollection([])
-        if yaml
-        else ResourceStorageCollection(
-            hass, SimpleNamespace(async_load=AsyncMock(return_value={}))
-        )
+def initialized(hass):
+    resources = ResourceStorageCollection(
+        hass, SimpleNamespace(async_load=AsyncMock(return_value={}))
     )
     hass.data[LOVELACE_DATA] = SimpleNamespace(resources=resources)
     return resources
 
 
-async def test_assets_and_resource_registered_once_under_concurrent_setup(frontend):
+def resource(resources):
+    items = resources.async_items()
+    assert len(items) == 1
+    assert items[0]["type"] == "module"
+    assert items[0]["url"].startswith(PATH + "?v=")
+    assert len(items[0]["url"].split("?v=")[1]) == 12
+    return items[0]
+
+
+async def test_first_repeated_concurrent_and_reload_setup(frontend):
     resources = initialized(frontend)
     await asyncio.gather(*(async_setup_assets(frontend) for _ in range(3)))
+    first = resource(resources).copy()
+    with patch.object(
+        resources, "async_update_item", wraps=resources.async_update_item
+    ) as update:
+        await asyncio.gather(*(async_setup_assets(frontend) for _ in range(3)))
+        await async_setup_assets(frontend)  # Entry unload retains shared state.
+        update.assert_not_called()
+    assert resource(resources) == first
     frontend.http.async_register_static_paths.assert_awaited_once()
     config = frontend.http.async_register_static_paths.call_args.args[0][0]
     assert config.url_path == PATH
     assert config.cache_headers is False
-    urls = frontend.data[DATA_EXTRA_MODULE_URL].urls
-    assert len(urls) == 1
-    url = next(iter(urls))
-    assert url.startswith(PATH + "?v=")
-    assert len(url.split("?v=")[1]) == 12
-    assert resources.async_items() == []
 
 
-async def test_headless_then_late_frontend_and_lovelace(frontend):
-    await async_setup_assets(frontend)
-    frontend.http.async_register_static_paths.assert_not_awaited()
-    frontend.data[DATA_EXTRA_MODULE_URL] = UrlManager(lambda *args: None, [])
-    frontend.bus.async_fire(EVENT_COMPONENT_LOADED, {"component": "frontend"})
-    await frontend.async_block_till_done()
-    assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
-    resources = ResourceStorageCollection(
-        frontend, SimpleNamespace(async_load=AsyncMock(return_value={}))
-    )
-    frontend.data[LOVELACE_DATA] = SimpleNamespace(resources=resources)
-    frontend.bus.async_fire(EVENT_COMPONENT_LOADED, {"component": "lovelace"})
-    await frontend.async_block_till_done()
-    assert resources.async_items() == []
-    frontend.http.async_register_static_paths.assert_awaited_once()
-
-
-async def test_existing_bundled_resource_is_migrated_to_single_loader(frontend):
+@pytest.mark.parametrize(
+    "url,kind",
+    [
+        (PATH, "module"),
+        (PATH + "?v=old", "module"),
+        (PATH, "js"),
+        (PATH + "?v=old", "css"),
+    ],
+)
+async def test_existing_resource_updated_in_place(frontend, url, kind):
     resources = initialized(frontend)
-    await resources.async_create_item({"url": PATH, "res_type": "js"})
+    old = await resources.async_create_item({"url": url, "res_type": kind})
     await async_setup_assets(frontend)
-    assert resources.async_items() == []
-    assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
+    assert resource(resources)["id"] == old["id"]
 
 
-async def test_yaml_resources_remain_untouched(frontend):
-    resources = initialized(frontend, yaml=True)
-    await async_setup_assets(frontend)
-    assert resources.async_items() == []
-    assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
-
-
-async def test_beta1_in_memory_registration_is_upgraded_without_duplicate_route(
-    frontend,
-):
+async def test_duplicates_removed_and_unrelated_preserved(frontend):
     resources = initialized(frontend)
-    frontend.data["wallbox_manager_frontend"] = True
-    await async_setup_assets(frontend)
-    frontend.http.async_register_static_paths.assert_not_awaited()
-    assert resources.async_items() == []
-    assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
-
-
-async def test_content_change_removes_old_module_and_resource_duplicates(
-    frontend, monkeypatch
-):
-    resources = initialized(frontend)
-    other = await resources.async_create_item(
-        {"url": "https://example.org" + PATH, "res_type": "module"}
-    )
+    unrelated = []
+    for url in (
+        "https://example.org" + PATH,
+        "//example.org" + PATH,
+        "/local/wallbox-manager-card.js",
+        "/other.js",
+    ):
+        unrelated.append(
+            await resources.async_create_item({"url": url, "res_type": "module"})
+        )
+    originals = []
     for url in (PATH, PATH + "?v=old", PATH + "?v=older"):
-        await resources.async_create_item({"url": url, "res_type": "module"})
+        originals.append(
+            await resources.async_create_item({"url": url, "res_type": "js"})
+        )
     await async_setup_assets(frontend)
-    before = frontend.data[DATA_EXTRA_MODULE_URL].urls
+    items = resources.async_items()
+    assert len(items) == len(unrelated) + 1
+    assert all(item in items for item in unrelated)
+    keeper = next(item for item in items if item["id"] == originals[0]["id"])
+    assert keeper["type"] == "module"
+    assert keeper["url"].startswith(PATH + "?v=")
+
+
+async def test_content_change_updates_same_resource(frontend, monkeypatch):
+    resources = initialized(frontend)
+    await async_setup_assets(frontend)
+    before = resource(resources).copy()
     monkeypatch.setattr(
         "custom_components.wallbox_manager.frontend.Path.read_bytes",
         lambda _: b"changed module",
     )
     await async_setup_assets(frontend)
-    after = frontend.data[DATA_EXTRA_MODULE_URL].urls
-    assert len(after) == 1 and after != before
-    assert resources.async_items() == [other]
+    after = resource(resources)
+    assert after["id"] == before["id"]
+    assert after["url"] != before["url"]
+    assert (
+        after["url"]
+        == PATH + "?v=" + hashlib.sha256(b"changed module").hexdigest()[:12]
+    )
     frontend.http.async_register_static_paths.assert_awaited_once()
 
 
-async def test_repeated_setup_does_not_publish_duplicate_add_events(frontend):
-    initialized(frontend)
-    events = []
-    frontend.data[DATA_EXTRA_MODULE_URL] = UrlManager(
-        lambda *args: events.append(args), []
-    )
+async def test_late_lovelace_initialization(frontend):
     await async_setup_assets(frontend)
-    await async_setup_assets(frontend)
-    assert len(events) == 1
-
-
-async def test_frontend_manager_replacement_registers_again(frontend):
-    initialized(frontend)
-    await async_setup_assets(frontend)
-    frontend.data[DATA_EXTRA_MODULE_URL] = UrlManager(lambda *args: None, [])
     frontend.bus.async_fire(EVENT_COMPONENT_LOADED, {"component": "frontend"})
     await frontend.async_block_till_done()
-    assert len(frontend.data[DATA_EXTRA_MODULE_URL].urls) == 1
+    resources = initialized(frontend)
+    frontend.bus.async_fire(EVENT_COMPONENT_LOADED, {"component": "lovelace"})
+    await frontend.async_block_till_done()
+    resource(resources)
     frontend.http.async_register_static_paths.assert_awaited_once()
+
+
+async def test_late_http_initialization(frontend):
+    http = frontend.http
+    frontend.http = None
+    resources = initialized(frontend)
+    await async_setup_assets(frontend)
+    assert not resources.async_items()
+    frontend.http = http
+    frontend.bus.async_fire(EVENT_COMPONENT_LOADED, {"component": "http"})
+    await frontend.async_block_till_done()
+    resource(resources)
+
+
+async def test_restart_loads_persisted_resource_without_duplicate(frontend):
+    resources = initialized(frontend)
+    await async_setup_assets(frontend)
+    before = resource(resources).copy()
+    await resources.store.async_save({"items": resources.async_items()})
+    frontend.data[KEY]["unsubscribe"]()
+    del frontend.data[KEY]
+    restarted = initialized(frontend)  # Fresh, unloaded collection reads HA storage.
+    await async_setup_assets(frontend)
+    assert resource(restarted) == before
+
+
+@pytest.mark.parametrize("yaml", [True, False])
+async def test_non_mutable_resources_remain_untouched(frontend, caplog, yaml):
+    items = [{"url": PATH + "?v=pinned", "type": "js"}]
+    resources = (
+        ResourceYAMLCollection(items.copy())
+        if yaml
+        else SimpleNamespace(data=items.copy())
+    )
+    frontend.data[LOVELACE_DATA] = SimpleNamespace(resources=resources)
+    await async_setup_assets(frontend)
+    assert resources.data == items
+    assert "cannot automatically register" in caplog.text
+    frontend.http.async_register_static_paths.assert_awaited_once()
+
+
+async def test_old_static_sentinel_is_reused(frontend):
+    resources = initialized(frontend)
+    frontend.data[KEY] = True
+    await async_setup_assets(frontend)
+    frontend.http.async_register_static_paths.assert_not_awaited()
+    resource(resources)
