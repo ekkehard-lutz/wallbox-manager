@@ -196,6 +196,21 @@
       },
       "min_soc": {
         "name": "{scope} Entladereserve"
+      },
+      "soll_soc_speicher": {
+        "name": "Speicher-Ziel-SoC"
+      },
+      "soc_hysterese": {
+        "name": "SoC-Hysterese"
+      },
+      "regulation_interval": {
+        "name": "Regelintervall"
+      },
+      "pv_start_delay": {
+        "name": "PV-Startverzögerung"
+      },
+      "pv_stop_delay": {
+        "name": "PV-Stoppverzögerung"
       }
     },
     "select": {
@@ -210,11 +225,19 @@
       "charging_profile": {
         "name": "Ladeprofil {scope}",
         "state": {
-          "NETZ": "Netz"
+          "NETZ": "Netz",
+          "PV_SURPLUS": "PV-Überschuss"
         }
       },
       "active_wallbox": {
         "name": "Aktive Wallbox"
+      },
+      "pv_approximation": {
+        "name": "PV-Leistungsannäherung",
+        "state": {
+          "up": "Nicht unter Soll",
+          "down": "Nicht über Soll"
+        }
       }
     },
     "button": {
@@ -227,10 +250,13 @@
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "Optionale Referenzen für den gemeinsamen Hausspeicher. Stationsfähigkeiten bearbeiten Sie direkt in der Unterkonfiguration der Wallbox.",
+        "description": "PV-Überschuss benötigt beide Leistungsreferenzen. Ohne Speicher-SoC arbeitet es ohne Speicher; die Entladereserve ist davon unabhängig.",
         "data": {
           "min_soc_speicher": "Batterie-Mindestreserve",
-          "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand"
+          "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand",
+          "leistung_pv": "PV-Leistung",
+          "leistung_verbraucher": "Gesamtverbrauch (einschließlich ausgewählter Wallbox)",
+          "pv_diagnostic_logging": "PV-Regler-Diagnoseprotokoll"
         }
       }
     }

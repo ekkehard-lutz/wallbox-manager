@@ -206,8 +206,10 @@ The integration serves its bundled JS directly at
 It registers that URL with HA's `frontend.add_extra_js_url`, the public API for
 custom integrations to load extra modules. `after_dependencies: frontend` orders
 setup when the frontend is configured. Headless HA needs no frontend resources.
-This works without editing Lovelace resource storage and does not depend on HACS
-also installing this integration repository as a frontend repository. Updates use
+This does not depend on HACS also installing this integration repository as a
+frontend repository. Old entries for the integration-owned local route are
+removed through the Lovelace collection API; the extra module is the sole
+automatic loader. YAML lists and unrelated resources are untouched. Updates use
 a content hash to avoid stale browser assets. No dashboard card is inserted.
 
 Add a card with only:
@@ -228,7 +230,7 @@ configuration keys are no longer part of the public interface. For an upgrade fr
 beta.1, **remove the old manually registered `/local/wallbox-manager-card.js`
 resource once**, then refresh the browser; otherwise the old module can register
 its custom element first. Future updates require no copy to `/config/www` and no
-manual resource maintenance. No user resources are automatically deleted.
+manual resource maintenance. See [registration lifecycle and migration](frontend-registration.md).
 
 The backend active-wallbox select exposes the discovered topology and readiness.
 Control entities expose integration-owned `wallbox_manager_role`, entry identity

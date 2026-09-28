@@ -164,6 +164,10 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
         self.data = migrate_options(self.config_entry.options)
         fields = {
             vol.Optional(
+                "pv_diagnostic_logging",
+                default=self.data.get("pv_diagnostic_logging", False),
+            ): bool,
+            vol.Optional(
                 "min_soc_speicher",
                 description={"suggested_value": self.data.get("min_soc_speicher")},
             ): EntitySelector(EntitySelectorConfig(domain=["number", "input_number"])),
@@ -172,11 +176,30 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 description={"suggested_value": self.data.get("soc_speicher_aktuell")},
             ): EntitySelector(EntitySelectorConfig()),
         }
+        for key in ("leistung_pv", "leistung_verbraucher"):
+            fields[
+                vol.Optional(key, description={"suggested_value": self.data.get(key)})
+            ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
         if user_input is not None:
-            for key in ("min_soc_speicher", "soc_speicher_aktuell"):
+            for key in (
+                "min_soc_speicher",
+                "soc_speicher_aktuell",
+                "leistung_pv",
+                "leistung_verbraucher",
+            ):
                 self.data.pop(key, None)
                 if user_input.get(key):
                     self.data[key] = user_input[key]
+            if "pv_diagnostic_logging" in user_input:
+                self.data["pv_diagnostic_logging"] = user_input["pv_diagnostic_logging"]
+            # A diagnostic-only edit must not disconnect or restart control.
+            self.automatic_reload = {
+                k: v for k, v in self.data.items() if k != "pv_diagnostic_logging"
+            } != {
+                k: v
+                for k, v in self.config_entry.options.items()
+                if k != "pv_diagnostic_logging"
+            }
             return self.async_create_entry(title="", data=self.data)
         return self.async_show_form(step_id="init", data_schema=vol.Schema(fields))
 

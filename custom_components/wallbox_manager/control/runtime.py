@@ -199,7 +199,7 @@ class ControlRuntime:
         intent.status = "idle"
         return intent
 
-    def resolve(self, target, *, substitute_mode=None):
+    def resolve(self, target, *, substitute_mode=None, request=None):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
             return None, None, "disconnected"
@@ -217,7 +217,8 @@ class ControlRuntime:
         ):
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
-        if intent.request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
+        request = request or intent.request
+        if request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
             from ..solver.operating_point import Reason, ResultStatus
 
             return (
@@ -226,7 +227,7 @@ class ControlRuntime:
                 "zero_current_unverified",
             )
         result = solve(
-            PowerRequest(intent.request.target_w, intent.request.direction, True),
+            PowerRequest(request.target_w, request.direction, True),
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
@@ -466,7 +467,13 @@ class ControlRuntime:
         return result
 
     async def apply_stored(
-        self, target, *, prepare=False, fence=lambda: True, prepared=None
+        self,
+        target,
+        *,
+        prepare=False,
+        fence=lambda: True,
+        prepared=None,
+        reuse_applied=False,
     ):
         """Apply a target once; never change hardware permission."""
         if not self.profile_permitted(target):
@@ -529,6 +536,10 @@ class ControlRuntime:
                 != authority_revision
             ):
                 return False
+            if hasattr(self, "profiles") and not self.profiles.permits_point(
+                target, resolved.point
+            ):
+                return False
             fresh, result, reason = self.resolve(
                 target, substitute_mode=substitute_mode
             )
@@ -563,6 +574,12 @@ class ControlRuntime:
                 after_dispatch=True, permission_confirmed=True
             )
             prepared["fence"] = prepared_fence
+        prior_point = self.confirmed_point(target)
+        if reuse_applied and prior_point == resolved.point and current():
+            intent.command_result = CommandResult(CommandStatus.APPLIED)
+            intent.status = "applied"
+            self.publish(target)
+            return intent.command_result
         self._confirmed_points.pop(target, None)
         intent.status = "pending"
         self.publish(target)
@@ -588,9 +605,12 @@ class ControlRuntime:
             if blocked is None and substitute.point is not None:
                 resolved = substitute
                 intent.solver_result = resolved
-                result = await apply_operating_point(
-                    adapter, resolved.point, is_current=current
-                )
+                if reuse_applied and prior_point == resolved.point and current():
+                    result = CommandResult(CommandStatus.APPLIED)
+                else:
+                    result = await apply_operating_point(
+                        adapter, resolved.point, is_current=current
+                    )
         if generation != intent.generation or (
             result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
         ):

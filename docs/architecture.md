@@ -1225,3 +1225,36 @@ The station owns all CP and connection-detection mechanics. Its actual enable
 reader confirms the EVSE register through existing command dispatch; unavailable
 hardware produces an unsuccessful read rather than a synthetic Disabled value.
 No lockout timers or timer configuration are implemented in Stage 1.
+
+## PV Surplus implementation (0.3.x)
+
+`GridProfiles` now owns both NETZ and PV_SURPLUS settings and task lifetimes.
+`pv_surplus.py` supplies measurement validation and the battery policy; it does
+not implement an electrical solver or protocol control. Positive targets and OFF
+use `ControlRuntime.resolve/apply_stored`, with the existing command fences,
+phase-lockout fallback and one-second power debounce. PV-only reuse of confirmed
+points avoids duplicate dispatch, including a retained phase-lockout fallback.
+The profile continuation latch is cleared by pauses, invalid measurements and
+lifecycle invalidation. Reference options and profile settings persist, while
+permission and continuation do not resume on reload. Grid battery reserve
+requests exclude PV profiles. See [PV Surplus](pv-surplus-profile.md) for the
+implemented rules and the distinction from future profile designs above.
+
+### PV beta.2 policy refinements
+
+Profile availability is exposed by the backend per connector and depends on the
+owning entry's configured power references, not live sensor availability. Missing
+mappings fence positive commands; automatic fallback waits for confirmed OFF.
+Profile selection and settings without authority are configuration-only actions.
+Explicit ownership takeover and explicit charging permission remain separate.
+
+`pv_plan` wraps the existing `ControlRuntime.resolve` solver with start/stop
+monotonic deadlines. `resolve(request=...)` provides side-effect-free candidate
+selection, including the minimum feasible point during stop delay. The original
+PV continuation latch, command generations, phase-lockout retry and OCPP dispatch
+are reused. Safety events and measurement expiry bypass delay deadlines. Runtime
+deadlines are never persisted, while user settings are.
+
+Frontend registration uses supported frontend/collection APIs, handles late
+component setup and guards duplicate execution of the bundled card. See
+[frontend registration](frontend-registration.md).

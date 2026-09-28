@@ -52,6 +52,8 @@ async def async_setup_entry(
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP
     from homeassistant.exceptions import ConfigEntryNotReady
 
+    from .frontend import async_setup_assets
+
     # Library/schema module imports may read files; keep them off the HA loop.
     transport = await hass.async_add_executor_job(
         import_module, ".protocols.ocpp.common.transport", __package__
@@ -95,6 +97,7 @@ async def async_setup_entry(
         control.profiles = profiles
         entry.runtime_data = EntryRuntime(state, server, storage, control, profiles)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        await async_setup_assets(hass)
     except BaseException:
         if profiles is not None:
             await profiles.close()

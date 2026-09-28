@@ -92,7 +92,9 @@ class SessionEntity(StationEntity):
     @property
     def extra_state_attributes(self):
         energy = self.runtime.sessions.measurement(
-            self.scope, Quantity.ENERGY, datetime.now(UTC)
+            self.scope,
+            Quantity.POWER if self.key == "power" else Quantity.ENERGY,
+            datetime.now(UTC),
         )
         now = datetime.now(UTC)
         return {
@@ -111,9 +113,12 @@ class SessionEntity(StationEntity):
             **scope_attributes(self.runtime, self.entry_id, self.scope),
             "session_active": self.session.active,
             "valid_until": energy.valid_until.isoformat()
-            if self.key == "energy"
+            if self.key in ("energy", "power")
             and energy
-            and energy.observed_at == self.session.energy_at
+            and energy.observed_at
+            == (
+                self.session.power_at if self.key == "power" else self.session.energy_at
+            )
             else None,
             "station_id": self.station.value,
             "evse_id": self.session.evse_id.value,
