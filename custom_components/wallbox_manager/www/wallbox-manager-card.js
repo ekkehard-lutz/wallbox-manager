@@ -55,7 +55,7 @@ function liveValues(states, discovery, language, now = Date.now()) {
   const de = language?.startsWith("de"), empty = "—";
   const number = value => new Intl.NumberFormat(language, {maximumFractionDigits: 1}).format(value);
   const connected = discovery.inventory[discovery.displayed]?.connected;
-  const text = (role, labels) => connected && available(state(role)) && state(role).attributes.connected !== false && (!state(role).attributes.valid_until || fresh(state(role),now)) ? (labels[state(role).state] || empty) : empty;
+  const text = (role, labels) => available(state(role)) && (state(role).attributes.state_represents === "last_known_observation" || (connected && state(role).attributes.connected !== false && (!state(role).attributes.valid_until || fresh(state(role),now)))) ? (labels[state(role).state] || empty) : empty;
   const connection = text("connector_state", de ? {available:"Frei", occupied:"Belegt", reserved:"Reserviert", faulted:"Störung"} : {available:"Available", occupied:"Occupied", reserved:"Reserved", faulted:"Faulted"});
   const charging = text("charging_state", de ? {idle:"Bereit",connected:"Verbunden",preparing:"Vorbereitung",charging:"Lädt",suspended_vehicle:"Vom Fahrzeug pausiert",suspended_station:"Von Wallbox pausiert",finishing:"Beendet"} : {idle:"Idle",connected:"Connected",preparing:"Preparing",charging:"Charging",suspended_vehicle:"Paused by vehicle",suspended_station:"Paused by wallbox",finishing:"Finishing"});
   const session = role => connected && available(state(role)) && state(role).attributes.connected !== false && state(role).attributes.session_active === true ? Number(state(role).state) : NaN;
@@ -287,7 +287,7 @@ class WallboxManagerCard extends HTMLElement {
     get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     const pv = state("charging_profile")?.state === "PV_SURPLUS";
     get("power-row").hidden = pv;
-    get("reserve-row").hidden = pv || !attrs.battery_configured;
+    get("reserve-row").hidden = !(attrs.battery_reserve_configured ?? (!pv && attrs.battery_configured));
     get("approximation-row").hidden = !pv || !!attrs.battery_configured;
     get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
     this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"]]);
@@ -307,6 +307,11 @@ class WallboxManagerCard extends HTMLElement {
       const id = key === "power" ? "live-power" : key;
       get(id).textContent = value;
       if (labels[key]) get(`${id}-label`).textContent = labels[key];
+    }
+    for (const [id, role] of [["connection", "connector_state"], ["charging", "charging_state"]]) {
+      const stale = state(role)?.attributes.state_fresh === false;
+      get(id).style.opacity = stale ? "0.5" : "1";
+      get(id).title = stale ? (de ? "Letzter bekannter Zustand · aktuell nicht beobachtbar" : "Last known state · not currently observable") : "";
     }
     const errors = de ? {previous_off_unconfirmed:"Vorherige Wallbox: Ladefreigabe OFF nicht bestätigt.",previous_wallbox_unavailable:"Vorherige Wallbox nicht erreichbar.",previous_authority_unknown:"Steuerung der vorherigen Wallbox unbekannt.",battery_restore_pending:"Batteriereserve konnte noch nicht wiederhergestellt werden.",takeover_failed:"Steuerungsübernahme fehlgeschlagen.",wallbox_unavailable:"Wallbox nicht erreichbar.",off_unconfirmed:"Ladefreigabe OFF nicht bestätigt.",takeover_stale:"Steuerungsübernahme bitte erneut ausführen.",transition_failed:"Wallbox-Wechsel fehlgeschlagen."} : {previous_off_unconfirmed:"Previous wallbox: charging permission OFF not confirmed.",previous_wallbox_unavailable:"Previous wallbox unavailable.",previous_authority_unknown:"Previous wallbox authority unknown.",battery_restore_pending:"Battery reserve restoration pending.",takeover_failed:"Control takeover failed.",wallbox_unavailable:"Wallbox unavailable.",off_unconfirmed:"Charging permission OFF not confirmed.",takeover_stale:"Please take control again.",transition_failed:"Wallbox switch failed."};
     const blocked = de ? {voltage_unavailable:"Keine aktuellen Spannungswerte. Messdaten der Wallbox prüfen.",capabilities_unavailable:"Technische Grenzen fehlen. Verbindung und Wallbox-Konfiguration prüfen.",direction_unreachable:"Sollleistung mit der gewählten Annäherung nicht erreichbar. Sollleistung oder Annäherung anpassen.",zero_current_unverified:"Nullleistung wird nicht bestätigt unterstützt. Ladefreigabe deaktivieren, um zu stoppen.",electrical_limit:"Kein Ladepunkt innerhalb der Stromgrenzen. Einstellungen prüfen.",no_eligible_mode:"Keine unterstützte Phasenkonfiguration verfügbar. Wallbox-Konfiguration prüfen."} : {voltage_unavailable:"No fresh voltage readings. Check wallbox metering.",capabilities_unavailable:"Technical limits unavailable. Check connection and wallbox configuration.",direction_unreachable:"Requested power cannot meet the selected approximation policy. Adjust power or approximation.",zero_current_unverified:"Zero-power control is unverified. Disable charging permission to stop.",electrical_limit:"No charging point within current limits. Check settings.",no_eligible_mode:"No supported phase configuration available. Check wallbox configuration."};

@@ -162,7 +162,9 @@ async def battery(tmp_path):
     async def write(call):
         calls.append(call.data["value"])
         hass.states.async_set(
-            "number.reserve", str(call.data["value"]), {"min": 0, "max": 100}
+            "number.reserve",
+            str(call.data["value"]),
+            dict(hass.states.get("number.reserve").attributes),
         )
 
     hass.services.async_register("number", "set_value", write)

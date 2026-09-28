@@ -60,6 +60,7 @@ async def recreate(
     mismatch=False,
     reload=False,
     wait_recovery=True,
+    phase_event=True,
 ):
     old = control.runtime.get(bound.target.station)
     session = control.runtime.sessions.get(bound.target)
@@ -96,7 +97,8 @@ async def recreate(
         live.enabled_poll_task.cancel()
     measured(runtime, token, bound.target)
     await transaction(peer, connector=1, identity=transaction_id)
-    await physical_report(peer, "Rxx")
+    if phase_event:
+        await physical_report(peer, getattr(peer, "phase_read_value", "Rxx"))
     new_control = create_control_runtime(
         runtime,
         SimpleNamespace(sessions={bound.target.station: SimpleNamespace(adapter=live)}),
@@ -105,7 +107,11 @@ async def recreate(
     new_owner = owner if reload else ProfileOwnership(hass)
     await new_owner.load()
     remove = new_owner.register(entry, new_control)
-    new_profile = GridProfiles(hass, entry, new_control, BatteryReserve(hass, entry))
+    battery = BatteryReserve(hass, entry)
+    await battery.load(
+        preserve=bool(new_owner.record and new_owner.record["enabled_intent"])
+    )
+    new_profile = GridProfiles(hass, entry, new_control, battery)
     await new_profile.load()
     new_control.profiles = new_profile
     parked = asyncio.Event()
@@ -332,24 +338,46 @@ async def test_schedule_readback_is_fenced_and_voltage_drift_is_semantic(site, c
         assert result.phase_voltages_v == (Fraction("229.6"),)
 
 
-async def test_grid_profile_recovery_does_not_replay_matching_point(site):
+@pytest.mark.parametrize("power,phases,current", [(2.3, 1, 10), (5.52, 3, 8)])
+async def test_grid_profile_recovery_does_not_replay_matching_point(
+    site, power, phases, current
+):
     owner, (a, _), hass = site
     c, bound, peer, p, key = a
     await owner.activate(key)
-    await p.set_value(bound.target, "power_kw", 2.3)
+    await p.set_value(bound.target, "power_kw", power)
+    peer.phase_read_value = "RST" if phases == 3 else "Rxx"
+    await physical_report(peer, peer.phase_read_value)
     p.wait = lambda _: asyncio.Event().wait()
     await p.permission(bound.target, True)
     schedule(peer, c.confirmed_point(bound.target))
     counts = len(peer.requests), len(peer.permissions), len(peer.authority_requests)
-    owner, c, p, remove = await recreate(owner, c, bound, peer, p, hass)
+    owner, c, p, remove = await recreate(
+        owner, c, bound, peer, p, hass, phase_event=False
+    )
     try:
         assert owner.ready and p.setting(bound.target)["profile"] == "NETZ"
-        assert c.confirmed_point(bound.target).current_a == 10
+        assert c.confirmed_point(bound.target).current_a == current
+        attrs = c.attributes(bound.target)
+        assert attrs["applied_phase_count"] == phases
+        assert attrs["applied_current_a"] == current
+        assert attrs["electrical_recovery_status"] == "point_adopted"
+        from custom_components.wallbox_manager.control_entity import ControlEntity
+
+        entity = ControlEntity(c, c.entry_id, bound.target, "charging_profile")
+        assert entity.extra_state_attributes["applied_phase_count"] == phases
+        assert entity.extra_state_attributes["applied_current_a"] == current
         assert counts == (
             len(peer.requests),
             len(peer.permissions),
             len(peer.authority_requests),
         )
+        p.debounce_wait = lambda _: asyncio.sleep(0)
+        await p.set_value(bound.target, "power_kw", power + 0.7)
+        await p.debounce_tasks[bound.target]
+        assert len(peer.requests) == counts[0] + 1
+        assert c.attributes(bound.target)["applied_current_a"] != current
+        assert len(peer.permissions) == counts[1]
     finally:
         await p.close()
         c.close()
@@ -423,3 +451,75 @@ async def test_local_observed_during_teardown_still_revokes_history(site):
         ),
     )
     assert owner.record is None and owner.status == "ownership_rejected_local"
+
+
+async def test_live_reserve_survives_owned_reload_and_restores_on_permission_off(site):
+    from datetime import timedelta
+
+    from custom_components.wallbox_manager.core.telemetry import (
+        Channel,
+        Observation,
+        Quantity,
+        State,
+    )
+
+    owner, c, bound, peer, p, hass = await prepared(site)
+    target = bound.target
+    options = {
+        "min_soc_speicher": "number.reserve",
+        "soc_speicher_aktuell": "sensor.soc",
+    }
+    p.entry.options.update(options)
+    p.battery = BatteryReserve(hass, p.entry)
+    p.setting(target)["min_soc"] = 40
+    hass.states.async_set("number.reserve", "20", {"step": 1})
+    hass.states.async_set("sensor.soc", "65", {"unit_of_measurement": "%"})
+    writes = []
+
+    async def write(call):
+        writes.append(call.data["value"])
+        hass.states.async_set("number.reserve", str(call.data["value"]), {"step": 1})
+
+    hass.services.async_register("number", "set_value", write)
+
+    def flow(control, token):
+        now = datetime.now(UTC)
+        control.runtime.observe(
+            token,
+            (
+                Observation(
+                    Channel(target, Quantity.CHARGING_STATE),
+                    State.CHARGING,
+                    now,
+                    now,
+                    None,
+                    "test",
+                ),
+                Observation(
+                    Channel(target, Quantity.POWER),
+                    2300,
+                    now,
+                    now,
+                    now + timedelta(seconds=60),
+                    "test",
+                ),
+            ),
+        )
+
+    flow(c, bound.token)
+    await p.reconcile_battery()
+    assert writes == [40]
+    owner, c, p, remove = await recreate(owner, c, bound, peer, p, hass)
+    try:
+        await p.reconcile_battery()
+        assert writes == [40]  # Still awaiting live flow; no restore on load.
+        flow(c, c.runtime.get(target.station).token)
+        await p.reconcile_battery()
+        assert writes == [40]
+        assert p.battery.record["original"] == 20
+        await p.permission(target, False)
+        assert writes == [40, 20]
+    finally:
+        await p.close()
+        c.close()
+        remove()

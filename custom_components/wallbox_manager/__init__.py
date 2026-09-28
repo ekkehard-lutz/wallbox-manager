@@ -91,7 +91,13 @@ async def async_setup_entry(
         ownership = await async_get_ownership(hass)
         entry.async_on_unload(ownership.register(entry, control))
         battery = BatteryReserve(hass, entry)
-        await battery.load()
+        await battery.load(
+            preserve=bool(
+                ownership.record
+                and ownership.record["enabled_intent"]
+                and ownership.resolve(ownership.active_wallbox)[0] is control
+            )
+        )
         profiles = GridProfiles(hass, entry, control, battery)
         profiles.recovery_ready = False
         await profiles.load()

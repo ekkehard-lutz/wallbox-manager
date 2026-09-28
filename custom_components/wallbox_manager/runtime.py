@@ -24,6 +24,7 @@ class Runtime:
         self.sessions = SessionLedger()
         self._stations: dict[StationId, StationSnapshot] = {}
         self._phase_epoch = {}
+        self._cp_epoch = {}
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
     @property
@@ -209,6 +210,8 @@ class Runtime:
             or old.valid_until <= observation.observed_at
         ):
             revision += 1
+        if old is None or old.enabled != observation.enabled:
+            self._cp_epoch[observation.scope] = observation.observed_at
         observation = replace(observation, revision=revision)
         self._publish(
             replace(
@@ -299,6 +302,28 @@ class Runtime:
                 raise ValueError("session observation belongs to another station")
             self.sessions.observe(observations, external_id)
 
+    def cp_scope(self, scope):
+        if isinstance(scope, ConnectorId):
+            return scope
+        if isinstance(scope, EvseId) and (state := self.get(scope.station)):
+            targets = [t for t in state.connectors if t.evse == scope]
+            return targets[0] if len(targets) == 1 else None
+        return None
+
+    def physical_state_fresh(self, observation):
+        if observation is None:
+            return False
+        state = self.get(station_of(observation.channel.scope))
+        if not state or not state.connected or not observation.fresh(datetime.now(UTC)):
+            return False
+        scope = self.cp_scope(observation.channel.scope)
+        enabled = self.enabled_observation(scope) if scope else None
+        if enabled is not None and self.enabled(scope) is not True:
+            return False
+        return observation.observed_at >= self._cp_epoch.get(
+            scope, observation.observed_at
+        )
+
     def observe(
         self,
         token: SessionToken,
@@ -321,6 +346,18 @@ class Runtime:
             for o in incoming
         ):
             raise ValueError("observation belongs to another station or is invalid")
+        # CP-off status reports cannot establish physical vehicle presence.
+        # Explicit transaction lifecycle events are handled separately.
+        incoming = tuple(
+            o
+            for o in incoming
+            if not (
+                o.channel.quantity
+                in (Quantity.CONNECTOR_STATE, Quantity.CHARGING_STATE)
+                and (target := self.cp_scope(o.channel.scope)) is not None
+                and self.enabled(target) is False
+            )
+        )
         old = self.get(token.station)
         values = {o.channel: o for o in old.observations}
         supported = dict.fromkeys(old.supported_channels)

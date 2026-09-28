@@ -179,29 +179,67 @@ supply a finite numeric percentage from 0 to 100. Before writes, the backend
 checks availability, service support and entity bounds. One missing reference
 disables new battery overrides without affecting ordinary Grid charging.
 
-Only the active, ready, actually charging connector can request an override.
-Actual charging requires an active transaction, charging state and positive fresh
-flow. The per-wallbox `min_soc` stays with that profile. On an episode's start,
-read current reserve and SOC. If requested reserve is higher than current reserve,
-journal the original before writing `min(requested reserve, current SOC)`, even
-when SOC is below the original. An already sufficient reserve remains unchanged.
-Changing `min_soc` during an episode is stored for the next episode.
+Only the active, ready, actually charging connector can request an override,
+for Grid or PV Surplus. Actual charging requires an active transaction, charging
+state and positive fresh flow. The existing session ledger selects connector,
+unambiguous EVSE and TransactionEvent power; embedded transaction metering does
+not need a duplicate ordinary MeterValues channel.
 
-Permission OFF, profile selection, active-wallbox switch, disconnect, finishing/
-suspension, authority loss or unload restores the original, but only while the
-entity still matches the temporary value. A different external value wins and is
-not overwritten or reasserted during that episode. An external write of the exact
-same numeric value cannot be distinguished. A resumed episode reads a new baseline.
-Non-active Local charging never activates a reserve override.
+The per-wallbox `min_soc` is the **profile charging reserve**, independent of the
+PV storage target `soll_soc_speicher` and its `soc_hysterese`. Before the first
+override, capture the installation's actual reserve and persist it atomically.
+The temporary value is `max(original, downsize(min(profile reserve, actual SoC)))`.
+Downsize uses the number entity's step grid anchored at its minimum, with a
+one-percentage-point default when step metadata is absent; its maximum also
+bounds the request. Thus original 20, requested 40 and SoC 65 yields 40; SoC 37.8
+with step 1 yields 37; SoC at/below 20 never lowers the original. SoC must be
+finite, 0–100 and reported within 90 seconds. Unavailable, restored or explicitly
+expired entity evidence cannot authorize a write. A constant reserve number does
+not expire merely because its value has not changed.
 
-The existing atomic journal survives restart, reload and reference changes.
-Recovery restores before new activation. Failed restoration retains the journal;
-there is one failed write attempt per runtime, with another attempt after a
-referenced entity becomes available or reload. Failed activation is not retried
-through every telemetry event. Unconfirmed writes remain journaled and diagnosed.
-HA has no atomic compare-and-set number service, so an external write racing the
-actual service dispatch remains a limitation. Switching owners waits for safe
-reserve release rather than replacing a pending journal.
+Owned overrides follow changed profile reserve/SoC only when the down-sized value
+changes; repeated identical evaluations issue no writes. Failed writes do not
+create a regulation-cycle retry loop. The journal retains the previous and pending
+temporary values during adjustment so a failed write cannot lose the original.
+Permission OFF, profile selection, owner switch, vehicle/session end, observed
+suspension, authority loss and ordinary control termination restore the original,
+but only while the entity matches the value written by Wallbox Manager. External
+changes win, including an external return to the original; no reassertion occurs
+during that charging episode. An external write of exactly the same numeric value
+cannot be distinguished. HA has no atomic compare-and-set number service, so an
+external write racing actual service dispatch remains a limitation.
+
+A normal owned HA shutdown/reload preserves the existing journal and override.
+Startup waits for the existing ownership reconciliation and fresh charging evidence,
+then compares/adopts the override without `40 → 20 → 40` oscillation. Rejected
+ownership or persisted OFF releases it through the same compare-before-restore
+path. Missing startup evidence leaves restoration/reconciliation pending; it grants
+no new authority. Without legitimate retained ownership, load/unload restores as
+before. Changed entity references restore the journaled old entity before any new
+override. Failed restoration retains the journal and permits another attempt when
+the entity returns; owner switching waits for safe reserve release.
+
+Entity attributes include `battery_status` and `battery_reserve` diagnostics:
+original/profile/observed/desired reserve, SoC, write count/last value, pending
+restoration and error reason. Unchanged cycles do not emit repeated error logs.
+
+### Electrical display after recovery
+
+Continuing hardware charging alone does not establish a confirmed current limit.
+The five-second `Connector.PhaseRotation` NotifyEvent cache may be absent after
+restart. Recovery now reads that same scoped Actual variable with GetVariables,
+then validates the fresh A-unit Composite Schedule against physical phase,
+voltage, capabilities, limits, permission, authority and generation. Unsupported,
+ambiguous, expired or mismatched evidence keeps recovery waiting. There is no
+fallback from measured EV current or historical watts.
+
+A validated point is adopted into the existing confirmed-point store and published
+immediately through `applied_phase_count` and `applied_current_a`. A matching
+3p/8A schedule therefore appears without changing desired power or issuing another
+operating-point write. `electrical_recovery_status` distinguishes missing evidence,
+rejected/stale readback, phase/voltage problems, rejected electrical resolution and
+successful adoption. GetVariables and GetCompositeSchedule support still require
+hardware validation; neither read changes CP or charging permission.
 
 ## Zero-configuration card and automatic resource loading
 

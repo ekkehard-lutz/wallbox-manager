@@ -20,7 +20,7 @@ function runtime() {
     ms=end;
   },get pending(){return timers.size;},listeners};
   class Node {
-    constructor() { this.children = []; this.value = ''; this.textContent = ''; }
+    constructor() { this.style = {}; this.children = []; this.value = ''; this.textContent = ''; }
     replaceChildren(...nodes) { this.children = nodes; }
     focus() {}
     setPointerCapture(id) { this.pointer=id; }
@@ -528,4 +528,24 @@ test('profile availability is discovered separately for the displayed connector'
   c.hass={...c._hass};
   assert.equal(get('profile-row').hidden,false);
   assert.equal(get('profile').value,'PV_SURPLUS');
+});
+
+test('last known CP states remain visible and dimmed until fresh observations', () => {
+  const data = states(true);
+  data['sensor.connector'] = state('connector_state','A','occupied',{state_represents:'last_known_observation',state_fresh:false});
+  data['sensor.charging'] = state('charging_state','A','charging',{state_represents:'last_known_observation',state_fresh:false});
+  const {card: c,get} = card(data);
+  assert.equal(get('connection').textContent,'Occupied');
+  assert.equal(get('charging').textContent,'Charging');
+  assert.equal(get('connection').style.opacity,'0.5');
+  assert.match(get('connection').title,/Last known/);
+  assert.match(get('permission').textContent,/Enable/);
+  data['sensor.connector'].state = 'available';
+  data['sensor.charging'].state = 'idle';
+  data['sensor.connector'].attributes.state_fresh = true;
+  data['sensor.charging'].attributes.state_fresh = true;
+  c.hass = {states:data,language:'en'};
+  assert.equal(get('connection').textContent,'Available');
+  assert.equal(get('charging').textContent,'Idle');
+  assert.equal(get('connection').style.opacity,'1');
 });

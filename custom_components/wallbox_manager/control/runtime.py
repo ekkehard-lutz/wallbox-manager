@@ -91,6 +91,7 @@ class ControlRuntime:
         self._listeners = set()
         self._closed = False
         self._confirmed_points = {}
+        self.recovery_status = {}
         self.pending_points = {}
         self._point_locks = {}
         self._unconfirmed_targets = set()
@@ -345,6 +346,7 @@ class ControlRuntime:
             inputs, _, blocked = self.resolve(target)
         applied = self.confirmed_point(target)
         return {
+            "electrical_recovery_status": self.recovery_status.get(target),
             "applied_current_a": float(applied.current_a or 0) if applied else None,
             "applied_phase_count": applied.mode.count
             if applied and applied.mode
@@ -481,18 +483,25 @@ class ControlRuntime:
 
     async def reconcile_applied(self, target, *, fence):
         """Adopt an authoritative schedule readback in a freshly fenced context."""
+        self.recovery_status[target] = "waiting_electrical_evidence"
+        adapter = self.adapter(target)
         state = self.runtime.get(target.station)
         inputs = self.inputs(target)
         enabled = self.runtime.enabled_observation(target)
-        adapter = self.adapter(target)
         generation = self.intent(target).generation
         if not state or not inputs or not enabled or not adapter or not fence():
             return None
 
-        def current():
+        def current(*, refreshing_phase=False):
             fresh = self.runtime.get(target.station)
             observation = self.runtime.enabled_observation(target)
             fresh_inputs = self.inputs(target)
+            if refreshing_phase and fresh_inputs:
+                fresh_inputs = replace(
+                    fresh_inputs,
+                    current_mode=inputs.current_mode,
+                    eligible_modes=inputs.eligible_modes,
+                )
             return bool(
                 fence()
                 and not self._closed
@@ -508,18 +517,29 @@ class ControlRuntime:
                 and replace(fresh_inputs, voltage=inputs.voltage) == inputs
             )
 
+        refresh = getattr(adapter, "read_physical_mode", None)
+        if refresh:
+            await refresh(is_current=lambda: current(refreshing_phase=True))
+            if not current(refreshing_phase=True):
+                self.recovery_status[target] = "phase_readback_stale"
+                return None
+            inputs = self.inputs(target)
         read = getattr(adapter, "read_operating_limit", None)
         result = await read(is_current=current) if read else None
         if result is None or not current():
+            self.recovery_status[target] = "readback_rejected_or_stale"
             return None
+        self.recovery_status[target] = "readback_obtained"
         amps, phases = result
         inputs = self.inputs(target)
         mode = inputs.current_mode
         if amps:
             if mode is None or mode.count != phases:
+                self.recovery_status[target] = "physical_phase_unavailable_or_mismatch"
                 return None
             volts = inputs.voltage.active_voltages(mode, datetime.now(UTC))
             if volts is None:
+                self.recovery_status[target] = "voltage_unavailable"
                 return None
             watts = amps * sum(volts)
         else:
@@ -535,7 +555,9 @@ class ControlRuntime:
             or not solved.point
             or (amps and solved.point.current_a != amps)
         ):
+            self.recovery_status[target] = "electrical_resolution_rejected"
             return None
+        self.recovery_status[target] = "point_validated"
         self._confirmed_points[target] = (
             solved.point,
             state.token,
@@ -543,6 +565,8 @@ class ControlRuntime:
             enabled.revision,
         )
         self._unconfirmed_targets.discard(target)
+        self.recovery_status[target] = "point_adopted"
+        self.publish(target)
         return solved.point
 
     async def apply_stored(self, target, **kwargs):

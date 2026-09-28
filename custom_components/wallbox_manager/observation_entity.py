@@ -1,12 +1,12 @@
 """Thin projections of scoped, push-based runtime observations."""
 
 from .core.models import ConnectorId, EvseId
-from .core.telemetry import station_of
+from .core.telemetry import STATE_OPTIONS, State, station_of
 from .entity import StationEntity, observation_unique_id, scope_attributes
 
 
 class ObservationEntity(StationEntity):
-    """Known values live for the connection generation, not the sample deadline."""
+    """Meters follow connection generations; physical enums retain display history."""
 
     _attr_entity_category = None
 
@@ -18,6 +18,7 @@ class ObservationEntity(StationEntity):
             projection or channel.quantity.value,
         )
         self.channel = channel
+        self._last_known = None
         self._attr_unique_id = observation_unique_id(entry_id, channel, projection)
         scope = channel.scope
         label = "Station"
@@ -28,12 +29,32 @@ class ObservationEntity(StationEntity):
         self._attr_translation_placeholders = {"scope": label}
 
     @property
+    def physical_state(self):
+        return self.channel.quantity in STATE_OPTIONS
+
+    @property
     def observation(self):
-        return self.snapshot.observation(self.channel) if self.snapshot else None
+        value = self.snapshot.observation(self.channel) if self.snapshot else None
+        if not self.physical_state:
+            return value
+        if value and value.value not in (None, State.UNKNOWN, State.UNAVAILABLE):
+            self._last_known = value
+        return self._last_known
+
+    @property
+    def state_fresh(self):
+        live = self.snapshot.observation(self.channel) if self.snapshot else None
+        return bool(
+            live
+            and live == self.observation
+            and self.runtime.physical_state_fresh(live)
+        )
 
     @property
     def available(self):
         observation = self.observation
+        if self.physical_state:
+            return bool(observation and observation.value is not None)
         return bool(
             self.snapshot
             and self.snapshot.connected
@@ -52,6 +73,10 @@ class ObservationEntity(StationEntity):
             )
         if isinstance(scope, ConnectorId):
             attrs["connector_id"] = scope.value
+        if self.physical_state:
+            attrs.update(
+                state_fresh=self.state_fresh, state_represents="last_known_observation"
+            )
         if observation := self.observation:
             attrs.update(
                 observed_at=observation.observed_at.isoformat(),

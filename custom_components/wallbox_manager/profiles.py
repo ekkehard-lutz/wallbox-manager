@@ -12,7 +12,7 @@ from homeassistant.helpers.storage import Store
 
 from .control.commands import CommandReason, CommandResult, CommandStatus, ControlArea
 from .core.authority import ControlAuthority
-from .core.telemetry import Channel, Quantity
+from .core.telemetry import Channel, Quantity, State
 from .core.values import scalar
 from .pv_diagnostics import diagnostic_permission
 from .pv_surplus import PV_DEFAULTS, PVSurplus
@@ -140,7 +140,9 @@ class GridProfiles(PVSurplus):
             if self.setting(target)["profile"] == "PV_SURPLUS"
             else self.battery.configured,
             "profile_actively_charging": self.pv_ongoing.get(target, False),
+            "battery_reserve_configured": self.battery.configured,
             "battery_status": self.battery.status,
+            "battery_reserve": dict(self.battery.diagnostics),
             "actual_charging": self.active(target),
             "profile_control_ready": self.control.profile_permitted(target),
         }
@@ -172,6 +174,26 @@ class GridProfiles(PVSurplus):
             return False
         from .protocols.ocpp.v21.control_runtime import actively_charging
 
+        sample = self.control.runtime.sessions.measurement(
+            target, Quantity.POWER, datetime.now(UTC)
+        )
+        if sample is not None:
+            scopes = [target]
+            if [t for t in state.connectors if t.evse == target.evse] == [target]:
+                scopes.append(target.evse)
+            charging = max(
+                (
+                    o
+                    for scope in scopes
+                    if (o := state.observation(Channel(scope, Quantity.CHARGING_STATE)))
+                    is not None
+                ),
+                key=lambda o: o.observed_at,
+                default=None,
+            )
+            return bool(
+                charging and charging.value == State.CHARGING and sample.value > 0
+            )
         return actively_charging(state, target)
 
     def invalidate(self, target):
@@ -263,6 +285,7 @@ class GridProfiles(PVSurplus):
             raise ValueError("discharge reserve must be a whole percent")
         self.setting(target)[field] = float(value)
         if self.setting(target)["profile"] == "PV_SURPLUS":
+            self.sessions_changed()
             await self.save()
             self.control.publish(target)
             return
@@ -288,6 +311,7 @@ class GridProfiles(PVSurplus):
                 ),
                 "Grid power debounce",
             )
+        self.sessions_changed()
         self.control.publish(target)
         await self.save()
 
@@ -539,7 +563,8 @@ class GridProfiles(PVSurplus):
         while self.battery_dirty and not self.closed:
             self.battery_dirty = False
             await self.reconcile_availability()
-            await self.reconcile_battery()
+            if not self.closed:
+                await self.reconcile_battery()
 
     async def reconcile_battery(self, exclude=None):
         requests = [
@@ -547,13 +572,36 @@ class GridProfiles(PVSurplus):
             for s in self.control.runtime.stations
             for t in s.connectors
             if t != exclude
-            and self.setting(t)["profile"] == "NETZ"
             and t not in self.suppressed
             and self.control.profile_permitted(t)
             and self.active(t)
             and self.control.runtime.enabled(t) is True
             and self.control.runtime.authority(t.station) == ControlAuthority.REMOTE
         ]
+        owner = getattr(self.control, "ownership", None)
+        if self.battery.recovering and owner and owner.record:
+            owned_control, target = owner.resolve(owner.active_wallbox)
+            if owned_control is self.control and owner.record["enabled_intent"]:
+                if not requests:
+                    # Await evidence without restoring/reasserting during startup.
+                    if not owner.ready or self.control.runtime.enabled(target) is None:
+                        self.battery.status = "waiting_ownership_evidence"
+                        return
+                    session = self.control.runtime.sessions.get(target)
+                    if session is None or (
+                        session.active
+                        and (
+                            self.control.confirmed_point(target) is None
+                            or self.control.runtime.sessions.measurement(
+                                target, Quantity.POWER, datetime.now(UTC)
+                            )
+                            is None
+                        )
+                    ):
+                        self.battery.status = "waiting_charging_evidence"
+                        return
+                else:
+                    self.battery.resume()
         await self.battery.update(max(requests) if requests else None)
         for target in self.control.intents:
             self.control.publish(target)
@@ -656,9 +704,9 @@ class GridProfiles(PVSurplus):
     async def close(self):
         if self.closed:
             return
+        self.closed = True
         if hasattr(self.control, "ownership"):
             await self.control.ownership.suspend(self.control)
-        self.closed = True
         self.unsubscribe_battery()
         self.unsubscribe()
         self.session_unsubscribe()
@@ -674,5 +722,12 @@ class GridProfiles(PVSurplus):
         await asyncio.gather(*tasks, return_exceptions=True)
         if self.battery_task:
             await self.battery_task
-        await self.battery.update(None)
+        owner = getattr(self.control, "ownership", None)
+        if not (
+            owner
+            and owner.record
+            and owner.record["enabled_intent"]
+            and owner.resolve(owner.active_wallbox)[0] is self.control
+        ):
+            await self.battery.update(None)
         await self.save()

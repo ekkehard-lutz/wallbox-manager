@@ -352,6 +352,72 @@ class EvseControlAdapter:
             CommandStatus.FAILED, reason=CommandReason.COMMUNICATION_ERROR
         )
 
+    async def read_physical_mode(self, *, is_current):
+        """Refresh the same scoped phase evidence used by NotifyEvent, read-only."""
+        from ....core.models import PhaseMode, PhysicalPhaseObservation
+        from .phase_feedback import LIFETIME
+
+        component = {
+            "name": "Connector",
+            "evse": {
+                "id": int(self.evse.value),
+                "connector_id": int(self.target.value),
+            },
+        }
+        variable = {"name": "PhaseRotation"}
+        at = datetime.now(UTC)
+        if not is_current():
+            return
+        try:
+            response = await self.adapter.call(
+                call.GetVariables(
+                    get_variable_data=[
+                        {
+                            "component": component,
+                            "variable": variable,
+                            "attribute_type": "Actual",
+                        }
+                    ]
+                ),
+                suppress=False,
+            )
+            rows = response.get_variable_result
+            if not is_current() or len(rows) != 1:
+                return
+            row = rows[0]
+            if (
+                row.get("component") != component
+                or row.get("variable") != variable
+                or row.get("attribute_type", "Actual") != "Actual"
+                or row.get("attribute_status") != "Accepted"
+            ):
+                return
+            mode = {"Rxx": PhaseMode.canonical(1), "RST": PhaseMode.canonical(3)}.get(
+                row.get("attribute_value")
+            )
+            self.adapter.runtime.observe_physical_phase(
+                self.token,
+                PhysicalPhaseObservation(
+                    self.target,
+                    mode,
+                    at,
+                    at + LIFETIME,
+                    "ocpp2.1:GetVariables:Connector.PhaseRotation",
+                ),
+            )
+        except (
+            TimeoutError,
+            ConnectionClosed,
+            OSError,
+            OCPPError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            OverflowError,
+        ):
+            return
+
     async def read_operating_limit(self, *, is_current):
         """Read an effective, constant schedule; never infer a limit from EV draw."""
         if not is_current() or self._active_transaction() is None:

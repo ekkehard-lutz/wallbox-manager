@@ -104,7 +104,9 @@ async def test_platform_setup_failure_closes_listener(monkeypatch):
     monkeypatch.setattr(
         ownership,
         "async_get_ownership",
-        AsyncMock(return_value=Mock(register=Mock(return_value=lambda: None))),
+        AsyncMock(
+            return_value=Mock(record=None, register=Mock(return_value=lambda: None))
+        ),
     )
 
     monkeypatch.setattr(battery, "BatteryReserve", lambda *args: Mock(load=AsyncMock()))
