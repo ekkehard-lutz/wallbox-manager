@@ -545,8 +545,10 @@ class ControlRuntime:
         substitute_mode = None
         intent.phase_retry = False
         intent.fence_reason = None
+        validated_point = resolved.point
 
         def current(*, after_dispatch=False, permission_confirmed=False):
+            nonlocal validated_point
             if (
                 self._closed
                 or not (
@@ -571,26 +573,33 @@ class ControlRuntime:
             ):
                 intent.fence_reason = "intent_authority_permission_or_caller"
                 return False
-            if hasattr(self, "profiles") and not self.profiles.permits_point(
-                target, resolved.point, after_dispatch=after_dispatch
-            ):
-                intent.fence_reason = "pv_policy"
-                return False
             fresh, result, reason = self.resolve(
-                target, substitute_mode=substitute_mode
+                target,
+                substitute_mode=substitute_mode,
+                dispatch_modes=(resolved.point.mode,)
+                if after_dispatch and resolved.point.charging
+                else None,
             )
             if fresh is None:
                 intent.fence_reason = "inputs_unavailable"
                 return False
-            if resolved.point.charging:
-                if (
-                    fresh.voltage.active_voltages(
-                        resolved.point.mode, datetime.now(UTC)
-                    )
-                    != resolved.point.phase_voltages_v
-                ):
-                    intent.fence_reason = "voltage_changed"
-                    return False
+            if (
+                resolved.point.charging
+                and fresh.voltage.active_voltages(
+                    resolved.point.mode, datetime.now(UTC)
+                )
+                is None
+            ):
+                intent.fence_reason = "voltage_unavailable"
+                return False
+            if result is None or not resolved.point.same_setpoint(result.point):
+                intent.fence_reason = "electrical_setpoint_changed"
+                return False
+            if hasattr(self, "profiles") and not self.profiles.permits_point(
+                target, result.point, after_dispatch=after_dispatch
+            ):
+                intent.fence_reason = "pv_policy"
+                return False
             # Compare required electrical values, not sample timestamps.
             fresh = replace(fresh, voltage=inputs.voltage)
             if after_dispatch or not resolved.point.charging:
@@ -605,10 +614,12 @@ class ControlRuntime:
                 valid = (
                     reason is None
                     and fresh == inputs
-                    and result.point == resolved.point
+                    and resolved.point.same_setpoint(result.point)
                 )
             if not valid:
                 intent.fence_reason = "electrical_transaction_or_pre_dispatch_phase"
+            if valid:
+                validated_point = result.point
             return valid
 
         if prepared is not None:
@@ -683,7 +694,7 @@ class ControlRuntime:
             if result.status == CommandStatus.APPLIED:
                 self._unconfirmed_targets.discard(target)
                 self._confirmed_points[target] = (
-                    resolved.point,
+                    validated_point,
                     token,
                     authority_revision,
                     self.runtime.enabled_observation(target).revision,

@@ -270,3 +270,21 @@ positive policy decision, not permission or hardware confirmation;
 and `ongoing_after` to determine actual permission and confirmed continuation.
 Connector availability is diagnostic telemetry, not transport connectivity or
 authority, and is not a command fence by itself.
+
+### Voltage drift during command confirmation
+
+The command fence validates fresh voltage semantically: re-solve the stored power
+request and direction, then compare charging/OFF, phase mode and current. Voltage
+samples and voltage-derived offered watts need not be identical. After dispatch,
+use the already verified dispatched phase mode; before a new write, use fresh
+phase eligibility. The confirmed point records the freshly validated voltage and
+power basis. No percentage or absolute voltage tolerance is introduced: even a
+small change is material if it crosses a discrete current step under the selected
+approximation policy. Capability, current-limit, transaction, authority, intent
+and permission fences remain independent and unchanged.
+
+`command_fence_reason=voltage_unavailable` identifies missing, expired or otherwise
+invalid required phase voltage. `electrical_setpoint_changed` identifies a fresh
+resolution that cannot retain the dispatched phase/current/OFF setting. Harmless
+drift is accepted without a stale fence reason. An accepted but materially changed
+point continues to use the existing reconciliation and retry path.

@@ -79,7 +79,7 @@ class PVSurplus:
             transition_mode=point.mode if after_dispatch else None,
         )
         if status == "pv_stop_delay":
-            return point == self.control.confirmed_point(target)
+            return point.same_setpoint(self.control.confirmed_point(target))
         return (
             power > 0
             and self.control.intent(target).request.direction == direction
