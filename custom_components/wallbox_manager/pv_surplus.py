@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
+from .control.commands import CommandStatus
 from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
@@ -73,12 +74,10 @@ class PVSurplus:
         if self.closed or "PV_SURPLUS" not in self.available_profiles(target):
             return False
         power, direction, status, _ = self.pv_plan(target, advance=False)
+        if status == "pv_stop_delay":
+            return point == self.control.confirmed_point(target)
         return (
             power > 0
-            and (
-                status != "pv_stop_delay"
-                or self.control.intent(target).request.target_w == 1
-            )
             and self.control.intent(target).request.direction == direction
             and (direction != Direction.DOWN or point.offered_power_w <= power)
         )
@@ -228,7 +227,16 @@ class PVSurplus:
             status = "paused_insufficient_pv"
         ongoing = self.pv_ongoing.get(target, False)
         if status == "paused_insufficient_pv" and ongoing:
-            minimum = resolve(Fraction(1), Direction.UP)
+            confirmed = self.control.confirmed_point(target)
+            held = (
+                self.control.resolve(
+                    target,
+                    substitute_mode=confirmed.mode,
+                    request=PowerSettings(confirmed.offered_power_w, Direction.DOWN),
+                )[1]
+                if confirmed and confirmed.charging
+                else None
+            )
             if advance:
                 self.pv_start_since.pop(target, None)
                 self.pv_stop_since.setdefault(target, now)
@@ -236,11 +244,10 @@ class PVSurplus:
             if (
                 since is not None
                 and now < since + settings["pv_stop_delay"]
-                and minimum
-                and minimum.point
-                and minimum.point.charging
+                and held
+                and held.point == confirmed
             ):
-                return Fraction(1), Direction.UP, "pv_stop_delay", minimum
+                return confirmed.offered_power_w, Direction.DOWN, "pv_stop_delay", held
         elif advance:
             self.pv_stop_since.pop(target, None)
         if (
@@ -266,9 +273,17 @@ class PVSurplus:
         return Fraction(0), Direction.DOWN, status, resolve(Fraction(0), Direction.DOWN)
 
     def pv_edit(self, target):
+        if target not in self.control.pending_points:
+            self.control.intent(target).profile_modes = None
         power, direction, status, result = self.pv_plan(target)
         intent = self.control.intent(target)
-        intent.profile_modes = None
+        if target in self.control.pending_points and power > 0:
+            # Measurements remain the latest desired input; leave the executing
+            # generation intact until its adapter has completed confirmation.
+            return result
+        intent.profile_modes = (
+            (result.point.mode.count,) if status == "pv_stop_delay" else None
+        )
         if intent.request.target_w != power or intent.request.direction != direction:
             self.control._edit(target, {"target_w": power, "direction": direction})
         self.status[target] = status
@@ -392,15 +407,14 @@ class PVSurplus:
                     point = result.point if result else None
                     intent = self.control.intent(target)
                     waiting_retry = (
-                        intent.phase_retry
-                        and self.pv_retry_request.get(target) == intent.request
-                        and self.monotonic() < self.pv_retry_until.get(target, 0)
+                        self.monotonic() < self.pv_retry_until.get(target, 0)
                         and point
                         and point.charging
                     )
                     if not waiting_retry and (
                         point != self.control.confirmed_point(target)
                         or intent.phase_retry
+                        or target in self.control._unconfirmed_targets
                         or intent.command_result is None
                     ):
                         if (
@@ -423,7 +437,11 @@ class PVSurplus:
                             ),
                             reuse_applied=True,
                         )
-                        if intent.phase_retry:
+                        if intent.phase_retry or (
+                            intent.command_result
+                            and intent.command_result.status
+                            == CommandStatus.TEMPORARILY_REJECTED
+                        ):
                             self.pv_retry_request[target] = intent.request
                             if self.monotonic() >= self.pv_retry_until.get(target, 0):
                                 self.pv_retry_until[target] = self.monotonic() + 60

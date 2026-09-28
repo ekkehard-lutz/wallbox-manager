@@ -121,13 +121,14 @@ async def apply(p, t):
 async def test_default_zero_start_is_immediate_and_stop_default_is_sixty(grid):
     p, t, (c, _, _, *_), clock = await prepare(grid)
     await p.permission(t, True)
-    assert c.confirmed_point(t).charging
+    confirmed = c.confirmed_point(t)
+    assert confirmed.charging
     p.debounce_wait.assert_not_awaited()
     assert p.setting(t)["pv_start_delay"] == 0
     assert p.setting(t)["pv_stop_delay"] == 60
     measurements(p, t, pv=0)
     point = await apply(p, t)
-    assert point.charging and point.current_a == 6
+    assert point == confirmed
     assert p.status[t] == "pv_stop_delay"
     clock[0] = 59
     assert (await apply(p, t)).charging

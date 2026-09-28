@@ -67,13 +67,13 @@ async def test_pending_and_rejected_target_are_not_applied(manual):
     peer.release.clear()
     pending = asyncio.create_task(control.change(bound.target, target_w=6210))
     await asyncio.wait_for(peer.received.wait(), 1)
-    assert displayed(control, bound.target) == (None, None)
+    assert displayed(control, bound.target) == (1, 16)
     peer.release.set()
     await pending
     assert displayed(control, bound.target) == (3, 9)
     peer.profile_response = lambda _: call_result.SetChargingProfile(status="Rejected")
     await control.change(bound.target, target_w=3680)
-    assert displayed(control, bound.target) == (None, None)
+    assert displayed(control, bound.target) == (3, 9)
 
 
 @pytest.mark.parametrize(

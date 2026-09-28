@@ -308,6 +308,9 @@ class Cycle:
             ongoing_after=p.pv_ongoing.get(t, False),
             applied_before=point(self.before),
             applied=point(after),
+            awaiting_confirmation=t in p.control.pending_points,
+            reconciliation_required=t in p.control._unconfirmed_targets,
+            in_flight=point(p.control.pending_points.get(t)),
             selected=point(self.plan.point) if self.plan else None,
             commanded=point(intent.solver_result.point)
             if intent.solver_result
@@ -327,7 +330,9 @@ class Cycle:
             pending_target_w=number(
                 self.data.get("policy_target_w", intent.request.target_w)
             )
-            if intent.status == "pending" or intent.phase_retry
+            if intent.status == "pending"
+            or intent.phase_retry
+            or p.pv_retry_until.get(t, 0) > p.monotonic()
             else None,
         )
         self.data["delays"] = {}

@@ -101,8 +101,14 @@ An already dispatched frame cannot be recalled, but its delayed reply cannot
 restore continuation after a safety stop; a zero-power command follows. Equal
 confirmed operating points produce no redundant OCPP operating-point commands. Phase lockouts retain the existing retry
 and cooldown implementation, including avoiding resending an already applied
-fallback point. Unchanged requests retain the Grid profile’s 60-second phase
-retry interval; repeated regulation cycles do not reset that deadline.
+fallback point. Temporary refusals (including stale/busy) retain the last confirmed
+point and continuation state and use the existing 60-second retry interval.
+Changing desired surplus does not bypass or extend that deadline; safety OFF does.
+The control runtime serializes operating-point commands through completion of the
+adapter operation, including phase fallback. Pending commands retain their intent
+generation across normal PV evaluations; the next cycle reads the newest inputs.
+An accepted write rejected by the final fence is not reported as confirmed and
+requires reconciliation even if the next target equals the last confirmed point.
 
 Authority loss, deselection, profile transitions, permission disable and unload
 invalidate pending work. Reload restores settings only, not charging authorization
@@ -127,12 +133,12 @@ rule. A lost condition resets it. With zero delay, enabling with valid measureme
 starts immediately; newly eligible measurements also wake a paused regulator.
 
 During active charging, insufficient surplus starts a separate stop deadline.
-The same solver resolves the minimum valid positive point (`1 W`, NOT_BELOW),
-subject to all current/phase/capability limits. This intentionally permits temporary
+The controller holds the last confirmed current and phase point, validated by the
+same solver against current electrical limits. This intentionally permits temporary
 grid import or battery discharge, including while SoC is in the continuation band.
 Sufficient surplus cancels this deadline. Expiry requests OFF without disabling
 permission; every subsequent restart requires the full start rule and start delay.
-If no safe minimum exists, OFF is immediate.
+If the held point is no longer electrically feasible, OFF is immediate.
 
 User OFF, authority loss, invalid/stale measurements, low battery SoC and existing
 safety conditions bypass PV delays. Regulation wakes at the earliest regulation,

@@ -1,5 +1,6 @@
 """Manual charging orchestration; no HA or protocol types and no automatic retry."""
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -89,6 +90,9 @@ class ControlRuntime:
         self._listeners = set()
         self._closed = False
         self._confirmed_points = {}
+        self.pending_points = {}
+        self._point_locks = {}
+        self._unconfirmed_targets = set()
         self._inactive = set()
         self.authority_adapter = authority_adapter
         self._takeover_generations = {}
@@ -302,8 +306,9 @@ class ControlRuntime:
     def confirmed_point(self, target):
         """Read-only projection of an APPLIED result in its confirmed context.
 
-        Intent edits do not change hardware. No persistence, retries or command
-        decisions depend on this snapshot; uncertain dispatch clears it.
+        Intent edits do not change hardware. Pending/retryable commands retain
+        the last confirmed point, separately from their unconfirmed target.
+        Failed or superseded dispatch clears uncertain state.
         """
         record = self._confirmed_points.get(target)
         state = self.runtime.get(target.station)
@@ -466,7 +471,23 @@ class ControlRuntime:
             self.publish(target)
         return result
 
-    async def apply_stored(
+    async def apply_stored(self, target, **kwargs):
+        """Serialize transitions through confirmation, including phase fallback."""
+        generation = self.intent(target).generation
+        lock = self._point_locks.setdefault(target, asyncio.Lock())
+        async with lock:
+            if generation != self.intent(target).generation:
+                return stale_command_result()
+            self.pending_points[target] = None
+            try:
+                return await self._apply_stored(target, **kwargs)
+            except BaseException:
+                self._confirmed_points.pop(target, None)
+                raise
+            finally:
+                self.pending_points.pop(target, None)
+
+    async def _apply_stored(
         self,
         target,
         *,
@@ -575,12 +596,17 @@ class ControlRuntime:
             )
             prepared["fence"] = prepared_fence
         prior_point = self.confirmed_point(target)
-        if reuse_applied and prior_point == resolved.point and current():
+        if (
+            reuse_applied
+            and target not in self._unconfirmed_targets
+            and prior_point == resolved.point
+            and current()
+        ):
             intent.command_result = CommandResult(CommandStatus.APPLIED)
             intent.status = "applied"
             self.publish(target)
             return intent.command_result
-        self._confirmed_points.pop(target, None)
+        self.pending_points[target] = resolved.point
         intent.status = "pending"
         self.publish(target)
         result = await apply_operating_point(
@@ -605,7 +631,12 @@ class ControlRuntime:
             if blocked is None and substitute.point is not None:
                 resolved = substitute
                 intent.solver_result = resolved
-                if reuse_applied and prior_point == resolved.point and current():
+                if (
+                    reuse_applied
+                    and target not in self._unconfirmed_targets
+                    and prior_point == resolved.point
+                    and current()
+                ):
                     result = CommandResult(CommandStatus.APPLIED)
                 else:
                     result = await apply_operating_point(
@@ -614,9 +645,18 @@ class ControlRuntime:
         if generation != intent.generation or (
             result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
         ):
+            if generation != intent.generation:
+                self._confirmed_points.pop(target, None)
+            # The adapter accepted a write whose final fence no longer matches.
+            # Retain historical confirmation, but require reconciliation even if
+            # the next desired target equals that old point.
+            self._unconfirmed_targets.add(target)
             result = stale_command_result()
+        if result.status in (CommandStatus.FAILED, CommandStatus.UNSUPPORTED):
+            self._confirmed_points.pop(target, None)
         if generation == intent.generation:
             if result.status == CommandStatus.APPLIED:
+                self._unconfirmed_targets.discard(target)
                 self._confirmed_points[target] = (
                     resolved.point,
                     token,
