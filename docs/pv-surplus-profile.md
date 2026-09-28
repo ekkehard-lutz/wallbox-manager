@@ -71,12 +71,17 @@ clamp the upper threshold to 99%.
 | Any start or restart, SoC ≤ target | OFF; waiting for SoC above target |
 | SoC > target | Charge with NOT_BELOW |
 | Already charging, stop threshold ≤ SoC ≤ target | Continue with NOT_ABOVE |
-| SoC < stop threshold | OFF; battery stop |
-| Insufficient available power | Minimum feasible power during stop delay, then OFF |
+| SoC < stop threshold | Latch battery stop; hold through stop delay, then OFF |
+| Insufficient available power | Hold confirmed phase/current through stop delay, then OFF |
 | Restart after any pause | Require SoC > target again |
 
 Equality at target permits continuation only. Equality at the stop threshold does
-not stop an ongoing charge. Runtime continuation uses a confirmed APPLIED charging
+not stop an ongoing charge. Battery eligibility is a separate stateful latch:
+once the lower boundary is crossed it remains stopped until SoC exceeds the
+upper target, even while electrical charging is deliberately held by the stop
+delay. The entire hysteresis band lies below the target (41%/5 pp means a strict
+start above 41% and a stop below 36%). `min_soc` is the independent battery reserve.
+Runtime continuation uses a confirmed APPLIED charging
 point and explicit profile state, not a transient OCPP Charging status. A new or
 ended transaction clears continuation and requires the full start rule again.
 Permission stays enabled during profile-controlled OFF, waiting and pauses.
@@ -90,10 +95,11 @@ restoration remains handled by the existing shared battery integration.
 `regulation_interval` defaults to 5 seconds (configurable 1–300 seconds). Every
 cycle reads current measurements and computes a fresh policy and solver result.
 Ordinary positive power adjustments during charging use the existing one-second
-debounce. Starts with zero start delay and OFF skip it. A battery SoC event that requires OFF immediately fences pending work and
-wakes this same regulator, including while its interval or debounce is waiting.
-The event value is checked so that a short dip below the threshold cannot be
-hidden by a later recovery. Measurements are re-read after debounce and positive
+debounce. Starts with zero start delay and OFF skip it. Battery-SoC policy stops
+use the same stop-delay state machine as insufficient PV. Event values update the
+battery latch; recovery above the upper threshold cancels a pending normal stop.
+Invalid measurements and explicit control/safety invalidations still fence pending
+work immediately. With a configured zero stop delay, policy stops are immediate. Measurements are re-read after debounce and positive
 command fences reject changed or stale policy inputs. The shared control runtime
 also applies the PV policy immediately before dispatch and after command replies;
 every OFF clears continuation, including OFF requested through primitive controls.
@@ -111,8 +117,10 @@ An accepted write rejected by the final fence is not reported as confirmed and
 requires reconciliation even if the next target equals the last confirmed point.
 
 Authority loss, deselection, profile transitions, permission disable and unload
-invalidate pending work. Reload restores settings only, not charging authorization
-or an ongoing battery continuation state. Safe zero-power capability must be
+invalidate pending work. A deliberate HA shutdown/reload preserves historical
+ownership and user intent for fresh-evidence reconciliation as documented in
+[Grid profile recovery](grid-profile.md#restart-and-reload-reconciliation).
+It never restores queued work or treats stored state as current hardware proof. Safe zero-power capability must be
 verified before PV charging can start. A missing safe-stop capability is surfaced
 as a blocked request rather than inventing protocol support.
 
@@ -140,8 +148,9 @@ Sufficient surplus cancels this deadline. Expiry requests OFF without disabling
 permission; every subsequent restart requires the full start rule and start delay.
 If the held point is no longer electrically feasible, OFF is immediate.
 
-User OFF, authority loss, invalid/stale measurements, low battery SoC and existing
-safety conditions bypass PV delays. Regulation wakes at the earliest regulation,
+User OFF, authority loss, invalid/stale measurements and existing hard safety
+conditions bypass PV delays. Crossing the PV storage-SoC threshold is a normal
+policy stop and uses the configured delay; it is not a hard battery protection signal. Regulation wakes at the earliest regulation,
 PV-delay or measurement-expiry deadline. Device phase/restart lockouts remain
 independent and cannot extend the PV stop deadline. Delayed positive commands are
 checked again at dispatch/acknowledgement against current policy and deadlines.
@@ -252,7 +261,9 @@ interval, even when no prior applied point exists. It re-reads policy and fresh
 execution evidence for each attempt. Only successful preparation and permission
 confirmation hand over to normal PV regulation. OFF, changed intent, ownership or
 authority loss, disconnect/reboot and unload revoke this pending authorization;
-restart/reload never restores it. Phase feedback alone cannot prove the current
+restart/reload never restores the queued command or retry deadline. Persisted
+explicit user intent is independently reconciled through the ownership recovery
+path. Phase feedback alone cannot prove the current
 setpoint, so an uncertain operation is retried rather than inferred as applied.
 
 After an accepted command, PV policy checks use its previously verified phase mode
@@ -288,3 +299,16 @@ invalid required phase voltage. `electrical_setpoint_changed` identifies a fresh
 resolution that cannot retain the dispatched phase/current/OFF setting. Harmless
 drift is accepted without a stale fence reason. An accepted but materially changed
 point continues to use the existing reconciliation and retry path.
+
+### Stateful stop diagnostics
+
+`stop_policy_reason` identifies the normal policy requesting a stop while
+`stop_delay_holding` identifies deliberate continued charging. The existing delay
+fields expose elapsed and remaining seconds from the original monotonic deadline;
+regulation uses `setdefault` and cannot extend it. Recovery cancels the timer and a
+later independent stop starts a fresh one. The held phase/current is revalidated
+using fresh voltage, without requiring unchanged voltage-derived watts.
+`battery_policy_allowed`, `battery_hysteresis_holding` and the two battery threshold
+fields distinguish latched continuation/waiting from an unrestricted policy result.
+`ownership_status` distinguishes explicit acquisition, restored ownership and
+rejected live identity/authority evidence.

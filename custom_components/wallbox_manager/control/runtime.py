@@ -479,6 +479,72 @@ class ControlRuntime:
             self.publish(target)
         return result
 
+    async def reconcile_applied(self, target, *, fence):
+        """Adopt an authoritative schedule readback in a freshly fenced context."""
+        state = self.runtime.get(target.station)
+        inputs = self.inputs(target)
+        enabled = self.runtime.enabled_observation(target)
+        adapter = self.adapter(target)
+        generation = self.intent(target).generation
+        if not state or not inputs or not enabled or not adapter or not fence():
+            return None
+
+        def current():
+            fresh = self.runtime.get(target.station)
+            observation = self.runtime.enabled_observation(target)
+            fresh_inputs = self.inputs(target)
+            return bool(
+                fence()
+                and not self._closed
+                and self.profile_permitted(target)
+                and self.runtime.current(state.token)
+                and fresh.authority_revision == state.authority_revision
+                and self.runtime.authority(target.station) == ControlAuthority.REMOTE
+                and observation
+                and observation.revision == enabled.revision
+                and self.intent(target).generation == generation
+                and target not in self.pending_points
+                and fresh_inputs is not None
+                and replace(fresh_inputs, voltage=inputs.voltage) == inputs
+            )
+
+        read = getattr(adapter, "read_operating_limit", None)
+        result = await read(is_current=current) if read else None
+        if result is None or not current():
+            return None
+        amps, phases = result
+        inputs = self.inputs(target)
+        mode = inputs.current_mode
+        if amps:
+            if mode is None or mode.count != phases:
+                return None
+            volts = inputs.voltage.active_voltages(mode, datetime.now(UTC))
+            if volts is None:
+                return None
+            watts = amps * sum(volts)
+        else:
+            watts = Fraction(0)
+        _, solved, blocked = self.resolve(
+            target,
+            request=PowerSettings(watts, Direction.NEAREST),
+            substitute_mode=mode if amps else None,
+        )
+        if (
+            blocked
+            or not solved
+            or not solved.point
+            or (amps and solved.point.current_a != amps)
+        ):
+            return None
+        self._confirmed_points[target] = (
+            solved.point,
+            state.token,
+            state.authority_revision,
+            enabled.revision,
+        )
+        self._unconfirmed_targets.discard(target)
+        return solved.point
+
     async def apply_stored(self, target, **kwargs):
         """Serialize transitions through confirmation, including phase fallback."""
         generation = self.intent(target).generation

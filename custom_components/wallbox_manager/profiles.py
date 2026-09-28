@@ -34,6 +34,7 @@ class GridProfiles(PVSurplus):
         self.entry_id = entry.entry_id
         self.references = dict(entry.options)
         self.pv_ongoing = {}
+        self.pv_battery = {}
         self.pv_sessions = {}
         self.pv_start_since = {}
         self.pv_stop_since = {}
@@ -44,6 +45,8 @@ class GridProfiles(PVSurplus):
         self.monotonic = time.monotonic
         self.settings = {}
         self.tasks = {}
+        self.recoveries = {}
+        self.recovery_ready = True
         self.debounce_tasks = {}
         self.debounce_wait = asyncio.sleep
         self.epochs = {}
@@ -173,13 +176,14 @@ class GridProfiles(PVSurplus):
 
     def invalidate(self, target):
         self.epochs[target] = self.epochs.get(target, 0) + 1
-        for tasks in (self.tasks, self.debounce_tasks):
+        for tasks in (self.tasks, self.debounce_tasks, self.recoveries):
             task = tasks.pop(target, None)
             if task and task is not asyncio.current_task():
                 task.cancel()
         self.control.intent(target).generation += 1
         self.status[target] = "idle"
         self.pv_ongoing[target] = False
+        self.pv_battery.pop(target, None)
         self.pv_startups.pop(target, None)
         self.pv_retry_until.pop(target, None)
         self.pv_retry_request.pop(target, None)
@@ -195,6 +199,8 @@ class GridProfiles(PVSurplus):
         self.invalidate(target)
         self.suppressed.add(target)
         epoch = self.epochs[target]
+        if hasattr(self.control, "ownership"):
+            await self.control.ownership.permission_intent(self.control, target, False)
         if self.can_control(target):
             result = await self.control.request_enabled(target, False)
             if not result or result.status != CommandStatus.APPLIED:
@@ -330,6 +336,10 @@ class GridProfiles(PVSurplus):
             )
         self.invalidate(target)
         epoch = self.epochs[target]
+        if hasattr(self.control, "ownership"):
+            await self.control.ownership.permission_intent(
+                self.control, target, enabled
+            )
         if enabled:
             self.suppressed.discard(target)
         else:
@@ -548,18 +558,118 @@ class GridProfiles(PVSurplus):
         for target in self.control.intents:
             self.control.publish(target)
 
+    async def recover(self, target, record):
+        """Resume persisted intent only after ownership and live evidence agree."""
+        epoch = self.epochs.get(target, 0)
+        generation = self.control.intent(target).generation
+        runtime = self.control.runtime
+
+        def current():
+            state = runtime.get(target.station)
+            return bool(
+                not self.closed
+                and self.epochs.get(target, 0) == epoch
+                and self.control.intent(target).generation == generation
+                and self.can_control(target)
+                and state
+                and state.connected
+                and target in state.connectors
+            )
+
+        while current():
+            enabled = runtime.enabled(target)
+            if not record["enabled_intent"]:
+                self.suppressed.add(target)
+                if enabled is True:
+                    generation += 1  # The permission operation owns this edit.
+                    await self.control.request_enabled(target, False, fence=current)
+                self.status[target] = "restored_permission_off"
+                return
+            self.suppressed.discard(target)
+            if target_key(target) not in self.settings:
+                self.status[target] = "recovery_missing_profile"
+                return
+            inputs = self.control.inputs(target)
+            if inputs and self.control.blocker(target) is None and enabled is not None:
+                if self.setting(target)["profile"] == "PV_SURPLUS":
+                    try:
+                        self.pv_measurements(target)
+                    except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                        self.status[target] = "recovery_waiting_measurements"
+                        await self.wait(self.setting(target)["regulation_interval"])
+                        continue
+                if enabled is False:
+                    # This continues persisted explicit user intent, not Remote
+                    # authority alone. Normal startup fences/delays still apply.
+                    await self.permission(target, True)
+                    return
+                point = await self.control.reconcile_applied(target, fence=current)
+                if not current():
+                    return
+                if point is not None:
+                    session = runtime.sessions.get(target)
+                    continuing = bool(
+                        point.charging
+                        and session
+                        and session.active
+                        and record.get("continuation") is True
+                        and record.get("transaction") == session.external_transaction_id
+                    )
+                    self.pv_sessions[target] = session.session_id if session else None
+                    self.pv_ongoing[target] = continuing
+                    self.pv_battery[target] = (
+                        continuing and record.get("battery_allowed") is True
+                    )
+                    if self.setting(target)["profile"] == "PV_SURPLUS":
+                        self.pv_edit(target)
+                        self.launch(target)
+                    else:
+                        self.control._edit(
+                            target,
+                            {
+                                "target_w": Fraction(
+                                    str(self.setting(target)["power_kw"])
+                                )
+                                * 1000
+                            },
+                        )
+                        generation = self.control.intent(target).generation
+                        await self.control.apply_stored(
+                            target, reuse_applied=True, fence=current
+                        )
+                        self.launch(target)
+                    self.control.publish(target)
+                    return
+                self.status[target] = "recovery_waiting_electrical"
+            else:
+                self.status[target] = "recovery_waiting_runtime"
+            self.control.publish(target)
+            await self.wait(
+                60
+                if self.status[target] == "recovery_waiting_electrical"
+                else self.setting(target)["regulation_interval"]
+            )
+
     async def save(self):
         await self.store.async_save(self.settings)
 
     async def close(self):
         if self.closed:
             return
+        if hasattr(self.control, "ownership"):
+            await self.control.ownership.suspend(self.control)
         self.closed = True
         self.unsubscribe_battery()
         self.unsubscribe()
         self.session_unsubscribe()
-        tasks = [*self.tasks.values(), *self.debounce_tasks.values()]
-        for target in self.tasks.keys() | self.debounce_tasks.keys():
+        tasks = [
+            *self.tasks.values(),
+            *self.debounce_tasks.values(),
+            *self.recoveries.values(),
+        ]
+        for target in (
+            self.tasks.keys() | self.debounce_tasks.keys() | self.recoveries.keys()
+        ):
             self.invalidate(target)
         await asyncio.gather(*tasks, return_exceptions=True)
         if self.battery_task:

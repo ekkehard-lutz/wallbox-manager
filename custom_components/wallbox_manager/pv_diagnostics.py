@@ -308,6 +308,10 @@ class Cycle:
             startup_pending=t in p.pv_startups,
             policy_allows_charging=self.data.get("policy_reason")
             == "actively_charging",
+            ownership_status=getattr(
+                getattr(p.control, "ownership", None), "status", None
+            ),
+            stop_delay_holding=reason == "pv_stop_delay",
             ongoing_before=self.ongoing_before,
             ongoing_after=p.pv_ongoing.get(t, False),
             applied_before=point(self.before),

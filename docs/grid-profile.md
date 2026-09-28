@@ -14,18 +14,24 @@ colliding. One coordinator shared by all loaded Wallbox Manager entries enforces
 at most one eligible profile-controlled connector. Multiple physical wallboxes
 remain supported; a multi-connector station exposes its distinct control scopes.
 
-The coordinator persists the active identity in HA Store
-`wallbox_manager.active_wallbox`. It does **not** persist permission ON, a successful
-takeover authorization or pending work. Separate transient fields are:
+The coordinator extends the existing HA Store `wallbox_manager.active_wallbox`
+with a versioned `ownership` record written only after successful explicit takeover
+and OFF confirmation. It records entry/station/EVSE/connector identity, observed
+station vendor/model/serial/firmware, explicit permission intent, and PV battery
+continuation state scoped to the external transaction. Per-wallbox profile and
+parameters remain in the existing profile Store, without a second settings source.
 
-- `ready`: the explicit takeover and OFF confirmation completed in this runtime;
-- `transition`: a guarded activation is running and profile commands are inhibited;
-- `status`: readiness or a specific failure, exposed by the active-wallbox select.
+- `ready`: explicit takeover completed, or historical ownership was reconciled
+  with fresh compatible runtime evidence;
+- `transition`: an explicit activation is running and profile commands are inhibited;
+- `status`: readiness/recovery or a specific rejection, exposed by the active-wallbox select.
 
-Startup/reload restores the identity and per-wallbox settings but starts inhibited.
-The user explicitly takes control again; no startup, telemetry, retry, profile
-selection or battery event acquires authority. Local/unknown authority and loss
-of the active connector invalidate readiness and pending profile work.
+Legacy records containing only `active_wallbox`, absent/corrupt ownership records,
+and unknown ownership versions remain inhibited and require explicit takeover.
+Migration does not grant ownership. Local/unknown authority, online disconnect,
+changed runtime generations or identities invalidate live readiness. An observed
+Local transition durably revokes history; a later Remote transition cannot revive it.
+A deliberate HA shutdown/reload instead suspends execution and preserves history.
 
 Only the active, ready connector under confirmed Remote authority may receive
 profile permission ON or operating points. This check is in `ControlRuntime`,
@@ -292,9 +298,9 @@ and charging-current limit, for example `1-phasig · 16 A` / `1-phase · 16 A`. 
 not measured vehicle current. The existing stable control attributes
 `applied_phase_count` and `applied_current_a` now project a read-only snapshot of
 the primitive command boundary's successfully fenced `APPLIED` result. The snapshot
-survives desired-power edits and the separately confirmed ON command. No control
-policy, solver decision, command sequencing or retry depends on it, and it is not
-persisted or restored.
+survives desired-power edits and the separately confirmed ON command. No applied
+snapshot is restored from disk. Recovery may establish a new confirmation using
+fresh, fenced effective-schedule readback; measured EV current alone is insufficient.
 
 During a phase lockout, a confirmed substitute remains displayed while the retry
 waits: a desired 3p/9 A target with an applied 1p/16 A substitute displays 1p/16 A.
@@ -325,3 +331,40 @@ checks narrow light/dark layouts with mock HA components. These do not replace a
 HA browser or physical station test. Writable profile control retains the existing
 OCPP 2.1 support; other OCPP versions' discovery support does not imply writable
 profile support. No release version or tag is changed by this iteration.
+
+## Restart and reload reconciliation
+
+The same path handles a new HA runtime and integration reload. Fresh Remote/OCPP
+authority, matching entry/station/EVSE/connector and station identity, and fresh
+ChargingEnabled observation must agree with a valid historical ownership record.
+Remote alone never establishes ownership. Recovery sends no takeover and no
+unconditional OFF. Stored permission OFF does not enable the station; if fresh
+hardware permission conflicts with stored OFF, ordinary fenced OFF reconciles it.
+Stored ON with hardware OFF follows the existing explicit-enable/startup path only
+after required fresh inputs are available.
+
+For an already enabled station, recovery reads standard OCPP GetCompositeSchedule
+(A, 60 seconds) to obtain its effective electrical limit. It accepts only a current,
+EVSE-matching, single constant balanced period, with fresh verified physical phase
+feedback and an unambiguous live transaction. Fresh capabilities, voltage and
+current limits must validate that point; authority, permission, transaction and
+intent generations are fenced through the read. This read-only operation does not
+change existing command payloads or phase/current transition semantics.
+
+If readback already satisfies the restored PV intent, normal regulation reuses the
+confirmation and does not replay a command. PV continuation and battery latch are
+restored only for the same external transaction. A different/new session follows
+the normal strict start policy. No synthetic OFF/ON cycle is introduced.
+
+If readback is unsupported, ambiguous or unsafe, ownership/intent can still be
+restored, but electrical regulation waits in `recovery_waiting_electrical`; reads
+retry at 60 seconds without changing the running charge. Missing PV/runtime inputs
+wait at the configured regulation interval. The integration does not infer a
+current limit from measured draw. This is a hardware-validation requirement for
+non-disruptive adoption. Existing phase/current writes are unchanged.
+
+The current protocol exposes no persistent authority-transition counter. A
+Remote -> Local -> Remote transition entirely while HA is offline is indistinguishable
+from uninterrupted Remote if the station returns with the same identity and fresh
+authority evidence. Recovery cannot detect that history. Online Local transitions
+are observed, revoke persisted ownership, and continue to require explicit takeover.

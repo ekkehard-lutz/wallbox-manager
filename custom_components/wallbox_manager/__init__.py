@@ -93,10 +93,13 @@ async def async_setup_entry(
         battery = BatteryReserve(hass, entry)
         await battery.load()
         profiles = GridProfiles(hass, entry, control, battery)
+        profiles.recovery_ready = False
         await profiles.load()
         control.profiles = profiles
         entry.runtime_data = EntryRuntime(state, server, storage, control, profiles)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        profiles.recovery_ready = True
+        ownership.changed()
         await async_setup_assets(hass)
     except BaseException:
         if profiles is not None:

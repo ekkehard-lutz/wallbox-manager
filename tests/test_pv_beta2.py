@@ -180,9 +180,7 @@ async def test_surplus_recovery_resets_stop_delay_and_no_duplicate_minimum_comma
     assert not (await apply(p, t)).charging
 
 
-@pytest.mark.parametrize(
-    "safety", ["soc", "invalid", "stale", "explicit_off", "authority"]
-)
+@pytest.mark.parametrize("safety", ["invalid", "stale", "explicit_off", "authority"])
 async def test_safety_bypasses_stop_delay(grid, safety):
     p, t, (c, bound, peer, *_), clock = await prepare(grid, soc=96)
     await p.permission(t, True)

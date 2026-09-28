@@ -63,6 +63,29 @@ def decision(available, soc, settings, ongoing):
 class PVSurplus:
     """Mixin sharing profile persistence, epochs, ownership and primitive controls."""
 
+    def pv_battery_state(self, target, soc):
+        """Latch battery eligibility independently of a delayed electrical stop."""
+        ongoing = self.pv_ongoing.get(target, False)
+        if soc is None:
+            return ongoing
+        settings = self.setting(target)
+        upper = Fraction(str(settings["soll_soc_speicher"]))
+        lower = upper - Fraction(str(settings["soc_hysterese"]))
+        allowed = self.pv_battery.get(target, ongoing)
+        if soc > upper:
+            allowed = True
+        elif soc < lower or not ongoing:
+            allowed = False
+        self.pv_battery[target] = allowed
+        if record := active(self, target):
+            record.data.update(
+                battery_policy_allowed=allowed,
+                battery_hysteresis_holding=ongoing and lower <= soc <= upper,
+                battery_start_threshold=number(upper),
+                battery_stop_threshold=number(lower),
+            )
+        return allowed
+
     def permits_point(self, target, point, *, after_dispatch=False):
         """Apply the existing PV policy at the shared command dispatch fence."""
         if self.setting(target)["profile"] != "PV_SURPLUS":
@@ -106,7 +129,7 @@ class PVSurplus:
                         event.data.get("new_state"), datetime.now(UTC), soc=True
                     )
                     power, _, status = decision(
-                        Fraction(1), soc, settings, self.pv_ongoing.get(target, False)
+                        Fraction(1), soc, settings, self.pv_battery_state(target, soc)
                     )
                 except ValueError, TypeError, ZeroDivisionError, OverflowError:
                     power, status = Fraction(0), "measurements_unavailable"
@@ -120,6 +143,18 @@ class PVSurplus:
                         datetime.now(UTC),
                     )
                 if power > 0:
+                    if (
+                        self.pv_ongoing.get(target, False)
+                        and target in self.pv_stop_since
+                    ):
+                        self.pv_plan(target)
+                    continue
+                if (
+                    status in ("stopped_battery_soc", "waiting_battery_soc")
+                    and self.pv_ongoing.get(target, False)
+                    and settings["pv_stop_delay"] > 0
+                    and self.pv_plan(target)[2] == "pv_stop_delay"
+                ):
                     continue
                 point = self.control.confirmed_point(target)
                 needs_stop = (
@@ -198,7 +233,7 @@ class PVSurplus:
         try:
             available, soc = self.pv_measurements(target)
             return decision(
-                available, soc, self.setting(target), self.pv_ongoing.get(target, False)
+                available, soc, self.setting(target), self.pv_battery_state(target, soc)
             )
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
             return Fraction(0), Direction.DOWN, "measurements_unavailable"
@@ -236,17 +271,30 @@ class PVSurplus:
         ):
             status = "paused_insufficient_pv"
         ongoing = self.pv_ongoing.get(target, False)
-        if status == "paused_insufficient_pv" and ongoing:
+        if (
+            status
+            in ("paused_insufficient_pv", "stopped_battery_soc", "waiting_battery_soc")
+            and ongoing
+        ):
             confirmed = self.control.confirmed_point(target)
+            volts = (
+                inputs.voltage.active_voltages(confirmed.mode, datetime.now(UTC))
+                if confirmed and confirmed.charging and inputs
+                else None
+            )
             held = (
                 self.control.resolve(
                     target,
                     substitute_mode=confirmed.mode,
-                    request=PowerSettings(confirmed.offered_power_w, Direction.DOWN),
+                    request=PowerSettings(
+                        confirmed.current_a * sum(volts), Direction.DOWN
+                    ),
                 )[1]
-                if confirmed and confirmed.charging
+                if volts
                 else None
             )
+            if record := active(self, target):
+                record.data["stop_policy_reason"] = status
             if advance:
                 self.pv_start_since.pop(target, None)
                 self.pv_stop_since.setdefault(target, now)
@@ -255,9 +303,9 @@ class PVSurplus:
                 since is not None
                 and now < since + settings["pv_stop_delay"]
                 and held
-                and held.point == confirmed
+                and confirmed.same_setpoint(held.point)
             ):
-                return confirmed.offered_power_w, Direction.DOWN, "pv_stop_delay", held
+                return held.point.offered_power_w, Direction.DOWN, "pv_stop_delay", held
         elif advance:
             self.pv_stop_since.pop(target, None)
         if (
@@ -383,6 +431,8 @@ class PVSurplus:
                 if self.valid(target, self.epochs[target]):
                     self.launch(target, stop_first=True)
                 continue
+            if self.pv_ongoing.get(target, False) and target in self.pv_stop_since:
+                self.pv_plan(target)
             if not self.pv_ongoing.get(target, False) and self.status.get(target) in (
                 "paused_insufficient_pv",
                 "waiting_battery_soc",
@@ -528,11 +578,20 @@ class PVSurplus:
                         and point
                         and point.charging
                     )
-                    if not waiting_retry and (
-                        point != self.control.confirmed_point(target)
-                        or intent.phase_retry
-                        or target in self.control._unconfirmed_targets
-                        or intent.command_result is None
+                    holding = (
+                        self.status.get(target) == "pv_stop_delay"
+                        and point
+                        and point.same_setpoint(self.control.confirmed_point(target))
+                    )
+                    if (
+                        not holding
+                        and not waiting_retry
+                        and (
+                            point != self.control.confirmed_point(target)
+                            or intent.phase_retry
+                            or target in self.control._unconfirmed_targets
+                            or intent.command_result is None
+                        )
                     ):
                         if (
                             point

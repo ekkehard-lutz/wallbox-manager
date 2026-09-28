@@ -4,6 +4,7 @@ import json
 import math
 from collections.abc import Callable
 from contextvars import ContextVar
+from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
 from ocpp.exceptions import OCPPError
@@ -350,6 +351,56 @@ class EvseControlAdapter:
         return CommandResult(
             CommandStatus.FAILED, reason=CommandReason.COMMUNICATION_ERROR
         )
+
+    async def read_operating_limit(self, *, is_current):
+        """Read an effective, constant schedule; never infer a limit from EV draw."""
+        if not is_current() or self._active_transaction() is None:
+            return None
+        transaction = self._active_transaction()
+        try:
+            response = await self.adapter.call(
+                call.GetCompositeSchedule(
+                    duration=60, evse_id=int(self.evse.value), charging_rate_unit="A"
+                ),
+                suppress=False,
+            )
+            if (
+                not is_current()
+                or self._active_transaction() != transaction
+                or response.status != "Accepted"
+            ):
+                return None
+            schedule = response.schedule
+            start = datetime.fromisoformat(
+                schedule["schedule_start"].replace("Z", "+00:00")
+            )
+            periods = schedule["charging_schedule_period"]
+            if (
+                schedule["evse_id"] != int(self.evse.value)
+                or schedule["charging_rate_unit"] != "A"
+                or not start
+                <= datetime.now(UTC)
+                < start + timedelta(seconds=schedule["duration"])
+                or len(periods) != 1
+                or periods[0]["start_period"] != 0
+                or set(periods[0]) - {"start_period", "limit", "number_phases"}
+            ):
+                return None
+            current = Fraction(str(periods[0]["limit"]))
+            count = periods[0].get("number_phases")
+            return (current, count) if current >= 0 else None
+        except (
+            TimeoutError,
+            ConnectionClosed,
+            OSError,
+            OCPPError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            OverflowError,
+        ):
+            return None
 
     def _permission_component(self, *, writable=True):
         inventory = getattr(self.adapter, "permission_inventory", None)
