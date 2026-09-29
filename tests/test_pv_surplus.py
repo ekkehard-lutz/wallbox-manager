@@ -25,6 +25,10 @@ async def grid(base_grid):  # noqa: F811
         stop=replace(source.snapshot.stop, state=EvidenceState.VERIFIED),
     )
     profile, target, _ = base_grid
+    # Legacy state-machine regressions exercise the raw-input (disabled) mode.
+    profile.references["power_smoothing_window"] = 0
+    for history in profile.power_history.values():
+        history.window = 0
     profile.references.update(
         leistung_pv="sensor.pv", leistung_verbraucher="sensor.load"
     )
@@ -74,7 +78,7 @@ def test_hysteresis_clamp_and_pause_restart():
     "updates",
     [
         {"soll_soc_speicher": 100},
-        {"soc_hysterese": 96},
+        {"soc_hysterese": 100},
         {"soc_hysterese": -1},
         {"regulation_interval": 0},
         {"regulation_interval": 301},
@@ -341,11 +345,8 @@ async def test_measurement_change_fences_queued_positive_command(grid):
         measurements(p, t, soc="unavailable")
     result = await pending
     assert result.status.value != "applied"
-    # Invalid battery telemetry also requests immediate OFF through the regulator.
-    assert all(
-        request[1]["charging_schedule"][0]["charging_schedule_period"][0]["limit"] == 0
-        for request in peer.requests[count:]
-    )
+    # Missing telemetry fences new writes without issuing an implicit OFF.
+    assert len(peer.requests) == count
 
 
 async def test_safety_stop_skips_debounce_and_preserves_permission(grid):
@@ -428,7 +429,8 @@ async def test_reload_restores_profile_only(grid):
     clone = GridProfiles(
         p.hass,
         SimpleNamespace(
-            entry_id=p.entry_id, options={"soc_speicher_aktuell": "sensor.soc"}
+            entry_id=p.entry_id,
+            options={**p.entry.options, "soc_speicher_aktuell": "sensor.soc"},
         ),
         c,
         p.battery,

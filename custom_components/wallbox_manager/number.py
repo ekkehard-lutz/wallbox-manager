@@ -111,6 +111,14 @@ class ProfileNumber(ControlEntity, NumberEntity):
     def __init__(self, control, entry_id, target, key):
         super().__init__(control, entry_id, target, key)
         self.field = "power_kw" if key == "soll_power" else key
+        if key in (
+            "soc_hysterese",
+            "regulation_interval",
+            "pv_start_delay",
+            "pv_stop_delay",
+        ):
+            self._attr_entity_category = EntityCategory.CONFIG
+            self._attr_entity_registry_enabled_default = False
         self._attr_native_unit_of_measurement = "kW" if key == "soll_power" else "%"
         self._attr_native_step = 0.1 if key == "soll_power" else 1
         if key in ("regulation_interval", "pv_start_delay", "pv_stop_delay"):
@@ -142,6 +150,7 @@ class ProfileNumber(ControlEntity, NumberEntity):
         # Consumers must use technical_max_kw, not this fallback, as capability.
         return {
             "soll_soc_speicher": 99,
+            "soc_hysterese": 99,
             "regulation_interval": 300,
             "pv_start_delay": 3600,
             "pv_stop_delay": 3600,
@@ -152,6 +161,10 @@ class ProfileNumber(ControlEntity, NumberEntity):
         attrs = super().extra_state_attributes
         if self.field == "power_kw":
             maximum = self.control.power_ceiling(self.target)
+            minimum = self.control.power_floor(self.target)
+            attrs["technical_min_kw"] = (
+                float(minimum / 1000) if minimum is not None else None
+            )
             attrs["technical_max_kw"] = (
                 float(maximum / 1000) if maximum is not None else None
             )
@@ -161,4 +174,6 @@ class ProfileNumber(ControlEntity, NumberEntity):
         pass
 
     async def async_set_native_value(self, value):
+        if self.field == "soll_soc_speicher" and scalar(value).denominator != 1:
+            raise ValueError("battery target SoC must be a whole percent")
         await self.control.profiles.set_value(self.target, self.field, value)

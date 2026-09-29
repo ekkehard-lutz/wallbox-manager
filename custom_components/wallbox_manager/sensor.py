@@ -5,6 +5,8 @@ Entity description/category pattern adapted from pinned lbbrhzn/ocpp sensor.py,
 See THIRD_PARTY_NOTICES.md.
 """
 
+from datetime import datetime
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -12,9 +14,10 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .core.capabilities import EvidenceState
-from .core.telemetry import STATE_OPTIONS, Quantity
+from .core.telemetry import STATE_OPTIONS, Observation, Quantity, State
 from .entity import StationEntity, async_setup_station_entities
 from .observation_entity import ObservationEntity
 from .session_entity import setup_session_entities
@@ -65,7 +68,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
             for description in DESCRIPTIONS
         ],
         observation_factory=lambda runtime, entry_id, channel: [
-            ObservationSensor(runtime, entry_id, channel)
+            (
+                StateObservationSensor
+                if channel.quantity in STATE_OPTIONS
+                else ObservationSensor
+            )(runtime, entry_id, channel)
         ],
     )
 
@@ -137,6 +144,28 @@ class ObservationSensor(ObservationEntity, SensorEntity):
         if self.channel.quantity == Quantity.ENERGY:
             value /= 1000
         return float(value)
+
+
+class StateObservationSensor(ObservationSensor, RestoreEntity):
+    """Persist only display enums, never transient electrical telemetry."""
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        if self.physical_state and self.observation is None:
+            previous = await self.async_get_last_state()
+            if previous and previous.state not in ("unknown", "unavailable"):
+                try:
+                    at = datetime.fromisoformat(previous.attributes["observed_at"])
+                    self._last_known = Observation(
+                        self.channel,
+                        State(previous.state),
+                        at,
+                        at,
+                        None,
+                        "ha:last_known_display",
+                    )
+                except ValueError, TypeError, KeyError:
+                    pass
 
 
 class AuthoritySensor(StationEntity, SensorEntity):

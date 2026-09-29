@@ -174,3 +174,23 @@ that channel is reported. No destructive automatic cleanup is performed; unwante
 test duplicates can be removed manually in HA. Retained session entity IDs are unchanged. For beta.6 upgrades, the removed
 Session Charging State registry entry may likewise remain for manual removal;
 newly observed sessions create exactly nine entities.
+
+
+## CP-off observability and last-known display
+
+Connector and charging enum entities retain their last reliable observation while
+CP is disabled. `state_fresh: false` and `state_represents: last_known_observation`
+separate that value from current physical evidence. CP-off status notifications
+cannot manufacture a disconnect/idle observation; an unobserved unplug therefore
+remains unknown until CP returns and a new status arrives. Enabling CP alone does
+not make the old sample fresh. The card keeps the text, dims it, and labels its
+last-known meaning in a tooltip. Charging permission remains a separate commanded
+control; OFF does not mean the vehicle was physically unplugged.
+
+Existing HA RestoreEntity storage retains only these display enums across reload.
+Restored values never populate electrical inputs or authorize control. A runtime
+without any previous value displays unknown, not disconnected. Live measurements
+retain their existing expiry rules. Real protocol transaction endings (including
+EVDeparted) still update/end the session ledger even while CP is off; lack of
+observable status alone never ends a session. Fresh post-enable connector/charging
+observations replace the display history and clear the dimmed indication.

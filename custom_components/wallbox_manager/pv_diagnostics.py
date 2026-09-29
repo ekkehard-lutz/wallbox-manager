@@ -14,8 +14,8 @@ from fractions import Fraction
 from functools import wraps
 
 from .core.telemetry import Channel, Quantity, state_flag
+from .diagnostics import OPTION
 
-OPTION = "pv_diagnostic_logging"
 _LOGGER = logging.getLogger(__name__)
 _ACTIVE = ContextVar("pv_diagnostic_cycle", default=None)
 
@@ -125,7 +125,19 @@ class Cycle:
         p, t, _ = self.owner
         now = datetime.now(UTC)
         self.data["evaluated_at"] = now.isoformat()
-        for key in ("site_load_w", "surplus_w", "measured_power_w"):
+        for key in (
+            "site_load_w",
+            "surplus_w",
+            "measured_power_w",
+            "raw_pv_power_w",
+            "smoothed_pv_power_w",
+            "raw_consumption_power_w",
+            "smoothed_consumption_power_w",
+            "smoothing_window_s",
+            "smoothing_enabled",
+            "pv_history_s",
+            "consumption_history_s",
+        ):
             self.data.pop(key, None)
         self.data["external"] = {
             key: entity_sample(
@@ -304,10 +316,21 @@ class Cycle:
             reason=reason,
             profile_status=p.status.get(t),
             control_status=intent.status,
+            command_fence_reason=intent.fence_reason,
+            startup_pending=t in p.pv_startups,
+            policy_allows_charging=self.data.get("policy_reason")
+            == "actively_charging",
+            ownership_status=getattr(
+                getattr(p.control, "ownership", None), "status", None
+            ),
+            stop_delay_holding=reason == "pv_stop_delay",
             ongoing_before=self.ongoing_before,
             ongoing_after=p.pv_ongoing.get(t, False),
             applied_before=point(self.before),
             applied=point(after),
+            awaiting_confirmation=t in p.control.pending_points,
+            reconciliation_required=t in p.control._unconfirmed_targets,
+            in_flight=point(p.control.pending_points.get(t)),
             selected=point(self.plan.point) if self.plan else None,
             commanded=point(intent.solver_result.point)
             if intent.solver_result
@@ -327,7 +350,9 @@ class Cycle:
             pending_target_w=number(
                 self.data.get("policy_target_w", intent.request.target_w)
             )
-            if intent.status == "pending" or intent.phase_retry
+            if intent.status == "pending"
+            or intent.phase_retry
+            or p.pv_retry_until.get(t, 0) > p.monotonic()
             else None,
         )
         self.data["delays"] = {}
@@ -343,7 +368,7 @@ class Cycle:
                 "remaining_s": max(0, total - elapsed) if elapsed is not None else None,
             }
         _LOGGER.info(
-            "PVCTRL %s",
+            "WBMGR subsystem=pv %s",
             json.dumps(
                 self.data, separators=(",", ":"), sort_keys=True, allow_nan=False
             ),
@@ -380,12 +405,12 @@ def cycle(profile, target, trigger):
                 record.finish()
             else:
                 _LOGGER.info(
-                    "PVCTRL %s",
+                    "WBMGR subsystem=pv %s",
                     '{"decision":"DIAGNOSTIC_UNAVAILABLE","reason":"snapshot_failed"}',
                 )
         except Exception:
             _LOGGER.info(
-                "PVCTRL %s",
+                "WBMGR subsystem=pv %s",
                 '{"decision":"DIAGNOSTIC_UNAVAILABLE","reason":"serialization_failed"}',
             )
         finally:
@@ -395,11 +420,11 @@ def cycle(profile, target, trigger):
 
 def diagnostic_plan(method):
     @wraps(method)
-    def wrapped(self, target, *, advance=True):
+    def wrapped(self, target, *, advance=True, **kwargs):
         if not advance:
-            return method(self, target, advance=False)
+            return method(self, target, advance=False, **kwargs)
         with cycle(self, target, "plan"):
-            result = method(self, target, advance=True)
+            result = method(self, target, advance=True, **kwargs)
             if record := active(self, target):
                 record.plan = result[3]
                 record.data.update(
@@ -417,10 +442,10 @@ def diagnostic_plan(method):
 
 def diagnostic_permission(method):
     @wraps(method)
-    async def wrapped(self, target, enabled):
+    async def wrapped(self, target, enabled, **kwargs):
         if self.setting(target)["profile"] != "PV_SURPLUS":
-            return await method(self, target, enabled)
+            return await method(self, target, enabled, **kwargs)
         with cycle(self, target, "permission"):
-            return await method(self, target, enabled)
+            return await method(self, target, enabled, **kwargs)
 
     return wrapped

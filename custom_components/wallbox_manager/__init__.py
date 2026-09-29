@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 from .const import DEFAULT_HOST, DEFAULT_PORT
 
-PLATFORMS = ("binary_sensor", "sensor", "switch", "number", "select", "button")
+PLATFORMS = ("binary_sensor", "sensor", "switch", "number", "select", "button", "text")
 
 
 @dataclass
@@ -60,7 +60,7 @@ async def async_setup_entry(
     )
     from .runtime import Runtime
 
-    state = Runtime()
+    state = Runtime(entry)
     server = transport.CentralSystem(
         state,
         entry.data.get("host", DEFAULT_HOST),
@@ -91,12 +91,21 @@ async def async_setup_entry(
         ownership = await async_get_ownership(hass)
         entry.async_on_unload(ownership.register(entry, control))
         battery = BatteryReserve(hass, entry)
-        await battery.load()
+        await battery.load(
+            preserve=bool(
+                ownership.record
+                and ownership.record["enabled_intent"]
+                and ownership.resolve(ownership.active_wallbox)[0] is control
+            )
+        )
         profiles = GridProfiles(hass, entry, control, battery)
+        profiles.recovery_ready = False
         await profiles.load()
         control.profiles = profiles
         entry.runtime_data = EntryRuntime(state, server, storage, control, profiles)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        profiles.recovery_ready = True
+        ownership.changed()
         await async_setup_assets(hass)
     except BaseException:
         if profiles is not None:

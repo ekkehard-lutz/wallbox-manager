@@ -244,6 +244,14 @@
       "take_control": {
         "name": "Take control"
       }
+    },
+    "text": {
+      "grid_start_delay": {
+        "name": "Start delay"
+      },
+      "grid_duration": {
+        "name": "Charging duration"
+      }
     }
   },
   "options": {
@@ -251,12 +259,31 @@
       "init": {
         "title": "Wallbox Manager",
         "description": "PV Surplus requires both power references. Without battery SoC it operates without battery logic; the discharge-reserve reference is independent.",
-        "data": {
-          "min_soc_speicher": "Battery minimum reserve",
-          "soc_speicher_aktuell": "Current battery state of charge",
-          "leistung_pv": "PV power",
-          "leistung_verbraucher": "Total consumer power (including selected wallbox)",
-          "pv_diagnostic_logging": "PV controller diagnostic logging"
+        "sections": {
+          "general": {
+            "name": "General parameters",
+            "data": {
+              "min_soc_speicher": "Minimum reserve",
+              "soc_speicher_aktuell": "Battery SoC",
+              "leistung_pv": "PV power",
+              "leistung_verbraucher": "Consumption power",
+              "pv_diagnostic_logging": "Diagnostic logging"
+            },
+            "data_description": {
+              "pv_diagnostic_logging": "Enables detailed Wallbox Manager diagnostics for troubleshooting. Content depends on the active feature, profile and current activity. Disabled by default.",
+              "leistung_verbraucher": "Total consumption including the selected wallbox."
+            }
+          },
+          "regulation": {
+            "name": "Regulation parameters",
+            "data": {
+              "regulation_interval": "Regulation interval",
+              "pv_start_delay": "PV start delay",
+              "pv_stop_delay": "PV stop delay",
+              "soc_hysterese": "SoC hysteresis",
+              "power_smoothing_window": "Power smoothing window"
+            }
+          }
         }
       }
     }

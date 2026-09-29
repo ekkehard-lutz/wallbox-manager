@@ -101,10 +101,13 @@ async def test_reference_options_form_serializes():
         fields = {f["name"]: f for f in payload["data_schema"]}
         assert "reference_verified" not in fields
         assert "reference_min_a" not in fields
-        assert "min_soc_speicher" in fields
-        assert "soc_speicher_aktuell" in fields
+        assert "general" in fields
+        general = {f["name"] for f in fields["general"]["schema"]}
+        assert "min_soc_speicher" in general
+        assert "soc_speicher_aktuell" in general
         result = await flow.async_step_init({})
-        assert result["type"] == "create_entry" and result["data"] == {}
+        assert result["type"] == "create_entry"
+        assert result["data"]["power_smoothing_window"] == 5
     finally:
         await hass.async_stop()
 

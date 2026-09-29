@@ -106,8 +106,10 @@ async def test_observed_capability_entities_metadata_and_scopes(diagnostics):
             for s in samples[5:]
         ),
     )
-    assert by_key[(samples[5].channel, "connector_state")].native_value == "unknown"
-    assert by_key[(samples[6].channel, "charging_state")].native_value == "unknown"
+    assert by_key[(samples[5].channel, "connector_state")].native_value == "occupied"
+    assert not by_key[(samples[5].channel, "connector_state")].state_fresh
+    assert by_key[(samples[6].channel, "charging_state")].native_value == "connected"
+    assert not by_key[(samples[6].channel, "charging_state")].state_fresh
     assert not any(
         e.translation_key
         in {"available", "occupied", "vehicle_connected", "charging_active"}
@@ -256,3 +258,262 @@ async def test_card_scope_join_rejects_ambiguous_parent_meter(diagnostics):
     assert exact.extra_state_attributes["wallbox_manager_target"] == identity(
         config.entry_id, connector
     )
+
+
+@pytest.mark.parametrize("parent", [False, True])
+async def test_cp_off_retains_physical_states_and_reload_only_restores_display(
+    diagnostics, parent
+):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+    from custom_components.wallbox_manager.core.sessions import (
+        SessionEvent,
+        SessionEventKind,
+    )
+
+    hass, _, runtime, platforms, setup, unload = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    now = datetime.now(UTC)
+    runtime.session_event(
+        token,
+        SessionEvent(target, "vehicle", SessionEventKind.STARTED, now, State.CHARGING),
+        live=True,
+    )
+    runtime.observe(
+        token,
+        (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(
+                target.evse if parent else target,
+                Quantity.CHARGING_STATE,
+                State.CHARGING,
+            ),
+        ),
+    )
+    await hass.async_block_till_done()
+    states = {e.channel.quantity: e for e in operational(platforms)}
+    assert all(e.state_fresh for e in states.values())
+    at = datetime.now(UTC)
+    runtime.observe_enabled(
+        token, EnabledObservation(target, False, at, at + timedelta(seconds=60))
+    )
+    runtime.observe(
+        token,
+        (
+            observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),
+            observation(
+                target.evse if parent else target, Quantity.CHARGING_STATE, State.IDLE
+            ),
+        ),
+    )
+    assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
+    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert not states[Quantity.CONNECTOR_STATE].state_fresh
+    assert not states[Quantity.CHARGING_STATE].state_fresh
+    assert (
+        hass.states.get(states[Quantity.CHARGING_STATE].entity_id).state == "connected"
+    )
+    assert runtime.sessions.get(target).active
+    assert runtime.enabled(target) is False
+    await unload()
+    runtime = await setup()
+    states = {e.channel.quantity: e for e in operational(platforms)}
+    assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
+    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert all(e.available and not e.state_fresh for e in states.values())
+    token = runtime.connect(target.station)
+    at = datetime.now(UTC)
+    runtime.observe_enabled(
+        token, EnabledObservation(target, True, at, at + timedelta(seconds=60))
+    )
+    assert all(not e.state_fresh for e in states.values())
+    runtime.observe(
+        token,
+        (
+            observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),
+            observation(
+                target.evse if parent else target, Quantity.CHARGING_STATE, State.IDLE
+            ),
+        ),
+    )
+    assert states[Quantity.CONNECTOR_STATE].native_value == "available"
+    assert states[Quantity.CHARGING_STATE].native_value == "idle"
+    assert all(e.state_fresh for e in states.values())
+
+
+async def test_explicit_departure_still_ends_session_when_cp_is_off(diagnostics):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+    from custom_components.wallbox_manager.core.sessions import (
+        SessionEvent,
+        SessionEventKind,
+    )
+
+    _, _, runtime, _, _, _ = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    at = datetime.now(UTC)
+    runtime.session_event(
+        token,
+        SessionEvent(target, "vehicle", SessionEventKind.STARTED, at, State.CHARGING),
+        live=True,
+    )
+    runtime.observe_enabled(
+        token, EnabledObservation(target, False, at, at + timedelta(seconds=60))
+    )
+    runtime.session_event(
+        token,
+        SessionEvent(
+            target,
+            "vehicle",
+            SessionEventKind.ENDED,
+            datetime.now(UTC),
+            State.IDLE,
+            "EVDeparted",
+        ),
+        live=True,
+    )
+    assert not runtime.sessions.get(target).active
+
+
+@pytest.mark.parametrize("parent", [False, True])
+@pytest.mark.parametrize("read_first", [False, True])
+async def test_restart_cp_events_before_or_after_first_on_read_are_fresh(
+    diagnostics, parent, read_first
+):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, setup, unload = diagnostics
+    target = ConnectorId(EvseId(StationId("cp"), "1"), "1")
+    scope = target.evse if parent else target
+
+    def samples():
+        return (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(scope, Quantity.CHARGING_STATE, State.CHARGING),
+        )
+
+    token = runtime.connect(target.station)
+    runtime.observe(token, samples())
+    await hass.async_block_till_done()
+    await unload()
+    runtime = await setup()
+    states = operational(platforms)
+    assert all(e.available and not e.state_fresh for e in states)
+    token = runtime.connect(target.station)
+    assert all(not e.state_fresh for e in states)  # Socket alone proves nothing.
+    if not read_first:
+        runtime.observe(token, samples())
+    at = datetime.now(UTC)
+    runtime.observe_enabled(
+        token, EnabledObservation(target, True, at, at + timedelta(seconds=60))
+    )
+    if read_first:
+        assert all(not e.state_fresh for e in states)
+        runtime.observe(token, samples())
+    assert all(e.state_fresh for e in states)
+    assert all(hass.states.get(e.entity_id).attributes["state_fresh"] for e in states)
+
+
+async def test_real_off_on_transition_still_requires_new_cp_evidence(diagnostics):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    runtime.observe(
+        token,
+        (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(target, Quantity.CHARGING_STATE, State.CHARGING),
+        ),
+    )
+    await hass.async_block_till_done()
+    for enabled in (True, False, True):
+        at = datetime.now(UTC)
+        runtime.observe_enabled(
+            token, EnabledObservation(target, enabled, at, at + timedelta(seconds=60))
+        )
+    states = {e.channel.quantity: e for e in operational(platforms)}
+    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert all(not e.state_fresh for e in states.values())
+    runtime.observe(
+        token, (observation(target, Quantity.CHARGING_STATE, State.CHARGING),)
+    )
+    assert states[Quantity.CHARGING_STATE].native_value == "charging"
+    assert states[Quantity.CHARGING_STATE].state_fresh
+
+
+@pytest.mark.parametrize("initial", [None, True, False])
+@pytest.mark.parametrize("read_first", [False, True])
+async def test_unknown_permission_recovery_only_fences_confirmed_off(
+    diagnostics, initial, read_first
+):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+
+    def permission(value):
+        at = datetime.now(UTC)
+        runtime.observe_enabled(
+            token, EnabledObservation(target, value, at, at + timedelta(seconds=60))
+        )
+
+    def samples():
+        return (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(target, Quantity.CHARGING_STATE, State.CHARGING),
+        )
+
+    if initial is not None:
+        permission(initial)
+    permission(None)  # Failed first discovery read, or a transient polling failure.
+    if read_first:
+        permission(True)
+    evidence = samples()
+    runtime.observe(token, evidence)
+    await hass.async_block_till_done()
+    if not read_first:
+        assert all(not e.state_fresh for e in operational(platforms))
+        permission(True)
+    fresh = initial is not False or read_first
+    assert all(e.state_fresh == fresh for e in operational(platforms))
+    assert all(
+        hass.states.get(e.entity_id).attributes["state_fresh"] == fresh
+        for e in operational(platforms)
+    )
+    # Reordered older reports do not replace new evidence or move its timestamp.
+    runtime.observe(
+        token,
+        tuple(
+            replace(o, observed_at=o.observed_at - timedelta(seconds=1))
+            for o in evidence
+        ),
+    )
+    assert all(runtime.get(token.station).observation(o.channel) == o for o in evidence)
+    runtime.observe(token, samples())
+    assert all(e.state_fresh for e in operational(platforms))
+
+
+async def test_permission_recovery_cannot_extend_expired_physical_evidence(diagnostics):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    sample = observation(target, Quantity.CHARGING_STATE, State.CHARGING)
+    sample = replace(sample, valid_until=sample.observed_at)
+    runtime.observe(token, (sample,))
+    await hass.async_block_till_done()
+    for value in (None, True):
+        at = datetime.now(UTC)
+        runtime.observe_enabled(
+            token, EnabledObservation(target, value, at, at + timedelta(seconds=60))
+        )
+    assert all(not e.state_fresh for e in operational(platforms))
+    assert runtime.get(token.station).observation(sample.channel) == sample
+    runtime.observe(
+        token, (observation(target, Quantity.CHARGING_STATE, State.CHARGING),)
+    )
+    assert all(e.state_fresh for e in operational(platforms))

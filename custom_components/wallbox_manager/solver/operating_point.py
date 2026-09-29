@@ -44,6 +44,14 @@ class OperatingPoint:
         ):
             raise ValueError("OFF has no physical current or phase setpoint")
 
+    def same_setpoint(self, other):
+        """Compare wire control quantities, independently of voltage-derived watts."""
+        return isinstance(other, OperatingPoint) and (
+            self.charging,
+            self.mode,
+            self.current_a,
+        ) == (other.charging, other.mode, other.current_a)
+
     @classmethod
     def off(cls) -> OperatingPoint:
         return cls(False, None, None, Fraction(0))

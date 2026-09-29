@@ -159,7 +159,9 @@ async def test_zero_needs_no_voltage_or_phase_feedback(authority):
     ]
 
 
-@pytest.mark.parametrize("change", ["refresh", "voltage", "hardware", "capability"])
+@pytest.mark.parametrize(
+    "change", ["refresh", "drift", "voltage", "hardware", "capability"]
+)
 async def test_profile_inflight_semantic_fences(authority, change):
     control, bound, peer, _ = authority
     await acquire_for_test(control, bound, peer, start=peer.enabled)
@@ -175,13 +177,13 @@ async def test_profile_inflight_semantic_fences(authority, change):
         live.runtime._publish(replace(state, electrical=()))
     else:
         measured(live.runtime, live.token, bound.target)
-        if change == "voltage":
+        if change in ("drift", "voltage"):
             state = live.runtime.get(bound.target.station)
             live.runtime._publish(
                 replace(
                     state,
                     observations=tuple(
-                        replace(o, value=240)
+                        replace(o, value=240 if change == "drift" else 260)
                         if o.channel.quantity == Quantity.VOLTAGE_L1
                         else o
                         for o in state.observations
@@ -190,9 +192,11 @@ async def test_profile_inflight_semantic_fences(authority, change):
             )
     peer.release.set()
     result = await pending
-    if change == "refresh":
+    if change in ("refresh", "drift", "voltage"):
         assert result.status == CommandStatus.APPLIED
         assert len(peer.permissions) == 1
+        assert control.confirmed_point(bound.target).current_a == 10
+        assert control.intent(bound.target).fence_reason is None
         assert live.runtime.enabled(bound.target) is True
     else:
         assert result.reason == CommandReason.STALE
@@ -260,7 +264,7 @@ async def test_unknown_and_expired_state_never_restore_desired_permission(contro
 
 
 @pytest.mark.parametrize(
-    "change", ["refresh", "voltage", "expired", "hardware", "transaction"]
+    "change", ["refresh", "drift", "voltage", "expired", "hardware", "transaction"]
 )
 async def test_enable_queue_rechecks_prepared_target(authority, change):
     control, bound, peer, _ = authority
@@ -319,13 +323,13 @@ async def test_enable_queue_rechecks_prepared_target(authority, change):
                     ),
                 )
             )
-        if change == "voltage":
+        if change in ("drift", "voltage"):
             state = live.runtime.get(bound.target.station)
             live.runtime._publish(
                 replace(
                     state,
                     observations=tuple(
-                        replace(o, value=240)
+                        replace(o, value=240 if change == "drift" else 260)
                         if o.channel.quantity == Quantity.VOLTAGE_L1
                         else o
                         for o in state.observations
@@ -335,8 +339,12 @@ async def test_enable_queue_rechecks_prepared_target(authority, change):
     release.set()
     result = await pending
     assert len(peer.requests) == 1
-    if change == "refresh":
+    if change in ("refresh", "drift", "voltage", "expired"):
+        # The prepared point was already dispatched; permission completes the
+        # same decision, with live control fences but no voltage re-solving.
         assert result.status == CommandStatus.APPLIED
+        assert control.confirmed_point(bound.target).current_a == 10
+        assert control.intent(bound.target).fence_reason is None
         assert len(peer.permissions) == 1
     else:
         assert result.reason == CommandReason.STALE

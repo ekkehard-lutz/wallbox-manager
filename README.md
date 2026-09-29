@@ -272,7 +272,7 @@ Remote wallbox, acquires the selected station, explicitly sends OFF and confirms
 OFF before completing selection. **Every takeover forces charging permission OFF.**
 A separate user action starts charging. Startup/reload, profile selection and
 background events never acquire authority. Power edits while active/enabled apply after a one-second trailing-edge backend
-debounce; explicit enable and stop remain immediate. Per-wallbox settings persist
+debounce; explicit permission changes bypass this debounce. Per-wallbox settings persist
 separately. With authority, profile selection disables permission; without authority,
 profile selection/settings are configuration-only and send no OCPP commands.
 
@@ -296,9 +296,9 @@ metadata and survives entity renames. After verifying automatic loading, remove
 temporary manually registered copies such as `/local/wallbox-manager-card.js`.
 See [automatic registration verification](docs/frontend-registration.md).
 
-The compact card includes a device-name header, equal narrow numeric fields,
-progressive 0.1/1 kW buttons with press-and-hold repeat (450 ms, then every 150 ms),
-and locale-aware direct input. Its two-column status section shows measured
+The compact card shows requested charging power, discharge reserve, optional start
+delay and optional charging duration for NETZ, or only battery target SoC for PV Surplus. Technical regulation
+settings are in the integration options. Its two-column status section shows measured
 power, session duration as total `H:MM`, and the confirmed applied phase/current
 limit, including any phase-lockout substitute.
 Known backend technical limits bound requests. The optional battery control is
@@ -310,9 +310,70 @@ See [Grid profile, ownership, migration and card installation](docs/grid-profile
 for the exact state model, guarded sequence, station-scoped capability subentries,
 battery lifecycle and failure behavior.
 
-PV_SURPLUS, PV_DAILY_OPTIMUM and PV_MAXIMUM are deferred pending detailed
-specifications. No PV algorithms or external Energy Manager interface are
-implemented in this iteration.
+PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
+PV_DAILY_OPTIMUM, PV_MAXIMUM and the external Energy Manager interface remain deferred.
+
+## Integration settings and profile timing
+
+The native Home Assistant options form separates **General parameters / Allgemeine
+Parameter** (diagnostics, minimum reserve, battery SoC, PV power, consumption power)
+from **Regulation parameters / Regelparameter** (regulation interval, PV start/stop
+delays, SoC hysteresis, power smoothing window). Consumption means **total site
+consumption including the selected wallbox**. Existing settings are migrated;
+explicit central values win. Conflicting old per-wallbox values are selected by
+sorted stored target identity, per setting, with all originals archived in the
+options. No integration version change is needed. Diagnostic-only edits do not
+reload the integration.
+
+Power smoothing defaults to **5 seconds**; **0 disables it**. Only PV and total
+consumption power are averaged. This is a time-weighted moving window: 2000 W for
+4 seconds and 1000 W for 1 second produces 1800 W over 5 seconds. Startup averages
+only known time. Larger windows suppress short load spikes but respond more slowly.
+The regulation interval is independent: a 5-second interval can use a 15-second
+window. SoC, voltage, safety state and selected-wallbox actual power remain raw.
+Missing or stale readings pause decisions without synthesizing OFF; new readings
+cannot invalidate a dispatched command snapshot.
+
+NETZ **Start delay / Startverzögerung** and **Charging duration / Ladedauer** are
+optional relative durations in `hh:mm`, never local clock times. Hours can exceed
+23 (`24:00`, `120:15`); minutes must be 00–59. Empty means unset; `00:00` is zero
+(a zero charging duration expires immediately).
+
+| Start delay | Charging duration | Behavior |
+| --- | --- | --- |
+| Empty | Empty | Immediate, unlimited |
+| Set | Empty | Delayed, then unlimited |
+| Empty | Set | Immediate, stops after duration |
+| Set | Set | Delayed, duration counted from scheduled start |
+
+For example, `01:30` plus `02:00` waits 90 minutes from Charging Permission ON,
+then allows charging for two hours from the scheduled start. These are **one-shot**
+inputs for the next authorization. Editing or selecting NETZ does not start a timer.
+ON captures the values into a persisted request and clears the pending inputs.
+The existing hours/minutes fields then show deadline-derived countdowns, rounded
+up to whole minutes and disabled for editing. At each deadline the corresponding
+field becomes unset. Explicit zero duration immediately invokes permission OFF,
+even if a delay was entered.
+
+Duration expiry uses the same confirmed Charging Permission OFF path as the switch,
+not just a zero-power request. Failed disables retain a stopping request and retry
+at the existing 60-second interval; HA never assumes hardware permission is OFF.
+Manual OFF or profile selection cancels and consumes an armed request. Later ON
+is immediate/unlimited unless new timing values were entered. Requested power and
+discharge reserve remain persistent.
+
+Reload/restart preserves absolute start/end deadlines; downtime counts and recovery
+processes missed expiry through the normal authority/ownership/control fences.
+Beta.15 configured timings migrate as pending one-shot inputs for the next explicit
+ON; their old recurring activation timestamp is discarded. Consumed timings never
+become pending again. Profile attributes expose armed state, deadlines, captured
+duration, and idle/waiting/active/stopping/consumed/cancelled state.
+
+Requested power uses backend `technical_min_kw` / `technical_max_kw`, calculated
+from verified capability envelopes, exact current steps/limits, eligible phases
+and fresh observed voltages. No nominal voltage is assumed. The compact editor
+steps by 0.1 kW below 10 kW, by 1 kW above it, with reversible 9.9↔10.0 transitions
+and clamping to known bounds. Direct entry retains backend OperatingPoint selection.
 
 ## Planned Energy Manager interface
 
@@ -413,16 +474,18 @@ solver, explicit charging permission and active-wallbox ownership. See
 [PV Surplus configuration and behavior](docs/pv-surplus-profile.md).
 
 PV beta.2 refinements add backend profile availability, configuration without
-control authority, and separate PV start/stop delays (defaults 0/60 seconds).
+control authority, and separate PV start/stop delays (defaults 0/90 seconds).
 Profile settings remain stored when hidden. See the
 [PV profile documentation](docs/pv-surplus-profile.md) and
 [automatic card registration and verification](docs/frontend-registration.md),
 including migration of existing integration-path Lovelace resources.
 
-PV troubleshooting now offers an integration-level **PV controller diagnostic
-logging** option (disabled by default). It emits one structured `PVCTRL` INFO
-record per evaluation without changing charging behavior. See
-[enabling diagnostics and the next hardware test](docs/pv-surplus-profile.md#opt-in-pv-controller-diagnostics).
+Wallbox Manager offers one integration-level **Diagnostic logging** option
+(German: **Diagnoseprotokoll**, disabled by default) for troubleshooting.
+Detailed records use `WBMGR subsystem=pv` for PV evaluations and
+`WBMGR subsystem=recovery` for restart/reload recovery in any charging profile.
+See [diagnostic logging and recovery evidence](docs/diagnostic-logging.md) and
+[PV diagnostic fields](docs/pv-surplus-profile.md#opt-in-wallbox-manager-diagnostics).
 Source sensor freshness is independent of the controller interval; the inspected
 Fronius PV Manager currently polls every 30 seconds. Its proposed fast/slow design
 is [analysis only](docs/fronius-polling-analysis.md).

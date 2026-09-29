@@ -162,7 +162,9 @@ async def battery(tmp_path):
     async def write(call):
         calls.append(call.data["value"])
         hass.states.async_set(
-            "number.reserve", str(call.data["value"]), {"min": 0, "max": 100}
+            "number.reserve",
+            str(call.data["value"]),
+            dict(hass.states.get("number.reserve").attributes),
         )
 
     hass.services.async_register("number", "set_value", write)
@@ -359,13 +361,16 @@ async def test_unavailable_restart_cannot_replace_original_journal(battery):
     assert recovered.record is None
 
 
-async def test_unconfirmed_restore_keeps_journal(battery):
+async def test_unconfirmed_restore_keeps_journal(battery, monkeypatch):
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.battery.CONFIRMATION_TIMEOUT", 0.01
+    )
     reserve, _, _, _ = battery
     await reserve.update(50)
     reserve.write = AsyncMock()
     await reserve.update(None)
     assert reserve.record["original"] == 10
-    assert reserve.status == "error"
+    assert reserve.status == "write_unconfirmed"
 
 
 async def test_actual_metered_charging_finish_and_resume(grid):

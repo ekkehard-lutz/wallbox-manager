@@ -334,3 +334,78 @@ async def test_failed_debounced_apply_clears_pending_diagnostics(grid):
     assert (
         control.attributes(target)["execution_blocked_reason"] != "power_edit_pending"
     )
+
+
+@pytest.mark.parametrize(
+    "minimum,maximum,expected_min,expected_max",
+    [(6, 27, 1.38, 18.63), (8, 16, 1.84, 11.04), (7, 20, 1.61, 13.8)],
+)
+async def test_canonical_positive_power_bounds_from_capabilities(
+    grid, minimum, maximum, expected_min, expected_max
+):
+    from dataclasses import replace
+
+    profile, target, (control, _, _, _, source, _) = grid
+    source.snapshot = replace(
+        source.snapshot,
+        envelopes=tuple(
+            replace(e, min_current_a=minimum, max_current_a=maximum)
+            for e in source.snapshot.envelopes
+        ),
+    )
+    entity = ProfileNumber(control, "grid", target, "soll_power")
+    assert entity.extra_state_attributes["technical_min_kw"] == expected_min
+    assert entity.extra_state_attributes["technical_max_kw"] == expected_max
+    assert control.power_floor(target) == minimum * 230
+    # These bounds do not select/change a point or alter the approximation policy.
+    assert profile.setting(target)["power_kw"] == 11
+    source.snapshot = None
+    assert entity.extra_state_attributes["technical_min_kw"] is None
+    assert entity.extra_state_attributes["technical_max_kw"] is None
+
+
+async def test_positive_bound_uses_eligible_modes_and_exact_current_grid(grid):
+    from dataclasses import replace
+
+    profile, target, (control, _, _, _, source, _) = grid
+    source.snapshot = replace(
+        source.snapshot,
+        envelopes=tuple(
+            replace(e, min_current_a=7, max_current_a=16, current_step_a=2)
+            for e in source.snapshot.envelopes
+        ),
+    )
+    control.restore(target, allowed_current_1p=6, allowed_current_3p=8)
+    assert control.power_floor(target) == 7 * 690  # 1p interval is empty.
+    assert control.power_ceiling(target) == 7 * 690
+
+
+async def test_bounds_use_fresh_actual_voltage_and_generation(grid):
+    from dataclasses import replace
+    from datetime import UTC, datetime, timedelta
+
+    _, target, (control, _, _, *_) = grid
+    original = control.inputs(target)
+    voltage = replace(
+        original.voltage,
+        phases=tuple(replace(p, voltage_v=220) for p in original.voltage.phases),
+    )
+    control.inputs = lambda target: replace(original, voltage=voltage)
+    assert control.power_floor(target) == 6 * 220
+    assert control.power_ceiling(target) == 32 * 660
+    voltage = replace(voltage, connection_generation=voltage.connection_generation + 1)
+    assert control.power_floor(target) is None
+    assert control.power_ceiling(target) is None
+    voltage = replace(
+        original.voltage,
+        phases=tuple(
+            replace(
+                p,
+                observed_at=datetime.now(UTC) - timedelta(seconds=120),
+                valid_until=datetime.now(UTC) - timedelta(seconds=60),
+            )
+            for p in original.voltage.phases
+        ),
+    )
+    assert control.power_floor(target) is None
+    assert control.power_ceiling(target) is None

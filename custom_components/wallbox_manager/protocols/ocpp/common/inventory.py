@@ -162,12 +162,17 @@ class InventoryAdapter(DiscoveryAdapter):
                 ),
                 live=not offline,
             )
-        if evse and evse.get("id", 0) > 0 and not offline:
-            scope = evse_identity(self.token.station, evse["id"])
-            if evse.get("connector_id") is not None:
-                scope = connector_identity(
-                    self.token.station, evse["id"], evse["connector_id"]
-                )
+        if not offline and (
+            (evse and evse.get("id", 0) > 0) or (not evse and scope is not None)
+        ):
+            # A later event may omit EVSE entirely. The session already resolved
+            # its explicit identity above; keep fresh state on that same channel.
+            if evse:
+                scope = evse_identity(self.token.station, evse["id"])
+                if evse.get("connector_id") is not None:
+                    scope = connector_identity(
+                        self.token.station, evse["id"], evse["connector_id"]
+                    )
             source = f"ocpp{self._ocpp_version}:TransactionEvent"
             # Embedded measurements belong to the session ledger, not to
             # ordinary metering capability/entity advertisement.

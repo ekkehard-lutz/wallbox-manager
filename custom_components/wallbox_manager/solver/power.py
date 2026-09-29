@@ -23,8 +23,8 @@ def current_indices(envelope, limits):
     return max(0, ceil((lower - origin) / step)), floor((upper - origin) / step)
 
 
-def maximum_power(capabilities, voltage, *, now, eligible_modes, limits):
-    """Known ceiling only; does not select any requested operating point."""
+def maximum_power(capabilities, voltage, *, now, eligible_modes, limits, minimum=False):
+    """Known feasible bound; minimum excludes the non-charging OFF point."""
     if (
         voltage.scope != capabilities.scope
         or voltage.connection_generation != capabilities.connection_generation
@@ -38,12 +38,14 @@ def maximum_power(capabilities, voltage, *, now, eligible_modes, limits):
         if envelope.evidence.state != EvidenceState.VERIFIED or volts is None:
             return None
         first, last = current_indices(envelope, limits)
-        maxima.append(
-            (envelope.min_current_a + last * envelope.current_step_a) * sum(volts)
-            if first <= last
-            else Fraction(0)
-        )
-    return max(maxima) if maxima else None
+        if first <= last:
+            index = first if minimum else last
+            maxima.append(
+                (envelope.min_current_a + index * envelope.current_step_a) * sum(volts)
+            )
+        elif not minimum:
+            maxima.append(Fraction(0))
+    return (min(maxima) if minimum else max(maxima)) if maxima else None
 
 
 def solve(

@@ -18,9 +18,9 @@ from custom_components.wallbox_manager.pv_diagnostics import entity_sample
 
 def records(caplog):
     return [
-        json.loads(r.message.removeprefix("PVCTRL "))
+        json.loads(r.message.removeprefix("WBMGR subsystem=pv "))
         for r in caplog.records
-        if r.message.startswith("PVCTRL ")
+        if r.message.startswith("WBMGR subsystem=pv ")
     ]
 
 
@@ -60,12 +60,18 @@ async def test_one_record_per_cycle_and_identical_command_behavior(
         assert lines[0]["external"]["leistung_pv"]["value"] == 8000
         assert lines[0]["external"]["leistung_pv"]["age_s"] >= 0
         assert lines[0]["external"]["leistung_pv"]["age_basis"] == "last_reported"
+        assert lines[0]["raw_pv_power_w"] == 8000
+        assert lines[0]["smoothed_pv_power_w"] == 8000
+        assert lines[0]["raw_consumption_power_w"] == 5000
+        assert lines[0]["smoothed_consumption_power_w"] == 5000
+        assert lines[0]["smoothing_window_s"] == 0
+        assert lines[0]["smoothing_enabled"] is False
         assert lines[0]["surplus_w"] == 6000
         assert lines[0]["site_load_w"] == 2000
         assert all(
             "\n" not in r.message
             for r in caplog.records
-            if r.message.startswith("PVCTRL ")
+            if r.message.startswith("WBMGR subsystem=pv ")
         )
 
 
@@ -132,7 +138,12 @@ async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
     again = ReferenceOptionsFlow()
     again.hass, again.handler = p.hass, config.entry_id
     form = await again.async_step_init()
-    assert form["data_schema"]({})["pv_diagnostic_logging"] is True
+    assert (
+        form["data_schema"]({"general": {}, "regulation": {}})["general"][
+            "pv_diagnostic_logging"
+        ]
+        is True
+    )
 
 
 async def test_diagnostic_collector_failure_does_not_change_plan(
@@ -277,3 +288,43 @@ async def test_no_authority_is_explicit(grid, caplog):
     (line,) = records(caplog)
     assert line["decision"] == "NO_AUTHORITY"
     assert line["reason"] == "no_authority"
+
+
+async def test_diagnostics_default_disabled(grid):
+    from homeassistant.config_entries import ConfigEntries
+    from test_ha_lifecycle import entry
+
+    from custom_components.wallbox_manager.config_flow import ReferenceOptionsFlow
+
+    p, _, _ = grid
+    config = entry()
+    p.hass.config_entries = ConfigEntries(p.hass, {})
+    p.hass.config_entries._entries[config.entry_id] = config
+    flow = ReferenceOptionsFlow()
+    flow.hass, flow.handler = p.hass, config.entry_id
+    form = await flow.async_step_init()
+    assert (
+        form["data_schema"]({"general": {}, "regulation": {}})["general"][
+            "pv_diagnostic_logging"
+        ]
+        is False
+    )
+
+
+def test_diagnostic_translations_are_generic():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1] / "custom_components/wallbox_manager"
+    for filename, label in [
+        ("strings.json", "Diagnostic logging"),
+        ("translations/en.json", "Diagnostic logging"),
+        ("translations/de.json", "Diagnoseprotokoll"),
+    ]:
+        step = json.loads((root / filename).read_text())["options"]["step"]["init"][
+            "sections"
+        ]["general"]
+        assert step["data"]["pv_diagnostic_logging"] == label
+        help_text = step["data_description"]["pv_diagnostic_logging"]
+        assert "PV" not in help_text
+        assert "Wallbox" in help_text
+        assert "deaktiviert" in help_text or "Disabled by default" in help_text

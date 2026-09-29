@@ -14,18 +14,27 @@ colliding. One coordinator shared by all loaded Wallbox Manager entries enforces
 at most one eligible profile-controlled connector. Multiple physical wallboxes
 remain supported; a multi-connector station exposes its distinct control scopes.
 
-The coordinator persists the active identity in HA Store
-`wallbox_manager.active_wallbox`. It does **not** persist permission ON, a successful
-takeover authorization or pending work. Separate transient fields are:
+The coordinator extends the existing HA Store `wallbox_manager.active_wallbox`
+with a versioned `ownership` record written only after successful explicit takeover
+and OFF confirmation. It records entry/station/EVSE/connector identity, observed
+station vendor/model/serial/firmware, explicit permission intent, and PV battery
+continuation state scoped to the external transaction. Per-wallbox profile and
+parameters remain in the existing profile Store, without a second settings source.
 
-- `ready`: the explicit takeover and OFF confirmation completed in this runtime;
-- `transition`: a guarded activation is running and profile commands are inhibited;
-- `status`: readiness or a specific failure, exposed by the active-wallbox select.
+- `ready`: explicit takeover completed, or historical ownership was reconciled
+  with fresh compatible runtime evidence;
+- `transition`: an explicit activation is running and profile commands are inhibited;
+- `status`: readiness/recovery or a specific rejection, exposed by the active-wallbox select.
 
-Startup/reload restores the identity and per-wallbox settings but starts inhibited.
-The user explicitly takes control again; no startup, telemetry, retry, profile
-selection or battery event acquires authority. Local/unknown authority and loss
-of the active connector invalidate readiness and pending profile work.
+Legacy records containing only `active_wallbox`, absent/corrupt ownership records,
+and unknown ownership versions remain inhibited and require explicit takeover.
+Migration does not grant ownership. Unknown authority, transport disconnect and
+changed runtime generations suspend live readiness and fence pending work, while
+preserving legitimate ownership history and permission/profile intent. Fresh Remote
+and ChargingEnabled evidence reconcile that same record automatically on reconnect.
+An observed Local transition or mismatched station identity durably revokes history;
+a later Remote transition cannot revive it. HA shutdown/reload preserves history
+through its existing deliberate suspension path.
 
 Only the active, ready connector under confirmed Remote authority may receive
 profile permission ON or operating points. This check is in `ControlRuntime`,
@@ -81,10 +90,11 @@ shortcut. Removing inventory never makes the card target an unrelated entity.
 `profiles.py` retains connector-scoped Store values: profile NETZ, `soll_power`
 (kW, bounded by known effective technical limits; storage range 0–100) and
 `min_soc` (0–100%, whole percent for new edits). Existing beta.2 stores remain readable. Switching active wallboxes does not copy settings.
-The select currently offers only NETZ. Selecting/reselecting the profile requests
+The select offers NETZ and, when both power references are configured, PV Surplus. Selecting/reselecting the profile requests
 permission OFF and invalidates work; it never acquires authority.
 
-After takeover, choose Grid, adjust power and enable charging. While active and
+After takeover, choose Grid, configure optional timing and enable charging.
+Fixed power remains configurable through its existing entity. While active and
 enabled, power edits use a **one-second trailing-edge backend debounce**. For edits
 at 0.0, 0.2, 0.5 and 0.8 seconds, only the last value is resolved/applied at about
 1.8 seconds. `GridProfiles.set_value` updates intent and publishes it immediately,
@@ -94,9 +104,8 @@ Entity services, automations and the card all enter this same path. Pure technic
 bounds are independent of the request and share the solver's exact current grid.
 Task epochs and intent generations fence late work, alongside the primitive
 connection, authority and permission checks. OFF, profile changes, owner changes,
-authority loss, disconnect and unload invalidate pending work. There is no delayed
-permission ON. Explicit enable cancels the timer and applies the latest value
-immediately; explicit permission OFF and a zero-power stop also bypass the timer.
+authority loss, disconnect and unload invalidate pending work. NETZ timing gates the requested power through the same control path.
+Explicit enable applies the currently scheduled value; explicit permission OFF and a zero-power stop also bypass the timer.
 
 Settings may be saved
 for an inactive wallbox, but cannot dispatch power. Permission remains confirmed
@@ -109,7 +118,7 @@ The existing solver handles approximation, current steps, separate per-phase
 maxima, fresh voltages, installation limits and phase retention. The primitive
 runtime still owns protocol queues, sequencing, confirmation and connection,
 authority and generation fences. Zero power uses the verified zero-current
-contract without toggling permission. No PV or continuous regulation was added.
+contract without toggling permission. PV regulation uses the same control boundary.
 
 Grid reads the connector's existing `phase_switch_deviation_pct` setting (default
 5%). With enabled, positively charging state, the solver retains the current
@@ -134,7 +143,8 @@ a new start or power change. Switching owners cancels the old sequence too.
 
 ## Station capability configuration and migration
 
-The central integration options now contain only the two battery references.
+The central integration options use native General parameters and Regulation
+parameters sections, including battery/power references, diagnostics and PV tuning.
 There is no central station picker for capability editing.
 
 OCPP discovery creates a real HA **configuration subentry** for each station/EVSE/
@@ -173,29 +183,79 @@ supply a finite numeric percentage from 0 to 100. Before writes, the backend
 checks availability, service support and entity bounds. One missing reference
 disables new battery overrides without affecting ordinary Grid charging.
 
-Only the active, ready, actually charging connector can request an override.
-Actual charging requires an active transaction, charging state and positive fresh
-flow. The per-wallbox `min_soc` stays with that profile. On an episode's start,
-read current reserve and SOC. If requested reserve is higher than current reserve,
-journal the original before writing `min(requested reserve, current SOC)`, even
-when SOC is below the original. An already sufficient reserve remains unchanged.
-Changing `min_soc` during an episode is stored for the next episode.
+Only the active, ready, actually charging connector using Grid (`NETZ`) can
+request an override. PV Surplus never requests an override, including with legacy
+stored `min_soc` settings. Its SoC threshold is only an eligibility threshold. Actual charging requires an active transaction, charging
+state and positive fresh flow. The existing session ledger selects connector,
+unambiguous EVSE and TransactionEvent power; embedded transaction metering does
+not need a duplicate ordinary MeterValues channel.
 
-Permission OFF, profile selection, active-wallbox switch, disconnect, finishing/
-suspension, authority loss or unload restores the original, but only while the
-entity still matches the temporary value. A different external value wins and is
-not overwritten or reasserted during that episode. An external write of the exact
-same numeric value cannot be distinguished. A resumed episode reads a new baseline.
-Non-active Local charging never activates a reserve override.
+The per-wallbox `min_soc` is the **Grid charging reserve**, independent of the
+PV storage target `soll_soc_speicher` and its `soc_hysterese`. Before the first
+override, capture the installation's actual reserve and persist it atomically.
+The temporary value is `max(original, downsize(min(profile reserve, actual SoC)))`.
+Downsize uses the number entity's step grid anchored at its minimum, with a
+one-percentage-point default when step metadata is absent; its maximum also
+bounds the request. Thus original 20, requested 40 and SoC 65 yields 40; SoC 37.8
+with step 1 yields 37; SoC at/below 20 never lowers the original. SoC must be
+finite, 0–100 and reported within 90 seconds. Unavailable, restored or explicitly
+expired entity evidence cannot authorize a write. A constant reserve number does
+not expire merely because its value has not changed.
 
-The existing atomic journal survives restart, reload and reference changes.
-Recovery restores before new activation. Failed restoration retains the journal;
-there is one failed write attempt per runtime, with another attempt after a
-referenced entity becomes available or reload. Failed activation is not retried
-through every telemetry event. Unconfirmed writes remain journaled and diagnosed.
-HA has no atomic compare-and-set number service, so an external write racing the
-actual service dispatch remains a limitation. Switching owners waits for safe
-reserve release rather than replacing a pending journal.
+Owned overrides follow changed profile reserve/SoC only when the down-sized value
+changes; repeated identical evaluations issue no writes. Failed writes do not
+create a regulation-cycle retry loop. The journal retains the previous and pending
+temporary values during adjustment so a failed write cannot lose the original.
+Reserve writes and restoration subscribe to HA state changes before dispatch and
+allow up to ten seconds for service completion and matching live numeric readback.
+The old value during this window is `confirmation_pending`, not a failure. No
+polling loop or repeated write is used. A timeout is `write_unconfirmed`; a service
+exception is `error`. The normal battery state-event reconciliation clears either
+obsolete error once the current journal target is confirmed, even after timeout.
+Pending adjustment targets survive reload; superseded targets cannot confirm a
+newer adjustment. External changes still release the override. As before, the HA
+number interface has no operation ID: a matching live numeric value is the
+available confirmation boundary, not proof of which writer produced it.
+
+Permission OFF, profile selection, owner switch, vehicle/session end, observed
+suspension, authority loss and ordinary control termination restore the original,
+but only while the entity matches the value written by Wallbox Manager. External
+changes win, including an external return to the original; no reassertion occurs
+during that charging episode. An external write of exactly the same numeric value
+cannot be distinguished. HA has no atomic compare-and-set number service, so an
+external write racing actual service dispatch remains a limitation.
+
+A normal owned HA shutdown/reload preserves the existing journal and override.
+Startup waits for the existing ownership reconciliation and fresh charging evidence,
+then compares/adopts the override without `40 → 20 → 40` oscillation. Rejected
+ownership or persisted OFF releases it through the same compare-before-restore
+path. Missing startup evidence leaves restoration/reconciliation pending; it grants
+no new authority. Without legitimate retained ownership, load/unload restores as
+before. Changed entity references restore the journaled old entity before any new
+override. Failed restoration retains the journal and permits another attempt when
+the entity returns; owner switching waits for safe reserve release.
+
+Entity attributes include `battery_status` and `battery_reserve` diagnostics:
+original/profile/observed/desired reserve, SoC, write count/last value, pending
+restoration and error reason. Unchanged cycles do not emit repeated error logs.
+
+### Electrical display after recovery
+
+Continuing hardware charging alone does not establish a confirmed current limit.
+The five-second `Connector.PhaseRotation` NotifyEvent cache may be absent after
+restart. Recovery now reads that same scoped Actual variable with GetVariables,
+then validates the fresh A-unit Composite Schedule against physical phase,
+voltage, capabilities, limits, permission, authority and generation. Unsupported,
+ambiguous, expired or mismatched evidence keeps recovery waiting. There is no
+fallback from measured EV current or historical watts.
+
+A validated point is adopted into the existing confirmed-point store and published
+immediately through `applied_phase_count` and `applied_current_a`. A matching
+3p/8A schedule therefore appears without changing desired power or issuing another
+operating-point write. `electrical_recovery_status` distinguishes missing evidence,
+rejected/stale readback, phase/voltage problems, rejected electrical resolution and
+successful adoption. GetVariables and GetCompositeSchedule support still require
+hardware validation; neither read changes CP or charging permission.
 
 ## Zero-configuration card and automatic resource loading
 
@@ -244,25 +304,18 @@ The theme-aware header uses a 48 × 48 px `mdi:ev-station` (twice the original
 24 px dimensions), the optional presentation title, and
 the real device display name (`name_by_user`, then device/station name) beneath it.
 The multi-wallbox selector lives in the header; single-wallbox cards omit it.
-Takeover remains explicit. Both numeric fields use the former narrow reserve
-width (4 em), including mobile layouts. Keyboard-accessible power buttons step by
-0.1 kW below 10, and 1 kW above: 9.8 → 9.9 → 10 → 11 and the reverse. Direct input
-also accepts fractions above 10. The card formats the HA language's decimal
-separator. `technical_max_kw` comes from verified envelopes, fresh voltages and
-effective current limits; the buttons clamp to it and direct overflow is rejected.
-Unknown limits are not replaced with a fictitious 99/100 kW rating; backend
-validation errors remain visible. Power edits stay interactive during service
-responses. Reserve is labelled **Entladereserve / Discharge reserve**, with integer
-steps from 0 to 100, and appears only with both central battery references.
-
-Pressing either numeric control's +/- button applies one step immediately.
-Holding repeats after 450 ms, then every 150 ms without acceleration. Pointer
-capture handles mouse/touch release; cancellation, leaving the button, focus
-loss, disabling the control, changing the selected wallbox, reconfiguration and
-card removal stop repetition and clear timers. Pointer-generated clicks do not
-apply a duplicate step. Native keyboard/assistive clicks remain supported. These
-are input-repeat timers only: every power edit still uses the single existing
-one-second backend debounce, applying only the final value after release.
+Takeover remains explicit. The NETZ card exposes requested charging power, discharge reserve, optional
+start delay and optional charging duration, in that order. The reserve uses integer steps from
+0 to 100 and appears when its battery references are configured. Duration inputs
+use separate native integer hours/minutes inputs with a visible colon. Hours
+may exceed 23; minutes stay within 0–59 without wrapping or carrying. Blank
+fields mean unset (unlimited duration); the small × button clears both fields.
+Explicit zero remains `00:00`, which expires a charging duration immediately.
+The card still sends the existing `hh:mm` values, so stored beta.14 settings
+remain compatible. PV Surplus shows only battery target SoC, using the same
+compact minus/value/plus whole-percentage editor as discharge reserve. The existing
+approximation entity remains available for advanced use; technical regulation
+parameters live in integration settings.
 
 A separated two-column, three-row section shows connection/charging state,
 current session energy/measured power, and session duration/applied operating point.
@@ -292,9 +345,9 @@ and charging-current limit, for example `1-phasig · 16 A` / `1-phase · 16 A`. 
 not measured vehicle current. The existing stable control attributes
 `applied_phase_count` and `applied_current_a` now project a read-only snapshot of
 the primitive command boundary's successfully fenced `APPLIED` result. The snapshot
-survives desired-power edits and the separately confirmed ON command. No control
-policy, solver decision, command sequencing or retry depends on it, and it is not
-persisted or restored.
+survives desired-power edits and the separately confirmed ON command. No applied
+snapshot is restored from disk. Recovery may establish a new confirmation using
+fresh, fenced effective-schedule readback; measured EV current alone is insufficient.
 
 During a phase lockout, a confirmed substitute remains displayed while the retry
 waits: a desired 3p/9 A target with an applied 1p/16 A substitute displays 1p/16 A.
@@ -314,8 +367,11 @@ Observation and session entities expose stable roles and scoped join metadata.
 Connector observations take priority. EVSE/station aggregates are offered to the
 card only when runtime topology maps them to exactly one connector; ambiguous
 aggregates are omitted. Entity renames cannot redirect readings to another box.
-Normal internal status messages are hidden. Actionable command, takeover and
-battery errors remain visible. All backend guards apply independently of the card.
+Normal internal status messages are hidden. The confirmed operating point appears
+under **Wallboxparameter / Wallbox parameters**. The permanent **Meldungen / Messages**
+section follows it, showing `-` when empty. Existing command, takeover, battery and
+input/service errors appear there once, retaining their existing red styling.
+All backend guards apply independently of the card.
 
 ## Validation boundary
 
@@ -325,3 +381,109 @@ checks narrow light/dark layouts with mock HA components. These do not replace a
 HA browser or physical station test. Writable profile control retains the existing
 OCPP 2.1 support; other OCPP versions' discovery support does not imply writable
 profile support. No release version or tag is changed by this iteration.
+
+## Restart and reload reconciliation
+
+The same recovery path handles a new HA runtime, integration reload and a station
+reconnect within a running HA instance. A temporary network outage, wallbox service
+restart, Pi reboot or power cycle does not itself revoke prior explicit ownership.
+On disconnect, execution is inhibited and old recovery tasks are cancelled; on
+return, fresh evidence starts a new recovery using the existing ownership record. Fresh Remote/OCPP
+authority, matching entry/station/EVSE/connector and station identity, and fresh
+ChargingEnabled observation must agree with a valid historical ownership record.
+Remote alone never establishes ownership. Recovery sends no takeover and no
+unconditional OFF. Stored permission OFF does not enable the station; if fresh
+hardware permission conflicts with stored OFF, ordinary fenced OFF reconciles it.
+Stored ON with hardware OFF follows the existing explicit-enable/startup path only
+after required fresh inputs are available.
+
+For an already enabled station, recovery reads standard OCPP GetCompositeSchedule
+(A, 60 seconds) to obtain its effective electrical limit. It accepts only a current,
+EVSE-matching, single constant balanced period, with fresh verified physical phase
+feedback and an unambiguous live transaction. Fresh capabilities, voltage and
+current limits must validate that point; authority, permission, transaction and
+intent generations are fenced through the read. This read-only operation does not
+change existing command payloads or phase/current transition semantics.
+
+If readback already satisfies the restored PV intent, normal regulation reuses the
+confirmation and does not replay a command. PV continuation and battery latch are
+restored only for the same external transaction. A different/new session follows
+the normal strict start policy. No synthetic OFF/ON cycle is introduced.
+
+If readback is unsupported, ambiguous or unsafe, ownership/intent can still be
+restored, but electrical regulation waits in `recovery_waiting_electrical`; reads
+retry at 60 seconds without changing the running charge. Missing PV/runtime inputs
+wait at the configured regulation interval. The integration does not infer a
+current limit from measured draw. This is a hardware-validation requirement for
+non-disruptive adoption. Existing phase/current writes are unchanged.
+
+The current protocol exposes no persistent authority-transition counter. A
+Remote -> Local -> Remote transition entirely while HA or the station/transport is
+offline is indistinguishable from uninterrupted Remote if the station returns with
+the same identity and fresh
+authority evidence. Recovery cannot detect that history. Online Local transitions
+are observed, revoke persisted ownership, and continue to require explicit takeover.
+
+Fresh connector and charging observations are independent of the electrical retry.
+They update immediately without a power/profile command or a 60-second delay. If a
+vehicle departed during the outage, fresh Available/Idle evidence replaces retained
+occupancy/charging, and the ended transaction prevents adopting a stale running
+session. Recovery waits for the normal runtime prerequisites. If the effective
+point changed, fresh phase/schedule/voltage evidence validates the actual point
+before the active profile reconciles its target. Matching points require no duplicate
+charging command; a changed target can require an ordinary fenced profile command.
+There is no blind replay of the old electrical point or synthetic OFF/ON cycle.
+
+## Relative NETZ timing
+
+Start delay and charging duration are optional `hh:mm` durations, **not clock
+times**. Empty delay starts immediately; empty duration means unlimited. Delay
+alone waits then charges indefinitely; duration alone charges immediately for the
+specified duration; both wait first then count duration from the scheduled start.
+`01:30` plus `02:00` means wait 90 minutes then charge for two hours. Hours may
+exceed 23; minutes must be 00–59. Explicit `00:00` duration expires immediately.
+
+Pending `grid_start_delay` / `grid_duration` store optional seconds. Permission ON
+moves them into a separate `grid_request` record containing `activated_at`,
+`start_at`, `end_at` and captured `duration`, clearing both pending fields. An
+unset pair creates no timed request. Zero duration has an immediate end deadline,
+including with a positive delay. Editing/selecting never arms timing. Edits while
+armed are rejected by the backend and disabled in the card.
+
+The start/end deadlines use wall-clock seconds and survive reload/restart. Duration
+is measured from the scheduled start, independent of command latency. Downtime
+counts; recovery reuses the request without rearming pending values. Beta.15's
+`grid_activated_at` is discarded on load, while its configured timings remain pending
+for the next explicit ON. Recovery of old permission intent does not arm them.
+
+The existing epoch-fenced NETZ task waits for deadlines and uses normal stored
+OperatingPoint application at start. Expiry calls `GridProfiles.permission(False)`,
+the same method used by the Charging Permission switch. It does not call OCPP
+primitives or merely request zero watts. Confirmed hardware readback remains the
+source of switch state. A failed disable persists `stopping` and retries through
+that same path after 60 seconds. New authorization, profile selection, authority,
+ownership, connection and unload fences prevent stale tasks controlling new work.
+The pre-dispatch NETZ gate continues to reject positive points while waiting/expired.
+PV stop still uses its existing zero-current pause path.
+
+Successful expiry consumes the request; manual OFF/profile selection cancels and
+consumes it. Delay-only requests consume at their scheduled start. Persistent power
+and reserve are untouched. A later ON is immediate/unlimited unless the user enters
+new pending timings. Consumed state survives restart and cannot become configuration.
+
+Profile attributes expose `grid_request_armed`, `grid_start_deadline`,
+`grid_end_deadline`, `grid_armed_duration_seconds`, activation UTC, pending seconds
+and `grid_timing_state` (idle, waiting, active, stopping, consumed, cancelled).
+The card uses the existing display tick and absolute deadlines, rounding remaining
+seconds up to whole minutes. Duration remains fixed during delay. At the start
+boundary delay displays unset; at expiry both display unset, even while confirmed
+permission-disable is pending. No display tick writes control intent.
+
+The power editor consumes `technical_min_kw` / `technical_max_kw` from the backend.
+Both reuse the solver's exact current-grid intervals, verified envelopes, eligible
+modes, current limits and fresh observed voltages; minimum excludes the OFF point.
+Unknown capability evidence produces null bounds, never a fabricated nominal-voltage
+rating. Existing advanced zero-power pause semantics remain available. The card's
+known positive minimum and maximum clamp button steps and validate keyboard input;
+representable OperatingPoint selection remains exclusively in the backend. Steps
+are 0.1 kW below 10, 1 kW above, with 10→9.9 on decrement and crossing clamped to 10.
