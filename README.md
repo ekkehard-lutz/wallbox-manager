@@ -419,10 +419,12 @@ Profile settings remain stored when hidden. See the
 [automatic card registration and verification](docs/frontend-registration.md),
 including migration of existing integration-path Lovelace resources.
 
-PV troubleshooting now offers an integration-level **PV controller diagnostic
-logging** option (disabled by default). It emits one structured `PVCTRL` INFO
-record per evaluation without changing charging behavior. See
-[enabling diagnostics and the next hardware test](docs/pv-surplus-profile.md#opt-in-pv-controller-diagnostics).
+Wallbox Manager offers one integration-level **Diagnostic logging** option
+(German: **Diagnoseprotokoll**, disabled by default) for troubleshooting.
+Detailed records use `WBMGR subsystem=pv` for PV evaluations and
+`WBMGR subsystem=recovery` for restart/reload recovery in any charging profile.
+See [diagnostic logging and recovery evidence](docs/diagnostic-logging.md) and
+[PV diagnostic fields](docs/pv-surplus-profile.md#opt-in-wallbox-manager-diagnostics).
 Source sensor freshness is independent of the controller interval; the inspected
 Fronius PV Manager currently polls every 30 seconds. Its proposed fast/slow design
 is [analysis only](docs/fronius-polling-analysis.md).

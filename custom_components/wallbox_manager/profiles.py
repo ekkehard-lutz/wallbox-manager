@@ -14,6 +14,7 @@ from .control.commands import CommandReason, CommandResult, CommandStatus, Contr
 from .core.authority import ControlAuthority
 from .core.telemetry import Channel, Quantity, State
 from .core.values import scalar
+from .diagnostics import diagnostic_recovery, recovery_record, recovery_snapshot
 from .pv_diagnostics import diagnostic_permission
 from .pv_surplus import PV_DEFAULTS, PVSurplus
 
@@ -606,11 +607,41 @@ class GridProfiles(PVSurplus):
         for target in self.control.intents:
             self.control.publish(target)
 
+    @diagnostic_recovery
     async def recover(self, target, record):
         """Resume persisted intent only after ownership and live evidence agree."""
         epoch = self.epochs.get(target, 0)
         generation = self.control.intent(target).generation
         runtime = self.control.runtime
+
+        recovery_snapshot(
+            "start",
+            lambda: dict(
+                profile=self.settings.get(target_key(target), {}).get("profile"),
+                enabled_intent=record["enabled_intent"],
+                enabled_actual=runtime.enabled(target),
+                ownership=getattr(
+                    getattr(self.control, "ownership", None), "status", None
+                ),
+                matching_active_transaction=bool(
+                    runtime.sessions.get(target)
+                    and runtime.sessions.get(target).active
+                    and record.get("transaction")
+                    == runtime.sessions.get(target).external_transaction_id
+                ),
+                generation=generation,
+                profile_epoch=epoch,
+            ),
+        )
+        last_wait = None
+
+        def waiting(reason, seconds):
+            nonlocal last_wait
+            if reason != last_wait:
+                recovery_record(
+                    "waiting", reason=reason, pending=True, retry_seconds=seconds
+                )
+                last_wait = reason
 
         def current():
             state = runtime.get(target.station)
@@ -631,10 +662,12 @@ class GridProfiles(PVSurplus):
                 if enabled is True:
                     generation += 1  # The permission operation owns this edit.
                     await self.control.request_enabled(target, False, fence=current)
+                recovery_record("complete", reason="restored_permission_off")
                 self.status[target] = "restored_permission_off"
                 return
             self.suppressed.discard(target)
             if target_key(target) not in self.settings:
+                recovery_record("rejected", reason="recovery_missing_profile")
                 self.status[target] = "recovery_missing_profile"
                 return
             inputs = self.control.inputs(target)
@@ -644,15 +677,21 @@ class GridProfiles(PVSurplus):
                         self.pv_measurements(target)
                     except ValueError, TypeError, ZeroDivisionError, OverflowError:
                         self.status[target] = "recovery_waiting_measurements"
+                        waiting(
+                            "recovery_waiting_measurements",
+                            self.setting(target)["regulation_interval"],
+                        )
                         await self.wait(self.setting(target)["regulation_interval"])
                         continue
                 if enabled is False:
                     # This continues persisted explicit user intent, not Remote
                     # authority alone. Normal startup fences/delays still apply.
+                    recovery_record("resume", reason="persisted_permission_on")
                     await self.permission(target, True)
                     return
                 point = await self.control.reconcile_applied(target, fence=current)
                 if not current():
+                    recovery_record("fence", reason="profile_recovery_context_changed")
                     return
                 if point is not None:
                     session = runtime.sessions.get(target)
@@ -692,11 +731,19 @@ class GridProfiles(PVSurplus):
             else:
                 self.status[target] = "recovery_waiting_runtime"
             self.control.publish(target)
+            waiting(
+                self.status[target],
+                60
+                if self.status[target] == "recovery_waiting_electrical"
+                else self.setting(target)["regulation_interval"],
+            )
             await self.wait(
                 60
                 if self.status[target] == "recovery_waiting_electrical"
                 else self.setting(target)["regulation_interval"]
             )
+
+        recovery_record("fence", reason="profile_recovery_context_changed")
 
     async def save(self):
         await self.store.async_save(self.settings)

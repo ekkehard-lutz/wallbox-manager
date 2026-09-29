@@ -14,8 +14,8 @@ from fractions import Fraction
 from functools import wraps
 
 from .core.telemetry import Channel, Quantity, state_flag
+from .diagnostics import OPTION
 
-OPTION = "pv_diagnostic_logging"
 _LOGGER = logging.getLogger(__name__)
 _ACTIVE = ContextVar("pv_diagnostic_cycle", default=None)
 
@@ -356,7 +356,7 @@ class Cycle:
                 "remaining_s": max(0, total - elapsed) if elapsed is not None else None,
             }
         _LOGGER.info(
-            "PVCTRL %s",
+            "WBMGR subsystem=pv %s",
             json.dumps(
                 self.data, separators=(",", ":"), sort_keys=True, allow_nan=False
             ),
@@ -393,12 +393,12 @@ def cycle(profile, target, trigger):
                 record.finish()
             else:
                 _LOGGER.info(
-                    "PVCTRL %s",
+                    "WBMGR subsystem=pv %s",
                     '{"decision":"DIAGNOSTIC_UNAVAILABLE","reason":"snapshot_failed"}',
                 )
         except Exception:
             _LOGGER.info(
-                "PVCTRL %s",
+                "WBMGR subsystem=pv %s",
                 '{"decision":"DIAGNOSTIC_UNAVAILABLE","reason":"serialization_failed"}',
             )
         finally:

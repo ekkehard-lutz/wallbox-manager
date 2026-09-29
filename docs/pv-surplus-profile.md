@@ -169,18 +169,22 @@ transitions and lockout recovery, battery threshold crossings, sensor outages,
 authority handover and integration reload. Verified capabilities and simulated
 OCPP tests cannot replace these device checks.
 
-## Opt-in PV controller diagnostics
+## Opt-in Wallbox Manager diagnostics
 
 Open **Settings → Devices & services → Wallbox Manager → Configure** and enable
-**PV controller diagnostic logging** (German: **PV-Regler-Diagnoseprotokoll**).
+**Diagnostic logging** (German: **Diagnoseprotokoll**).
 It defaults to disabled, is saved in the integration options, and needs no OCPP
 control authority. A diagnostic-only change takes effect for subsequent evaluations
 without integration reload, charging/OCPP commands or changes to profile settings.
 Changing entity references at the same time still uses their existing reload path.
 Disable this option after troubleshooting: records are detailed and may be frequent.
 
-Each actual evaluation writes exactly one physical **INFO** record prefixed
-`PVCTRL`, followed by compact JSON with stable sorted keys. Normal HA logs suffice;
+The same switch also enables restart/reload recovery diagnostics in all profiles,
+including NETZ; see [recovery diagnostics](diagnostic-logging.md). Content depends
+on the active feature/profile and current activity.
+
+Each actual PV evaluation writes exactly one physical **INFO** record prefixed
+`WBMGR subsystem=pv`, followed by compact JSON with stable sorted keys. Normal HA logs suffice;
 no `logger:` configuration is needed. Nested solver checks, debounce replanning
 and dispatch freshness fences belong to the same record. `trigger` distinguishes
 periodic regulation, permission evaluation, safety-stop execution, SoC-event
@@ -242,7 +246,7 @@ new-sample gate, smoothing, or Fronius fast polling is introduced here. See the
    [frontend verification](frontend-registration.md), and enable diagnostics.
 2. Record selected reference entities, target SoC/hysteresis, start/stop delays and
    interval. Reproduce the approximately 39% SoC / 38% target / 3.5 kW PV case.
-3. Save consecutive `PVCTRL` lines from before charging starts through the stop,
+3. Save consecutive `WBMGR subsystem=pv` lines from before charging starts through the stop,
    including event/safety-stop records. Compare `decision/reason`, source ages,
    site load/surplus, policy target, selected and confirmed points, and retry/delay
    state. A SoC above target alone does not explain the other input/safety branches.
@@ -274,7 +278,7 @@ A temporary phase-feedback gap after confirmation keeps the positive desired
 request instead of manufacturing an OFF request. This does not extend the policy
 stop delay or bypass safety-invalidating inputs.
 
-PVCTRL adds `startup_pending` and `command_fence_reason`; `retry_remaining_s` now
+The PV diagnostic record adds `startup_pending` and `command_fence_reason`; `retry_remaining_s` now
 also includes first-start retries. `policy_reason=actively_charging` describes a
 positive policy decision, not permission or hardware confirmation;
 `policy_allows_charging` makes that distinction explicit. Use `enabled`, `applied`

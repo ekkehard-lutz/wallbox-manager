@@ -256,7 +256,10 @@
           "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand",
           "leistung_pv": "PV-Leistung",
           "leistung_verbraucher": "Gesamtverbrauch (einschließlich ausgewählter Wallbox)",
-          "pv_diagnostic_logging": "PV-Regler-Diagnoseprotokoll"
+          "pv_diagnostic_logging": "Diagnoseprotokoll"
+        },
+        "data_description": {
+          "pv_diagnostic_logging": "Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert."
         }
       }
     }

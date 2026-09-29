@@ -9,6 +9,12 @@ from ..core.authority import ControlAuthority
 from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
+from ..diagnostics import (
+    diagnostic_recovery,
+    profile_name,
+    recovery_record,
+    recovery_snapshot,
+)
 from ..solver.operating_point import SolverResult
 from ..solver.power import maximum_power, solve
 from .commands import (
@@ -481,8 +487,10 @@ class ControlRuntime:
             self.publish(target)
         return result
 
+    @diagnostic_recovery
     async def reconcile_applied(self, target, *, fence):
         """Adopt an authoritative schedule readback in a freshly fenced context."""
+        recovery_record("attempt", result="started")
         self.recovery_status[target] = "waiting_electrical_evidence"
         adapter = self.adapter(target)
         state = self.runtime.get(target.station)
@@ -490,7 +498,44 @@ class ControlRuntime:
         enabled = self.runtime.enabled_observation(target)
         generation = self.intent(target).generation
         if not state or not inputs or not enabled or not adapter or not fence():
+            recovery_record(
+                "rejected",
+                reason=(
+                    "runtime_unavailable"
+                    if not state
+                    else "capability_evidence_missing"
+                    if not inputs
+                    else "charging_enabled_unknown"
+                    if not enabled
+                    else "adapter_unavailable"
+                    if not adapter
+                    else "command_fence_stale"
+                ),
+            )
             return None
+
+        recovery_snapshot(
+            "phase_evidence",
+            lambda: dict(
+                observations=[
+                    dict(
+                        source=o.source,
+                        phases=o.mode.count if o.mode else None,
+                        state="expired"
+                        if not o.fresh(datetime.now(UTC))
+                        else "unknown"
+                        if o.mode is None
+                        else "valid",
+                        valid_until=o.valid_until.isoformat(),
+                    )
+                    for o in state.physical_phases
+                    if o.scope == target
+                ],
+                state="present"
+                if any(o.scope == target for o in state.physical_phases)
+                else "absent",
+            ),
+        )
 
         def current(*, refreshing_phase=False):
             fresh = self.runtime.get(target.station)
@@ -502,43 +547,150 @@ class ControlRuntime:
                     current_mode=inputs.current_mode,
                     eligible_modes=inputs.eligible_modes,
                 )
-            return bool(
-                fence()
-                and not self._closed
-                and self.profile_permitted(target)
-                and self.runtime.current(state.token)
-                and fresh.authority_revision == state.authority_revision
-                and self.runtime.authority(target.station) == ControlAuthority.REMOTE
-                and observation
-                and observation.revision == enabled.revision
-                and self.intent(target).generation == generation
-                and target not in self.pending_points
-                and fresh_inputs is not None
-                and replace(fresh_inputs, voltage=inputs.voltage) == inputs
+            reason = (
+                "command_fence_stale"
+                if not fence()
+                else "runtime_closed"
+                if self._closed
+                else "profile_not_permitted"
+                if not self.profile_permitted(target)
+                else "connection_generation_changed"
+                if not self.runtime.current(state.token)
+                else "authority_changed"
+                if fresh.authority_revision != state.authority_revision
+                else "no_authority"
+                if self.runtime.authority(target.station) != ControlAuthority.REMOTE
+                else "charging_enabled_unknown"
+                if not observation
+                else "charging_enabled_changed"
+                if observation.revision != enabled.revision
+                else "generation_changed"
+                if self.intent(target).generation != generation
+                else "point_command_pending"
+                if target in self.pending_points
+                else "capability_evidence_missing"
+                if fresh_inputs is None
+                else "electrical_inputs_changed"
+                if replace(fresh_inputs, voltage=inputs.voltage) != inputs
+                else None
             )
+            if reason:
+                recovery_record("fence", reason=reason)
+            return reason is None
 
         refresh = getattr(adapter, "read_physical_mode", None)
         if refresh:
             await refresh(is_current=lambda: current(refreshing_phase=True))
             if not current(refreshing_phase=True):
+                recovery_record("rejected", reason="phase_readback_stale")
                 self.recovery_status[target] = "phase_readback_stale"
                 return None
             inputs = self.inputs(target)
+        else:
+            recovery_record(
+                "phase_readback", attempted=False, reason="phase_readback_not_supported"
+            )
         read = getattr(adapter, "read_operating_limit", None)
+        if not read:
+            recovery_record(
+                "composite_schedule",
+                attempted=False,
+                reason="composite_schedule_not_supported",
+            )
         result = await read(is_current=current) if read else None
         if result is None or not current():
+            recovery_record("rejected", reason="readback_rejected_or_stale")
             self.recovery_status[target] = "readback_rejected_or_stale"
             return None
         self.recovery_status[target] = "readback_obtained"
         amps, phases = result
         inputs = self.inputs(target)
         mode = inputs.current_mode
+        recovery_snapshot(
+            "electrical_evidence",
+            lambda: dict(
+                physical_phases=mode.count if mode else None,
+                schedule_phases=phases,
+                current_a=float(amps),
+                generation=generation,
+                authority_revision=state.authority_revision,
+                enabled_revision=enabled.revision,
+                requested_power_w=float(self.intent(target).request.target_w),
+                profile=profile_name(self.profiles, target)
+                if hasattr(self, "profiles")
+                else None,
+                voltages=[
+                    dict(
+                        phase=v.phase.value,
+                        voltage_v=float(v.voltage_v),
+                        fresh=v.observed_at <= datetime.now(UTC) < v.valid_until,
+                        valid_until=v.valid_until.isoformat(),
+                    )
+                    for v in inputs.voltage.phases
+                ],
+                phase_observations=[
+                    dict(
+                        source=o.source,
+                        phases=o.mode.count if o.mode else None,
+                        state="expired"
+                        if not o.fresh(datetime.now(UTC))
+                        else "unknown"
+                        if o.mode is None
+                        else "valid",
+                    )
+                    for o in self.runtime.get(target.station).physical_phases
+                    if o.scope == target
+                ],
+                voltage_available=bool(inputs.voltage.phases),
+                envelopes=[
+                    dict(
+                        phases=e.mode.count,
+                        minimum_a=float(e.min_current_a),
+                        maximum_a=float(e.max_current_a),
+                        step_a=float(e.current_step_a),
+                        evidence=e.evidence.state.value,
+                    )
+                    for e in inputs.capabilities.envelopes
+                ],
+                limits=[
+                    dict(
+                        phases=v.mode.count,
+                        minimum_a=float(v.min_current_a),
+                        maximum_a=float(v.max_current_a),
+                    )
+                    for v in inputs.limits
+                ],
+                desired_current_limits={
+                    str(k): float(v)
+                    for k, v in self.intent(target).current_limits.items()
+                },
+            ),
+        )
         if amps:
             if mode is None or mode.count != phases:
+                recovery_record(
+                    "rejected",
+                    reason="phase_evidence_unavailable"
+                    if mode is None
+                    else "schedule_phase_missing"
+                    if phases is None
+                    else "schedule_phase_mismatch",
+                )
                 self.recovery_status[target] = "physical_phase_unavailable_or_mismatch"
                 return None
             volts = inputs.voltage.active_voltages(mode, datetime.now(UTC))
             if volts is None:
+                recovery_snapshot(
+                    "rejected",
+                    lambda: dict(
+                        reason="voltage_missing"
+                        if any(
+                            phase not in {v.phase for v in inputs.voltage.phases}
+                            for phase in mode.phases
+                        )
+                        else "voltage_stale",
+                    ),
+                )
                 self.recovery_status[target] = "voltage_unavailable"
                 return None
             watts = amps * sum(volts)
@@ -555,6 +707,12 @@ class ControlRuntime:
             or not solved.point
             or (amps and solved.point.current_a != amps)
         ):
+            recovery_record(
+                "rejected",
+                reason="electrical_resolution_rejected",
+                blocked=blocked,
+                solver_reason=solved.reason.value if solved else None,
+            )
             self.recovery_status[target] = "electrical_resolution_rejected"
             return None
         self.recovery_status[target] = "point_validated"
@@ -566,6 +724,17 @@ class ControlRuntime:
         )
         self._unconfirmed_targets.discard(target)
         self.recovery_status[target] = "point_adopted"
+        recovery_snapshot(
+            "adoption",
+            lambda: dict(
+                result="point_adopted",
+                phases=solved.point.mode.count if solved.point.mode else 0,
+                current_a=float(solved.point.current_a or 0),
+                voltages_v=[float(v) for v in solved.point.phase_voltages_v],
+                power_w=float(solved.point.offered_power_w),
+                charging_command_sent=False,
+            ),
+        )
         self.publish(target)
         return solved.point
 

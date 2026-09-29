@@ -18,9 +18,9 @@ from custom_components.wallbox_manager.pv_diagnostics import entity_sample
 
 def records(caplog):
     return [
-        json.loads(r.message.removeprefix("PVCTRL "))
+        json.loads(r.message.removeprefix("WBMGR subsystem=pv "))
         for r in caplog.records
-        if r.message.startswith("PVCTRL ")
+        if r.message.startswith("WBMGR subsystem=pv ")
     ]
 
 
@@ -65,7 +65,7 @@ async def test_one_record_per_cycle_and_identical_command_behavior(
         assert all(
             "\n" not in r.message
             for r in caplog.records
-            if r.message.startswith("PVCTRL ")
+            if r.message.startswith("WBMGR subsystem=pv ")
         )
 
 
@@ -277,3 +277,36 @@ async def test_no_authority_is_explicit(grid, caplog):
     (line,) = records(caplog)
     assert line["decision"] == "NO_AUTHORITY"
     assert line["reason"] == "no_authority"
+
+
+async def test_diagnostics_default_disabled(grid):
+    from homeassistant.config_entries import ConfigEntries
+    from test_ha_lifecycle import entry
+
+    from custom_components.wallbox_manager.config_flow import ReferenceOptionsFlow
+
+    p, _, _ = grid
+    config = entry()
+    p.hass.config_entries = ConfigEntries(p.hass, {})
+    p.hass.config_entries._entries[config.entry_id] = config
+    flow = ReferenceOptionsFlow()
+    flow.hass, flow.handler = p.hass, config.entry_id
+    form = await flow.async_step_init()
+    assert form["data_schema"]({})["pv_diagnostic_logging"] is False
+
+
+def test_diagnostic_translations_are_generic():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1] / "custom_components/wallbox_manager"
+    for filename, label in [
+        ("strings.json", "Diagnostic logging"),
+        ("translations/en.json", "Diagnostic logging"),
+        ("translations/de.json", "Diagnoseprotokoll"),
+    ]:
+        step = json.loads((root / filename).read_text())["options"]["step"]["init"]
+        assert step["data"]["pv_diagnostic_logging"] == label
+        help_text = step["data_description"]["pv_diagnostic_logging"]
+        assert "PV" not in help_text
+        assert "Wallbox" in help_text
+        assert "deaktiviert" in help_text or "Disabled by default" in help_text

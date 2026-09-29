@@ -1,6 +1,8 @@
 """Persisted ownership is reconciled with a fresh runtime and live OCPP peer."""
 
 import asyncio
+import json
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -338,12 +340,15 @@ async def test_schedule_readback_is_fenced_and_voltage_drift_is_semantic(site, c
         assert result.phase_voltages_v == (Fraction("229.6"),)
 
 
+@pytest.mark.parametrize("diagnostics", [False, True])
 @pytest.mark.parametrize("power,phases,current", [(2.3, 1, 10), (5.52, 3, 8)])
 async def test_grid_profile_recovery_does_not_replay_matching_point(
-    site, power, phases, current
+    site, power, phases, current, diagnostics, caplog
 ):
     owner, (a, _), hass = site
     c, bound, peer, p, key = a
+    p.entry.options["pv_diagnostic_logging"] = diagnostics
+    caplog.set_level(logging.INFO)
     await owner.activate(key)
     await p.set_value(bound.target, "power_kw", power)
     peer.phase_read_value = "RST" if phases == 3 else "Rxx"
@@ -372,9 +377,36 @@ async def test_grid_profile_recovery_does_not_replay_matching_point(
             len(peer.permissions),
             len(peer.authority_requests),
         )
-        p.debounce_wait = lambda _: asyncio.sleep(0)
+        lines = [
+            json.loads(r.message.removeprefix("WBMGR subsystem=recovery "))
+            for r in caplog.records
+            if r.message.startswith("WBMGR subsystem=recovery ")
+        ]
+        assert bool(lines) is diagnostics
+        assert not any(r.message.startswith("PVCTRL") for r in caplog.records)
+        if diagnostics:
+            assert any(
+                r.get("profile") == "NETZ" and r["stage"] == "start" for r in lines
+            )
+            assert any(
+                r.get("value") == peer.phase_read_value
+                and r.get("status") == "Accepted"
+                for r in lines
+            )
+            assert any(
+                r["stage"] == "composite_schedule" and r.get("status") == "Accepted"
+                for r in lines
+            )
+            adopted = next(r for r in lines if r.get("result") == "point_adopted")
+            assert adopted["phases"] == phases and adopted["current_a"] == current
+            assert adopted["voltages_v"] == [230] * phases
+            assert adopted["charging_command_sent"] is False
+        edit_ready = asyncio.Event()
+        p.debounce_wait = lambda _: edit_ready.wait()
         await p.set_value(bound.target, "power_kw", power + 0.7)
-        await p.debounce_tasks[bound.target]
+        edit_task = p.debounce_tasks[bound.target]
+        edit_ready.set()
+        await edit_task
         assert len(peer.requests) == counts[0] + 1
         assert c.attributes(bound.target)["applied_current_a"] != current
         assert len(peer.permissions) == counts[1]
