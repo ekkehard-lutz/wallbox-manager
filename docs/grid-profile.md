@@ -90,10 +90,11 @@ shortcut. Removing inventory never makes the card target an unrelated entity.
 `profiles.py` retains connector-scoped Store values: profile NETZ, `soll_power`
 (kW, bounded by known effective technical limits; storage range 0–100) and
 `min_soc` (0–100%, whole percent for new edits). Existing beta.2 stores remain readable. Switching active wallboxes does not copy settings.
-The select currently offers only NETZ. Selecting/reselecting the profile requests
+The select offers NETZ and, when both power references are configured, PV Surplus. Selecting/reselecting the profile requests
 permission OFF and invalidates work; it never acquires authority.
 
-After takeover, choose Grid, adjust power and enable charging. While active and
+After takeover, choose Grid, configure optional timing and enable charging.
+Fixed power remains configurable through its existing entity. While active and
 enabled, power edits use a **one-second trailing-edge backend debounce**. For edits
 at 0.0, 0.2, 0.5 and 0.8 seconds, only the last value is resolved/applied at about
 1.8 seconds. `GridProfiles.set_value` updates intent and publishes it immediately,
@@ -103,9 +104,8 @@ Entity services, automations and the card all enter this same path. Pure technic
 bounds are independent of the request and share the solver's exact current grid.
 Task epochs and intent generations fence late work, alongside the primitive
 connection, authority and permission checks. OFF, profile changes, owner changes,
-authority loss, disconnect and unload invalidate pending work. There is no delayed
-permission ON. Explicit enable cancels the timer and applies the latest value
-immediately; explicit permission OFF and a zero-power stop also bypass the timer.
+authority loss, disconnect and unload invalidate pending work. NETZ timing gates the requested power through the same control path.
+Explicit enable applies the currently scheduled value; explicit permission OFF and a zero-power stop also bypass the timer.
 
 Settings may be saved
 for an inactive wallbox, but cannot dispatch power. Permission remains confirmed
@@ -118,7 +118,7 @@ The existing solver handles approximation, current steps, separate per-phase
 maxima, fresh voltages, installation limits and phase retention. The primitive
 runtime still owns protocol queues, sequencing, confirmation and connection,
 authority and generation fences. Zero power uses the verified zero-current
-contract without toggling permission. No PV or continuous regulation was added.
+contract without toggling permission. PV regulation uses the same control boundary.
 
 Grid reads the connector's existing `phase_switch_deviation_pct` setting (default
 5%). With enabled, positively charging state, the solver retains the current
@@ -143,7 +143,8 @@ a new start or power change. Switching owners cancels the old sequence too.
 
 ## Station capability configuration and migration
 
-The central integration options now contain only the two battery references.
+The central integration options use native General parameters and Regulation
+parameters sections, including battery/power references, diagnostics and PV tuning.
 There is no central station picker for capability editing.
 
 OCPP discovery creates a real HA **configuration subentry** for each station/EVSE/
@@ -303,25 +304,12 @@ The theme-aware header uses a 48 × 48 px `mdi:ev-station` (twice the original
 24 px dimensions), the optional presentation title, and
 the real device display name (`name_by_user`, then device/station name) beneath it.
 The multi-wallbox selector lives in the header; single-wallbox cards omit it.
-Takeover remains explicit. Both numeric fields use the former narrow reserve
-width (4 em), including mobile layouts. Keyboard-accessible power buttons step by
-0.1 kW below 10, and 1 kW above: 9.8 → 9.9 → 10 → 11 and the reverse. Direct input
-also accepts fractions above 10. The card formats the HA language's decimal
-separator. `technical_max_kw` comes from verified envelopes, fresh voltages and
-effective current limits; the buttons clamp to it and direct overflow is rejected.
-Unknown limits are not replaced with a fictitious 99/100 kW rating; backend
-validation errors remain visible. Power edits stay interactive during service
-responses. Reserve is labelled **Entladereserve / Discharge reserve**, with integer
-steps from 0 to 100, and appears only with both central battery references.
-
-Pressing either numeric control's +/- button applies one step immediately.
-Holding repeats after 450 ms, then every 150 ms without acceleration. Pointer
-capture handles mouse/touch release; cancellation, leaving the button, focus
-loss, disabling the control, changing the selected wallbox, reconfiguration and
-card removal stop repetition and clear timers. Pointer-generated clicks do not
-apply a duplicate step. Native keyboard/assistive clicks remain supported. These
-are input-repeat timers only: every power edit still uses the single existing
-one-second backend debounce, applying only the final value after release.
+Takeover remains explicit. The NETZ card exposes only discharge reserve, optional
+start delay and optional charging duration. The reserve uses integer steps from
+0 to 100 and appears when its battery references are configured. Duration inputs
+use `hh:mm`. PV Surplus shows only battery target SoC. Existing power and
+approximation entities remain available for advanced use; technical regulation
+parameters live in integration settings.
 
 A separated two-column, three-row section shows connection/charging state,
 current session energy/measured power, and session duration/applied operating point.
@@ -439,3 +427,33 @@ point changed, fresh phase/schedule/voltage evidence validates the actual point
 before the active profile reconciles its target. Matching points require no duplicate
 charging command; a changed target can require an ordinary fenced profile command.
 There is no blind replay of the old electrical point or synthetic OFF/ON cycle.
+
+## Relative NETZ timing
+
+Start delay and charging duration are optional `hh:mm` durations, **not clock
+times**. Empty delay starts immediately; empty duration means unlimited. Delay
+alone waits then charges indefinitely; duration alone charges immediately for the
+specified duration; both wait first then count duration from the scheduled start.
+`01:30` plus `02:00` means wait 90 minutes then charge for two hours. Hours may
+exceed 23; minutes must be 00–59. Explicit `00:00` duration expires immediately.
+
+The profile Store persists seconds and an absolute activation timestamp. Selecting
+NETZ or materially changing its timing starts a new activation. Selection retains
+the existing permission-OFF behavior: the user must enable permission separately.
+The scheduled start is activation plus delay; the end is start plus duration,
+independent of command latency and temporary unavailability. Restart/reload keeps
+these deadlines and counts downtime; existing ownership recovery must still prove
+control eligibility. No persisted timing record ever grants authority or permission.
+
+Each schedule task carries the profile epoch. Selection, timing edits, OFF, loss
+of authority/connection/ownership and unload invalidate/cancel the task. Switching
+away and back creates a fresh activation. Expiry edits target power to zero through
+`apply_stored`; it does not call hardware directly or change the OCPP protocol.
+The normal capability, permission and command-generation fences remain in force.
+A pre-dispatch gate also rejects positive NETZ points while waiting or expired.
+Transient command failures retain the existing 60-second retry interval.
+
+Profile attributes show activation UTC time, configured delay/duration seconds
+and waiting/active/expired state. An expired activation stays expired until a new
+selection, timing edit or explicit OFF followed by ON. Configuration edits with
+no control eligibility are stored without sending commands.

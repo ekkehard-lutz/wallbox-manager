@@ -452,18 +452,14 @@ for (const battery of [false,true]) for (const language of ['en','de']) {
     const {card:c,calls,get}=card(data);c.hass={...c._hass,language};
     assert.equal(get('power-row').hidden,true);
     assert.equal(get('reserve-row').hidden,true);
-    assert.equal(get('approximation-row').hidden,battery);
+    assert.equal(get('approximation-row').hidden,true);
     assert.equal(get('soll_soc_speicher-row').hidden,!battery);
-    assert.equal(get('soc_hysterese-row').hidden,!battery);
-    assert.equal(get('regulation_interval-row').hidden,false);
-    assert.equal(get('regulation_interval-label').textContent,language==='de'?'Regelintervall (s)':'Regulation interval (s)');
+    assert.equal(get('grid_start_delay-row').hidden,true);
+    assert.equal(get('grid_duration-row').hidden,true);
     assert.equal(get('permission').disabled,false);
-    await get('regulation_interval').onchange({target:{value:'10'}});
-    assert.equal(calls.at(-1)[2].entity_id,'number.random_regulation_interval');
-    assert.equal(calls.at(-1)[2].value,10);
-    await get('approximation').onchange({target:{value:'up'}});
-    assert.equal(calls.at(-1)[2].entity_id,'select.random_pv');
-    assert.equal(calls.at(-1)[2].option,'up');
+    await get('soll_soc_speicher').onchange({target:{value:'90'}});
+    assert.equal(calls.at(-1)[2].entity_id,'number.random_soll_soc_speicher');
+    assert.equal(calls.at(-1)[2].value,90);
   });
 }
 
@@ -500,20 +496,12 @@ for(const battery of [false,true]) {
     assert.equal(get('power').disabled,false);
     assert.equal(get('reserve').disabled,false);
     assert.equal(get('approximation').disabled,false);
-    assert.equal(get('approximation-row').hidden,battery);
-    assert.equal(get('soc_hysterese-row').hidden,!battery);
+    assert.equal(get('approximation-row').hidden,true);
     assert.equal(get('soll_soc_speicher-row').hidden,!battery);
-    for(const id of ['regulation_interval','pv_start_delay','pv_stop_delay']) {
-      assert.equal(get(`${id}-row`).hidden,false);
-      assert.equal(get(id).disabled,false);
-    }
     await get('profile').onchange({target:{value:'NETZ'}});
-    await get('pv_stop_delay').onchange({target:{value:'75'}});
+    await get('soll_soc_speicher').onchange({target:{value:'90'}});
     assert.deepEqual(calls.map(call=>call.slice(0,2)),[['select','select_option'],['number','set_value']]);
-    assert.equal(calls[0][2].entity_id,'select.anything');
-    assert.equal(calls[1][2].entity_id,'number.pv_stop_delay');
-    c.hass={...c._hass,language:'de'};
-    assert.equal(get('pv_stop_delay-label').textContent,'PV-Stoppverzögerung (s)');
+    assert.equal(calls[1][2].entity_id,'number.soll_soc_speicher');
   });
 }
 
@@ -586,4 +574,30 @@ test('existing backend and service errors stay inside messages without duplicate
   c.hass={...c._hass, states:data};
   assert.equal(get('status').hidden,true);
   assert.equal(get('error').hidden,false); // Placeholder stays hidden for service errors too.
+});
+
+for (const value of ['', '00:05', '01:30', '24:00', '120:15', '1:5', '01:60', '-01:00', 'abc']) {
+  test(`NETZ relative duration validates ${value}`, async () => {
+    const data=states(true);
+    data['text.delay']=state('grid_start_delay','A','01:30');
+    data['text.duration']=state('grid_duration','A','02:00');
+    const {card:c,get,calls}=card(data);
+    assert.equal(get('power-row').hidden,true);
+    assert.equal(get('grid_start_delay-row').hidden,false);
+    assert.equal(get('grid_duration-row').hidden,false);
+    assert.equal(get('grid_start_delay').value,'01:30');
+    get('grid_start_delay').onchange({target:{value}});
+    const valid=value==='' || /^[0-9]{2,}:[0-5][0-9]$/.test(value);
+    assert.equal(calls.length,valid ? 1 : 0);
+    if (valid) assert.deepEqual(calls[0].slice(0,2),['text','set_value']);
+    else assert.equal(get('error').hidden,false);
+    c.hass={...c._hass};
+    assert.equal(get('grid_duration').value,'02:00');
+  });
+}
+test('technical regulation fields are absent from card markup',()=>{
+  const {source}=runtime();
+  for (const field of ['soc_hysterese','regulation_interval','pv_start_delay','pv_stop_delay','power_smoothing_window']) {
+    assert.ok(!source.includes(`id="${field}"`));
+  }
 });

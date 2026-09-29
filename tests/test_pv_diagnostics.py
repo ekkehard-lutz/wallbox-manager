@@ -60,6 +60,12 @@ async def test_one_record_per_cycle_and_identical_command_behavior(
         assert lines[0]["external"]["leistung_pv"]["value"] == 8000
         assert lines[0]["external"]["leistung_pv"]["age_s"] >= 0
         assert lines[0]["external"]["leistung_pv"]["age_basis"] == "last_reported"
+        assert lines[0]["raw_pv_power_w"] == 8000
+        assert lines[0]["smoothed_pv_power_w"] == 8000
+        assert lines[0]["raw_consumption_power_w"] == 5000
+        assert lines[0]["smoothed_consumption_power_w"] == 5000
+        assert lines[0]["smoothing_window_s"] == 0
+        assert lines[0]["smoothing_enabled"] is False
         assert lines[0]["surplus_w"] == 6000
         assert lines[0]["site_load_w"] == 2000
         assert all(
@@ -132,7 +138,12 @@ async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
     again = ReferenceOptionsFlow()
     again.hass, again.handler = p.hass, config.entry_id
     form = await again.async_step_init()
-    assert form["data_schema"]({})["pv_diagnostic_logging"] is True
+    assert (
+        form["data_schema"]({"general": {}, "regulation": {}})["general"][
+            "pv_diagnostic_logging"
+        ]
+        is True
+    )
 
 
 async def test_diagnostic_collector_failure_does_not_change_plan(
@@ -292,7 +303,12 @@ async def test_diagnostics_default_disabled(grid):
     flow = ReferenceOptionsFlow()
     flow.hass, flow.handler = p.hass, config.entry_id
     form = await flow.async_step_init()
-    assert form["data_schema"]({})["pv_diagnostic_logging"] is False
+    assert (
+        form["data_schema"]({"general": {}, "regulation": {}})["general"][
+            "pv_diagnostic_logging"
+        ]
+        is False
+    )
 
 
 def test_diagnostic_translations_are_generic():
@@ -304,7 +320,9 @@ def test_diagnostic_translations_are_generic():
         ("translations/en.json", "Diagnostic logging"),
         ("translations/de.json", "Diagnoseprotokoll"),
     ]:
-        step = json.loads((root / filename).read_text())["options"]["step"]["init"]
+        step = json.loads((root / filename).read_text())["options"]["step"]["init"][
+            "sections"
+        ]["general"]
         assert step["data"]["pv_diagnostic_logging"] == label
         help_text = step["data_description"]["pv_diagnostic_logging"]
         assert "PV" not in help_text

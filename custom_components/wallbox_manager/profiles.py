@@ -15,8 +15,11 @@ from .core.authority import ControlAuthority
 from .core.telemetry import Channel, Quantity, State
 from .core.values import scalar
 from .diagnostics import diagnostic_recovery, recovery_record, recovery_snapshot
+from .grid_timing import GridTiming, duration_seconds
+from .power_history import PowerHistory
 from .pv_diagnostics import diagnostic_permission
 from .pv_surplus import PV_DEFAULTS, PVSurplus
+from .regulation import DEFAULTS, migrate_regulation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +28,7 @@ def target_key(target):
     return json.dumps([target.station.value, target.evse.value, target.value])
 
 
-class GridProfiles(PVSurplus):
+class GridProfiles(GridTiming, PVSurplus):
     """Own profile settings and bounded detection tasks, never acquire authority."""
 
     def __init__(self, hass, entry, control, battery):
@@ -34,6 +37,10 @@ class GridProfiles(PVSurplus):
         self.entry = entry
         self.entry_id = entry.entry_id
         self.references = dict(entry.options)
+        self.power_history = {
+            key: PowerHistory(self.references.get("power_smoothing_window", 5))
+            for key in ("leistung_pv", "leistung_verbraucher")
+        }
         self.pv_ongoing = {}
         self.pv_battery = {}
         self.pv_sessions = {}
@@ -44,6 +51,9 @@ class GridProfiles(PVSurplus):
         self.pv_retry_request = {}
         self.pv_startups = {}
         self.monotonic = time.monotonic
+        self.wall_time = time.time
+        self.timer_wait = asyncio.sleep
+        self.grid_timers = {}
         self.settings = {}
         self.tasks = {}
         self.recoveries = {}
@@ -78,11 +88,39 @@ class GridProfiles(PVSurplus):
             except ValueError, TypeError, KeyError:
                 continue
 
+        migrated = migrate_regulation(self.entry.options, stored)
+        self.references.update(migrated)
+        if migrated != dict(self.entry.options) and hasattr(
+            self.entry, "async_on_unload"
+        ):
+            self.hass.config_entries.async_update_entry(self.entry, options=migrated)
+        self.seed_power_history()
+
+    def seed_power_history(self):
+        from .pv_surplus import power_valid_for, reading
+
+        now = datetime.now(UTC)
+        for key in ("leistung_pv", "leistung_verbraucher"):
+            history = PowerHistory(self.references.get("power_smoothing_window", 5))
+            self.power_history[key] = history
+            try:
+                state = self.hass.states.get(self.references.get(key, ""))
+                value = reading(state, now)
+                valid_for = power_valid_for(state, now)
+            except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                value, valid_for = None, 0
+            history.add(self.monotonic(), value, valid_for=valid_for)
+
     def setting(self, target):
-        return self.settings.setdefault(
+        settings = self.settings.setdefault(
             target_key(target),
             {"profile": "NETZ", "power_kw": 11, "min_soc": 20, **PV_DEFAULTS},
         )
+
+        for key in DEFAULTS:
+            if key in self.entry.options:
+                settings[key] = self.entry.options[key]
+        return settings
 
     def available_profiles(self, target):
         # Entity options are scoped to this connector's owning integration entry.
@@ -135,6 +173,7 @@ class GridProfiles(PVSurplus):
 
     def attributes(self, target):
         return {
+            **self.grid_attributes(target),
             "profile_status": self.status.get(target, "idle"),
             "available_profiles": self.available_profiles(target),
             "battery_configured": bool(self.references.get("soc_speicher_aktuell"))
@@ -200,7 +239,12 @@ class GridProfiles(PVSurplus):
 
     def invalidate(self, target):
         self.epochs[target] = self.epochs.get(target, 0) + 1
-        for tasks in (self.tasks, self.debounce_tasks, self.recoveries):
+        for tasks in (
+            self.tasks,
+            self.debounce_tasks,
+            self.recoveries,
+            self.grid_timers,
+        ):
             task = tasks.pop(target, None)
             if task and task is not asyncio.current_task():
                 task.cancel()
@@ -233,6 +277,10 @@ class GridProfiles(PVSurplus):
         if self.epochs[target] != epoch:
             return
         self.setting(target)["profile"] = profile
+        if profile == "NETZ":
+            self.grid_restart(target)
+        else:
+            self.setting(target).pop("grid_activated_at", None)
         await self.save()
         await self.reconcile_battery(exclude=target)
         self.control.publish(target)
@@ -248,7 +296,7 @@ class GridProfiles(PVSurplus):
         interval = scalar(settings["regulation_interval"])
         if (
             target > 99
-            or hysteresis > target
+            or hysteresis > 99
             or not 1 <= interval <= 300
             or any(
                 scalar(settings[key]) > 3600
@@ -258,6 +306,45 @@ class GridProfiles(PVSurplus):
             raise ValueError("invalid PV thresholds or interval")
 
     async def set_value(self, target, field, value):
+        if field in ("grid_start_delay", "grid_duration"):
+            value = duration_seconds(value)
+            if self.setting(target).get(field) == value:
+                return
+            self.setting(target)[field] = value
+            if self.setting(target)["profile"] != "NETZ":
+                await self.save()
+                self.control.publish(target)
+                return
+            self.invalidate(target)
+            epoch = self.epochs[target]
+            self.grid_restart(target)
+            await self.save()
+            if self.epochs[target] != epoch:
+                return
+            if self.setting(target)["profile"] == "NETZ":
+                self.control._edit(target, {"target_w": self.grid_target(target)})
+                if (
+                    self.valid(target, self.epochs[target])
+                    and target not in self.suppressed
+                ):
+                    await self.start(target)
+            self.control.publish(target)
+            return
+        if field in DEFAULTS:
+            settings = {**self.setting(target), field: float(scalar(value))}
+            self.validate_pv(settings)
+            if field == "power_smoothing_window" and not 0 <= settings[field] <= 300:
+                raise ValueError("invalid smoothing window")
+            options = {**self.entry.options, field: settings[field]}
+            if hasattr(self.entry, "async_on_unload"):
+                self.hass.config_entries.async_update_entry(self.entry, options=options)
+                await self.hass.config_entries.async_reload(self.entry_id)
+                return
+            self.entry.options = options
+            self.references.update(options)
+            if field == "power_smoothing_window":
+                self.seed_power_history()
+                return
         if field in PV_DEFAULTS:
             value = str(value) if field == "approximation" else float(scalar(value))
             settings = {**self.setting(target), field: value}
@@ -293,7 +380,7 @@ class GridProfiles(PVSurplus):
             return
         if field == "power_kw":
             self.invalidate(target)
-            self.control._edit(target, {"target_w": value * 1000})
+            self.control._edit(target, {"target_w": self.grid_target(target)})
         epoch = self.epochs.get(target, 0)
         if (
             field == "power_kw"
@@ -370,10 +457,16 @@ class GridProfiles(PVSurplus):
             self.suppressed.discard(target)
         else:
             self.suppressed.add(target)
+        if self.setting(target)["profile"] == "NETZ":
+            if enabled and self.setting(target).get("grid_activated_at") is None:
+                self.grid_restart(target)
+            elif not enabled:
+                self.setting(target).pop("grid_activated_at", None)
+            await self.save()
+            if self.epochs[target] != epoch:
+                return None
         self.control.intent(target).profile_modes = None
-        self.control._edit(
-            target, {"target_w": Fraction(str(self.setting(target)["power_kw"])) * 1000}
-        )
+        self.control._edit(target, {"target_w": self.grid_target(target)})
         if self.setting(target)["profile"] == "PV_SURPLUS":
             if enabled:
                 self.pv_edit(target)
@@ -416,6 +509,7 @@ class GridProfiles(PVSurplus):
             return
         epoch = self.epochs.get(target, 0)
         self.control.intent(target).profile_modes = None
+        self.control._edit(target, {"target_w": self.grid_target(target)})
         await self.control.apply_stored(target)
         if self.epochs.get(target, 0) == epoch:
             self.launch(target)
@@ -429,6 +523,10 @@ class GridProfiles(PVSurplus):
                     ),
                     "PV regulation",
                 )
+            return
+        self.grid_launch_timer(target)
+        if self.grid_phase(target)[0] != "active":
+            self.control.publish(target)
             return
         epoch = self.epochs.get(target, 0)
         intent = self.control.intent(target)
@@ -541,7 +639,9 @@ class GridProfiles(PVSurplus):
             self.control.publish(target)
 
     def changed(self, snapshot):
-        for target in self.tasks.keys() | self.debounce_tasks.keys():
+        for target in (
+            self.tasks.keys() | self.debounce_tasks.keys() | self.grid_timers.keys()
+        ):
             if target.station == snapshot.token.station and (
                 not snapshot.connected
                 or (
@@ -723,12 +823,7 @@ class GridProfiles(PVSurplus):
                     else:
                         self.control._edit(
                             target,
-                            {
-                                "target_w": Fraction(
-                                    str(self.setting(target)["power_kw"])
-                                )
-                                * 1000
-                            },
+                            {"target_w": self.grid_target(target)},
                         )
                         generation = self.control.intent(target).generation
                         await self.control.apply_stored(
@@ -756,7 +851,16 @@ class GridProfiles(PVSurplus):
         recovery_record("fence", reason="profile_recovery_context_changed")
 
     async def save(self):
-        await self.store.async_save(self.settings)
+        await self.store.async_save(
+            {
+                key: {
+                    field: value
+                    for field, value in settings.items()
+                    if field not in DEFAULTS
+                }
+                for key, settings in self.settings.items()
+            }
+        )
 
     async def close(self):
         if self.closed:
@@ -771,9 +875,13 @@ class GridProfiles(PVSurplus):
             *self.tasks.values(),
             *self.debounce_tasks.values(),
             *self.recoveries.values(),
+            *self.grid_timers.values(),
         ]
         for target in (
-            self.tasks.keys() | self.debounce_tasks.keys() | self.recoveries.keys()
+            self.tasks.keys()
+            | self.debounce_tasks.keys()
+            | self.recoveries.keys()
+            | self.grid_timers.keys()
         ):
             self.invalidate(target)
         await asyncio.gather(*tasks, return_exceptions=True)

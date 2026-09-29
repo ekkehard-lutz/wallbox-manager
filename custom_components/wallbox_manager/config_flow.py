@@ -14,7 +14,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.data_entry_flow import FlowResult, section
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .core.values import scalar
@@ -159,9 +159,25 @@ def migrate_options(options):
 
 class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
     async def async_step_init(self, user_input=None):
-        from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+        from homeassistant.helpers.selector import (
+            EntitySelector,
+            EntitySelectorConfig,
+            NumberSelector,
+            NumberSelectorConfig,
+        )
+        from homeassistant.helpers.storage import Store
 
-        self.data = migrate_options(self.config_entry.options)
+        from .regulation import DEFAULTS, migrate_regulation
+
+        stored = (
+            await Store(
+                self.hass, 1, f"wallbox_manager.{self.config_entry.entry_id}.profiles"
+            ).async_load()
+            or {}
+        )
+        self.data = migrate_regulation(
+            migrate_options(self.config_entry.options), stored
+        )
         fields = {
             vol.Optional(
                 "pv_diagnostic_logging",
@@ -180,7 +196,38 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
             fields[
                 vol.Optional(key, description={"suggested_value": self.data.get(key)})
             ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+        regulation = {}
+        for key, default in DEFAULTS.items():
+            regulation[vol.Required(key, default=self.data.get(key, default))] = (
+                NumberSelector(
+                    NumberSelectorConfig(
+                        min=1 if key == "regulation_interval" else 0,
+                        max=3600
+                        if key in ("pv_start_delay", "pv_stop_delay")
+                        else 99
+                        if key == "soc_hysterese"
+                        else 300,
+                        step=1,
+                        mode="box",
+                        unit_of_measurement="%" if key == "soc_hysterese" else "s",
+                    )
+                )
+            )
+        schema = vol.Schema(
+            {
+                vol.Required("general"): section(vol.Schema(fields)),
+                vol.Required("regulation"): section(vol.Schema(regulation)),
+            }
+        )
         if user_input is not None:
+            if "general" in user_input:
+                user_input = {
+                    **user_input["general"],
+                    **user_input.get("regulation", {}),
+                }
+            for key in DEFAULTS:
+                if key in user_input:
+                    self.data[key] = user_input[key]
             for key in (
                 "min_soc_speicher",
                 "soc_speicher_aktuell",
@@ -197,11 +244,13 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 k: v for k, v in self.data.items() if k != "pv_diagnostic_logging"
             } != {
                 k: v
-                for k, v in self.config_entry.options.items()
+                for k, v in migrate_regulation(
+                    self.config_entry.options, stored
+                ).items()
                 if k != "pv_diagnostic_logging"
             }
             return self.async_create_entry(title="", data=self.data)
-        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields))
+        return self.async_show_form(step_id="init", data_schema=schema)
 
 
 class WallboxCapabilityFlow(config_entries.ConfigSubentryFlow):

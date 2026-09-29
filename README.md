@@ -272,7 +272,7 @@ Remote wallbox, acquires the selected station, explicitly sends OFF and confirms
 OFF before completing selection. **Every takeover forces charging permission OFF.**
 A separate user action starts charging. Startup/reload, profile selection and
 background events never acquire authority. Power edits while active/enabled apply after a one-second trailing-edge backend
-debounce; explicit enable and stop remain immediate. Per-wallbox settings persist
+debounce; explicit permission changes bypass this debounce. Per-wallbox settings persist
 separately. With authority, profile selection disables permission; without authority,
 profile selection/settings are configuration-only and send no OCPP commands.
 
@@ -296,9 +296,9 @@ metadata and survives entity renames. After verifying automatic loading, remove
 temporary manually registered copies such as `/local/wallbox-manager-card.js`.
 See [automatic registration verification](docs/frontend-registration.md).
 
-The compact card includes a device-name header, equal narrow numeric fields,
-progressive 0.1/1 kW buttons with press-and-hold repeat (450 ms, then every 150 ms),
-and locale-aware direct input. Its two-column status section shows measured
+The compact card shows discharge reserve, optional start delay and optional charging
+duration for NETZ, or only battery target SoC for PV Surplus. Technical regulation
+settings are in the integration options. Its two-column status section shows measured
 power, session duration as total `H:MM`, and the confirmed applied phase/current
 limit, including any phase-lockout substitute.
 Known backend technical limits bound requests. The optional battery control is
@@ -310,9 +310,56 @@ See [Grid profile, ownership, migration and card installation](docs/grid-profile
 for the exact state model, guarded sequence, station-scoped capability subentries,
 battery lifecycle and failure behavior.
 
-PV_SURPLUS, PV_DAILY_OPTIMUM and PV_MAXIMUM are deferred pending detailed
-specifications. No PV algorithms or external Energy Manager interface are
-implemented in this iteration.
+PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
+PV_DAILY_OPTIMUM, PV_MAXIMUM and the external Energy Manager interface remain deferred.
+
+## Integration settings and profile timing
+
+The native Home Assistant options form separates **General parameters / Allgemeine
+Parameter** (diagnostics, minimum reserve, battery SoC, PV power, consumption power)
+from **Regulation parameters / Regelparameter** (regulation interval, PV start/stop
+delays, SoC hysteresis, power smoothing window). Consumption means **total site
+consumption including the selected wallbox**. Existing settings are migrated;
+explicit central values win. Conflicting old per-wallbox values are selected by
+sorted stored target identity, per setting, with all originals archived in the
+options. No integration version change is needed. Diagnostic-only edits do not
+reload the integration.
+
+Power smoothing defaults to **5 seconds**; **0 disables it**. Only PV and total
+consumption power are averaged. This is a time-weighted moving window: 2000 W for
+4 seconds and 1000 W for 1 second produces 1800 W over 5 seconds. Startup averages
+only known time. Larger windows suppress short load spikes but respond more slowly.
+The regulation interval is independent: a 5-second interval can use a 15-second
+window. SoC, voltage, safety state and selected-wallbox actual power remain raw.
+Missing or stale readings pause decisions without synthesizing OFF; new readings
+cannot invalidate a dispatched command snapshot.
+
+NETZ **Start delay / Startverzögerung** and **Charging duration / Ladedauer** are
+optional relative durations in `hh:mm`, never local clock times. Hours can exceed
+23 (`24:00`, `120:15`); minutes must be 00–59. Empty means unset; `00:00` is zero
+(a zero charging duration expires immediately).
+
+| Start delay | Charging duration | Behavior |
+| --- | --- | --- |
+| Empty | Empty | Immediate, unlimited |
+| Set | Empty | Delayed, then unlimited |
+| Empty | Set | Immediate, stops after duration |
+| Set | Set | Delayed, duration counted from scheduled start |
+
+For example, `01:30` plus `02:00` waits 90 minutes, then requests charging for two
+hours. Selecting/reselecting NETZ or changing its timing restarts the schedule.
+Profile selection still turns charging permission OFF; explicitly enable it to
+allow the schedule to act. First enable without an existing activation starts a
+new schedule. Explicit OFF cancels it; a subsequent enable starts afresh.
+Authority, ownership, connection and capability checks always apply.
+
+Activation timestamps are persisted. Reload/restart resumes the original start
+and end deadlines through existing ownership recovery; elapsed downtime counts,
+and missed charging time is not added back. Switching away cancels the schedule;
+switching back creates a fresh one. An expired schedule remains expired until a
+new activation, timing edit, or OFF/ON. Grid timing state and deadlines can be
+understood from the profile entity's activation, configured seconds and
+waiting/active/expired attributes.
 
 ## Planned Energy Manager interface
 

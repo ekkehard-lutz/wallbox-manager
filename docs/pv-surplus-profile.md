@@ -10,7 +10,8 @@ requires a separate enable action.
 
 ## Central references and measurement quality
 
-Configure Home Assistant entity references in the integration options:
+Configure Home Assistant entity references in the integration options under
+**General parameters / Allgemeine Parameter**:
 
 - `leistung_pv`: PV generation power (required).
 - `leistung_verbraucher`: total consumer power, **including** the selected
@@ -50,9 +51,41 @@ For 8000 W PV, 5000 W consumers and 3000 W selected charging, the result is 6000
 Zero or negative available power prevents a start and starts the stop-delay timer
 for an ongoing charge. Adding back actual charging power avoids repeatedly subtracting the controlled wallbox's own consumption.
 
+## Central regulation and time-window smoothing
+
+**Regulation parameters / Regelparameter** contains the regulation interval
+(default 5 s), PV start delay (0 s), PV stop delay (60 s), SoC hysteresis (5 percentage
+points), and power smoothing window (5 s, range 0–300 s). Existing stored values
+are retained during migration; these defaults apply only when absent. The card
+only exposes battery target SoC for this profile. Advanced approximation entities
+remain available, but are not shown in the everyday card.
+
+PV and total consumption each have an independent, event-driven history. HA state
+changes record normalized watts and a monotonic timestamp; there is no sampling
+poll. Each value is constant until the next event or its validity expiry. At a
+regulation decision, integrate each valid segment over `[now - window, now]` and
+divide by the total valid duration. Keep the segment crossing the left boundary
+and discard earlier samples. For example, 4 s × 2000 W + 1 s × 1000 W over 5 s gives
+1800 W. With only two known seconds at startup, divide by two, not five. Unknown
+gaps have no weight and are never inserted as zero. At zero window use raw power.
+
+Larger windows reduce short duty-cycle load spikes but react more slowly. The
+window is independent of the regulation interval. Battery SoC/reserve, voltage,
+actual wallbox power and all safety/control state are not smoothed. Current raw
+measurements must still pass freshness and validity checks before averaging.
+History cannot authorize a decision while a current reading is unavailable.
+After dispatch the chosen operating point remains a snapshot: subsequent events
+are recorded for the next cycle, without re-solving the command in flight.
+
+Detailed PV diagnostics include raw and smoothed PV/load watts, window seconds,
+enabled state and known-history seconds per channel. Normal logging volume is
+unchanged. History is deliberately rebuilt on reload; unknown past time is not
+invented.
+
 ## Without a battery
 
-Choose the common solver's canonical approximation value:
+Advanced users can set the existing approximation entity to the common solver's
+canonical value:
 
 - `up` / NOT_BELOW / Not below target: use at least the available power, within
   achievable hardware limits; some grid import is possible.
@@ -66,7 +99,7 @@ No minimum-current or device/vehicle limits are bypassed.
 
 Settings are `soll_soc_speicher` (default 95%) and `soc_hysterese` (default 5
 percentage points). The stop threshold is target minus hysteresis. Target settings
-are restricted to 0–99%, hysteresis to 0–target; policy calculations additionally
+are restricted to 0–99%, hysteresis to 0–99 percentage points; policy calculations additionally
 clamp the upper threshold to 99%.
 
 | Situation | Action |

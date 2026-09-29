@@ -111,6 +111,14 @@ class ProfileNumber(ControlEntity, NumberEntity):
     def __init__(self, control, entry_id, target, key):
         super().__init__(control, entry_id, target, key)
         self.field = "power_kw" if key == "soll_power" else key
+        if key in (
+            "soc_hysterese",
+            "regulation_interval",
+            "pv_start_delay",
+            "pv_stop_delay",
+        ):
+            self._attr_entity_category = EntityCategory.CONFIG
+            self._attr_entity_registry_enabled_default = False
         self._attr_native_unit_of_measurement = "kW" if key == "soll_power" else "%"
         self._attr_native_step = 0.1 if key == "soll_power" else 1
         if key in ("regulation_interval", "pv_start_delay", "pv_stop_delay"):

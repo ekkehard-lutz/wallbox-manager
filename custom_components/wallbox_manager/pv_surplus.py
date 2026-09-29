@@ -44,6 +44,18 @@ def reading(state, now, *, soc=False):
     return value
 
 
+def power_valid_for(state, now):
+    """Known validity bounds history segments as well as current snapshots."""
+    if state is None:
+        return 0
+    expiry = getattr(state, "last_reported", state.last_updated) + timedelta(
+        seconds=MAX_AGE_SECONDS
+    )
+    if explicit := state.attributes.get("valid_until"):
+        expiry = min(expiry, datetime.fromisoformat(explicit))
+    return max(0, (expiry - now).total_seconds())
+
+
 def decision(available, soc, settings, ongoing):
     """A pause clears ongoing; every subsequent start crosses the strict threshold."""
     direction = Direction(settings["approximation"])
@@ -89,7 +101,7 @@ class PVSurplus:
     def permits_point(self, target, point, *, after_dispatch=False):
         """Apply the existing PV policy at the shared command dispatch fence."""
         if self.setting(target)["profile"] != "PV_SURPLUS":
-            return True
+            return not point.charging or self.grid_phase(target)[0] == "active"
         if not point.charging:
             # OFF ends continuation even when another primitive control requested it.
             self.pv_ongoing[target] = False
@@ -201,6 +213,25 @@ class PVSurplus:
         if record := active(self, target):
             record.capture_inputs(candidates)
         pv, load = reading(pv_state, now), reading(load_state, now)
+        raw_pv, raw_load = pv, load
+        timestamp = self.monotonic()
+        pv, pv_history = self.power_history["leistung_pv"].average(timestamp, pv)
+        load, load_history = self.power_history["leistung_verbraucher"].average(
+            timestamp, load
+        )
+        if record := active(self, target):
+            record.data.update(
+                raw_pv_power_w=number(raw_pv),
+                smoothed_pv_power_w=number(pv),
+                raw_consumption_power_w=number(raw_load),
+                smoothed_consumption_power_w=number(load),
+                smoothing_window_s=self.references.get("power_smoothing_window", 5),
+                smoothing_enabled=bool(
+                    self.references.get("power_smoothing_window", 5)
+                ),
+                pv_history_s=pv_history,
+                consumption_history_s=load_history,
+            )
         soc_entity = self.references.get("soc_speicher_aktuell")
         soc = (
             reading(self.hass.states.get(soc_entity), now, soc=True)
@@ -461,6 +492,17 @@ class PVSurplus:
         if self.closed:
             return
         state = event.data.get("new_state")
+        for key in ("leistung_pv", "leistung_verbraucher"):
+            if entity == self.references.get(key):
+                try:
+                    now = datetime.now(UTC)
+                    value = reading(state, now)
+                    valid_for = power_valid_for(state, now)
+                except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                    value, valid_for = None, 0
+                self.power_history[key].add(
+                    self.monotonic(), value, valid_for=valid_for
+                )
         for target in tuple(self.tasks):
             if self.setting(target)["profile"] != "PV_SURPLUS":
                 continue

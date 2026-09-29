@@ -125,7 +125,19 @@ class Cycle:
         p, t, _ = self.owner
         now = datetime.now(UTC)
         self.data["evaluated_at"] = now.isoformat()
-        for key in ("site_load_w", "surplus_w", "measured_power_w"):
+        for key in (
+            "site_load_w",
+            "surplus_w",
+            "measured_power_w",
+            "raw_pv_power_w",
+            "smoothed_pv_power_w",
+            "raw_consumption_power_w",
+            "smoothed_consumption_power_w",
+            "smoothing_window_s",
+            "smoothing_enabled",
+            "pv_history_s",
+            "consumption_history_s",
+        ):
             self.data.pop(key, None)
         self.data["external"] = {
             key: entity_sample(

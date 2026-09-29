@@ -109,7 +109,8 @@ class WallboxManagerCard extends HTMLElement {
       <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
       <div class="row" id="reserve-row"><label id="reserve-label" for="reserve"></label><div class="numeric"><button id="reserve-down" class="step" type="button">−</button><input id="reserve" type="text" inputmode="numeric" autocomplete="off"><button id="reserve-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
       <label class="row" id="approximation-row"><span id="approximation-label"></span><select id="approximation"></select></label>
-      ${["soll_soc_speicher", "soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="number" id="${id}" min="${id === "regulation_interval" ? 1 : 0}" max="${id.endsWith("delay") ? 3600 : id === "regulation_interval" ? 300 : 99}" step="1"></label>`).join("")}
+      ${["soll_soc_speicher"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="number" id="${id}" min="0" max="99" step="1"></label>`).join("")}
+      ${["grid_start_delay", "grid_duration"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="text" id="${id}" placeholder="hh:mm" pattern="[0-9]{2,}:[0-5][0-9]" autocomplete="off"></label>`).join("")}
       <button id="permission"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
       <section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section>
@@ -120,8 +121,20 @@ class WallboxManagerCard extends HTMLElement {
     get("takeover").onclick = () => this.activate(this.discovery.displayed);
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
     get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.pv_approximation, option:e.target.value});
-    for (const id of ["soll_soc_speicher", "soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay"]) {
+    for (const id of ["soll_soc_speicher"]) {
       get(id).onchange = e => this.call("number", "set_value", {entity_id:this.discovery.roles[id], value:Number(e.target.value)});
+    }
+    for (const id of ["grid_start_delay", "grid_duration"]) {
+      get(id).onchange = e => {
+        const value = e.target.value;
+        if (value !== "" && !/^[0-9]{2,}:[0-5][0-9]$/.test(value)) {
+          const error = get("error");
+          error.textContent = this._hass?.language?.startsWith("de") ? "Dauer als hh:mm eingeben (Minuten 00–59)." : "Enter a duration as hh:mm (minutes 00–59).";
+          error.hidden = false;
+          return;
+        }
+        this.call("text", "set_value", {entity_id:this.discovery.roles[id], value});
+      };
     }
     for (const id of ["power", "reserve"]) {
       get(id).onchange = () => this.editNumber(id);
@@ -287,16 +300,22 @@ class WallboxManagerCard extends HTMLElement {
     get("permission").disabled = busy || !ready || !available(permission);
     get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     const pv = state("charging_profile")?.state === "PV_SURPLUS";
-    get("power-row").hidden = pv;
+    get("power-row").hidden = true;
     get("reserve-row").hidden = !(!pv && (attrs.battery_reserve_configured ?? attrs.battery_configured));
-    get("approximation-row").hidden = !pv || !!attrs.battery_configured;
+    get("approximation-row").hidden = true;
     get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
     this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"]]);
     get("approximation").value = state("pv_approximation")?.state || "down";
     get("approximation").disabled = busy || !available(state("pv_approximation"));
-    const pvLabels = de ? {soll_soc_speicher:"Speicher-Ziel-SoC (%)",soc_hysterese:"SoC-Hysterese (Prozentpunkte)",regulation_interval:"Regelintervall (s)",pv_start_delay:"PV-Startverzögerung (s)",pv_stop_delay:"PV-Stoppverzögerung (s)"} : {soll_soc_speicher:"Battery target SoC (%)",soc_hysterese:"SoC hysteresis (percentage points)",regulation_interval:"Regulation interval (s)",pv_start_delay:"PV start delay (s)",pv_stop_delay:"PV stop delay (s)"};
+    for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
+      get(`${id}-row`).hidden = pv;
+      get(`${id}-label`).textContent = `${label} (hh:mm)`;
+      if (this.shadowRoot.activeElement !== get(id)) get(id).value = available(state(id)) ? state(id).state : "";
+      get(id).disabled = busy || !available(state(id));
+    }
+    const pvLabels = de ? {soll_soc_speicher:"Speicher-Ziel-SoC (%)"} : {soll_soc_speicher:"Battery target SoC (%)"};
     for (const [id,label] of Object.entries(pvLabels)) {
-      get(`${id}-row`).hidden = !pv || (["soll_soc_speicher", "soc_hysterese"].includes(id) && !attrs.battery_configured);
+      get(`${id}-row`).hidden = !pv || !attrs.battery_configured;
       get(`${id}-label`).textContent = label;
       if (this.shadowRoot.activeElement !== get(id)) get(id).value = available(state(id)) ? state(id).state : "";
       get(id).disabled = busy || !available(state(id));
@@ -323,7 +342,7 @@ class WallboxManagerCard extends HTMLElement {
       d.active && !d.inventory[d.active] ? (de ? "Aktive Wallbox fehlt. Bitte Verbindung prüfen." : "Active wallbox missing. Check its connection.") : "",
       ["error","write_unconfirmed"].includes(attrs.battery_status) ? (de ? "Batteriereserve konnte nicht gesetzt werden. Batterie prüfen." : "Could not set battery reserve. Check the battery.") : "",
       ["failed","unsupported","temporarily_rejected"].includes(attrs.command_status) && !["phase_lockout","observing"].includes(attrs.profile_status) ? (de ? "Ladeeinstellung nicht angewendet. Verbindung und Wallbox prüfen." : "Charging setting not applied. Check the connection and wallbox.") : "",
-      ({profile_unavailable:de ? "Profil nicht verfügbar. Warte auf bestätigtes OFF für den Wechsel zu Netz." : "Profile unavailable. Waiting for confirmed OFF before falling back to Grid.",pv_start_delay:de ? "PV-Startverzögerung läuft." : "Waiting for PV start delay.",pv_stop_delay:de ? "PV-Stoppverzögerung: Laden mit Mindestleistung." : "PV stop delay: charging at minimum power.",measurements_unavailable: de ? "PV-Regelung pausiert: Messwerte fehlen, sind ungültig oder veraltet." : "PV regulation paused: readings are missing, invalid or stale.",waiting_battery_soc:de ? "Warte auf Speicher-SoC über dem Zielwert." : "Waiting for battery SoC above target.",stopped_battery_soc:de ? "Laden wegen niedrigem Speicher-SoC gestoppt." : "Charging stopped due to low battery SoC.",paused_insufficient_pv:de ? "Laden wegen zu geringer PV-Leistung pausiert." : "Charging paused due to insufficient PV power."})[attrs.profile_status] || "",
+      ({grid_waiting:de ? "NETZ-Startverzögerung läuft." : "Waiting for Grid start delay.",grid_expired:de ? "NETZ-Ladedauer abgelaufen." : "Grid charging duration expired.",profile_unavailable:de ? "Profil nicht verfügbar. Warte auf bestätigtes OFF für den Wechsel zu Netz." : "Profile unavailable. Waiting for confirmed OFF before falling back to Grid.",pv_start_delay:de ? "PV-Startverzögerung läuft." : "Waiting for PV start delay.",pv_stop_delay:de ? "PV-Stoppverzögerung: Laden mit Mindestleistung." : "PV stop delay: charging at minimum power.",measurements_unavailable: de ? "PV-Regelung pausiert: Messwerte fehlen, sind ungültig oder veraltet." : "PV regulation paused: readings are missing, invalid or stale.",waiting_battery_soc:de ? "Warte auf Speicher-SoC über dem Zielwert." : "Waiting for battery SoC above target.",stopped_battery_soc:de ? "Laden wegen niedrigem Speicher-SoC gestoppt." : "Charging stopped due to low battery SoC.",paused_insufficient_pv:de ? "Laden wegen zu geringer PV-Leistung pausiert." : "Charging paused due to insufficient PV power."})[attrs.profile_status] || "",
       attrs.profile_status === "error" ? (de ? "Ladeprofil fehlgeschlagen. Wallbox prüfen." : "Charging profile failed. Check the wallbox.") : ""].filter(Boolean);
     get("status").textContent = messages.join(" "); get("status").hidden = !messages.length;
   }

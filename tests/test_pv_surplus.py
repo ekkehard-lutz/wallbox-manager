@@ -25,6 +25,10 @@ async def grid(base_grid):  # noqa: F811
         stop=replace(source.snapshot.stop, state=EvidenceState.VERIFIED),
     )
     profile, target, _ = base_grid
+    # Legacy state-machine regressions exercise the raw-input (disabled) mode.
+    profile.references["power_smoothing_window"] = 0
+    for history in profile.power_history.values():
+        history.window = 0
     profile.references.update(
         leistung_pv="sensor.pv", leistung_verbraucher="sensor.load"
     )
@@ -74,7 +78,7 @@ def test_hysteresis_clamp_and_pause_restart():
     "updates",
     [
         {"soll_soc_speicher": 100},
-        {"soc_hysterese": 96},
+        {"soc_hysterese": 100},
         {"soc_hysterese": -1},
         {"regulation_interval": 0},
         {"regulation_interval": 301},
@@ -425,7 +429,8 @@ async def test_reload_restores_profile_only(grid):
     clone = GridProfiles(
         p.hass,
         SimpleNamespace(
-            entry_id=p.entry_id, options={"soc_speicher_aktuell": "sensor.soc"}
+            entry_id=p.entry_id,
+            options={**p.entry.options, "soc_speicher_aktuell": "sensor.soc"},
         ),
         c,
         p.battery,

@@ -244,6 +244,14 @@
       "take_control": {
         "name": "Steuerung übernehmen"
       }
+    },
+    "text": {
+      "grid_start_delay": {
+        "name": "Startverzögerung"
+      },
+      "grid_duration": {
+        "name": "Ladedauer"
+      }
     }
   },
   "options": {
@@ -251,15 +259,31 @@
       "init": {
         "title": "Wallbox Manager",
         "description": "PV-Überschuss benötigt beide Leistungsreferenzen. Ohne Speicher-SoC arbeitet es ohne Speicher; die Entladereserve ist davon unabhängig.",
-        "data": {
-          "min_soc_speicher": "Batterie-Mindestreserve",
-          "soc_speicher_aktuell": "Aktueller Batterie-Ladezustand",
-          "leistung_pv": "PV-Leistung",
-          "leistung_verbraucher": "Gesamtverbrauch (einschließlich ausgewählter Wallbox)",
-          "pv_diagnostic_logging": "Diagnoseprotokoll"
-        },
-        "data_description": {
-          "pv_diagnostic_logging": "Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert."
+        "sections": {
+          "general": {
+            "name": "Allgemeine Parameter",
+            "data": {
+              "min_soc_speicher": "Mindestreserve",
+              "soc_speicher_aktuell": "Ladezustand",
+              "leistung_pv": "PV-Leistung",
+              "leistung_verbraucher": "Verbrauchsleistung",
+              "pv_diagnostic_logging": "Diagnoseprotokoll"
+            },
+            "data_description": {
+              "pv_diagnostic_logging": "Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert.",
+              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox."
+            }
+          },
+          "regulation": {
+            "name": "Regelparameter",
+            "data": {
+              "regulation_interval": "Regelintervall",
+              "pv_start_delay": "PV-Startverzögerung",
+              "pv_stop_delay": "PV-Stoppverzögerung",
+              "soc_hysterese": "SoC-Hysterese",
+              "power_smoothing_window": "Leistungsglättung Zeitfenster"
+            }
+          }
         }
       }
     }
