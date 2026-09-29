@@ -1,5 +1,7 @@
 """Central options preserve beta.13 values and use native HA sections."""
 
+import pytest
+
 from custom_components.wallbox_manager.regulation import DEFAULTS, migrate_regulation
 
 
@@ -39,8 +41,22 @@ def test_explicit_central_values_including_zero_win():
     assert {key: migrated[key] for key in DEFAULTS} == options
 
 
-def test_defaults():
-    assert migrate_regulation({}, {}) == DEFAULTS
+@pytest.mark.parametrize("profiles", [{}, {"target": {"profile": "NETZ"}}])
+def test_defaults(profiles):
+    expected = {
+        "regulation_interval": 5,
+        "pv_start_delay": 0,
+        "pv_stop_delay": 90,
+        "soc_hysterese": 5,
+        "power_smoothing_window": 5,
+    }
+    migrated = migrate_regulation({}, profiles)
+    assert {key: migrated[key] for key in DEFAULTS} == DEFAULTS == expected
+    from custom_components.wallbox_manager.pv_surplus import PV_DEFAULTS
+
+    assert {key: PV_DEFAULTS[key] for key in expected if key in PV_DEFAULTS} == {
+        key: value for key, value in expected.items() if key != "power_smoothing_window"
+    }
 
 
 async def test_real_entry_migrates_store_and_keeps_regulation_out_of_profile_store(
@@ -93,4 +109,79 @@ async def test_real_entry_migrates_store_and_keeps_regulation_out_of_profile_sto
         profiles.unsubscribe_battery()
         profiles.unsubscribe()
         profiles.session_unsubscribe()
+        await hass.async_stop()
+
+
+@pytest.mark.parametrize("delay", [0, 60, 75, 90, 123, 3600])
+@pytest.mark.parametrize("source", ["central", "legacy"])
+def test_stop_delay_preserves_explicit_values(delay, source):
+    options = {"pv_stop_delay": delay} if source == "central" else {}
+    legacy = {"target": {"pv_stop_delay": 17 if source == "central" else delay}}
+    migrated = migrate_regulation(options, legacy)
+    assert migrated["pv_stop_delay"] == delay
+    assert migrated["power_smoothing_window"] == 5
+    assert migrate_regulation(migrated, legacy) == migrated
+
+
+@pytest.mark.parametrize("hysteresis", [-1, 0, 5, 5.5, 40, 99, 99.5, 100])
+async def test_hysteresis_options_entity_and_backend_ranges_agree(tmp_path, hysteresis):
+    from types import SimpleNamespace
+
+    import voluptuous as vol
+    from homeassistant.config_entries import ConfigEntries
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.data_entry_flow import FlowManagerIndexView
+    from test_ha_lifecycle import entry
+
+    from custom_components.wallbox_manager.config_flow import ReferenceOptionsFlow
+    from custom_components.wallbox_manager.core.models import (
+        ConnectorId,
+        EvseId,
+        StationId,
+    )
+    from custom_components.wallbox_manager.number import ProfileNumber
+    from custom_components.wallbox_manager.profiles import GridProfiles
+    from custom_components.wallbox_manager.pv_surplus import PV_DEFAULTS, decision
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = ConfigEntries(hass, {})
+    config = entry()
+    hass.config_entries._entries[config.entry_id] = config
+    flow = ReferenceOptionsFlow()
+    flow.hass, flow.handler = hass, config.entry_id
+    try:
+        form = await flow.async_step_init()
+        schema = form["data_schema"]
+        assert schema({"general": {}, "regulation": {}})["regulation"] == DEFAULTS
+        serialized = FlowManagerIndexView(None)._prepare_result_json(form)
+        regulation = next(
+            field
+            for field in serialized["data_schema"]
+            if field["name"] == "regulation"
+        )
+        selector = next(
+            field for field in regulation["schema"] if field["name"] == "soc_hysterese"
+        )["selector"]["number"]
+        target = ConnectorId(EvseId(StationId("test"), "1"), "1")
+        entity = ProfileNumber(
+            SimpleNamespace(), config.entry_id, target, "soc_hysterese"
+        )
+        assert selector["min"] == entity.native_min_value == 0
+        assert selector["max"] == entity.native_max_value == 99
+        settings = {**PV_DEFAULTS, "soll_soc_speicher": 40, "soc_hysterese": hysteresis}
+        submitted = {"general": {}, "regulation": {"soc_hysterese": hysteresis}}
+        if 0 <= hysteresis <= 99:
+            assert schema(submitted)["regulation"]["soc_hysterese"] == hysteresis
+            GridProfiles.validate_pv(settings)
+            if hysteresis >= 40:
+                # Zero/negative thresholds cannot be crossed by valid SoC;
+                # the independent strict start threshold still prevents a start.
+                assert decision(2000, 0, settings, True)[0] == 2000
+                assert decision(2000, 0, settings, False)[0] == 0
+        else:
+            with pytest.raises(vol.Invalid):
+                schema(submitted)
+            with pytest.raises(ValueError):
+                GridProfiles.validate_pv(settings)
+    finally:
         await hass.async_stop()

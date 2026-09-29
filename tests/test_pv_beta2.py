@@ -118,21 +118,21 @@ async def apply(p, t):
     return result.point
 
 
-async def test_default_zero_start_is_immediate_and_stop_default_is_sixty(grid):
+async def test_default_zero_start_is_immediate_and_stop_default_is_ninety(grid):
     p, t, (c, _, _, *_), clock = await prepare(grid)
     await p.permission(t, True)
     confirmed = c.confirmed_point(t)
     assert confirmed.charging
     p.debounce_wait.assert_not_awaited()
     assert p.setting(t)["pv_start_delay"] == 0
-    assert p.setting(t)["pv_stop_delay"] == 60
+    assert p.setting(t)["pv_stop_delay"] == 90
     measurements(p, t, pv=0)
     point = await apply(p, t)
     assert point == confirmed
     assert p.status[t] == "pv_stop_delay"
-    clock[0] = 59
+    clock[0] = 89
     assert (await apply(p, t)).charging
-    clock[0] = 60
+    clock[0] = 90
     assert not (await apply(p, t)).charging
     assert c.runtime.enabled(t) is True
 
@@ -174,9 +174,9 @@ async def test_surplus_recovery_resets_stop_delay_and_no_duplicate_minimum_comma
     measurements(p, t, pv=0)
     await apply(p, t)
     assert p.pv_stop_since[t] == 30
-    clock[0] = 89
+    clock[0] = 119
     assert (await apply(p, t)).charging
-    clock[0] = 90
+    clock[0] = 120
     assert not (await apply(p, t)).charging
 
 
@@ -312,7 +312,7 @@ async def test_stop_delay_fences_queued_minimum_after_expiry(grid):
     async with bound.adapter._call_lock:
         pending = asyncio.create_task(c.apply_stored(t))
         await asyncio.sleep(0)
-        clock[0] = 60
+        clock[0] = 90
     result = await pending
     assert result.status.value != "applied"
     assert len(peer.requests) == count
@@ -334,7 +334,7 @@ async def test_phase_lockout_retry_never_extends_pv_stop_delay(grid):
     measurements(p, t, pv=0, load=0, actual=0, soc=96)
     assert (await apply(p, t)).charging
     assert p.status[t] == "pv_stop_delay"
-    clock[0] = 60
+    clock[0] = 90
     assert not (await apply(p, t)).charging
     measurements(p, t, soc=95)
     assert not p.pv_edit(t).point.charging

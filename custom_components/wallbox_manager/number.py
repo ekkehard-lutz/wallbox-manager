@@ -150,6 +150,7 @@ class ProfileNumber(ControlEntity, NumberEntity):
         # Consumers must use technical_max_kw, not this fallback, as capability.
         return {
             "soll_soc_speicher": 99,
+            "soc_hysterese": 99,
             "regulation_interval": 300,
             "pv_start_delay": 3600,
             "pv_stop_delay": 3600,

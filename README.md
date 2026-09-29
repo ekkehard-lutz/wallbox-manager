@@ -460,7 +460,7 @@ solver, explicit charging permission and active-wallbox ownership. See
 [PV Surplus configuration and behavior](docs/pv-surplus-profile.md).
 
 PV beta.2 refinements add backend profile availability, configuration without
-control authority, and separate PV start/stop delays (defaults 0/60 seconds).
+control authority, and separate PV start/stop delays (defaults 0/90 seconds).
 Profile settings remain stored when hidden. See the
 [PV profile documentation](docs/pv-surplus-profile.md) and
 [automatic card registration and verification](docs/frontend-registration.md),

@@ -54,7 +54,7 @@ for an ongoing charge. Adding back actual charging power avoids repeatedly subtr
 ## Central regulation and time-window smoothing
 
 **Regulation parameters / Regelparameter** contains the regulation interval
-(default 5 s), PV start delay (0 s), PV stop delay (60 s), SoC hysteresis (5 percentage
+(default 5 s), PV start delay (0 s), PV stop delay (90 s), SoC hysteresis (5 percentage
 points), and power smoothing window (5 s, range 0–300 s). Existing stored values
 are retained during migration; these defaults apply only when absent. The card
 only exposes battery target SoC for this profile. Advanced approximation entities
@@ -100,7 +100,10 @@ No minimum-current or device/vehicle limits are bypassed.
 Settings are `soll_soc_speicher` (default 95%) and `soc_hysterese` (default 5
 percentage points). The stop threshold is target minus hysteresis. Target settings
 are restricted to 0–99%, hysteresis to 0–99 percentage points; policy calculations additionally
-clamp the upper threshold to 99%.
+clamp the upper threshold to 99%. Hysteresis may equal or exceed the target: the
+resulting zero or negative stop threshold cannot be crossed by a valid
+nonnegative SoC. This does not bypass the start threshold or other stop/control
+conditions.
 
 | Situation | Action |
 | --- | --- |
@@ -177,7 +180,7 @@ permission button remain available.
 
 ## Asymmetric PV delays (beta.2)
 
-Persistent `pv_start_delay` defaults to 0 seconds and `pv_stop_delay` to 60 seconds;
+Persistent `pv_start_delay` defaults to 0 seconds and `pv_stop_delay` to 90 seconds;
 both accept 0–3600 seconds. Start delay counts only continuous eligible surplus,
 valid measurements, feasible positive solver output and the complete battery start
 rule. A lost condition resets it. With zero delay, enabling with valid measurements

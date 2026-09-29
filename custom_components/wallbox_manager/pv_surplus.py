@@ -17,7 +17,7 @@ PV_DEFAULTS = {
     "soc_hysterese": 5,
     "regulation_interval": 5,
     "pv_start_delay": 0,
-    "pv_stop_delay": 60,
+    "pv_stop_delay": 90,
 }
 MAX_AGE_SECONDS = 90
 _LOGGER = logging.getLogger(__name__)
