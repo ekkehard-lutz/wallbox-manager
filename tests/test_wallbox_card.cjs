@@ -37,7 +37,7 @@ function runtime() {
   const registry = new Map();
   const context = vm.createContext({HTMLElement, document:{createElement: () => new Node()}, setTimeout:(fn,delay)=>schedule(fn,delay),clearTimeout:id=>timers.delete(id),setInterval:(fn,delay)=>schedule(fn,delay,delay),clearInterval:id=>timers.delete(id),window:{addEventListener:(event,fn)=>listeners.set(event,fn),removeEventListener:(event)=>listeners.delete(event)}, customElements:{get: key=>registry.get(key),define:(key,value)=>registry.set(key,value)}});
   const source = fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8');
-  vm.runInContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testHelpers = {sessionDuration,discoverWallboxManager,powerStep,liveValues};})();'), context);
+  vm.runInContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testHelpers = {sessionDuration,discoverWallboxManager,powerStep,liveValues,gridCountdown};})();'), context);
   return {context, source, clock, duration:context.testHelpers.sessionDuration, Card:registry.get('wallbox-manager-card'), discover:context.testHelpers.discoverWallboxManager, step:context.testHelpers.powerStep, live:context.testHelpers.liveValues};
 }
 function state(role, target, value, extra={}) {
@@ -160,7 +160,7 @@ test('fractional input above 10 is preserved and localized',async()=>{
   get('power').value='11,25'; await c.editNumber('power');
   assert.equal(calls[0][2].value,11.25);
   assert.equal(get('power').value,'11,25');
-  assert.equal(get('power-label').textContent,'Sollleistung');
+  assert.equal(get('power-label').textContent,'Angeforderte Ladeleistung');
   assert.equal(get('energy-label').textContent,'Energie');
 });
 
@@ -696,4 +696,55 @@ test('duration edit survives stale HA updates and preserves focused counterpart'
   assert.equal(get('grid_duration-minutes').value,'15');
   finish();await pending;
   assert.equal(get('grid_duration-minutes').value,'15');
+});
+
+test('NETZ restores compact power before reserve and timing',()=>{
+  const {get,card:c}=card(states(true)); const source=c.shadowRoot.innerHTML;
+  assert.equal(get('power-row').hidden,false);
+  assert.equal(get('power-label').textContent,'Requested charging power');
+  assert.ok(source.indexOf('id="power-row"')<source.indexOf('id="reserve-row"'));
+  assert.ok(source.indexOf('id="reserve-row"')<source.indexOf('id="grid_start_delay-row"'));
+  for(const id of ['power-down','power','power-up']) assert.ok(source.includes(`id="${id}"`));
+});
+for(const [minimum,maximum] of [[1.38,18.63],[1.84,11.04]]) test(`backend power bounds ${minimum}..${maximum}`,async()=>{
+  const data=states(true); Object.assign(data['number.renamed_power'].attributes,{technical_min_kw:minimum,technical_max_kw:maximum});
+  const {card:c,get,calls}=card(data);
+  get('power').value=String(minimum); await c.stepNumber('power',-1); assert.equal(calls.length,0);
+  get('power').value=String(minimum+.01); await c.stepNumber('power',-1); assert.equal(calls.at(-1)[2].value,minimum);
+  get('power').value=String(maximum-.01); await c.stepNumber('power',1); assert.equal(calls.at(-1)[2].value,maximum);
+  const count=calls.length;
+  for(const value of [minimum-.01,maximum+.01]) {get('power').value=String(value); await c.editNumber('power');assert.equal(calls.length,count);}
+  get('power').value='9.87';await c.editNumber('power');assert.equal(calls.at(-1)[2].value,9.87); // Backend selects the representable OperatingPoint.
+});
+test('power decimal boundary steps are reversible and clamp technical bounds',()=>{
+  const {step}=runtime();
+  assert.equal(step(9.8,1,18.63,1.38),9.9);
+  assert.equal(step(9.9,1,18.63,1.38),10);
+  assert.equal(step(10,-1,18.63,1.38),9.9);
+  assert.equal(step(10,1,18.63,1.38),11);
+  assert.equal(step(1.4,-1,18.63,1.38),1.38);
+  assert.equal(step(18,1,18.63,1.38),18.63);
+});
+for(const [now,delay,duration] of [[1000,'00:01','00:02'],[1001,'00:01','00:02'],[1059.9,'00:01','00:02'],[1060,'','00:02'],[1060.1,'','00:02'],[1120,'','00:01'],[1179.9,'','00:01'],[1180,'','']]) test(`authoritative countdown at ${now}`,()=>{
+  const {context}=runtime(); const countdown=context.testHelpers.gridCountdown;
+  const attrs={grid_start_deadline:1060,grid_end_deadline:1180,grid_armed_duration_seconds:120};
+  assert.equal(countdown(attrs,'grid_start_delay',now),delay);
+  assert.equal(countdown(attrs,'grid_duration',now),duration);
+});
+test('countdown replaces pending inputs, disables edits and reconstructs on card reload',async()=>{
+  const data=states(true), now=Date.now()/1000;
+  Object.assign(data['select.anything'].attributes,{grid_request_armed:true,grid_start_deadline:now+90,grid_end_deadline:now+7290,grid_armed_duration_seconds:7200});
+  data['text.delay']=state('grid_start_delay','A','');data['text.duration']=state('grid_duration','A','');
+  const first=card(data), second=card(data);
+  for(const ui of [first,second]) {
+    assert.equal(ui.get('grid_start_delay-hours').value,'00');assert.equal(ui.get('grid_start_delay-minutes').value,'02');
+    assert.equal(ui.get('grid_duration-hours').value,'02');assert.equal(ui.get('grid_duration-minutes').value,'00');
+    for(const id of ['grid_start_delay','grid_duration']) {
+      for(const part of ['hours','minutes','clear']) assert.equal(ui.get(`${id}-${part}`).disabled,true);
+      await ui.card.editDuration(id);assert.equal(ui.calls.length,0);
+    }
+  }
+  Object.assign(data['select.anything'].attributes,{grid_start_deadline:now-90,grid_end_deadline:now-1});
+  first.card.hass={...first.card._hass,states:data};
+  for(const id of ['grid_start_delay','grid_duration']) for(const part of ['hours','minutes']) assert.equal(first.get(`${id}-${part}`).value,'');
 });

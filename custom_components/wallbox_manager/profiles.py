@@ -85,6 +85,9 @@ class GridProfiles(GridTiming, PVSurplus):
                 if power <= 100 and reserve <= 100:
                     self.validate_pv({**PV_DEFAULTS, **value})
                     self.settings[key] = {**PV_DEFAULTS, **value}
+                    # beta.15's activation belonged to a recurring schedule.
+                    # Keep its configured values pending; never resume that clock.
+                    self.settings[key].pop("grid_activated_at", None)
             except ValueError, TypeError, KeyError:
                 continue
 
@@ -267,6 +270,10 @@ class GridProfiles(GridTiming, PVSurplus):
         self.invalidate(target)
         self.suppressed.add(target)
         epoch = self.epochs[target]
+        self.grid_consume(target, "cancelled")
+        await self.save()
+        if self.epochs[target] != epoch:
+            return
         if hasattr(self.control, "ownership"):
             await self.control.ownership.permission_intent(self.control, target, False)
         if self.can_control(target):
@@ -277,10 +284,6 @@ class GridProfiles(GridTiming, PVSurplus):
         if self.epochs[target] != epoch:
             return
         self.setting(target)["profile"] = profile
-        if profile == "NETZ":
-            self.grid_restart(target)
-        else:
-            self.setting(target).pop("grid_activated_at", None)
         await self.save()
         await self.reconcile_battery(exclude=target)
         self.control.publish(target)
@@ -308,26 +311,14 @@ class GridProfiles(GridTiming, PVSurplus):
     async def set_value(self, target, field, value):
         if field in ("grid_start_delay", "grid_duration"):
             value = duration_seconds(value)
+            if self.setting(target).get("grid_request"):
+                raise ValueError(
+                    "NETZ timing is armed; disable permission before editing"
+                )
             if self.setting(target).get(field) == value:
                 return
             self.setting(target)[field] = value
-            if self.setting(target)["profile"] != "NETZ":
-                await self.save()
-                self.control.publish(target)
-                return
-            self.invalidate(target)
-            epoch = self.epochs[target]
-            self.grid_restart(target)
             await self.save()
-            if self.epochs[target] != epoch:
-                return
-            if self.setting(target)["profile"] == "NETZ":
-                self.control._edit(target, {"target_w": self.grid_target(target)})
-                if (
-                    self.valid(target, self.epochs[target])
-                    and target not in self.suppressed
-                ):
-                    await self.start(target)
             self.control.publish(target)
             return
         if field in DEFAULTS:
@@ -424,7 +415,7 @@ class GridProfiles(GridTiming, PVSurplus):
                 self.control.publish(target)
 
     @diagnostic_permission
-    async def permission(self, target, enabled):
+    async def permission(self, target, enabled, *, _grid_expiry=False, _resume=False):
         if enabled and (
             not self.can_control(target)
             or self.setting(target)["profile"] not in self.available_profiles(target)
@@ -453,20 +444,33 @@ class GridProfiles(GridTiming, PVSurplus):
             await self.control.ownership.permission_intent(
                 self.control, target, enabled
             )
+        if self.epochs[target] != epoch:
+            return None
         if enabled:
             self.suppressed.discard(target)
         else:
             self.suppressed.add(target)
         if self.setting(target)["profile"] == "NETZ":
-            if enabled and self.setting(target).get("grid_activated_at") is None:
-                self.grid_restart(target)
+            if enabled and not _resume:
+                self.grid_arm(target)
             elif not enabled:
-                self.setting(target).pop("grid_activated_at", None)
+                if _grid_expiry and self.setting(target).get("grid_request"):
+                    self.setting(target)["grid_request"]["stopping"] = True
+                else:
+                    self.grid_consume(target, "cancelled")
             await self.save()
             if self.epochs[target] != epoch:
                 return None
+        if (
+            enabled
+            and self.setting(target)["profile"] == "NETZ"
+            and self.grid_phase(target)[0] == "expired"
+        ):
+            return await self.permission(target, False, _grid_expiry=True)
         self.control.intent(target).profile_modes = None
-        self.control._edit(target, {"target_w": self.grid_target(target)})
+        self.control._edit(
+            target, {"target_w": self.grid_target(target) if enabled else Fraction(0)}
+        )
         if self.setting(target)["profile"] == "PV_SURPLUS":
             if enabled:
                 self.pv_edit(target)
@@ -499,6 +503,25 @@ class GridProfiles(GridTiming, PVSurplus):
             == start_context.authority_revision
         ):
             self.pv_schedule_startup(target, epoch)
+        if (
+            enabled
+            and self.setting(target)["profile"] == "NETZ"
+            and self.setting(target).get("grid_request")
+            and self.can_control(target)
+        ):
+            # A rejected initial point must not discard the armed end deadline.
+            # The timer never grants permission; normal apply fences still apply.
+            self.grid_launch_timer(target)
+        if _grid_expiry:
+            if result and result.status == CommandStatus.APPLIED:
+                self.grid_consume(target, "consumed")
+                await self.save()
+                if self.epochs[target] != epoch:
+                    return result
+                self.status[target] = "grid_expired"
+                self.control.publish(target)
+            else:
+                self.grid_launch_timer(target, retry=True)
         if not enabled:
             await self.reconcile_battery(exclude=target)
         return result
@@ -767,7 +790,19 @@ class GridProfiles(GridTiming, PVSurplus):
 
         while current():
             enabled = runtime.enabled(target)
+            persisted = self.settings.get(target_key(target), {})
+            if (
+                persisted.get("profile") == "NETZ"
+                and self.grid_phase(target)[0] == "expired"
+            ):
+                await self.permission(target, False, _grid_expiry=True)
+                return
             if not record["enabled_intent"]:
+                if persisted.get("profile") == "NETZ" and persisted.get("grid_request"):
+                    self.grid_consume(target, "cancelled")
+                    await self.save()
+                    if not current():
+                        return
                 self.suppressed.add(target)
                 if enabled is True:
                     generation += 1  # The permission operation owns this edit.
@@ -797,7 +832,7 @@ class GridProfiles(GridTiming, PVSurplus):
                     # This continues persisted explicit user intent, not Remote
                     # authority alone. Normal startup fences/delays still apply.
                     recovery_record("resume", reason="persisted_permission_on")
-                    await self.permission(target, True)
+                    await self.permission(target, True, _resume=True)
                     return
                 point = await self.control.reconcile_applied(target, fence=current)
                 if not current():

@@ -304,8 +304,8 @@ The theme-aware header uses a 48 × 48 px `mdi:ev-station` (twice the original
 24 px dimensions), the optional presentation title, and
 the real device display name (`name_by_user`, then device/station name) beneath it.
 The multi-wallbox selector lives in the header; single-wallbox cards omit it.
-Takeover remains explicit. The NETZ card exposes only discharge reserve, optional
-start delay and optional charging duration. The reserve uses integer steps from
+Takeover remains explicit. The NETZ card exposes requested charging power, discharge reserve, optional
+start delay and optional charging duration, in that order. The reserve uses integer steps from
 0 to 100 and appears when its battery references are configured. Duration inputs
 use separate native integer hours/minutes inputs with a visible colon. Hours
 may exceed 23; minutes stay within 0–59 without wrapping or carrying. Blank
@@ -313,8 +313,8 @@ fields mean unset (unlimited duration); the small × button clears both fields.
 Explicit zero remains `00:00`, which expires a charging duration immediately.
 The card still sends the existing `hh:mm` values, so stored beta.14 settings
 remain compatible. PV Surplus shows only battery target SoC, using the same
-compact minus/value/plus whole-percentage editor as discharge reserve. Existing power and
-approximation entities remain available for advanced use; technical regulation
+compact minus/value/plus whole-percentage editor as discharge reserve. The existing
+approximation entity remains available for advanced use; technical regulation
 parameters live in integration settings.
 
 A separated two-column, three-row section shows connection/charging state,
@@ -443,23 +443,47 @@ specified duration; both wait first then count duration from the scheduled start
 `01:30` plus `02:00` means wait 90 minutes then charge for two hours. Hours may
 exceed 23; minutes must be 00–59. Explicit `00:00` duration expires immediately.
 
-The profile Store persists seconds and an absolute activation timestamp. Selecting
-NETZ or materially changing its timing starts a new activation. Selection retains
-the existing permission-OFF behavior: the user must enable permission separately.
-The scheduled start is activation plus delay; the end is start plus duration,
-independent of command latency and temporary unavailability. Restart/reload keeps
-these deadlines and counts downtime; existing ownership recovery must still prove
-control eligibility. No persisted timing record ever grants authority or permission.
+Pending `grid_start_delay` / `grid_duration` store optional seconds. Permission ON
+moves them into a separate `grid_request` record containing `activated_at`,
+`start_at`, `end_at` and captured `duration`, clearing both pending fields. An
+unset pair creates no timed request. Zero duration has an immediate end deadline,
+including with a positive delay. Editing/selecting never arms timing. Edits while
+armed are rejected by the backend and disabled in the card.
 
-Each schedule task carries the profile epoch. Selection, timing edits, OFF, loss
-of authority/connection/ownership and unload invalidate/cancel the task. Switching
-away and back creates a fresh activation. Expiry edits target power to zero through
-`apply_stored`; it does not call hardware directly or change the OCPP protocol.
-The normal capability, permission and command-generation fences remain in force.
-A pre-dispatch gate also rejects positive NETZ points while waiting or expired.
-Transient command failures retain the existing 60-second retry interval.
+The start/end deadlines use wall-clock seconds and survive reload/restart. Duration
+is measured from the scheduled start, independent of command latency. Downtime
+counts; recovery reuses the request without rearming pending values. Beta.15's
+`grid_activated_at` is discarded on load, while its configured timings remain pending
+for the next explicit ON. Recovery of old permission intent does not arm them.
 
-Profile attributes show activation UTC time, configured delay/duration seconds
-and waiting/active/expired state. An expired activation stays expired until a new
-selection, timing edit or explicit OFF followed by ON. Configuration edits with
-no control eligibility are stored without sending commands.
+The existing epoch-fenced NETZ task waits for deadlines and uses normal stored
+OperatingPoint application at start. Expiry calls `GridProfiles.permission(False)`,
+the same method used by the Charging Permission switch. It does not call OCPP
+primitives or merely request zero watts. Confirmed hardware readback remains the
+source of switch state. A failed disable persists `stopping` and retries through
+that same path after 60 seconds. New authorization, profile selection, authority,
+ownership, connection and unload fences prevent stale tasks controlling new work.
+The pre-dispatch NETZ gate continues to reject positive points while waiting/expired.
+PV stop still uses its existing zero-current pause path.
+
+Successful expiry consumes the request; manual OFF/profile selection cancels and
+consumes it. Delay-only requests consume at their scheduled start. Persistent power
+and reserve are untouched. A later ON is immediate/unlimited unless the user enters
+new pending timings. Consumed state survives restart and cannot become configuration.
+
+Profile attributes expose `grid_request_armed`, `grid_start_deadline`,
+`grid_end_deadline`, `grid_armed_duration_seconds`, activation UTC, pending seconds
+and `grid_timing_state` (idle, waiting, active, stopping, consumed, cancelled).
+The card uses the existing display tick and absolute deadlines, rounding remaining
+seconds up to whole minutes. Duration remains fixed during delay. At the start
+boundary delay displays unset; at expiry both display unset, even while confirmed
+permission-disable is pending. No display tick writes control intent.
+
+The power editor consumes `technical_min_kw` / `technical_max_kw` from the backend.
+Both reuse the solver's exact current-grid intervals, verified envelopes, eligible
+modes, current limits and fresh observed voltages; minimum excludes the OFF point.
+Unknown capability evidence produces null bounds, never a fabricated nominal-voltage
+rating. Existing advanced zero-power pause semantics remain available. The card's
+known positive minimum and maximum clamp button steps and validate keyboard input;
+representable OperatingPoint selection remains exclusively in the backend. Steps
+are 0.1 kW below 10, 1 kW above, with 10→9.9 on decrement and crossing clamped to 10.

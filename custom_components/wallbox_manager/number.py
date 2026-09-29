@@ -161,6 +161,10 @@ class ProfileNumber(ControlEntity, NumberEntity):
         attrs = super().extra_state_attributes
         if self.field == "power_kw":
             maximum = self.control.power_ceiling(self.target)
+            minimum = self.control.power_floor(self.target)
+            attrs["technical_min_kw"] = (
+                float(minimum / 1000) if minimum is not None else None
+            )
             attrs["technical_max_kw"] = (
                 float(maximum / 1000) if maximum is not None else None
             )

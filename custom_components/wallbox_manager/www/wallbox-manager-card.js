@@ -17,12 +17,12 @@ function discoverWallboxManager(states) {
   return {selector: selector?.[0], state: selector?.[1], inventory, active, displayed, roles, multiple: keys.length > 1};
 }
 
-function powerStep(value, direction, maximum = null) {
+function powerStep(value, direction, maximum = null, minimum = 0) {
   // Integer decimal arithmetic prevents 9.8 + 0.1 becoming 9.899999… .
   const step = value < 10 || (value === 10 && direction < 0) ? 0.1 : 1;
   let next = Math.round((value + direction * step) * 1e6) / 1e6;
   if ((value < 10 && next > 10) || (value > 10 && next < 10)) next = 10;
-  return Math.max(0, maximum === null ? next : Math.min(maximum, next));
+  return Math.max(minimum, maximum === null ? next : Math.min(maximum, next));
 }
 function parseInput(value, language) {
   const decimal = new Intl.NumberFormat(language).formatToParts(1.1).find(p => p.type === "decimal").value;
@@ -31,6 +31,16 @@ function parseInput(value, language) {
 }
 function available(state) { return state && !["unknown", "unavailable", ""].includes(state.state); }
 function durationAvailable(state) { return state && typeof state.state === "string" && (state.state === "" || /^[0-9]{2,}:[0-5][0-9]$/.test(state.state)); }
+// Absolute backend deadlines; round up so a live interval never shows zero early.
+function gridCountdown(attrs, id, now = Date.now() / 1000) {
+  const start = attrs.grid_start_deadline, end = attrs.grid_end_deadline;
+  if (attrs.grid_timing_state === "stopping" || (end != null && now >= end)) return "";
+  const seconds = id === "grid_start_delay" ? Math.max(0, start - now) :
+    end == null ? null : now < start ? attrs.grid_armed_duration_seconds : end - now;
+  if (seconds == null || seconds <= 0) return "";
+  const minutes = Math.ceil(seconds / 60);
+  return `${String(Math.floor(minutes / 60)).padStart(2,"0")}:${String(minutes % 60).padStart(2,"0")}`;
+}
 function numberRole(id) { return id === "power" ? "soll_power" : id === "reserve" ? "min_soc" : id; }
 function fresh(state, now = Date.now()) {
   return available(state) && state.attributes.connected !== false &&
@@ -210,6 +220,10 @@ class WallboxManagerCard extends HTMLElement {
     if (hold.button.hasPointerCapture(hold.pointerId)) hold.button.releasePointerCapture(hold.pointerId);
   }
   format(value) { return new Intl.NumberFormat(this._hass.language, {maximumFractionDigits:6,useGrouping:false}).format(value); }
+  minimum(id) {
+    const value = id === "power" ? this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_min_kw : 0;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+  }
   maximum(id) {
     if (id === "reserve") return 100;
     if (id === "soll_soc_speicher") return 99;
@@ -221,7 +235,7 @@ class WallboxManagerCard extends HTMLElement {
     if (input.disabled) return;
     const value = parseInput(input.value, this._hass.language);
     if (!Number.isFinite(value) || (id !== "power" && !Number.isInteger(value))) return;
-    const next = id === "power" ? powerStep(value,direction,this.maximum(id)) : Math.min(this.maximum(id),Math.max(0,Math.round(value) + direction));
+    const next = id === "power" ? powerStep(value,direction,this.maximum(id),this.minimum(id)) : Math.min(this.maximum(id),Math.max(0,Math.round(value) + direction));
     if (next === value) return;
     input.value = this.format(next);
     return this.editNumber(id);
@@ -231,8 +245,8 @@ class WallboxManagerCard extends HTMLElement {
     if (input.disabled) return;
     const value = parseInput(input.value,this._hass.language), maximum = this.maximum(id);
     const de = this._hass.language?.startsWith("de");
-    if (!Number.isFinite(value) || value < 0 || (maximum !== null && value > maximum) || (id !== "power" && !Number.isInteger(value))) {
-      get("error").textContent = de ? `Bitte einen gültigen Wert ab 0${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben${id !== "power" ? " (ganze Prozent)" : ""}.` : `Enter a valid value from 0${maximum === null ? "" : ` to ${this.format(maximum)}`}${id !== "power" ? " (whole percent)" : ""}.`;
+    if (!Number.isFinite(value) || value < this.minimum(id) || (maximum !== null && value > maximum) || (id !== "power" && !Number.isInteger(value))) {
+      get("error").textContent = de ? `Bitte einen gültigen Wert ab ${this.format(this.minimum(id))}${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben${id !== "power" ? " (ganze Prozent)" : ""}.` : `Enter a valid value from ${this.format(this.minimum(id))}${maximum === null ? "" : ` to ${this.format(maximum)}`}${id !== "power" ? " (whole percent)" : ""}.`;
       get("error").hidden = false;
       if (id === "soll_soc_speicher") input.value = this.format(Math.round(Number(this._hass.states[this.discovery.roles[id]].state)));
       return;
@@ -310,7 +324,7 @@ class WallboxManagerCard extends HTMLElement {
     get("takeover").textContent = de ? "Steuerung übernehmen" : "Take control";
     get("takeover").hidden = ready || !d.displayed; get("takeover").disabled = busy || !d.inventory[d.displayed]?.connected;
     get("profile-label").textContent = de ? "Ladeprofil" : "Charging profile";
-    get("power-label").textContent = de ? "Sollleistung" : "Requested power";
+    get("power-label").textContent = de ? "Angeforderte Ladeleistung" : "Requested charging power";
     get("reserve-label").textContent = de ? "Entladereserve" : "Discharge reserve";
     get("soll_soc_speicher-label").textContent = de ? "Speicher-Ziel-SoC" : "Battery target SoC";
     this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(value => [value,value === "NETZ" ? (de ? "Netz" : "Grid") : value === "PV_SURPLUS" ? (de ? "PV-Überschuss" : "PV Surplus") : value]));
@@ -325,14 +339,14 @@ class WallboxManagerCard extends HTMLElement {
       get(id).disabled = disabled;
       const value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
       for (const suffix of ["up","down"]) {
-        get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= 0 : maximum !== null && value >= maximum);
+        get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= this.minimum(id) : maximum !== null && value >= maximum);
         get(`${id}-${suffix}`).ariaLabel = `${get(`${id}-label`).textContent} ${suffix === "up" ? (de ? "erhöhen" : "increase") : (de ? "verringern" : "decrease")}`;
       }
     }
     get("permission").disabled = busy || !ready || !available(permission);
     get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     const pv = state("charging_profile")?.state === "PV_SURPLUS";
-    get("power-row").hidden = true;
+    get("power-row").hidden = pv;
     get("reserve-row").hidden = !(!pv && (attrs.battery_reserve_configured ?? attrs.battery_configured));
     get("approximation-row").hidden = true;
     get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
@@ -344,16 +358,18 @@ class WallboxManagerCard extends HTMLElement {
       get(`${id}-label`).textContent = label;
       const s = state(id), edit = this.durationEdits[id];
       if (edit && (edit.entity !== d.roles[id] || s?.state === edit.value)) delete this.durationEdits[id];
-      const value = this.durationEdits[id]?.value ?? (durationAvailable(s) ? s.state : "");
+      const armed = !pv && attrs.grid_request_armed === true;
+      if (armed) delete this.durationEdits[id];
+      const value = armed ? gridCountdown(attrs,id) : this.durationEdits[id]?.value ?? (durationAvailable(s) ? s.state : "");
       const parts = value === "" ? ["",""] : value.split(":");
       const focused = [get(`${id}-hours`),get(`${id}-minutes`)].includes(this.shadowRoot.activeElement);
       for (const [index,part] of ["hours","minutes"].entries()) {
         const input = get(`${id}-${part}`);
-        if (previous !== d.displayed || !focused) input.value = parts[index];
-        input.disabled = busy || !durationAvailable(s);
+        if (armed || previous !== d.displayed || !focused) input.value = parts[index];
+        input.disabled = busy || armed || !durationAvailable(s);
         input.ariaLabel = `${label}: ${part === "hours" ? (de ? "Stunden" : "hours") : (de ? "Minuten" : "minutes")}`;
       }
-      get(`${id}-clear`).disabled = busy || !durationAvailable(s);
+      get(`${id}-clear`).disabled = busy || armed || !durationAvailable(s);
       get(`${id}-clear`).title = get(`${id}-clear`).ariaLabel = de ? `${label} zurücksetzen (nicht gesetzt)` : `Clear ${label} (unset)`;
     }
     get("soll_soc_speicher-row").hidden = !pv || !attrs.battery_configured;

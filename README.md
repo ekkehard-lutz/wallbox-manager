@@ -296,8 +296,8 @@ metadata and survives entity renames. After verifying automatic loading, remove
 temporary manually registered copies such as `/local/wallbox-manager-card.js`.
 See [automatic registration verification](docs/frontend-registration.md).
 
-The compact card shows discharge reserve, optional start delay and optional charging
-duration for NETZ, or only battery target SoC for PV Surplus. Technical regulation
+The compact card shows requested charging power, discharge reserve, optional start
+delay and optional charging duration for NETZ, or only battery target SoC for PV Surplus. Technical regulation
 settings are in the integration options. Its two-column status section shows measured
 power, session duration as total `H:MM`, and the confirmed applied phase/current
 limit, including any phase-lockout substitute.
@@ -346,20 +346,34 @@ optional relative durations in `hh:mm`, never local clock times. Hours can excee
 | Empty | Set | Immediate, stops after duration |
 | Set | Set | Delayed, duration counted from scheduled start |
 
-For example, `01:30` plus `02:00` waits 90 minutes, then requests charging for two
-hours. Selecting/reselecting NETZ or changing its timing restarts the schedule.
-Profile selection still turns charging permission OFF; explicitly enable it to
-allow the schedule to act. First enable without an existing activation starts a
-new schedule. Explicit OFF cancels it; a subsequent enable starts afresh.
-Authority, ownership, connection and capability checks always apply.
+For example, `01:30` plus `02:00` waits 90 minutes from Charging Permission ON,
+then allows charging for two hours from the scheduled start. These are **one-shot**
+inputs for the next authorization. Editing or selecting NETZ does not start a timer.
+ON captures the values into a persisted request and clears the pending inputs.
+The existing hours/minutes fields then show deadline-derived countdowns, rounded
+up to whole minutes and disabled for editing. At each deadline the corresponding
+field becomes unset. Explicit zero duration immediately invokes permission OFF,
+even if a delay was entered.
 
-Activation timestamps are persisted. Reload/restart resumes the original start
-and end deadlines through existing ownership recovery; elapsed downtime counts,
-and missed charging time is not added back. Switching away cancels the schedule;
-switching back creates a fresh one. An expired schedule remains expired until a
-new activation, timing edit, or OFF/ON. Grid timing state and deadlines can be
-understood from the profile entity's activation, configured seconds and
-waiting/active/expired attributes.
+Duration expiry uses the same confirmed Charging Permission OFF path as the switch,
+not just a zero-power request. Failed disables retain a stopping request and retry
+at the existing 60-second interval; HA never assumes hardware permission is OFF.
+Manual OFF or profile selection cancels and consumes an armed request. Later ON
+is immediate/unlimited unless new timing values were entered. Requested power and
+discharge reserve remain persistent.
+
+Reload/restart preserves absolute start/end deadlines; downtime counts and recovery
+processes missed expiry through the normal authority/ownership/control fences.
+Beta.15 configured timings migrate as pending one-shot inputs for the next explicit
+ON; their old recurring activation timestamp is discarded. Consumed timings never
+become pending again. Profile attributes expose armed state, deadlines, captured
+duration, and idle/waiting/active/stopping/consumed/cancelled state.
+
+Requested power uses backend `technical_min_kw` / `technical_max_kw`, calculated
+from verified capability envelopes, exact current steps/limits, eligible phases
+and fresh observed voltages. No nominal voltage is assumed. The compact editor
+steps by 0.1 kW below 10 kW, by 1 kW above it, with reversible 9.9↔10.0 transitions
+and clamping to known bounds. Direct entry retains backend OperatingPoint selection.
 
 ## Planned Energy Manager interface
 

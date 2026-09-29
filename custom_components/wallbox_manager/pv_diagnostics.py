@@ -442,10 +442,10 @@ def diagnostic_plan(method):
 
 def diagnostic_permission(method):
     @wraps(method)
-    async def wrapped(self, target, enabled):
+    async def wrapped(self, target, enabled, **kwargs):
         if self.setting(target)["profile"] != "PV_SURPLUS":
-            return await method(self, target, enabled)
+            return await method(self, target, enabled, **kwargs)
         with cycle(self, target, "permission"):
-            return await method(self, target, enabled)
+            return await method(self, target, enabled, **kwargs)
 
     return wrapped

@@ -286,7 +286,10 @@ class ControlRuntime:
             self.blocker(target) if result.point is not None else result.reason.value,
         )
 
-    def power_ceiling(self, target):
+    def power_floor(self, target):
+        return self.power_ceiling(target, minimum=True)
+
+    def power_ceiling(self, target, *, minimum=False):
         """Known feasible ceiling, independent of the requested operating point.
 
         Unknown/stale evidence is not a station rating. Reuse the electrical
@@ -308,6 +311,7 @@ class ControlRuntime:
         return maximum_power(
             caps,
             inputs.voltage,
+            minimum=minimum,
             now=now,
             eligible_modes=inputs.eligible_modes,
             limits=inputs.limits

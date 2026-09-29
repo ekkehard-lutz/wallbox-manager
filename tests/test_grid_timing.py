@@ -101,12 +101,15 @@ async def test_timer_dispatches_start_and_expiry_through_control(grid):
     await timer
     assert c.intent(t).request.target_w == 0
     assert p.status[t] == "grid_expired"
-    assert (
-        c.runtime.enabled(t) is True
-    )  # Expiry changes profile intent, not permission.
+    assert c.runtime.enabled(t) is False
+    assert not p.setting(t).get("grid_request")
+    await p.permission(t, True)
+    assert c.runtime.enabled(t) is True
+    assert p.grid_phase(t) == ("active", None)
+    assert c.intent(t).request.target_w == 11000
 
 
-@pytest.mark.parametrize("action", ["off", "select", "edit", "authority"])
+@pytest.mark.parametrize("action", ["off", "select", "authority"])
 async def test_old_generation_cannot_dispatch(grid, action):
     p, t, (c, bound, peer, *_) = grid
     await p.set_value(t, "grid_start_delay", "00:01")
@@ -119,11 +122,7 @@ async def test_old_generation_cannot_dispatch(grid, action):
         await p.select(t, "PV_SURPLUS")
         p.wall_time = lambda: 1040
         await p.select(t, "NETZ")
-        assert p.grid_phase(t)[1] == 1100
-    elif action == "edit":
-        p.wall_time = lambda: 1040
-        await p.set_value(t, "grid_start_delay", "00:02")
-        assert p.grid_phase(t)[1] == 1160
+        assert p.grid_phase(t) == ("active", None)
     else:
         from datetime import UTC, datetime
 
@@ -148,6 +147,7 @@ async def test_reload_preserves_absolute_schedule(grid):
     p, t, _ = grid
     await p.set_value(t, "grid_start_delay", "00:01")
     await p.set_value(t, "grid_duration", "00:02")
+    await p.permission(t, True)
     await p.save()
     p.settings.clear()
     p.wall_time = lambda: 1100
@@ -253,3 +253,304 @@ async def test_target_soc_entity_whole_percent_edits(grid, value):
             await entity.async_set_native_value(value)
         assert entity.native_value == 95
     assert len(peer.operations) == count
+
+
+@pytest.mark.parametrize(
+    "delay,duration", [("", ""), ("00:01", ""), ("", "00:02"), ("00:01", "00:02")]
+)
+async def test_pending_values_arm_only_on_permission_and_are_consumed_once(
+    grid, delay, duration
+):
+    p, t, (c, *_) = grid
+    await p.set_value(t, "power_kw", 9.9)
+    await p.set_value(t, "min_soc", 40)
+    await p.set_value(t, "grid_start_delay", delay)
+    await p.set_value(t, "grid_duration", duration)
+    assert p.grid_phase(t) == ("active", None)
+    p.wall_time = lambda: 2000
+    await p.permission(t, True)
+    request = p.setting(t).get("grid_request")
+    if delay or duration:
+        assert request["activated_at"] == 2000
+        assert request["start_at"] == 2000 + (duration_seconds(delay) or 0)
+        assert p.setting(t)["grid_start_delay"] is None
+        assert p.setting(t)["grid_duration"] is None
+    await p.permission(t, False)
+    await p.permission(t, True)
+    assert p.grid_phase(t) == ("active", None)
+    assert not p.setting(t).get("grid_request")
+    assert c.intent(t).request.target_w == 9900
+    assert p.setting(t)["min_soc"] == 40
+    await p.permission(t, False)
+    await p.set_value(t, "grid_start_delay", "00:03")
+    await p.permission(t, True)
+    assert p.grid_phase(t) == ("waiting", 2180)
+
+
+@pytest.mark.parametrize("now", [1020, 1100])
+@pytest.mark.parametrize("action", ["off", "profile"])
+async def test_cancel_consumes_both_and_survives_reload(grid, now, action):
+    p, t, _ = grid
+    await p.set_value(t, "power_kw", 9.9)
+    await p.set_value(t, "min_soc", 40)
+    await p.set_value(t, "grid_start_delay", "00:01")
+    await p.set_value(t, "grid_duration", "00:02")
+    await p.permission(t, True)
+    p.wall_time = lambda: now
+    if action == "off":
+        await p.permission(t, False)
+    else:
+        p.references.update(leistung_pv="sensor.pv", leistung_verbraucher="sensor.load")
+        await p.select(t, "PV_SURPLUS")
+        await p.select(t, "NETZ")
+    assert p.grid_attributes(t)["grid_timing_state"] == "cancelled"
+    p.settings.clear()
+    await p.load()
+    await p.permission(t, True)
+    assert p.grid_phase(t) == ("active", None)
+    assert p.setting(t)["power_kw"] == 9.9
+    assert p.setting(t)["min_soc"] == 40
+
+
+@pytest.mark.parametrize("delay", ["", "00:00", "01:30"])
+async def test_zero_duration_disables_immediately_without_positive_command(grid, delay):
+    from unittest.mock import AsyncMock
+
+    from custom_components.wallbox_manager.switch import ChargingEnabled
+
+    p, t, (c, *_) = grid
+    await p.set_value(t, "grid_start_delay", delay)
+    await p.set_value(t, "grid_duration", "00:00")
+    c.request_enabled = AsyncMock(wraps=c.request_enabled)
+    await p.permission(t, True)
+    assert [call.args[1] for call in c.request_enabled.call_args_list] == [False]
+    assert ChargingEnabled(c, "grid", t).is_on is False
+    assert c.intent(t).request.target_w == 0
+    assert p.grid_attributes(t)["grid_timing_state"] == "consumed"
+    await p.permission(t, True)
+    assert p.grid_phase(t) == ("active", None)
+    assert ChargingEnabled(c, "grid", t).is_on is True
+
+
+@pytest.mark.parametrize("delay", ["00:00", "00:01"])
+async def test_delay_only_consumes_at_start(grid, delay):
+    p, t, (c, *_) = grid
+    await p.set_value(t, "grid_start_delay", delay)
+    gate = asyncio.Event()
+
+    async def wait(seconds):
+        await gate.wait()
+
+    p.timer_wait = wait
+    await p.permission(t, True)
+    timer = p.grid_timers[t]
+    p.wall_time = lambda: 1060
+    gate.set()
+    await timer
+    assert c.intent(t).request.target_w == 11000
+    assert not p.setting(t).get("grid_request")
+    assert p.grid_attributes(t)["grid_timing_state"] == "consumed"
+
+
+@pytest.mark.parametrize("field", ["grid_start_delay", "grid_duration"])
+@pytest.mark.parametrize("value", ["", "00:00", "00:05"])
+async def test_armed_timing_cannot_be_edited(grid, field, value):
+    p, t, _ = grid
+    await p.set_value(t, "grid_start_delay", "00:01")
+    await p.permission(t, True)
+    request = dict(p.setting(t)["grid_request"])
+    epoch = p.epochs[t]
+    with pytest.raises(ValueError, match="armed"):
+        await p.set_value(t, field, value)
+    assert p.setting(t)["grid_request"] == request
+    assert p.epochs[t] == epoch
+
+
+@pytest.mark.parametrize(
+    "now,phase,deadline",
+    [(1020, "waiting", 1060), (1100, "active", 1180), (1200, "expired", None)],
+)
+async def test_restart_reconstructs_deadlines_and_processes_downtime_expiry(
+    grid, now, phase, deadline
+):
+    p, t, (c, *_) = grid
+    await p.set_value(t, "grid_start_delay", "00:01")
+    await p.set_value(t, "grid_duration", "00:02")
+    await p.permission(t, True)
+    p.invalidate(t)
+    p.settings.clear()
+    p.wall_time = lambda: now
+    await p.load()
+    assert p.grid_phase(t) == (phase, deadline)
+    attrs = p.grid_attributes(t)
+    assert attrs["grid_start_deadline"] == 1060
+    assert attrs["grid_end_deadline"] == 1180
+    assert attrs["grid_armed_duration_seconds"] == 120
+    if phase == "expired":
+        await p.recover(t, {"enabled_intent": True})
+        assert c.runtime.enabled(t) is False
+        assert not p.setting(t).get("grid_request")
+        p.settings.clear()
+        await p.load()
+        await p.permission(t, True)
+        assert p.grid_phase(t) == ("active", None)
+    else:
+        # Recovery when hardware needs enabling must reuse, not re-arm, the request.
+        await p.permission(t, True, _resume=True)
+        assert p.grid_phase(t) == (phase, deadline)
+
+
+async def test_beta15_migration_discards_old_clock_preserves_pending_once(grid):
+    p, t, _ = grid
+    p.setting(t).update(
+        power_kw=9.9,
+        min_soc=40,
+        grid_start_delay=60,
+        grid_duration=120,
+        grid_activated_at=1,
+    )
+    await p.save()
+    p.settings.clear()
+    await p.load()
+    assert "grid_activated_at" not in p.setting(t)
+    assert p.grid_phase(t) == ("active", None)
+    assert p.setting(t)["grid_start_delay"] == 60
+    assert p.setting(t)["grid_duration"] == 120
+    await p.permission(t, True)
+    assert p.grid_phase(t) == ("waiting", 1060)
+    await p.permission(t, False)
+    await p.permission(t, True)
+    assert p.grid_phase(t) == ("active", None)
+    assert p.setting(t)["power_kw"] == 9.9
+    assert p.setting(t)["min_soc"] == 40
+
+
+async def test_failed_expiry_retains_confirmed_permission_and_retries_canonical_off(
+    grid,
+):
+    from unittest.mock import AsyncMock
+
+    from custom_components.wallbox_manager.control.commands import (
+        CommandReason,
+        CommandResult,
+        CommandStatus,
+        ControlArea,
+    )
+    from custom_components.wallbox_manager.switch import ChargingEnabled
+
+    p, t, (c, *_) = grid
+    await p.set_value(t, "grid_duration", "00:01")
+    await p.permission(t, True)
+    p.invalidate(t)
+    p.wall_time = lambda: 1060
+    original = c.request_enabled
+    c.request_enabled = AsyncMock(
+        return_value=CommandResult(
+            CommandStatus.TEMPORARILY_REJECTED,
+            ControlArea.CHARGING_PERMISSION,
+            CommandReason.NO_AUTHORITY,
+        )
+    )
+    gates, waits = asyncio.Queue(), asyncio.Queue()
+
+    async def wait(seconds):
+        waits.put_nowait(seconds)
+        await gates.get()
+
+    p.timer_wait = wait
+    await p.permission(t, False, _grid_expiry=True)
+    assert ChargingEnabled(c, "grid", t).is_on is True
+    assert p.grid_attributes(t)["grid_timing_state"] == "stopping"
+    assert await waits.get() == 60
+    timer = p.grid_timers[t]
+    c.request_enabled = original
+    gates.put_nowait(True)
+    await timer
+    assert ChargingEnabled(c, "grid", t).is_on is False
+    assert p.grid_attributes(t)["grid_timing_state"] == "consumed"
+
+
+@pytest.mark.parametrize("guard", ["new_authorization", "ownership", "authority"])
+async def test_stale_expiry_cannot_revoke_newer_or_unowned_permission(grid, guard):
+    from datetime import UTC, datetime
+
+    from custom_components.wallbox_manager.core.authority import (
+        AuthorityObservation,
+        ControlAuthority,
+    )
+
+    p, t, (c, bound, peer, *_) = grid
+    await p.set_value(t, "grid_duration", "00:01")
+    await p.permission(t, True)
+    epoch = p.epochs[t]
+    if guard == "new_authorization":
+        await p.permission(t, False)
+        await p.permission(t, True)
+    elif guard == "ownership":
+        c.profile_permitted = lambda target: False
+    else:
+        c.runtime.observe_authority(
+            bound.token,
+            AuthorityObservation(
+                t.station, ControlAuthority.LOCAL, datetime.now(UTC), "test"
+            ),
+        )
+    count = len(peer.operations)
+    p.wall_time = lambda: 1200
+    await p.grid_timer(t, epoch)
+    assert len(peer.operations) == count
+    assert c.runtime.enabled(t) is True
+
+
+async def test_beta15_recovery_does_not_arm_pending_values(grid):
+    p, t, _ = grid
+    p.setting(t).update(grid_start_delay=60, grid_duration=120, grid_activated_at=1)
+    await p.save()
+    p.settings.clear()
+    await p.load()
+    await p.recover(t, {"enabled_intent": True})
+    assert p.grid_phase(t) == ("active", None)
+    assert p.setting(t)["grid_start_delay"] == 60
+    assert p.setting(t)["grid_duration"] == 120
+
+
+@pytest.mark.parametrize("initial_enabled", [False, True])
+async def test_failed_initial_enable_still_expires_through_permission_off(
+    grid, initial_enabled
+):
+    from unittest.mock import AsyncMock
+
+    from custom_components.wallbox_manager.control.commands import (
+        CommandReason,
+        CommandResult,
+        CommandStatus,
+        ControlArea,
+    )
+
+    p, t, (c, *_) = grid
+    if initial_enabled:
+        await p.permission(t, True)
+    await p.set_value(t, "grid_duration", "00:01")
+    original = c.request_enabled
+    c.request_enabled = AsyncMock(
+        return_value=CommandResult(
+            CommandStatus.TEMPORARILY_REJECTED,
+            ControlArea.CHARGING_PERMISSION,
+            CommandReason.NO_AUTHORITY,
+        )
+    )
+    gate = asyncio.Event()
+
+    async def wait(seconds):
+        await gate.wait()
+
+    p.timer_wait = wait
+    await p.permission(t, True)
+    timer = p.grid_timers[t]
+    c.request_enabled = AsyncMock(wraps=original)
+    p.wall_time = lambda: 1060
+    gate.set()
+    await timer
+    assert c.request_enabled.call_args.args[1] is False
+    assert c.runtime.enabled(t) is False
+    assert not p.setting(t).get("grid_request")
