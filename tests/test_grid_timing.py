@@ -197,3 +197,59 @@ async def test_ownership_loss_fences_scheduled_start(grid):
     count = len(peer.requests)
     await p.grid_timer(t, epoch)
     assert len(peer.requests) == count
+
+
+@pytest.mark.parametrize("value", ["", "00:00", "01:30", "24:00", "120:15"])
+@pytest.mark.parametrize("guard", ["permission_off", "local", "inactive"])
+async def test_duration_entity_configuration_round_trips_without_commands(
+    grid, value, guard
+):
+    from datetime import UTC, datetime
+
+    from custom_components.wallbox_manager.core.authority import (
+        AuthorityObservation,
+        ControlAuthority,
+    )
+    from custom_components.wallbox_manager.text import ProfileDuration
+
+    p, t, (c, bound, peer, *_) = grid
+    if guard == "local":
+        c.runtime.observe_authority(
+            bound.token,
+            AuthorityObservation(
+                t.station, ControlAuthority.LOCAL, datetime.now(UTC), "test"
+            ),
+        )
+    elif guard == "inactive":
+        c.profile_permitted = lambda target: False
+    count = len(peer.operations)
+    for key in ("grid_start_delay", "grid_duration"):
+        entity = ProfileDuration(c, p.entry_id, t, key)
+        assert entity.available
+        assert entity.native_value == ""
+        await entity.async_set_value(value)
+        assert entity.native_value == value
+        assert p.setting(t).get(key) == duration_seconds(value)
+    assert len(peer.operations) == count
+    assert not p.grid_timers
+    await p.save()
+    p.settings.clear()
+    await p.load()
+    assert ProfileDuration(c, p.entry_id, t, "grid_duration").native_value == value
+
+
+@pytest.mark.parametrize("value", [0, 40.0, 99, 40.5, -1, 100])
+async def test_target_soc_entity_whole_percent_edits(grid, value):
+    from custom_components.wallbox_manager.number import ProfileNumber
+
+    p, t, (c, _, peer, *_) = grid
+    entity = ProfileNumber(c, p.entry_id, t, "soll_soc_speicher")
+    count = len(peer.operations)
+    if value in (0, 40, 99):
+        await entity.async_set_native_value(value)
+        assert entity.native_value == value
+    else:
+        with pytest.raises(ValueError):
+            await entity.async_set_native_value(value)
+        assert entity.native_value == 95
+    assert len(peer.operations) == count

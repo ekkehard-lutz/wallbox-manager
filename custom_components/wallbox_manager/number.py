@@ -170,4 +170,6 @@ class ProfileNumber(ControlEntity, NumberEntity):
         pass
 
     async def async_set_native_value(self, value):
+        if self.field == "soll_soc_speicher" and scalar(value).denominator != 1:
+            raise ValueError("battery target SoC must be a whole percent")
         await self.control.profiles.set_value(self.target, self.field, value)

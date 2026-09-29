@@ -30,6 +30,8 @@ function parseInput(value, language) {
   return /^\d+(?:\.\d+)?$/.test(normalized) ? Number(normalized) : NaN;
 }
 function available(state) { return state && !["unknown", "unavailable", ""].includes(state.state); }
+function durationAvailable(state) { return state && typeof state.state === "string" && (state.state === "" || /^[0-9]{2,}:[0-5][0-9]$/.test(state.state)); }
+function numberRole(id) { return id === "power" ? "soll_power" : id === "reserve" ? "min_soc" : id; }
 function fresh(state, now = Date.now()) {
   return available(state) && state.attributes.connected !== false &&
     (!state.attributes.observed_at || Date.parse(state.attributes.observed_at) <= now) &&
@@ -79,6 +81,7 @@ class WallboxManagerCard extends HTMLElement {
     this.stopHold();
     this.config = config;
     this.edits = {};
+    this.durationEdits = {};
     if (!this.shadowRoot) this.attachShadow({mode: "open"});
     this.shadowRoot.innerHTML = `<style>
       :host {display:block;color:var(--primary-text-color)}
@@ -91,6 +94,8 @@ class WallboxManagerCard extends HTMLElement {
       input,select,button {font:inherit;color:var(--primary-text-color);border:1px solid var(--divider-color);background:var(--card-background-color);border-radius:var(--ha-border-radius-sm,8px);box-sizing:border-box;min-height:40px}
       select {padding:6px 8px;max-width:55%} #wallbox-row {margin:0;max-width:48%} #wallbox {max-width:100%;width:100%}
       .numeric {display:flex;align-items:center;gap:4px;flex:none} input {width:4em;text-align:center;padding:6px 3px;font-variant-numeric:tabular-nums}
+      #grid_start_delay-label,#grid_duration-label {min-width:0;overflow-wrap:anywhere}
+      .duration-editor {display:flex;align-items:center;gap:4px;flex:none} .duration-editor input {text-align:left;width:4em;padding:6px 4px;appearance:auto} .duration-editor .clear {padding:0 6px} .duration-editor .colon {font-weight:600}
       .step {width:34px;padding:0;font-size:19px;touch-action:none;user-select:none;-webkit-user-select:none} .unit {color:var(--secondary-text-color);font-size:13px;width:2em}
       button {cursor:pointer} button:hover:not(:disabled) {background:var(--secondary-background-color)}
       :is(input,select,button):focus-visible {outline:2px solid var(--primary-color);outline-offset:2px}
@@ -109,8 +114,8 @@ class WallboxManagerCard extends HTMLElement {
       <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
       <div class="row" id="reserve-row"><label id="reserve-label" for="reserve"></label><div class="numeric"><button id="reserve-down" class="step" type="button">−</button><input id="reserve" type="text" inputmode="numeric" autocomplete="off"><button id="reserve-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
       <label class="row" id="approximation-row"><span id="approximation-label"></span><select id="approximation"></select></label>
-      ${["soll_soc_speicher"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="number" id="${id}" min="0" max="99" step="1"></label>`).join("")}
-      ${["grid_start_delay", "grid_duration"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="text" id="${id}" placeholder="hh:mm" pattern="[0-9]{2,}:[0-5][0-9]" autocomplete="off"></label>`).join("")}
+      <div class="row" id="soll_soc_speicher-row"><label id="soll_soc_speicher-label" for="soll_soc_speicher"></label><div class="numeric"><button id="soll_soc_speicher-down" class="step" type="button">−</button><input id="soll_soc_speicher" type="text" inputmode="numeric" autocomplete="off"><button id="soll_soc_speicher-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
+      ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="—"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="—"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
       <button id="permission"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
       <section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section>
@@ -121,22 +126,20 @@ class WallboxManagerCard extends HTMLElement {
     get("takeover").onclick = () => this.activate(this.discovery.displayed);
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
     get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.pv_approximation, option:e.target.value});
-    for (const id of ["soll_soc_speicher"]) {
-      get(id).onchange = e => this.call("number", "set_value", {entity_id:this.discovery.roles[id], value:Number(e.target.value)});
-    }
     for (const id of ["grid_start_delay", "grid_duration"]) {
-      get(id).onchange = e => {
-        const value = e.target.value;
-        if (value !== "" && !/^[0-9]{2,}:[0-5][0-9]$/.test(value)) {
-          const error = get("error");
-          error.textContent = this._hass?.language?.startsWith("de") ? "Dauer als hh:mm eingeben (Minuten 00–59)." : "Enter a duration as hh:mm (minutes 00–59).";
-          error.hidden = false;
-          return;
-        }
-        this.call("text", "set_value", {entity_id:this.discovery.roles[id], value});
+      for (const part of ["hours", "minutes"]) {
+        get(`${id}-${part}`).onchange = () => this.editDuration(id);
+        get(`${id}-${part}`).onkeydown = e => {
+          if (e.key === "Enter") { e.preventDefault(); this.editDuration(id); }
+        };
+      }
+      get(`${id}-clear`).onclick = () => {
+        if (get(`${id}-clear`).disabled) return;
+        get(`${id}-hours`).value = get(`${id}-minutes`).value = "";
+        this.editDuration(id);
       };
     }
-    for (const id of ["power", "reserve"]) {
+    for (const id of ["power", "reserve", "soll_soc_speicher"]) {
       get(id).onchange = () => this.editNumber(id);
       get(id).onkeydown = e => {
         if (["ArrowUp", "ArrowDown"].includes(e.key)) { e.preventDefault(); this.stepNumber(id, e.key === "ArrowUp" ? 1 : -1); }
@@ -209,6 +212,7 @@ class WallboxManagerCard extends HTMLElement {
   format(value) { return new Intl.NumberFormat(this._hass.language, {maximumFractionDigits:6,useGrouping:false}).format(value); }
   maximum(id) {
     if (id === "reserve") return 100;
+    if (id === "soll_soc_speicher") return 99;
     const value = this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_max_kw;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
   }
@@ -216,8 +220,8 @@ class WallboxManagerCard extends HTMLElement {
     const input = this.shadowRoot.getElementById(id);
     if (input.disabled) return;
     const value = parseInput(input.value, this._hass.language);
-    if (!Number.isFinite(value)) return;
-    const next = id === "power" ? powerStep(value,direction,this.maximum(id)) : Math.min(100,Math.max(0,Math.round(value) + direction));
+    if (!Number.isFinite(value) || (id !== "power" && !Number.isInteger(value))) return;
+    const next = id === "power" ? powerStep(value,direction,this.maximum(id)) : Math.min(this.maximum(id),Math.max(0,Math.round(value) + direction));
     if (next === value) return;
     input.value = this.format(next);
     return this.editNumber(id);
@@ -227,12 +231,14 @@ class WallboxManagerCard extends HTMLElement {
     if (input.disabled) return;
     const value = parseInput(input.value,this._hass.language), maximum = this.maximum(id);
     const de = this._hass.language?.startsWith("de");
-    if (!Number.isFinite(value) || value < 0 || (maximum !== null && value > maximum) || (id === "reserve" && !Number.isInteger(value))) {
-      get("error").textContent = de ? `Bitte einen gültigen Wert ab 0${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben${id === "reserve" ? " (ganze Prozent)" : ""}.` : `Enter a valid value from 0${maximum === null ? "" : ` to ${this.format(maximum)}`}${id === "reserve" ? " (whole percent)" : ""}.`;
+    if (!Number.isFinite(value) || value < 0 || (maximum !== null && value > maximum) || (id !== "power" && !Number.isInteger(value))) {
+      get("error").textContent = de ? `Bitte einen gültigen Wert ab 0${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben${id !== "power" ? " (ganze Prozent)" : ""}.` : `Enter a valid value from 0${maximum === null ? "" : ` to ${this.format(maximum)}`}${id !== "power" ? " (whole percent)" : ""}.`;
       get("error").hidden = false;
+      if (id === "soll_soc_speicher") input.value = this.format(Math.round(Number(this._hass.states[this.discovery.roles[id]].state)));
       return;
     }
-    const entity = this.discovery.roles[id === "power" ? "soll_power" : "min_soc"];
+    input.value = this.format(value);
+    const entity = this.discovery.roles[numberRole(id)];
     if ((!this.edits[id] && available(this._hass.states[entity]) && Number(this._hass.states[entity].state) === value) || (this.edits[id]?.entity === entity && this.edits[id].value === value)) return;
     const edit = this.edits[id] = {entity,value};
     input.value = this.format(value);
@@ -240,9 +246,34 @@ class WallboxManagerCard extends HTMLElement {
     this.hass = this._hass;
     try { await this._hass.callService("number","set_value",{entity_id:entity,value}); }
     catch (err) {
-      if (this.edits[id] === edit && this.discovery.roles[id === "power" ? "soll_power" : "min_soc"] === entity) {
+      if (this.edits[id] === edit && this.discovery.roles[numberRole(id)] === entity) {
         delete this.edits[id];
-        input.value = this.format(Number(this._hass.states[entity].state));
+        input.value = this.format(id === "soll_soc_speicher" ? Math.round(Number(this._hass.states[entity].state)) : Number(this._hass.states[entity].state));
+        get("error").textContent = err.message || String(err); get("error").hidden = false;
+      }
+    }
+    finally { this.hass = this._hass; }
+  }
+  async editDuration(id) {
+    const get = key => this.shadowRoot.getElementById(key);
+    const hours = get(`${id}-hours`), minutes = get(`${id}-minutes`);
+    if (hours.disabled || minutes.disabled) return;
+    const valid = (input, max = Number.MAX_SAFE_INTEGER) => !input.validity?.badInput &&
+      (input.value === "" || (/^[0-9]+$/.test(input.value) && Number.isSafeInteger(Number(input.value)) && Number(input.value) <= max));
+    if (!valid(hours) || !valid(minutes,59)) {
+      get("error").textContent = this._hass.language?.startsWith("de") ? "Ganze Stunden ab 0 und Minuten von 0 bis 59 eingeben." : "Enter whole hours from 0 and minutes from 0 to 59.";
+      get("error").hidden = false;
+      return;
+    }
+    const value = hours.value === "" && minutes.value === "" ? "" : `${String(Number(hours.value || 0)).padStart(2,"0")}:${String(Number(minutes.value || 0)).padStart(2,"0")}`;
+    const entity = this.discovery.roles[id];
+    const edit = this.durationEdits[id] = {entity,value};
+    get("error").hidden = true;
+    this.hass = this._hass;
+    try { await this._hass.callService("text","set_value",{entity_id:entity,value}); }
+    catch (err) {
+      if (this.durationEdits[id] === edit && this.discovery.roles[id] === entity) {
+        delete this.durationEdits[id];
         get("error").textContent = err.message || String(err); get("error").hidden = false;
       }
     }
@@ -265,7 +296,7 @@ class WallboxManagerCard extends HTMLElement {
     const get = id => this.shadowRoot.getElementById(id), de = hass.language?.startsWith("de");
     const previous = this.discovery?.displayed;
     const d = this.discovery = discoverWallboxManager(hass.states);
-    if (previous !== d.displayed) { this.stopHold(); this.edits = {}; get("error").hidden = true; }
+    if (previous !== d.displayed) { this.stopHold(); this.edits = {}; this.durationEdits = {}; get("error").hidden = true; }
     const state = role => hass.states[d.roles[role]], attrs = state("charging_profile")?.attributes || {};
     const ready = !!(attrs.profile_control_ready && d.state?.attributes.profile_control_ready && d.active === d.displayed);
     const busy = !!(this.busy || d.state?.attributes.transition_pending);
@@ -281,14 +312,15 @@ class WallboxManagerCard extends HTMLElement {
     get("profile-label").textContent = de ? "Ladeprofil" : "Charging profile";
     get("power-label").textContent = de ? "Sollleistung" : "Requested power";
     get("reserve-label").textContent = de ? "Entladereserve" : "Discharge reserve";
+    get("soll_soc_speicher-label").textContent = de ? "Speicher-Ziel-SoC" : "Battery target SoC";
     this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(value => [value,value === "NETZ" ? (de ? "Netz" : "Grid") : value === "PV_SURPLUS" ? (de ? "PV-Überschuss" : "PV Surplus") : value]));
     get("profile").value = state("charging_profile")?.state || "";
     get("profile-row").hidden = (state("charging_profile")?.attributes.options || []).length <= 1;
     get("profile").disabled = busy || !available(state("charging_profile"));
-    for (const [id,role] of [["power","soll_power"],["reserve","min_soc"]]) {
+    for (const [id,role] of [["power","soll_power"],["reserve","min_soc"],["soll_soc_speicher","soll_soc_speicher"]]) {
       const s = state(role), edit = this.edits[id];
       if (edit && (edit.entity !== d.roles[role] || (available(s) && Number(s.state) === edit.value))) delete this.edits[id];
-      if (previous !== d.displayed || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value) : available(s) ? this.format(Number(s.state)) : "";
+      if (previous !== d.displayed || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value) : available(s) ? this.format(id === "soll_soc_speicher" ? Math.round(Number(s.state)) : Number(s.state)) : "";
       const disabled = busy || !available(s);
       get(id).disabled = disabled;
       const value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
@@ -309,18 +341,23 @@ class WallboxManagerCard extends HTMLElement {
     get("approximation").disabled = busy || !available(state("pv_approximation"));
     for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
       get(`${id}-row`).hidden = pv;
-      get(`${id}-label`).textContent = `${label} (hh:mm)`;
-      if (this.shadowRoot.activeElement !== get(id)) get(id).value = available(state(id)) ? state(id).state : "";
-      get(id).disabled = busy || !available(state(id));
-    }
-    const pvLabels = de ? {soll_soc_speicher:"Speicher-Ziel-SoC (%)"} : {soll_soc_speicher:"Battery target SoC (%)"};
-    for (const [id,label] of Object.entries(pvLabels)) {
-      get(`${id}-row`).hidden = !pv || !attrs.battery_configured;
       get(`${id}-label`).textContent = label;
-      if (this.shadowRoot.activeElement !== get(id)) get(id).value = available(state(id)) ? state(id).state : "";
-      get(id).disabled = busy || !available(state(id));
+      const s = state(id), edit = this.durationEdits[id];
+      if (edit && (edit.entity !== d.roles[id] || s?.state === edit.value)) delete this.durationEdits[id];
+      const value = this.durationEdits[id]?.value ?? (durationAvailable(s) ? s.state : "");
+      const parts = value === "" ? ["",""] : value.split(":");
+      const focused = [get(`${id}-hours`),get(`${id}-minutes`)].includes(this.shadowRoot.activeElement);
+      for (const [index,part] of ["hours","minutes"].entries()) {
+        const input = get(`${id}-${part}`);
+        if (previous !== d.displayed || !focused) input.value = parts[index];
+        input.disabled = busy || !durationAvailable(s);
+        input.ariaLabel = `${label}: ${part === "hours" ? (de ? "Stunden" : "hours") : (de ? "Minuten" : "minutes")}`;
+      }
+      get(`${id}-clear`).disabled = busy || !durationAvailable(s);
+      get(`${id}-clear`).title = get(`${id}-clear`).ariaLabel = de ? `${label} zurücksetzen (nicht gesetzt)` : `Clear ${label} (unset)`;
     }
-    if (this.hold && (this.hold.button.disabled || (this.hold.id === "reserve" && !attrs.battery_configured))) this.stopHold();
+    get("soll_soc_speicher-row").hidden = !pv || !attrs.battery_configured;
+    if (this.hold && (this.hold.button.disabled || (["reserve","soll_soc_speicher"].includes(this.hold.id) && (!attrs.battery_configured || (this.hold.id === "reserve" ? pv : !pv))))) this.stopHold();
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
     get("actual").title = de ? "Bestätigter Betriebspunkt · Stromlimit, kein Messwert" : "Confirmed operating point · current limit, not measured current";

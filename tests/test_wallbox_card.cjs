@@ -457,7 +457,8 @@ for (const battery of [false,true]) for (const language of ['en','de']) {
     assert.equal(get('grid_start_delay-row').hidden,true);
     assert.equal(get('grid_duration-row').hidden,true);
     assert.equal(get('permission').disabled,false);
-    await get('soll_soc_speicher').onchange({target:{value:'90'}});
+    get('soll_soc_speicher').value='90';
+    await get('soll_soc_speicher').onchange();
     assert.equal(calls.at(-1)[2].entity_id,'number.random_soll_soc_speicher');
     assert.equal(calls.at(-1)[2].value,90);
   });
@@ -499,7 +500,8 @@ for(const battery of [false,true]) {
     assert.equal(get('approximation-row').hidden,true);
     assert.equal(get('soll_soc_speicher-row').hidden,!battery);
     await get('profile').onchange({target:{value:'NETZ'}});
-    await get('soll_soc_speicher').onchange({target:{value:'90'}});
+    get('soll_soc_speicher').value='90';
+    await get('soll_soc_speicher').onchange();
     assert.deepEqual(calls.map(call=>call.slice(0,2)),[['select','select_option'],['number','set_value']]);
     assert.equal(calls[1][2].entity_id,'number.soll_soc_speicher');
   });
@@ -576,23 +578,76 @@ test('existing backend and service errors stay inside messages without duplicate
   assert.equal(get('error').hidden,false); // Placeholder stays hidden for service errors too.
 });
 
-for (const value of ['', '00:05', '01:30', '24:00', '120:15', '1:5', '01:60', '-01:00', 'abc']) {
-  test(`NETZ relative duration validates ${value}`, async () => {
-    const data=states(true);
-    data['text.delay']=state('grid_start_delay','A','01:30');
-    data['text.duration']=state('grid_duration','A','02:00');
+for (const role of ['grid_start_delay','grid_duration']) for (const value of ['', '00:00','01:30','24:00','120:15']) {
+  test(`${role} split round trip ${JSON.stringify(value)} without authority`, async () => {
+    const data=states(false);
+    data['text.setting']=state(role,'A',value);
     const {card:c,get,calls}=card(data);
-    assert.equal(get('power-row').hidden,true);
-    assert.equal(get('grid_start_delay-row').hidden,false);
-    assert.equal(get('grid_duration-row').hidden,false);
-    assert.equal(get('grid_start_delay').value,'01:30');
-    get('grid_start_delay').onchange({target:{value}});
-    const valid=value==='' || /^[0-9]{2,}:[0-5][0-9]$/.test(value);
-    assert.equal(calls.length,valid ? 1 : 0);
-    if (valid) assert.deepEqual(calls[0].slice(0,2),['text','set_value']);
-    else assert.equal(get('error').hidden,false);
+    const [hours,minutes]=value ? value.split(':') : ['',''];
+    assert.equal(get(`${role}-hours`).value,hours);
+    assert.equal(get(`${role}-minutes`).value,minutes);
+    assert.equal(get(`${role}-hours`).disabled,false);
+    assert.equal(get(`${role}-minutes`).disabled,false);
+    await get(`${role}-hours`).onchange();
+    assert.deepEqual(JSON.parse(JSON.stringify(calls[0])),['text','set_value',{entity_id:'text.setting',value}]);
+    assert.equal(get('permission').disabled,true);
     c.hass={...c._hass};
-    assert.equal(get('grid_duration').value,'02:00');
+    assert.equal(get(`${role}-hours`).value,hours);
+    get(`${role}-clear`).onclick();
+    assert.equal(calls.at(-1)[2].value,'');
+    assert.equal(get(`${role}-hours`).value,'');
+    assert.equal(get(`${role}-minutes`).value,'');
+  });
+}
+for (const [hours,minutes,valid] of [['1','30',true],['120','15',true],['','5',true],['1','',true],['0','59',true],['0','0',true],['1.5','30',false],['1','30.5',false],['1.0','30',false],['-1','0',false],['0','-1',false],['1','60',false],['1e2','0',false]]) {
+  test(`duration integer bounds ${hours}:${minutes}`,async()=>{
+    const data=states(true);data['text.time']=state('grid_duration','A','01:30');
+    const {get,calls}=card(data);
+    get('grid_duration-hours').value=hours;get('grid_duration-minutes').value=minutes;
+    await get('grid_duration-minutes').onchange();
+    assert.equal(calls.length,valid?1:0);
+    if(valid) assert.equal(calls[0][2].value,`${String(Number(hours||0)).padStart(2,'0')}:${String(Number(minutes||0)).padStart(2,'0')}`);
+    else assert.equal(get('error').hidden,false);
+  });
+}
+for(const value of ['unknown','unavailable',null]) {
+  test(`unusable duration remains disabled: ${value}`,()=>{
+    const data=states(false);if(value!==null)data['text.time']=state('grid_duration','A',value);
+    const {get}=card(data);assert.equal(get('grid_duration-hours').disabled,true);
+    assert.equal(get('grid_duration-minutes').disabled,true);
+  });
+}
+test('split editors use native integer spinners and a visible colon',()=>{
+  const {card:c}=card(states());const html=c.shadowRoot.innerHTML;
+  for(const role of ['grid_start_delay','grid_duration']) {
+    assert.match(html,new RegExp(`<input type="number" id="${role}-hours" min="0" step="1"`));
+    assert.match(html,new RegExp(`<input type="number" id="${role}-minutes" min="0" max="59" step="1"`));
+    assert.ok(!html.includes(`id="${role}-up"`));
+  }
+  assert.match(html,/<span class="colon">:<\/span>/);
+  assert.match(html,/duration-editor input \{text-align:left/);
+});
+for(const stored of ['40.0','40','40.5']) {
+  test(`PV percentage compact integer rendering from ${stored}`,async()=>{
+    const data=states(false);data['select.anything'].state='PV_SURPLUS';
+    data['select.anything'].attributes.battery_configured=true;
+    data['number.target']=state('soll_soc_speicher','A',stored);
+    const {card:c,get,calls}=card(data);
+    const initial=Math.round(Number(stored));
+    assert.equal(get('soll_soc_speicher').value,String(initial));
+    assert.equal(get('soll_soc_speicher-row').hidden,false);
+    assert.equal(get('grid_duration-row').hidden,true);
+    assert.equal(get('grid_start_delay-row').hidden,true);
+    assert.equal(get('reserve-row').hidden,true);
+    await c.stepNumber('soll_soc_speicher',-1);
+    assert.equal(calls.at(-1)[2].value,initial-1);
+    await c.stepNumber('soll_soc_speicher',1);
+    assert.equal(calls.at(-1)[2].value,initial);
+    get('soll_soc_speicher').value='40.5';
+    const count=calls.length;await get('soll_soc_speicher').onchange();
+    assert.equal(calls.length,count);
+    assert.match(c.shadowRoot.innerHTML,/<input id="soll_soc_speicher" type="text" inputmode="numeric"/);
+    assert.ok(calls.every(call=>Number.isInteger(call[2].value)));
   });
 }
 test('technical regulation fields are absent from card markup',()=>{
@@ -600,4 +655,45 @@ test('technical regulation fields are absent from card markup',()=>{
   for (const field of ['soc_hysterese','regulation_interval','pv_start_delay','pv_stop_delay','power_smoothing_window']) {
     assert.ok(!source.includes(`id="${field}"`));
   }
+});
+
+for(const value of [0,99]) {
+  test(`target SoC buttons respect ${value} boundary`,async()=>{
+    const data=states(true);data['select.anything'].state='PV_SURPLUS';
+    data['select.anything'].attributes.battery_configured=true;
+    data['number.target']=state('soll_soc_speicher','A',String(value));
+    const {card:c,get,calls}=card(data);
+    assert.equal(get(`soll_soc_speicher-${value===0?'down':'up'}`).disabled,true);
+    await c.stepNumber('soll_soc_speicher',value===0?-1:1);
+    assert.equal(calls.length,0);
+    get('soll_soc_speicher').value=`${value}.0`;
+    await get('soll_soc_speicher').onchange();
+    assert.equal(get('soll_soc_speicher').value,String(value));
+    assert.equal(calls.length,0);
+  });
+}
+test('native bad-input state cannot accidentally clear a duration',async()=>{
+  const data=states(true);data['text.time']=state('grid_duration','A','01:30');
+  const {get,calls}=card(data);
+  get('grid_duration-hours').value='';get('grid_duration-minutes').value='';
+  get('grid_duration-hours').validity={badInput:true};
+  await get('grid_duration-hours').onchange();
+  assert.equal(calls.length,0);
+  assert.equal(get('error').hidden,false);
+});
+test('duration edit survives stale HA updates and preserves focused counterpart',async()=>{
+  const data=states(true);data['text.time']=state('grid_duration','A','');
+  const {card:c,get}=card(data);
+  let finish;c._hass.callService=()=>new Promise(resolve=>finish=resolve);
+  get('grid_duration-hours').value='24';
+  const pending=get('grid_duration-hours').onchange();
+  c.hass={...c._hass};
+  assert.equal(get('grid_duration-hours').value,'24');
+  assert.equal(get('grid_duration-minutes').value,'00');
+  c.shadowRoot.activeElement=get('grid_duration-minutes');
+  get('grid_duration-minutes').value='15';
+  c.hass={...c._hass};
+  assert.equal(get('grid_duration-minutes').value,'15');
+  finish();await pending;
+  assert.equal(get('grid_duration-minutes').value,'15');
 });

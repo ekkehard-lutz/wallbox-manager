@@ -307,7 +307,13 @@ The multi-wallbox selector lives in the header; single-wallbox cards omit it.
 Takeover remains explicit. The NETZ card exposes only discharge reserve, optional
 start delay and optional charging duration. The reserve uses integer steps from
 0 to 100 and appears when its battery references are configured. Duration inputs
-use `hh:mm`. PV Surplus shows only battery target SoC. Existing power and
+use separate native integer hours/minutes inputs with a visible colon. Hours
+may exceed 23; minutes stay within 0–59 without wrapping or carrying. Blank
+fields mean unset (unlimited duration); the small × button clears both fields.
+Explicit zero remains `00:00`, which expires a charging duration immediately.
+The card still sends the existing `hh:mm` values, so stored beta.14 settings
+remain compatible. PV Surplus shows only battery target SoC, using the same
+compact minus/value/plus whole-percentage editor as discharge reserve. Existing power and
 approximation entities remain available for advanced use; technical regulation
 parameters live in integration settings.
 
