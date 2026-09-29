@@ -181,7 +181,7 @@ async def test_surplus_recovery_resets_stop_delay_and_no_duplicate_minimum_comma
 
 
 @pytest.mark.parametrize("safety", ["invalid", "stale", "explicit_off", "authority"])
-async def test_safety_bypasses_stop_delay(grid, safety):
+async def test_explicit_safety_stops_but_measurement_gaps_hold(grid, safety):
     p, t, (c, bound, peer, *_), clock = await prepare(grid, soc=96)
     await p.permission(t, True)
     measurements(p, t, pv=0, soc=96)
@@ -218,8 +218,16 @@ async def test_safety_bypasses_stop_delay(grid, safety):
                     ).isoformat(),
                 },
             )
-        assert not (await apply(p, t)).charging
+        confirmed = c.confirmed_point(t)
+        count = len(peer.requests)
+        assert p.pv_edit(t) is None
+        await asyncio.sleep(0)
+        p.pv_confirm(t)
+        assert c.confirmed_point(t) == confirmed and confirmed.charging
+        assert len(peer.requests) == count
+        assert p.pv_ongoing[t] and t not in p.pv_stop_since
         assert c.runtime.enabled(t) is True
+        return
     assert not p.pv_ongoing.get(t, False)
 
 

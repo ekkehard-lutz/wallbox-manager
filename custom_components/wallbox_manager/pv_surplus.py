@@ -96,11 +96,13 @@ class PVSurplus:
             return True
         if self.closed or "PV_SURPLUS" not in self.available_profiles(target):
             return False
-        power, direction, status, _ = self.pv_plan(
+        power, direction, status, plan = self.pv_plan(
             target,
             advance=False,
             transition_mode=point.mode if after_dispatch else None,
         )
+        if plan is None:
+            return False  # Holding hardware is not permission for a new write.
         if status == "pv_stop_delay":
             return point.same_setpoint(self.control.confirmed_point(target))
         return (
@@ -142,6 +144,9 @@ class PVSurplus:
                         event.data.get("entity_id"),
                         datetime.now(UTC),
                     )
+                if status == "measurements_unavailable":
+                    self.pv_input_gap(target)
+                    continue
                 if power > 0:
                     if (
                         self.pv_ongoing.get(target, False)
@@ -153,9 +158,10 @@ class PVSurplus:
                     status in ("stopped_battery_soc", "waiting_battery_soc")
                     and self.pv_ongoing.get(target, False)
                     and settings["pv_stop_delay"] > 0
-                    and self.pv_plan(target)[2] == "pv_stop_delay"
                 ):
-                    continue
+                    _, _, planned, result = self.pv_plan(target)
+                    if planned == "pv_stop_delay" or result is None:
+                        continue
                 point = self.control.confirmed_point(target)
                 needs_stop = (
                     self.pv_ongoing.get(target, False)
@@ -224,12 +230,36 @@ class PVSurplus:
             )
         return pv - load + actual, soc
 
-    def pv_request(self, target):
+    def pv_sync_session(self, target):
+        """An identity handover is not an electrical stop; a real Ended is."""
         session = self.control.runtime.sessions.get(target)
+        previous = self.pv_sessions.get(target)
         identity = session.session_id if session and session.active else None
-        if identity != self.pv_sessions.get(target):
+        ended = bool(session and not session.active) or (
+            previous is not None
+            and identity != previous
+            and any(
+                item.session_id == previous and item.end_reason != "superseded"
+                for item in self.control.runtime.sessions.history(target)
+            )
+        )
+        confirmed = self.control.confirmed_point(target)
+        if ended or (identity != previous and not (confirmed and confirmed.charging)):
             self.pv_ongoing[target] = False
+            self.pv_battery.pop(target, None)
+            self.pv_start_since.pop(target, None)
+            self.pv_stop_since.pop(target, None)
         self.pv_sessions[target] = identity
+
+    def pv_input_gap(self, target):
+        """Break continuous policy timers without editing desired/applied state."""
+        self.pv_start_since.pop(target, None)
+        self.pv_stop_since.pop(target, None)
+        self.pv_expiry.pop(target, None)
+        self.status[target] = "measurements_unavailable"
+
+    def pv_request(self, target):
+        self.pv_sync_session(target)
         try:
             available, soc = self.pv_measurements(target)
             return decision(
@@ -263,6 +293,29 @@ class PVSurplus:
             )[1]
 
         result = resolve(power, direction)
+        # No decision is distinct from the solver's confirmed feasible OFF point.
+        # Do not turn missing policy/electrical inputs into a desired zero or a
+        # retryable command. Post-dispatch validation may use its dispatched mode.
+        if status != "profile_unavailable" and (
+            status in ("measurements_unavailable", "safe_stop_unavailable")
+            or inputs is None
+            or (transition_mode is None and not inputs.eligible_modes)
+            or result is None
+            or result.point is None
+        ):
+            if advance:
+                self.pv_start_since.pop(target, None)
+                self.pv_stop_since.pop(target, None)
+            return (
+                power,
+                direction,
+                (
+                    status
+                    if status in ("measurements_unavailable", "safe_stop_unavailable")
+                    else "telemetry_unavailable"
+                ),
+                None,
+            )
         if (
             status == "actively_charging"
             and result
@@ -302,10 +355,24 @@ class PVSurplus:
             if (
                 since is not None
                 and now < since + settings["pv_stop_delay"]
-                and held
-                and confirmed.same_setpoint(held.point)
+                and confirmed
+                and confirmed.charging
             ):
-                return held.point.offered_power_w, Direction.DOWN, "pv_stop_delay", held
+                if held and confirmed.same_setpoint(held.point):
+                    return (
+                        held.point.offered_power_w,
+                        Direction.DOWN,
+                        "pv_stop_delay",
+                        held,
+                    )
+                if volts is None:
+                    return (
+                        confirmed.offered_power_w,
+                        Direction.DOWN,
+                        "pv_stop_delay",
+                        None,
+                    )
+                # Proven electrical infeasibility retains the existing safety OFF.
         elif advance:
             self.pv_stop_since.pop(target, None)
         if (
@@ -326,26 +393,6 @@ class PVSurplus:
                         resolve(Fraction(0), Direction.DOWN),
                     )
             return power, direction, status, result
-        if (
-            status == "actively_charging"
-            and ongoing
-            and inputs is not None
-            and inputs.current_mode is None
-            and not inputs.eligible_modes
-            and (confirmed := self.control.confirmed_point(target))
-            and confirmed.charging
-            and (
-                held := self.control.resolve(
-                    target,
-                    request=PowerSettings(confirmed.offered_power_w, Direction.DOWN),
-                    dispatch_modes=(confirmed.mode,),
-                )[1]
-            )
-            and held.point == confirmed
-        ):
-            # A telemetry gap after an accepted transition is not an OFF plan.
-            # Keep the desired request; fresh phase proof gates every new write.
-            return power, direction, status, result
         if advance:
             self.pv_start_since.pop(target, None)
         return Fraction(0), Direction.DOWN, status, resolve(Fraction(0), Direction.DOWN)
@@ -355,6 +402,19 @@ class PVSurplus:
             self.control.intent(target).profile_modes = None
         power, direction, status, result = self.pv_plan(target)
         intent = self.control.intent(target)
+        if result is None:
+            self.status[target] = status
+            if self.control.runtime.enabled(target) is not False:
+                return None  # Retain desired, in-flight and confirmed points.
+            # Explicit ON/recovery may prepare a freshly confirmed disabled
+            # station at zero before enabling CP. This cannot stop ongoing
+            # charging; the normal sender must still confirm this preparation.
+            power, direction = Fraction(0), Direction.DOWN
+            result = self.control.resolve(
+                target, request=PowerSettings(power, direction)
+            )[1]
+            if result is None or result.point is None:
+                return None
         if target in self.control.pending_points and power > 0:
             # Measurements remain the latest desired input; leave the executing
             # generation intact until its adapter has completed confirmation.
@@ -394,7 +454,7 @@ class PVSurplus:
         return min(deadlines)
 
     def pv_measurement_changed(self, event):
-        """Safety failures wake immediately; a waiting start observes fresh inputs."""
+        """Input gaps pause regulation; valid observations can resume a start."""
         entity = event.data.get("entity_id")
         if self.closed:
             return
@@ -423,13 +483,7 @@ class PVSurplus:
             try:
                 reading(state, datetime.now(UTC), soc=soc)
             except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                self.invalidate(target)
-                self.control._edit(
-                    target, {"target_w": Fraction(0), "direction": Direction.DOWN}
-                )
-                self.status[target] = "measurements_unavailable"
-                if self.valid(target, self.epochs[target]):
-                    self.launch(target, stop_first=True)
+                self.pv_input_gap(target)
                 continue
             if self.pv_ongoing.get(target, False) and target in self.pv_stop_since:
                 self.pv_plan(target)
@@ -456,12 +510,23 @@ class PVSurplus:
         point = self.control.confirmed_point(target)
         session = self.control.runtime.sessions.get(target)
         self.pv_ongoing[target] = bool(
-            self.status.get(target) in ("actively_charging", "pv_stop_delay")
+            (
+                self.status.get(target) in ("actively_charging", "pv_stop_delay")
+                or (
+                    self.pv_ongoing.get(target, False)
+                    and self.status.get(target)
+                    in (
+                        "measurements_unavailable",
+                        "telemetry_unavailable",
+                        "safe_stop_unavailable",
+                    )
+                )
+            )
             and point
             and point.charging
-            and session
-            and session.active
+            and (session is None or session.active)
         )
+        self.pv_sync_session(target)
         if self.pv_ongoing[target]:
             self.pv_start_since.pop(target, None)
         if (
@@ -584,7 +649,8 @@ class PVSurplus:
                         and point.same_setpoint(self.control.confirmed_point(target))
                     )
                     if (
-                        not holding
+                        point is not None
+                        and not holding
                         and not waiting_retry
                         and (
                             point != self.control.confirmed_point(target)
@@ -602,7 +668,8 @@ class PVSurplus:
                             await self.debounce_wait(1)
                             if not self.valid(target, epoch):
                                 return
-                            self.pv_edit(target)
+                            if self.pv_edit(target) is None:
+                                continue
                         expected = self.pv_request(target)
                         stopping = self.control.intent(target).request.target_w == 0
                         await self.control.apply_stored(

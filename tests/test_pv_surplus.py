@@ -341,11 +341,8 @@ async def test_measurement_change_fences_queued_positive_command(grid):
         measurements(p, t, soc="unavailable")
     result = await pending
     assert result.status.value != "applied"
-    # Invalid battery telemetry also requests immediate OFF through the regulator.
-    assert all(
-        request[1]["charging_schedule"][0]["charging_schedule_period"][0]["limit"] == 0
-        for request in peer.requests[count:]
-    )
+    # Missing telemetry fences new writes without issuing an implicit OFF.
+    assert len(peer.requests) == count
 
 
 async def test_safety_stop_skips_debounce_and_preserves_permission(grid):

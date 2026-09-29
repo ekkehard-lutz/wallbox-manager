@@ -555,6 +555,10 @@ class GridProfiles(PVSurplus):
         self.sessions_changed()
 
     def sessions_changed(self):
+        for target in tuple(self.pv_sessions):
+            session = self.control.runtime.sessions.get(target)
+            if session and not session.active:
+                self.pv_sync_session(target)
         self.battery_dirty = True
         if not self.closed and (self.battery_task is None or self.battery_task.done()):
             self.battery_task = self.hass.async_create_background_task(

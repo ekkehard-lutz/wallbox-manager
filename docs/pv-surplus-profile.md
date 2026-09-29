@@ -20,7 +20,8 @@ Configure Home Assistant entity references in the integration options:
 
 Grid is always available. Backend profile options include PV Surplus only when
 both power references are configured, independently of battery/reserve mappings.
-Temporary sensor outages keep the profile in the selector but block charging.
+Temporary sensor outages keep the profile in the selector and pause regulation;
+already confirmed charging continues unchanged.
 The card hides the selector if there is only one available profile. Removing a
 required mapping fences pending work and requests OFF; automatic fallback to Grid
 waits for confirmed disabled permission. Without authority it remains pending until
@@ -28,8 +29,10 @@ OFF can be confirmed, rather than taking over a locally controlled wallbox.
 
 Options persist across reloads. Power accepts W, kW and MW and is normalized to
 watts. SoC requires percent (`%`), within 0–100. Unknown, unavailable, non-numeric,
-non-finite, future or more than 90 seconds unreported readings suspend charging
-with a zero-power request. Explicit measurement expiry is also respected.
+non-finite, future or more than 90 seconds unreported readings suspend new PV
+regulation decisions. They do not request zero power: the confirmed operating
+point remains the last known hardware state. Explicit measurement expiry is also
+respected. The next valid measurement cycle resumes normal regulation.
 A configured but invalid SoC never falls back to battery-free operation.
 
 Actual charging power is discovered by stable session-power metadata: integration
@@ -84,8 +87,11 @@ start above 41% and a stop below 36%). `min_soc` applies only to the Grid profil
 values and hides the discharge-reserve input. It never creates a temporary
 MinRsvPct override. Leaving Grid can still restore an already-owned Grid override.
 Runtime continuation uses a confirmed APPLIED charging
-point and explicit profile state, not a transient OCPP Charging status. A new or
-ended transaction clears continuation and requires the full start rule again.
+point and explicit profile state, not a transient OCPP Charging status. An active
+transaction identity handover (including a superseded startup identity) preserves
+confirmed continuation. A real Ended event clears continuation, battery eligibility
+and delay timers synchronously, even when Ended and Started arrive between PV ticks.
+The next genuine session requires the full start rule again.
 Permission stays enabled during profile-controlled OFF, waiting and pauses.
 Diagnostics distinguish active charging, PV pause, battery stop, waiting for SoC,
 invalid measurements and waiting for command confirmation.
@@ -100,8 +106,9 @@ Ordinary positive power adjustments during charging use the existing one-second
 debounce. Starts with zero start delay and OFF skip it. Battery-SoC policy stops
 use the same stop-delay state machine as insufficient PV. Event values update the
 battery latch; recovery above the upper threshold cancels a pending normal stop.
-Invalid measurements and explicit control/safety invalidations still fence pending
-work immediately. With a configured zero stop delay, policy stops are immediate. Measurements are re-read after debounce and positive
+Invalid measurements prevent new positive dispatch and confirmation through the
+existing live-policy fences; they do not invalidate the regulator or synthesize
+OFF. Explicit control/safety invalidations still fence pending work immediately. With a configured zero stop delay, policy stops are immediate. Measurements are re-read after debounce and positive
 command fences reject changed or stale policy inputs. The shared control runtime
 also applies the PV policy immediately before dispatch and after command replies;
 every OFF clears continuation, including OFF requested through primitive controls.
@@ -150,8 +157,12 @@ Sufficient surplus cancels this deadline. Expiry requests OFF without disabling
 permission; every subsequent restart requires the full start rule and start delay.
 If the held point is no longer electrically feasible, OFF is immediate.
 
-User OFF, authority loss, invalid/stale measurements and existing hard safety
-conditions bypass PV delays. Crossing the PV storage-SoC threshold is a normal
+User OFF, authority loss and existing hard safety conditions bypass PV delays.
+Invalid/stale PV, load, selected-power or SoC measurements instead leave desired,
+pending and confirmed points unchanged, and reset continuous policy timers.
+Missing electrical evidence likewise produces no new setpoint rather than OFF;
+no new retry deadline is manufactured. A gap cannot establish a continuous low-PV
+or low-SoC interval. Crossing the PV storage-SoC threshold is a normal
 policy stop and uses the configured delay; it is not a hard battery protection signal. Regulation wakes at the earliest regulation,
 PV-delay or measurement-expiry deadline. Device phase/restart lockouts remain
 independent and cannot extend the PV stop deadline. Delayed positive commands are
@@ -277,8 +288,10 @@ while continuing to check live power/SoC policy and electrical limits. The runti
 still fences changes to voltage, capabilities, limits, transaction, intent,
 authority and permission. New writes always require fresh phase-operation proof.
 A temporary phase-feedback gap after confirmation keeps the positive desired
-request instead of manufacturing an OFF request. This does not extend the policy
-stop delay or bypass safety-invalidating inputs.
+request instead of manufacturing an OFF request. Incomplete planning evidence
+pauses regulation and breaks continuous policy timers; a fresh genuine stop
+condition must satisfy its configured delay. This never authorizes a write from
+cached phase/voltage evidence or bypasses explicit safety invalidations.
 
 The PV diagnostic record adds `startup_pending` and `command_fence_reason`; `retry_remaining_s` now
 also includes first-start retries. `policy_reason=actively_charging` describes a
@@ -318,3 +331,23 @@ using fresh voltage, without requiring unchanged voltage-derived watts.
 fields distinguish latched continuation/waiting from an unrestricted policy result.
 `ownership_status` distinguishes explicit acquisition, restored ownership and
 rejected live identity/authority evidence.
+
+
+### Confirmed continuation across input and transport gaps
+
+`pv_plan()` distinguishes a feasible OFF result from no actionable result. The
+latter leaves the existing request and confirmed hardware point untouched;
+`pv_sequence()` skips dispatch until a valid plan exists. `pv_ongoing` is preserved
+through input gaps, while `pv_sessions` distinguishes identity handover from the
+ledger's actual session ends. There is no second operating-point cache.
+
+A wallbox disconnect still invalidates tasks and old command contexts. The shared
+control runtime retains historical confirmation without exposing it as live
+APPLIED proof while disconnected. Existing ownership recovery obtains fresh
+PhaseRotation/GetCompositeSchedule evidence after reconnect before resuming PV
+regulation. It does not issue an OFF/ON pair to reconstruct state. The existing
+60-second retry policy is unchanged; transient planning gaps do not enter it.
+If fresh permission evidence instead confirms that the station actually reset to
+OFF, the existing explicit ON/recovery path may prepare a verified zero-current
+point before enabling CP. That preparation still needs normal hardware confirmation;
+it is not inferred from an outage or used to interrupt an ongoing charge.
