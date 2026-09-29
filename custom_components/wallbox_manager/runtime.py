@@ -11,6 +11,7 @@ from .core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceS
 from .core.events import SessionToken, StationIdentity, StationSnapshot
 from .core.models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
 from .core.telemetry import Channel, Observation, Quantity, State, station_of
+from .diagnostics import diagnostic_event
 from .session_ledger import SessionLedger
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,12 +20,14 @@ _LOGGER = logging.getLogger(__name__)
 class Runtime:
     """Owned by one config entry; no protocol objects escape through snapshots."""
 
-    def __init__(self) -> None:
+    def __init__(self, entry=None) -> None:
+        self.entry = entry
         self.runtime_id = str(uuid4())
         self.sessions = SessionLedger()
         self._stations: dict[StationId, StationSnapshot] = {}
         self._phase_epoch = {}
         self._cp_epoch = {}
+        self._cp_confirmed = {}
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
     @property
@@ -68,6 +71,11 @@ class Runtime:
         self._cp_epoch = {
             scope: at
             for scope, at in self._cp_epoch.items()
+            if scope.station != token.station
+        }
+        self._cp_confirmed = {
+            scope: value
+            for scope, value in self._cp_confirmed.items()
             if scope.station != token.station
         }
         unknown = CapabilityEvidence(EvidenceState.UNKNOWN, "runtime", now, reason)
@@ -217,11 +225,25 @@ class Runtime:
             revision += 1
         # The first ON read is discovery, not a CP transition. Status events
         # may already have arrived in this generation before inventory finishes.
+        confirmed = self._cp_confirmed.get(observation.scope)
         if observation.enabled is False or (
-            old is not None and old.enabled != observation.enabled
+            observation.enabled is True and confirmed is False
         ):
             self._cp_epoch[observation.scope] = observation.observed_at
+        if observation.enabled is not None:
+            self._cp_confirmed[observation.scope] = observation.enabled
         observation = replace(observation, revision=revision)
+        if self.entry and (old is None or old.enabled != observation.enabled):
+            diagnostic_event(
+                self.entry,
+                "physical_state",
+                stage="permission_evidence",
+                enabled=observation.enabled,
+                confirmed_before=confirmed,
+                cp_epoch=self._cp_epoch.get(observation.scope).isoformat()
+                if observation.scope in self._cp_epoch
+                else None,
+            )
         self._publish(
             replace(
                 state,
@@ -384,6 +406,26 @@ class Runtime:
                     observation = replace(previous, value=None)
             if observation.value is None and channel not in supported:
                 continue
+            if (
+                self.entry
+                and channel.quantity
+                in (Quantity.CONNECTOR_STATE, Quantity.CHARGING_STATE)
+                and (
+                    previous is None
+                    or previous.value != observation.value
+                    or self.physical_state_fresh(previous)
+                    != self.physical_state_fresh(observation)
+                )
+            ):
+                diagnostic_event(
+                    self.entry,
+                    "physical_state",
+                    stage="station_evidence",
+                    quantity=channel.quantity.value,
+                    source=observation.source,
+                    observed_at=observation.observed_at.isoformat(),
+                    fresh=self.physical_state_fresh(observation),
+                )
             values[channel] = observation
             supported[channel] = None
             # A newer connector availability event supersedes contradictory

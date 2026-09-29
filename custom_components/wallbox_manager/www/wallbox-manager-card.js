@@ -288,7 +288,7 @@ class WallboxManagerCard extends HTMLElement {
     get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     const pv = state("charging_profile")?.state === "PV_SURPLUS";
     get("power-row").hidden = pv;
-    get("reserve-row").hidden = !(attrs.battery_reserve_configured ?? (!pv && attrs.battery_configured));
+    get("reserve-row").hidden = !(!pv && (attrs.battery_reserve_configured ?? attrs.battery_configured));
     get("approximation-row").hidden = !pv || !!attrs.battery_configured;
     get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
     this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"]]);

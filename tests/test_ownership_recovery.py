@@ -133,13 +133,13 @@ async def recreate(
     return new_owner, new_control, new_profile, remove
 
 
-async def prepared(site, *, enabled=True):
+async def prepared(site, *, enabled=True, profile="PV_SURPLUS"):
     owner, (a, _), hass = site
     c, bound, peer, p, key = a
     p.references.update(leistung_pv="sensor.pv", leistung_verbraucher="sensor.load")
     p.entry.options.update(p.references)
     await owner.activate(key)
-    await p.select(bound.target, "PV_SURPLUS")
+    await p.select(bound.target, profile)
     measurements(p, bound.target, pv=2300, load=0, actual=0, soc=96)
     p.entry.options.update(p.references)
     p.wait = lambda _: asyncio.Event().wait()
@@ -495,7 +495,7 @@ async def test_live_reserve_survives_owned_reload_and_restores_on_permission_off
         State,
     )
 
-    owner, c, bound, peer, p, hass = await prepared(site)
+    owner, c, bound, peer, p, hass = await prepared(site, profile="NETZ")
     target = bound.target
     options = {
         "min_soc_speicher": "number.reserve",
@@ -541,6 +541,9 @@ async def test_live_reserve_survives_owned_reload_and_restores_on_permission_off
     flow(c, bound.token)
     await p.reconcile_battery()
     assert writes == [40]
+    peer.phase_read_value = (
+        "RST" if c.confirmed_point(target).mode.count == 3 else "Rxx"
+    )
     owner, c, p, remove = await recreate(owner, c, bound, peer, p, hass)
     try:
         await p.reconcile_battery()
@@ -874,6 +877,6 @@ async def test_successful_ocpp_off_updates_canonical_sensor_without_cp_event(sit
         result = await p.permission(bound.target, False)
         assert result.status.value == "applied"
         assert [e.native_value for e in sensors] == ["occupied", "connected"]
-        assert not sensors[0].state_fresh and sensors[1].state_fresh
+        assert not sensors[0].state_fresh and not sensors[1].state_fresh
     finally:
         remove()

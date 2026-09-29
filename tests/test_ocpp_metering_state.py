@@ -233,3 +233,49 @@ async def test_16_status_and_meter_values(server, status, expected):
             snapshot.observation(Channel(scope.evse.station, Quantity.ENERGY)).value
             == 2500
         )
+
+
+@pytest.mark.parametrize("protocol", ["ocpp2.0.1", "ocpp2.1"])
+async def test_fresh_transaction_state_without_repeated_evse_identity(protocol):
+    async with paired(protocol) as (server, station):
+        await station.boot()
+        await state_when(
+            server.runtime, lambda s: s.discovery.state == EvidenceState.VERIFIED
+        )
+        root = StationId("station-a")
+        scope = ConnectorId(EvseId(root, "2"), "7")
+        channel = Channel(scope, Quantity.CHARGING_STATE)
+        at = datetime.now(UTC) - timedelta(seconds=2)
+        for index, state in enumerate(("Charging", "EVConnected")):
+            await station.call(
+                station._call.TransactionEvent(
+                    event_type="Started" if index == 0 else "Updated",
+                    seq_no=index,
+                    timestamp=(at + timedelta(seconds=index)).isoformat(),
+                    trigger_reason="ChargingStateChanged",
+                    transaction_info={
+                        "transaction_id": "known",
+                        "charging_state": state,
+                    },
+                    evse={"id": 2, "connector_id": 7} if index == 0 else None,
+                ),
+                suppress=False,
+            )
+        observation = server.runtime.get(root).observation(channel)
+        assert observation.value == State.CONNECTED
+        assert observation.observed_at == at + timedelta(seconds=1)
+        assert server.runtime.physical_state_fresh(observation)
+        await station.call(
+            station._call.TransactionEvent(
+                event_type="Updated",
+                seq_no=2,
+                timestamp=datetime.now(UTC).isoformat(),
+                trigger_reason="ChargingStateChanged",
+                transaction_info={
+                    "transaction_id": "unknown",
+                    "charging_state": "Charging",
+                },
+            ),
+            suppress=False,
+        )
+        assert server.runtime.get(root).observation(channel) == observation

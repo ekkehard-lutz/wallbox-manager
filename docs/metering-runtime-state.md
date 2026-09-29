@@ -180,9 +180,11 @@ ChargingEnabled readback confirms OFF, the canonical charging sensor replaces a
 retained `charging` enum with `connected` (German: Verbunden). Its source is
 `runtime:charging_disabled` and `state_represents=confirmed_charging_disabled`.
 This proves charging stopped; it does not prove that the vehicle is still present.
+The derived `connected` state is therefore stale (`state_fresh=false`) immediately,
+even while OFF remains freshly confirmed.
 The connector sensor independently retains its last occupied state with
 `state_fresh=false`. No session-end or vehicle-departure event is fabricated.
-An ON transition makes the derived charging display stale until a new CP observation
+The derived charging display stays stale until a new CP observation
 supersedes it; reading the previous snapshot cannot resurrect stale `charging`.
 
 HA restoration initially retains enum values as stale display history. Fresh
@@ -194,3 +196,13 @@ before that read were consequently left stale indefinitely until another event
 A real OFF-to-ON transition still fences prior CP observations, and reconnect/boot
 clears the old generation's CP epoch along with live observations. Connecting the
 socket or loading persisted enums alone never establishes fresh physical state.
+
+
+A failed permission read (`unknown`) is not a CP transition. Runtime remembers the
+last **confirmed** ON/OFF value separately from the latest read result. Initial
+unknown → ON and confirmed ON → unknown → ON do not advance the CP epoch; fresh
+CP events received before the successful read remain usable. Confirmed OFF →
+unknown → ON still advances the epoch. Entity publication follows runtime events
+immediately, independently of the 60-second electrical recovery retry. No event
+timestamp is extended. See [physical status resynchronization](physical-status-resync.md)
+for the remaining station-side missed-event limitation.

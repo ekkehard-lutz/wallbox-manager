@@ -60,7 +60,7 @@ async def async_setup_entry(
     )
     from .runtime import Runtime
 
-    state = Runtime()
+    state = Runtime(entry)
     server = transport.CentralSystem(
         state,
         entry.data.get("host", DEFAULT_HOST),

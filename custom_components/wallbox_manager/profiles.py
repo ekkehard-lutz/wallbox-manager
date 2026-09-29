@@ -141,7 +141,8 @@ class GridProfiles(PVSurplus):
             if self.setting(target)["profile"] == "PV_SURPLUS"
             else self.battery.configured,
             "profile_actively_charging": self.pv_ongoing.get(target, False),
-            "battery_reserve_configured": self.battery.configured,
+            "battery_reserve_configured": self.battery.configured
+            and self.setting(target)["profile"] == "NETZ",
             "battery_status": self.battery.status,
             "battery_reserve": dict(self.battery.diagnostics),
             "actual_charging": self.active(target),
@@ -573,6 +574,7 @@ class GridProfiles(PVSurplus):
             for s in self.control.runtime.stations
             for t in s.connectors
             if t != exclude
+            and self.setting(t)["profile"] == "NETZ"
             and t not in self.suppressed
             and self.control.profile_permitted(t)
             and self.active(t)
@@ -582,7 +584,11 @@ class GridProfiles(PVSurplus):
         owner = getattr(self.control, "ownership", None)
         if self.battery.recovering and owner and owner.record:
             owned_control, target = owner.resolve(owner.active_wallbox)
-            if owned_control is self.control and owner.record["enabled_intent"]:
+            if (
+                owned_control is self.control
+                and owner.record["enabled_intent"]
+                and self.setting(target)["profile"] == "NETZ"
+            ):
                 if not requests:
                     # Await evidence without restoring/reasserting during startup.
                     if not owner.ready or self.control.runtime.enabled(target) is None:

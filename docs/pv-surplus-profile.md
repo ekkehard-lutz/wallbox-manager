@@ -80,7 +80,9 @@ not stop an ongoing charge. Battery eligibility is a separate stateful latch:
 once the lower boundary is crossed it remains stopped until SoC exceeds the
 upper target, even while electrical charging is deliberately held by the stop
 delay. The entire hysteresis band lies below the target (41%/5 pp means a strict
-start above 41% and a stop below 36%). `min_soc` is the independent battery reserve.
+start above 41% and a stop below 36%). `min_soc` applies only to the Grid profile; PV Surplus ignores legacy reserve
+values and hides the discharge-reserve input. It never creates a temporary
+MinRsvPct override. Leaving Grid can still restore an already-owned Grid override.
 Runtime continuation uses a confirmed APPLIED charging
 point and explicit profile state, not a transient OCPP Charging status. A new or
 ended transaction clears continuation and requires the full start rule again.

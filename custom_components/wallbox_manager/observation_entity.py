@@ -72,8 +72,7 @@ class ObservationEntity(StationEntity):
     def state_fresh(self):
         observation = self.observation
         if observation and observation.source == "runtime:charging_disabled":
-            target = self.runtime.cp_scope(self.channel.scope)
-            return bool(target and self.runtime.enabled(target) is False)
+            return False
         live = self.snapshot.observation(self.channel) if self.snapshot else None
         return bool(
             live

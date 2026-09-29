@@ -150,7 +150,7 @@ async def test_transaction_event_power_drives_reserve_without_normal_meter_chann
         profile="PV_SURPLUS", min_soc=40, soll_soc_speicher=41, soc_hysterese=5
     )
     await profile.reconcile_battery()
-    profile.battery.update.assert_awaited_with(40)
+    profile.battery.update.assert_awaited_with(None)
 
 
 async def test_reload_external_change_is_not_reasserted(battery):
@@ -188,3 +188,227 @@ async def test_explicitly_expired_evidence_cannot_write(battery, entity):
     )
     await reserve.update(40)
     assert not calls
+
+
+async def test_delayed_confirmation_waits_for_state_event(battery):
+    import asyncio
+
+    reserve, hass, calls, _ = battery
+    dispatched = asyncio.Event()
+
+    async def write(entity, value):
+        calls.append(value)
+        dispatched.set()
+
+    reserve.write = write
+    task = asyncio.create_task(reserve.update(40))
+    await dispatched.wait()
+    assert reserve.status == "confirmation_pending"
+    assert not task.done()
+    hass.states.async_set("number.reserve", "40")
+    await task
+    assert reserve.status == "active"
+    assert reserve.last_error is None
+    assert calls == [40]
+
+
+async def test_confirmation_timeout_and_late_success(battery, monkeypatch):
+    reserve, hass, _, _ = battery
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.battery.CONFIRMATION_TIMEOUT", 0.01
+    )
+    reserve.write = AsyncMock()
+    await reserve.update(40)
+    assert reserve.status == "write_unconfirmed"
+    for _ in range(3):
+        await reserve.update(40)
+    assert reserve.status == "write_unconfirmed"
+    reserve.write.assert_awaited_once()
+    hass.states.async_set("number.reserve", "40")
+    await reserve.update(40)
+    assert reserve.status == "active"
+    assert "reason" not in reserve.diagnostics
+
+
+async def test_service_error_then_authoritative_success_clears_error(battery):
+    reserve, hass, _, _ = battery
+    reserve.write = AsyncMock(side_effect=ValueError("transient"))
+    await reserve.update(40)
+    assert reserve.status == "error"
+    hass.states.async_set("number.reserve", "40")
+    await reserve.update(40)
+    assert reserve.status == "active"
+    assert reserve.last_error is None
+    assert "reason" not in reserve.diagnostics
+
+
+async def test_superseded_adjustment_cannot_confirm_new_target(battery, monkeypatch):
+    reserve, hass, calls, _ = battery
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.battery.CONFIRMATION_TIMEOUT", 0.01
+    )
+    await reserve.update(40)
+    reserve.write = AsyncMock()
+    await reserve.update(50)
+    assert reserve.status == "write_unconfirmed"
+    await reserve.update(60)
+    assert reserve.record["pending"] == 60
+    hass.states.async_set("number.reserve", "50")
+    await reserve.update(60)
+    assert reserve.status == "write_unconfirmed"
+    assert reserve.record["pending"] == 60
+    hass.states.async_set("number.reserve", "60")
+    await reserve.update(60)
+    assert reserve.status == "active"
+    assert reserve.record["temporary"] == 60
+    assert "pending" not in reserve.record
+    assert calls == [40]
+
+
+async def test_delayed_restoration_and_late_timeout_recovery(battery, monkeypatch):
+    reserve, hass, calls, _ = battery
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.battery.CONFIRMATION_TIMEOUT", 0.01
+    )
+    await reserve.update(40)
+    reserve.write = AsyncMock()
+    await reserve.update(None)
+    assert reserve.status == "write_unconfirmed"
+    assert reserve.record is not None
+    await reserve.update(None)
+    reserve.write.assert_awaited_once()
+    hass.states.async_set("number.reserve", "10")
+    await reserve.update(None)
+    assert reserve.status == "restored"
+    assert reserve.record is None
+    assert not reserve.failed_restore
+    assert calls == [40]
+
+
+async def test_pending_adjustment_survives_reload_without_reassertion(
+    battery, monkeypatch
+):
+    reserve, hass, _, entry = battery
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.battery.CONFIRMATION_TIMEOUT", 0.01
+    )
+    await reserve.update(40)
+    reserve.write = AsyncMock()
+    await reserve.update(50)
+    restored = BatteryReserve(hass, entry)
+    await restored.load(preserve=True)
+    restored.resume()
+    restored.write = AsyncMock()
+    await restored.update(50)
+    restored.write.assert_not_awaited()
+    assert restored.record["pending"] == 50
+    hass.states.async_set("number.reserve", "50")
+    await restored.update(50)
+    assert restored.status == "active"
+    assert restored.record["temporary"] == 50
+
+
+async def test_pv_legacy_reserve_never_writes_or_creates_journal(grid, battery):
+    profile, target, _ = grid
+    reserve, _, calls, _ = battery
+    profile.battery = reserve
+    await profile.permission(target, True)
+    profile.active = lambda _: True
+    profile.setting(target).update(profile="PV_SURPLUS", min_soc=80)
+    await profile.reconcile_battery()
+    assert calls == []
+    assert reserve.record is None
+    assert await reserve.store.async_load() is None
+    assert not profile.attributes(target)["battery_reserve_configured"]
+
+
+async def test_pending_external_change_still_wins(battery, monkeypatch):
+    reserve, hass, _, _ = battery
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.battery.CONFIRMATION_TIMEOUT", 0.01
+    )
+    await reserve.update(40)
+    reserve.write = AsyncMock()
+    await reserve.update(50)
+    hass.states.async_set("number.reserve", "35")
+    await reserve.update(50)
+    assert reserve.status == "external_change"
+    assert reserve.record is None
+    await reserve.update(None)
+    reserve.write.assert_awaited_once()
+
+
+async def test_delayed_confirmation_of_restoration(battery):
+    import asyncio
+
+    reserve, hass, _, _ = battery
+    await reserve.update(40)
+    dispatched = asyncio.Event()
+
+    async def write(entity, value):
+        assert value == 10
+        dispatched.set()
+
+    reserve.write = write
+    task = asyncio.create_task(reserve.update(None))
+    await dispatched.wait()
+    assert reserve.status == "confirmation_pending"
+    hass.states.async_set("number.reserve", "10")
+    await task
+    assert reserve.status == "restored"
+    assert reserve.record is None
+
+
+async def test_late_success_automatically_reconciles_through_profile_event(grid):
+    from types import SimpleNamespace
+
+    profile, target, _ = grid
+    hass = profile.hass
+    hass.states.async_set("number.reserve", "10")
+    hass.states.async_set("sensor.soc", "60")
+    reserve = BatteryReserve(
+        hass,
+        SimpleNamespace(
+            entry_id="late",
+            options={
+                "min_soc_speicher": "number.reserve",
+                "soc_speicher_aktuell": "sensor.soc",
+            },
+        ),
+    )
+    profile.battery = reserve
+    profile.active = lambda _: True
+    profile.setting(target)["min_soc"] = 40
+    reserve.write = AsyncMock(side_effect=ValueError("transient"))
+    await profile.permission(target, True)
+    await profile.reconcile_battery()
+    assert reserve.status == "error"
+    hass.states.async_set("number.reserve", "40")
+    await hass.async_block_till_done()
+    if profile.battery_task:
+        await profile.battery_task
+    assert reserve.status == "active"
+    assert reserve.last_error is None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_reserve_diagnostics_are_opt_in_and_transition_level(
+    battery, caplog, enabled
+):
+    import logging
+
+    reserve, _, _, entry = battery
+    entry.options["pv_diagnostic_logging"] = enabled
+    caplog.set_level(logging.INFO)
+    await reserve.update(40)
+    events = [
+        r.message for r in caplog.records if "subsystem=battery_reserve" in r.message
+    ]
+    assert bool(events) is enabled
+    if enabled:
+        assert any('"stage":"write_requested"' in e for e in events)
+        assert any('"stage":"confirmation_pending"' in e for e in events)
+        assert any('"stage":"confirmed"' in e for e in events)
+    count = len(caplog.records)
+    await reserve.update(40)
+    assert len(caplog.records) == count

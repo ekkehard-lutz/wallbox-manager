@@ -182,13 +182,14 @@ supply a finite numeric percentage from 0 to 100. Before writes, the backend
 checks availability, service support and entity bounds. One missing reference
 disables new battery overrides without affecting ordinary Grid charging.
 
-Only the active, ready, actually charging connector can request an override,
-for Grid or PV Surplus. Actual charging requires an active transaction, charging
+Only the active, ready, actually charging connector using Grid (`NETZ`) can
+request an override. PV Surplus never requests an override, including with legacy
+stored `min_soc` settings. Its SoC threshold is only an eligibility threshold. Actual charging requires an active transaction, charging
 state and positive fresh flow. The existing session ledger selects connector,
 unambiguous EVSE and TransactionEvent power; embedded transaction metering does
 not need a duplicate ordinary MeterValues channel.
 
-The per-wallbox `min_soc` is the **profile charging reserve**, independent of the
+The per-wallbox `min_soc` is the **Grid charging reserve**, independent of the
 PV storage target `soll_soc_speicher` and its `soc_hysterese`. Before the first
 override, capture the installation's actual reserve and persist it atomically.
 The temporary value is `max(original, downsize(min(profile reserve, actual SoC)))`.
@@ -204,6 +205,17 @@ Owned overrides follow changed profile reserve/SoC only when the down-sized valu
 changes; repeated identical evaluations issue no writes. Failed writes do not
 create a regulation-cycle retry loop. The journal retains the previous and pending
 temporary values during adjustment so a failed write cannot lose the original.
+Reserve writes and restoration subscribe to HA state changes before dispatch and
+allow up to ten seconds for service completion and matching live numeric readback.
+The old value during this window is `confirmation_pending`, not a failure. No
+polling loop or repeated write is used. A timeout is `write_unconfirmed`; a service
+exception is `error`. The normal battery state-event reconciliation clears either
+obsolete error once the current journal target is confirmed, even after timeout.
+Pending adjustment targets survive reload; superseded targets cannot confirm a
+newer adjustment. External changes still release the override. As before, the HA
+number interface has no operation ID: a matching live numeric value is the
+available confirmation boundary, not proof of which writer produced it.
+
 Permission OFF, profile selection, owner switch, vehicle/session end, observed
 suspension, authority loss and ordinary control termination restore the original,
 but only while the entity matches the value written by Wallbox Manager. External

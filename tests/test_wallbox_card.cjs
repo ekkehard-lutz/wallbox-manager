@@ -446,7 +446,7 @@ for (const battery of [false,true]) for (const language of ['en','de']) {
   test(`PV settings, discovery and labels: battery=${battery} language=${language}`,async()=>{
     const data=states(true);
     data['select.anything'].state='PV_SURPLUS';
-    Object.assign(data['select.anything'].attributes,{battery_configured:battery,options:['NETZ','PV_SURPLUS']});
+    Object.assign(data['select.anything'].attributes,{battery_configured:battery,battery_reserve_configured:true,options:['NETZ','PV_SURPLUS']});
     for(const [role,value] of Object.entries({soll_soc_speicher:'95',soc_hysterese:'5',regulation_interval:'5'})) data[`number.random_${role}`]=state(role,'A',value);
     data['select.random_pv']=state('pv_approximation','A','down');
     const {card:c,calls,get}=card(data);c.hass={...c._hass,language};

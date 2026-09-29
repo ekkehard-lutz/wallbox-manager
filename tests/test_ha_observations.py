@@ -309,7 +309,7 @@ async def test_cp_off_retains_physical_states_and_reload_only_restores_display(
     assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
     assert states[Quantity.CHARGING_STATE].native_value == "connected"
     assert not states[Quantity.CONNECTOR_STATE].state_fresh
-    assert states[Quantity.CHARGING_STATE].state_fresh
+    assert not states[Quantity.CHARGING_STATE].state_fresh
     assert (
         hass.states.get(states[Quantity.CHARGING_STATE].entity_id).state == "connected"
     )
@@ -441,3 +441,79 @@ async def test_real_off_on_transition_still_requires_new_cp_evidence(diagnostics
     )
     assert states[Quantity.CHARGING_STATE].native_value == "charging"
     assert states[Quantity.CHARGING_STATE].state_fresh
+
+
+@pytest.mark.parametrize("initial", [None, True, False])
+@pytest.mark.parametrize("read_first", [False, True])
+async def test_unknown_permission_recovery_only_fences_confirmed_off(
+    diagnostics, initial, read_first
+):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+
+    def permission(value):
+        at = datetime.now(UTC)
+        runtime.observe_enabled(
+            token, EnabledObservation(target, value, at, at + timedelta(seconds=60))
+        )
+
+    def samples():
+        return (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(target, Quantity.CHARGING_STATE, State.CHARGING),
+        )
+
+    if initial is not None:
+        permission(initial)
+    permission(None)  # Failed first discovery read, or a transient polling failure.
+    if read_first:
+        permission(True)
+    evidence = samples()
+    runtime.observe(token, evidence)
+    await hass.async_block_till_done()
+    if not read_first:
+        assert all(not e.state_fresh for e in operational(platforms))
+        permission(True)
+    fresh = initial is not False or read_first
+    assert all(e.state_fresh == fresh for e in operational(platforms))
+    assert all(
+        hass.states.get(e.entity_id).attributes["state_fresh"] == fresh
+        for e in operational(platforms)
+    )
+    # Reordered older reports do not replace new evidence or move its timestamp.
+    runtime.observe(
+        token,
+        tuple(
+            replace(o, observed_at=o.observed_at - timedelta(seconds=1))
+            for o in evidence
+        ),
+    )
+    assert all(runtime.get(token.station).observation(o.channel) == o for o in evidence)
+    runtime.observe(token, samples())
+    assert all(e.state_fresh for e in operational(platforms))
+
+
+async def test_permission_recovery_cannot_extend_expired_physical_evidence(diagnostics):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    sample = observation(target, Quantity.CHARGING_STATE, State.CHARGING)
+    sample = replace(sample, valid_until=sample.observed_at)
+    runtime.observe(token, (sample,))
+    await hass.async_block_till_done()
+    for value in (None, True):
+        at = datetime.now(UTC)
+        runtime.observe_enabled(
+            token, EnabledObservation(target, value, at, at + timedelta(seconds=60))
+        )
+    assert all(not e.state_fresh for e in operational(platforms))
+    assert runtime.get(token.station).observation(sample.channel) == sample
+    runtime.observe(
+        token, (observation(target, Quantity.CHARGING_STATE, State.CHARGING),)
+    )
+    assert all(e.state_fresh for e in operational(platforms))

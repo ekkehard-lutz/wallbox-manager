@@ -6,7 +6,13 @@ import math
 from datetime import UTC, datetime
 from fractions import Fraction
 
+from homeassistant.core import callback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
+
+from .diagnostics import diagnostic_event
+
+CONFIRMATION_TIMEOUT = 10
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -14,6 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 class BatteryReserve:
     def __init__(self, hass, entry):
         self.hass = hass
+        self.entry = entry
         self.reserve = entry.options.get("min_soc_speicher")
         self.soc = entry.options.get("soc_speicher_aktuell")
         self.configured = bool(self.reserve and self.soc)
@@ -28,6 +35,8 @@ class BatteryReserve:
         self.recovering = False
         self.diagnostics = {}
         self.last_error = None
+        self._ignored_confirmation = None
+        self._last_transition = None
 
     async def load(self, *, preserve=False):
         self.record = await self.store.async_load()
@@ -41,7 +50,13 @@ class BatteryReserve:
         self.recovering = False
         if self.record:
             self.session = True
-            self.status = "preserved"
+            try:
+                confirmed = self.read(self.record["entity"]) == self.record.get(
+                    "pending", self.record["temporary"]
+                )
+            except ValueError, TypeError:
+                confirmed = False
+            self.status = "preserved" if confirmed else "write_unconfirmed"
 
     def read(self, entity, *, fresh=False):
         state = self.hass.states.get(entity)
@@ -82,6 +97,82 @@ class BatteryReserve:
             domain, "set_value", {"entity_id": entity, "value": value}, blocking=True
         )
 
+    def transition(self, status, **fields):
+        self.status = status
+        transition = (status, fields)
+        if transition != self._last_transition:
+            diagnostic_event(self.entry, "battery_reserve", stage=status, **fields)
+            self._last_transition = transition
+        if status in ("active", "restored", "unchanged"):
+            self.last_error = None
+            self.diagnostics.pop("reason", None)
+
+    async def write_confirmed(self, entity, value):
+        """Subscribe before dispatch; serialize targets and bound the async wait.
+
+        The durable journal remains the source of truth after timeout/reload.
+        Matching late evidence is reconciled by update, without reissuing writes.
+        """
+        changed = asyncio.Event()
+
+        def confirmed():
+            try:
+                return self.read(entity) == value
+            except ValueError, TypeError:
+                return False
+
+        @callback
+        def observed(event):
+            if confirmed():
+                changed.set()
+
+        remove = async_track_state_change_event(self.hass, [entity], observed)
+        try:
+            self.transition("confirmation_pending", entity=entity, target=value)
+            diagnostic_event(
+                self.entry,
+                "battery_reserve",
+                stage="write_requested",
+                entity=entity,
+                target=value,
+            )
+            async with asyncio.timeout(CONFIRMATION_TIMEOUT):
+                await self.write(entity, value)
+                while not confirmed():
+                    changed.clear()
+                    await changed.wait()
+            diagnostic_event(
+                self.entry,
+                "battery_reserve",
+                stage="confirmed",
+                entity=entity,
+                target=value,
+            )
+            return True
+        except TimeoutError:
+            if confirmed():
+                diagnostic_event(
+                    self.entry,
+                    "battery_reserve",
+                    stage="confirmed",
+                    entity=entity,
+                    target=value,
+                    service_timeout=True,
+                )
+                return True
+            self.transition("write_unconfirmed", entity=entity, target=value)
+            self.diagnostics["reason"] = "confirmation_timeout"
+            diagnostic_event(
+                self.entry,
+                "battery_reserve",
+                stage="confirmation_timeout",
+                entity=entity,
+                target=value,
+            )
+            return False
+        finally:
+            remove()
+
     def desired(self, requested, original):
         soc = self.read(self.soc, fresh=True)
         state = self.hass.states.get(self.reserve)
@@ -112,16 +203,81 @@ class BatteryReserve:
             try:
                 if self.record:
                     entity = self.record["entity"]
+                    original = self.record["original"]
                     current = self.read(entity)
                     self.diagnostics["observed_reserve"] = current
+                    if (
+                        requested is None
+                        and self.failed_restore
+                        and current != original
+                        and current
+                        in [
+                            self.record["temporary"],
+                            *self.record.get("superseded", []),
+                        ]
+                    ):
+                        return
                     pending = self.record.get("pending")
                     if pending is not None:
-                        self.record = {
-                            k: v for k, v in self.record.items() if k != "pending"
-                        }
                         if current == pending:
                             self.record["temporary"] = pending
-                        await self.store.async_save(self.record)
+                            self.record.pop("pending")
+                            self.record.pop("pending_request", None)
+                            self.transition("active", target=pending, late=True)
+                            await self.store.async_save(self.record)
+                        elif current not in (
+                            self.record["temporary"],
+                            *self.record.get("superseded", []),
+                        ):
+                            self.transition("external_change", observed=current)
+                            self.record = None
+                            self.failed_restore = False
+                            self.recovering = False
+                            await self.store.async_save(None)
+                            if requested is None:
+                                self.session = False
+                            return
+                        elif requested is not None and (
+                            requested == self.record.get("pending_request", requested)
+                            or current != self.record["temporary"]
+                        ):
+                            ignored = (pending, current)
+                            if self._ignored_confirmation != ignored:
+                                diagnostic_event(
+                                    self.entry,
+                                    "battery_reserve",
+                                    stage="nonmatching_confirmation_ignored",
+                                    target=pending,
+                                    observed=current,
+                                )
+                                self._ignored_confirmation = ignored
+                            # Retain the target across timeout and later evidence.
+                            # Never acknowledge an older target for a newer write.
+                            return
+                        else:
+                            diagnostic_event(
+                                self.entry,
+                                "battery_reserve",
+                                stage="superseded",
+                                target=pending,
+                                requested=requested,
+                            )
+                            self.record["superseded"] = list(
+                                dict.fromkeys(
+                                    [*self.record.get("superseded", []), pending]
+                                )
+                            )
+                            self.record.pop("pending")
+                            self.record.pop("pending_request", None)
+                            await self.store.async_save(self.record)
+                            if requested is not None:
+                                self.transition("active")
+                    if (
+                        requested is not None
+                        and current == self.record["temporary"]
+                        and self.status in ("error", "write_unconfirmed")
+                    ):
+                        self.transition("active", target=current, late=True)
                     if current == self.record["original"] and requested is not None:
                         return  # Unconfirmed or externally reverted: never reassert.
                     if current != self.record["temporary"]:
@@ -132,19 +288,22 @@ class BatteryReserve:
                         self.failed_restore = False
                         self.recovering = False
                         await self.store.async_save(None)
+                        if requested is None and current == original:
+                            self.transition("restored", late=True)
                     elif requested is None:
                         if self.failed_restore:
                             return
                         self.failed_restore = True
                         if current != self.record["original"]:
-                            await self.write(entity, self.record["original"])
-                        if self.read(entity) != self.record["original"]:
-                            raise ValueError("restoration unconfirmed")
+                            if not await self.write_confirmed(
+                                entity, self.record["original"]
+                            ):
+                                return
                         self.record = None
                         self.failed_restore = False
                         self.recovering = False
                         await self.store.async_save(None)
-                        self.status = "restored"
+                        self.transition("restored")
                         self.failed_restore = False
                 if requested is None:
                     self.session = False
@@ -155,16 +314,20 @@ class BatteryReserve:
                     temporary = self.desired(requested, self.record["original"])
                     if temporary == self.record["temporary"]:
                         return
-                    self.record = {**self.record, "pending": temporary}
+                    self.record = {
+                        **self.record,
+                        "pending": temporary,
+                        "pending_request": requested,
+                    }
                     await self.store.async_save(self.record)
-                    self.status = "write_unconfirmed"
-                    await self.write(self.reserve, temporary)
-                    if self.read(self.reserve) == temporary:
+                    if await self.write_confirmed(self.reserve, temporary):
                         self.record = {
-                            k: v for k, v in self.record.items() if k != "pending"
+                            k: v
+                            for k, v in self.record.items()
+                            if k not in ("pending", "pending_request")
                         }
                         self.record["temporary"] = temporary
-                        self.status = "active"
+                        self.transition("active", target=temporary)
                         if temporary == self.record["original"]:
                             self.record = None
                             self.status = "unchanged"
@@ -192,14 +355,10 @@ class BatteryReserve:
                     "temporary": temporary,
                 }
                 await self.store.async_save(self.record)
-                await self.write(self.reserve, temporary)
-                self.status = (
-                    "active"
-                    if self.read(self.reserve) == temporary
-                    else "write_unconfirmed"
-                )
+                if await self.write_confirmed(self.reserve, temporary):
+                    self.transition("active", target=temporary)
             except Exception as exc:
-                self.status = "error"
+                self.transition("error", reason=str(exc))
                 self.diagnostics["reason"] = str(exc)
                 if self.last_error != str(exc):
                     _LOGGER.warning("Battery reserve operation failed: %s", exc)
