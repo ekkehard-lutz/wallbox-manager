@@ -172,3 +172,25 @@ State is also no longer created; the live charging-state enum remains canonical.
 There is no destructive automatic registry cleanup. Remove unwanted legacy test
 entries manually. New installations create neither these projections nor old
 TransactionEvent duplicate meters. Existing canonical IDs remain unchanged.
+
+## Permission OFF and restart display recovery
+
+Connector presence and charging activity have different evidence. When a fresh
+ChargingEnabled readback confirms OFF, the canonical charging sensor replaces a
+retained `charging` enum with `connected` (German: Verbunden). Its source is
+`runtime:charging_disabled` and `state_represents=confirmed_charging_disabled`.
+This proves charging stopped; it does not prove that the vehicle is still present.
+The connector sensor independently retains its last occupied state with
+`state_fresh=false`. No session-end or vehicle-departure event is fabricated.
+An ON transition makes the derived charging display stale until a new CP observation
+supersedes it; reading the previous snapshot cannot resurrect stale `charging`.
+
+HA restoration initially retains enum values as stale display history. Fresh
+StatusNotification/TransactionEvent observations in the current generation replace
+that history immediately. Previously the first ChargingEnabled ON read advanced
+the CP epoch even when it merely discovered unchanged ON; state events received
+before that read were consequently left stale indefinitely until another event
+(often caused by a user command). The initial ON read now preserves those events.
+A real OFF-to-ON transition still fences prior CP observations, and reconnect/boot
+clears the old generation's CP epoch along with live observations. Connecting the
+socket or loading persisted enums alone never establishes fresh physical state.

@@ -65,6 +65,11 @@ class Runtime:
         old = self.get(token.station)
         now = datetime.now(UTC)
         self._phase_epoch[token.station] = now
+        self._cp_epoch = {
+            scope: at
+            for scope, at in self._cp_epoch.items()
+            if scope.station != token.station
+        }
         unknown = CapabilityEvidence(EvidenceState.UNKNOWN, "runtime", now, reason)
         return StationSnapshot(
             token,
@@ -210,7 +215,11 @@ class Runtime:
             or old.valid_until <= observation.observed_at
         ):
             revision += 1
-        if old is None or old.enabled != observation.enabled:
+        # The first ON read is discovery, not a CP transition. Status events
+        # may already have arrived in this generation before inventory finishes.
+        if observation.enabled is False or (
+            old is not None and old.enabled != observation.enabled
+        ):
             self._cp_epoch[observation.scope] = observation.observed_at
         observation = replace(observation, revision=revision)
         self._publish(

@@ -28,10 +28,13 @@ parameters remain in the existing profile Store, without a second settings sourc
 
 Legacy records containing only `active_wallbox`, absent/corrupt ownership records,
 and unknown ownership versions remain inhibited and require explicit takeover.
-Migration does not grant ownership. Local/unknown authority, online disconnect,
-changed runtime generations or identities invalidate live readiness. An observed
-Local transition durably revokes history; a later Remote transition cannot revive it.
-A deliberate HA shutdown/reload instead suspends execution and preserves history.
+Migration does not grant ownership. Unknown authority, transport disconnect and
+changed runtime generations suspend live readiness and fence pending work, while
+preserving legitimate ownership history and permission/profile intent. Fresh Remote
+and ChargingEnabled evidence reconcile that same record automatically on reconnect.
+An observed Local transition or mismatched station identity durably revokes history;
+a later Remote transition cannot revive it. HA shutdown/reload preserves history
+through its existing deliberate suspension path.
 
 Only the active, ready connector under confirmed Remote authority may receive
 profile permission ON or operating points. This check is in `ControlRuntime`,
@@ -358,8 +361,11 @@ Observation and session entities expose stable roles and scoped join metadata.
 Connector observations take priority. EVSE/station aggregates are offered to the
 card only when runtime topology maps them to exactly one connector; ambiguous
 aggregates are omitted. Entity renames cannot redirect readings to another box.
-Normal internal status messages are hidden. Actionable command, takeover and
-battery errors remain visible. All backend guards apply independently of the card.
+Normal internal status messages are hidden. The confirmed operating point appears
+under **Wallboxparameter / Wallbox parameters**. The permanent **Meldungen / Messages**
+section follows it, showing `-` when empty. Existing command, takeover, battery and
+input/service errors appear there once, retaining their existing red styling.
+All backend guards apply independently of the card.
 
 ## Validation boundary
 
@@ -372,7 +378,11 @@ profile support. No release version or tag is changed by this iteration.
 
 ## Restart and reload reconciliation
 
-The same path handles a new HA runtime and integration reload. Fresh Remote/OCPP
+The same recovery path handles a new HA runtime, integration reload and a station
+reconnect within a running HA instance. A temporary network outage, wallbox service
+restart, Pi reboot or power cycle does not itself revoke prior explicit ownership.
+On disconnect, execution is inhibited and old recovery tasks are cancelled; on
+return, fresh evidence starts a new recovery using the existing ownership record. Fresh Remote/OCPP
 authority, matching entry/station/EVSE/connector and station identity, and fresh
 ChargingEnabled observation must agree with a valid historical ownership record.
 Remote alone never establishes ownership. Recovery sends no takeover and no
@@ -402,7 +412,18 @@ current limit from measured draw. This is a hardware-validation requirement for
 non-disruptive adoption. Existing phase/current writes are unchanged.
 
 The current protocol exposes no persistent authority-transition counter. A
-Remote -> Local -> Remote transition entirely while HA is offline is indistinguishable
-from uninterrupted Remote if the station returns with the same identity and fresh
+Remote -> Local -> Remote transition entirely while HA or the station/transport is
+offline is indistinguishable from uninterrupted Remote if the station returns with
+the same identity and fresh
 authority evidence. Recovery cannot detect that history. Online Local transitions
 are observed, revoke persisted ownership, and continue to require explicit takeover.
+
+Fresh connector and charging observations are independent of the electrical retry.
+They update immediately without a power/profile command or a 60-second delay. If a
+vehicle departed during the outage, fresh Available/Idle evidence replaces retained
+occupancy/charging, and the ended transaction prevents adopting a stale running
+session. Recovery waits for the normal runtime prerequisites. If the effective
+point changed, fresh phase/schedule/voltage evidence validates the actual point
+before the active profile reconciles its target. Matching points require no duplicate
+charging command; a changed target can require an ordinary fenced profile command.
+There is no blind replay of the old electrical point or synthetic OFF/ON cycle.

@@ -19,6 +19,7 @@ Records are INFO lines with a stable prefix followed by compact, sorted JSON:
 ```text
 WBMGR subsystem=pv {"decision":...}
 WBMGR subsystem=recovery {"stage":...}
+WBMGR subsystem=reconnect {"connected":...,"ownership":...}
 ```
 
 PV records preserve the existing evaluation cadence and fields; see
@@ -99,3 +100,24 @@ final adoption/rejection sequence with the successful simulated peer path.
 
 These diagnostics do not change recovery criteria, parsing, evidence lifetimes,
 solver behavior, fencing, ownership, profile intent, charging commands or retries.
+
+## Reconnect and physical-state transitions
+
+The same switch enables `subsystem=reconnect`. Records are emitted only when the
+reported state changes, not for every unchanged voltage sample or permission poll.
+They include transport connectivity, connection/boot generations, fresh observed
+authority, ownership status and retained-proof boolean, permission intent versus
+actual permission, and connector/charging observation values and freshness.
+
+* `connected=false`, `prior_ownership_retained=true`: temporary outage, execution fenced.
+* New connection/boot generation with unknown authority: reconnect awaiting evidence.
+* Fresh `authority=remote`, `ownership=restored_ownership`: existing proof reconciled.
+* `ownership=ownership_rejected_local`, no retained proof: Local invalidated ownership.
+* `physical_states` changes: incoming CP evidence or a permission transition changed
+  the validity of the raw observation. The canonical HA charging sensor separately
+  exposes confirmed OFF as described in [runtime state](metering-runtime-state.md).
+
+`charging_command_sent=false` in these observer records means the notification
+handler sent no command. Subsequent `subsystem=recovery` records describe electrical
+readback/adoption and permission reconciliation; ordinary profile diagnostics retain
+their existing command reporting. No additional switch or polling was introduced.

@@ -99,7 +99,7 @@ class WallboxManagerCard extends HTMLElement {
       #permission:hover:not(:disabled) {filter:brightness(.95)}
       .live {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px}
       .caption {font-size:12px;color:var(--secondary-text-color);margin-bottom:3px} .reading {font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-      #actual {align-self:end} .notice {font-size:13px;color:var(--error-color);line-height:1.4;margin:12px 0 0}
+      .section {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px} h3 {font-size:14px;font-weight:500;margin:0 0 8px} #messages:has(.notice:not([hidden])) #no-messages {display:none} .notice {font-size:13px;color:var(--error-color);line-height:1.4;margin:12px 0 0}
       [hidden] {display:none!important}
       @media(max-width:360px) {ha-card {padding:12px} .row {gap:8px} header {gap:8px;flex-wrap:wrap} #wallbox-row {max-width:100%;width:100%} .numeric {gap:2px} .step {width:32px}}
     </style><ha-card>
@@ -111,8 +111,9 @@ class WallboxManagerCard extends HTMLElement {
       <label class="row" id="approximation-row"><span id="approximation-label"></span><select id="approximation"></select></label>
       ${["soll_soc_speicher", "soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay"].map(id => `<label class="row" id="${id}-row"><span id="${id}-label"></span><input type="number" id="${id}" min="${id === "regulation_interval" ? 1 : 0}" max="${id.endsWith("delay") ? 3600 : id === "regulation_interval" ? 300 : 99}" step="1"></label>`).join("")}
       <button id="permission"></button>
-      <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div><div class="reading" id="actual"></div></div>
-      <p id="status" class="notice" role="status" hidden></p><p id="error" class="notice" role="alert" hidden></p>
+      <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
+      <section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section>
+      <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><div class="reading" id="no-messages">-</div><p id="status" class="notice" role="status" hidden></p><p id="error" class="notice" role="alert" hidden></p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
     get("wallbox").onchange = e => this.activate(e.target.value);
@@ -301,6 +302,8 @@ class WallboxManagerCard extends HTMLElement {
       get(id).disabled = busy || !available(state(id));
     }
     if (this.hold && (this.hold.button.disabled || (this.hold.id === "reserve" && !attrs.battery_configured))) this.stopHold();
+    get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
+    get("messages-label").textContent = de ? "Meldungen" : "Messages";
     get("actual").title = de ? "Bestätigter Betriebspunkt · Stromlimit, kein Messwert" : "Confirmed operating point · current limit, not measured current";
     const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Energie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Energy",power:"Power",duration:"Duration"};
     for (const [key,value] of Object.entries(liveValues(hass.states,d,hass.language))) {

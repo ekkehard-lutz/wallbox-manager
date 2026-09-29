@@ -12,6 +12,7 @@ from .const import DOMAIN
 from .control.commands import CommandReason, CommandResult, CommandStatus, ControlArea
 from .core.authority import ControlAuthority
 from .core.models import ConnectorId, EvseId, StationId
+from .diagnostics import OPTION, diagnostic_event
 from .entity import station_identifier
 
 
@@ -49,6 +50,7 @@ class ProfileOwnership:
         self.context = None
         self.suspended = set()
         self.recovery_tasks = {}
+        self._diagnostic_state = None
 
     async def load(self):
         async with self.lock:
@@ -260,11 +262,17 @@ class ProfileOwnership:
             self.publish()
             return
         if self.ready and (control is None or not self.permits(control, target)):
-            self.revoke("ownership_invalidated")
-            if control and hasattr(control, "profiles"):
-                control.profiles.invalidate(target)
-                control.profiles.sessions_changed()
-        elif not self.ready and self.record and control:
+            # Execution is fenced immediately, but transport loss is not an
+            # authority transition. Reuse the persisted restart proof on return.
+            self.ready = False
+            self.context = None
+            self.status = "awaiting_ownership_evidence"
+            if control:
+                self.recovery_tasks.pop(control, None)
+                if hasattr(control, "profiles"):
+                    control.profiles.invalidate(target)
+                    control.profiles.sessions_changed()
+        if not self.ready and self.record and control:
             state = control.runtime.get(target.station)
             if state and state.connected:
                 authority = control.runtime.authority(target.station)
@@ -300,7 +308,42 @@ class ProfileOwnership:
                         profile.recover(target, dict(self.record)), "Profile recovery"
                     )
                 )
+        self.diagnose(control, target)
         self.publish()
+
+    def diagnose(self, control, target):
+        if not control or not self.entries[control.entry_id][0].options.get(
+            OPTION, False
+        ):
+            return
+        state = control.runtime.get(target.station)
+        if not state:
+            return
+        fields = dict(
+            station=target.station.value,
+            connected=state.connected,
+            connection_generation=state.token.connection_generation,
+            boot_generation=state.token.boot_generation,
+            authority=control.runtime.authority(target.station).value,
+            ownership=self.status,
+            prior_ownership_retained=self.record is not None,
+            enabled_intent=self.record["enabled_intent"] if self.record else None,
+            enabled_actual=control.runtime.enabled(target),
+            physical_states=[
+                dict(
+                    quantity=o.channel.quantity.value,
+                    scope=str(o.channel.scope),
+                    value=o.value,
+                    fresh=control.runtime.physical_state_fresh(o),
+                )
+                for o in state.observations
+                if o.channel.quantity.value in ("connector_state", "charging_state")
+            ],
+            charging_command_sent=False,
+        )
+        if fields != self._diagnostic_state:
+            self._diagnostic_state = fields
+            diagnostic_event(self.entries[control.entry_id][0], "reconnect", **fields)
 
     async def activate_station(self, control, station):
         state = control.runtime.get(station)

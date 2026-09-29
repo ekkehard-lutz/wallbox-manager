@@ -80,3 +80,17 @@ def profile_name(profile, target):
     from .profiles import target_key
 
     return profile.settings.get(target_key(target), {}).get("profile")
+
+
+def diagnostic_event(entry, subsystem, **fields):
+    """Transition-only callers share the existing opt-in diagnostic switch."""
+    if not entry.options.get(OPTION, False):
+        return
+    try:
+        _LOGGER.info(
+            "WBMGR subsystem=%s %s",
+            subsystem,
+            json.dumps(fields, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        )
+    except Exception:
+        pass

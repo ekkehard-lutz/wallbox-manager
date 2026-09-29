@@ -549,3 +549,41 @@ test('last known CP states remain visible and dimmed until fresh observations', 
   assert.equal(get('charging').textContent,'Idle');
   assert.equal(get('connection').style.opacity,'1');
 });
+
+test('parameters heading precedes confirmed point and permanent messages section',()=>{
+  const {card:c,get}=card(states(true));
+  const html=c.shadowRoot.innerHTML;
+  assert.ok(html.indexOf('id="parameters-label"') < html.indexOf('id="actual"'));
+  assert.ok(html.indexOf('id="actual"') < html.indexOf('id="messages"'));
+  assert.match(html, /id="no-messages">-<\/div>/);
+  assert.equal(get('parameters-label').textContent,'Wallbox parameters');
+  assert.equal(get('messages-label').textContent,'Messages');
+  assert.equal(get('status').hidden,true);
+  assert.match(html, /#messages:has\(\.notice:not\(\[hidden\]\)\) #no-messages \{display:none\}/);
+  assert.match(html, /\.notice \{[^}]*color:var\(--error-color\)/);
+  c.hass={...c._hass, language:'de'};
+  assert.equal(get('parameters-label').textContent,'Wallboxparameter');
+  assert.equal(get('messages-label').textContent,'Meldungen');
+});
+
+test('existing backend and service errors stay inside messages without duplicates',async()=>{
+  const data=states(true);
+  data['select.anything'].attributes.control_status='voltage_unavailable';
+  const {card:c,get}=card(data);
+  const html=c.shadowRoot.innerHTML;
+  const section=html.slice(html.indexOf('id="messages"'));
+  for(const id of ['status','error']) {
+    assert.equal(html.split(`id="${id}"`).length-1,1);
+    assert.ok(section.includes(`id="${id}"`));
+  }
+  assert.match(get('status').textContent,/No fresh voltage/);
+  assert.equal(get('status').hidden,false);
+  c.hass={...c._hass,callService:async()=>{throw new Error('station error');}};
+  await c.call('switch','turn_off',{});
+  assert.equal(get('error').textContent,'station error');
+  assert.equal(get('error').hidden,false);
+  delete data['select.anything'].attributes.control_status;
+  c.hass={...c._hass, states:data};
+  assert.equal(get('status').hidden,true);
+  assert.equal(get('error').hidden,false); // Placeholder stays hidden for service errors too.
+});

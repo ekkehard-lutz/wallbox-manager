@@ -307,15 +307,19 @@ async def test_cp_off_retains_physical_states_and_reload_only_restores_display(
         ),
     )
     assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
-    assert states[Quantity.CHARGING_STATE].native_value == "charging"
-    assert all(not e.state_fresh for e in states.values())
+    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert not states[Quantity.CONNECTOR_STATE].state_fresh
+    assert states[Quantity.CHARGING_STATE].state_fresh
+    assert (
+        hass.states.get(states[Quantity.CHARGING_STATE].entity_id).state == "connected"
+    )
     assert runtime.sessions.get(target).active
     assert runtime.enabled(target) is False
     await unload()
     runtime = await setup()
     states = {e.channel.quantity: e for e in operational(platforms)}
     assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
-    assert states[Quantity.CHARGING_STATE].native_value == "charging"
+    assert states[Quantity.CHARGING_STATE].native_value == "connected"
     assert all(e.available and not e.state_fresh for e in states.values())
     token = runtime.connect(target.station)
     at = datetime.now(UTC)
@@ -369,3 +373,71 @@ async def test_explicit_departure_still_ends_session_when_cp_is_off(diagnostics)
         live=True,
     )
     assert not runtime.sessions.get(target).active
+
+
+@pytest.mark.parametrize("parent", [False, True])
+@pytest.mark.parametrize("read_first", [False, True])
+async def test_restart_cp_events_before_or_after_first_on_read_are_fresh(
+    diagnostics, parent, read_first
+):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, setup, unload = diagnostics
+    target = ConnectorId(EvseId(StationId("cp"), "1"), "1")
+    scope = target.evse if parent else target
+
+    def samples():
+        return (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(scope, Quantity.CHARGING_STATE, State.CHARGING),
+        )
+
+    token = runtime.connect(target.station)
+    runtime.observe(token, samples())
+    await hass.async_block_till_done()
+    await unload()
+    runtime = await setup()
+    states = operational(platforms)
+    assert all(e.available and not e.state_fresh for e in states)
+    token = runtime.connect(target.station)
+    assert all(not e.state_fresh for e in states)  # Socket alone proves nothing.
+    if not read_first:
+        runtime.observe(token, samples())
+    at = datetime.now(UTC)
+    runtime.observe_enabled(
+        token, EnabledObservation(target, True, at, at + timedelta(seconds=60))
+    )
+    if read_first:
+        assert all(not e.state_fresh for e in states)
+        runtime.observe(token, samples())
+    assert all(e.state_fresh for e in states)
+    assert all(hass.states.get(e.entity_id).attributes["state_fresh"] for e in states)
+
+
+async def test_real_off_on_transition_still_requires_new_cp_evidence(diagnostics):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("cp"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    runtime.observe(
+        token,
+        (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(target, Quantity.CHARGING_STATE, State.CHARGING),
+        ),
+    )
+    await hass.async_block_till_done()
+    for enabled in (True, False, True):
+        at = datetime.now(UTC)
+        runtime.observe_enabled(
+            token, EnabledObservation(target, enabled, at, at + timedelta(seconds=60))
+        )
+    states = {e.channel.quantity: e for e in operational(platforms)}
+    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert all(not e.state_fresh for e in states.values())
+    runtime.observe(
+        token, (observation(target, Quantity.CHARGING_STATE, State.CHARGING),)
+    )
+    assert states[Quantity.CHARGING_STATE].native_value == "charging"
+    assert states[Quantity.CHARGING_STATE].state_fresh

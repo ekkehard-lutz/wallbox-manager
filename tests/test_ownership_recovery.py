@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -554,4 +554,326 @@ async def test_live_reserve_survives_owned_reload_and_restores_on_permission_off
     finally:
         await p.close()
         c.close()
+        remove()
+
+
+async def reconnect(
+    owner,
+    control,
+    bound,
+    peer,
+    profile,
+    *,
+    boot=True,
+    local=False,
+    unplugged=False,
+    voltage=True,
+):
+    """Same live HA objects; fresh protocol generation after station outage."""
+    from ocpp.v21 import call
+
+    target = bound.target
+    runtime = control.runtime
+    old = runtime.get(target.station)
+    session = runtime.sessions.get(target)
+    transaction_id = session.external_transaction_id if session else "vehicle"
+    runtime.disconnect(old.token)
+    assert not owner.ready
+    assert owner.record is not None
+    assert not control.profile_permitted(target)
+    token = runtime.connect(target.station, protocol="ocpp", protocol_version="2.1")
+    if boot:
+        token = runtime.boot(token, old.identity)
+    live = bound.adapter
+    live.token = token
+    assert not owner.ready  # Fresh authority and permission are still absent.
+    rows = inventory()
+    for row in rows:
+        if row["variable"]["name"] == "ControlAuthority":
+            row["variable_attribute"][0]["value"] = "Local" if local else "OCPP"
+        if row["variable"]["name"] == "ChargingEnabled":
+            row["variable_attribute"][0]["value"] = str(peer.enabled).lower()
+    runtime.discover(
+        token,
+        discovery=old.discovery,
+        charging_schedule=old.charging_schedule,
+        connectors=(target,),
+        electrical=live.electrical_inventory(token, rows),
+    )
+    live.inventory_completed(token, rows, datetime.now(UTC))
+    if live.enabled_poll_task:
+        live.enabled_poll_task.cancel()
+    if voltage:
+        measured(runtime, token, target)
+    await peer.call(
+        call.StatusNotification(
+            timestamp=datetime.now(UTC).isoformat(),
+            evse_id=1,
+            connector_id=1,
+            connector_status="Available" if unplugged else "Occupied",
+        )
+    )
+    await peer.call(
+        call.TransactionEvent(
+            event_type="Ended" if unplugged else "Updated",
+            timestamp=(
+                max(datetime.now(UTC), session.updated_at) + timedelta(microseconds=1)
+            ).isoformat(),
+            trigger_reason="EVDeparted" if unplugged else "ChargingStateChanged",
+            seq_no=(session.sequence or 0) + 1,
+            transaction_info={
+                "transaction_id": transaction_id,
+                "charging_state": "Idle" if unplugged else "Charging",
+            },
+            evse={"id": 1, "connector_id": 1},
+        )
+    )
+    await control.adapter(target).read_enabled()
+    return token
+
+
+@pytest.mark.parametrize("boot", [False, True])
+@pytest.mark.parametrize("phases,power", [(1, 2.3), (3, 5.52)])
+async def test_station_reconnect_reuses_proof_and_adopts_without_commands(
+    site, boot, phases, power
+):
+    owner, (a, _), _ = site
+    c, bound, peer, p, key = a
+    await owner.activate(key)
+    await p.set_value(bound.target, "power_kw", power)
+    peer.phase_read_value = "RST" if phases == 3 else "Rxx"
+    await physical_report(peer, peer.phase_read_value)
+    p.wait = lambda _: asyncio.Event().wait()
+    await p.permission(bound.target, True)
+    schedule(peer, c.confirmed_point(bound.target))
+    counts = len(peer.requests), len(peer.permissions), len(peer.authority_requests)
+    for _ in range(2):
+        await reconnect(owner, c, bound, peer, p, boot=boot)
+        await asyncio.wait_for(asyncio.shield(p.recoveries[bound.target]), 2)
+        assert owner.ready and owner.record["enabled_intent"]
+        assert p.setting(bound.target)["profile"] == "NETZ"
+        attrs = c.attributes(bound.target)
+        assert attrs["applied_phase_count"] == phases
+        assert attrs["electrical_recovery_status"] == "point_adopted"
+        assert counts == (
+            len(peer.requests),
+            len(peer.permissions),
+            len(peer.authority_requests),
+        )
+
+
+async def test_station_reconnect_local_invalidates_proof_permanently(site):
+    owner, c, bound, peer, p, _ = await prepared(site)
+    token = await reconnect(owner, c, bound, peer, p, local=True)
+    assert owner.record is None and not owner.ready
+    assert owner.status == "ownership_rejected_local"
+    c.runtime.observe_authority(
+        token,
+        AuthorityObservation(
+            bound.target.station,
+            ControlAuthority.REMOTE,
+            datetime.now(UTC),
+            "test",
+        ),
+    )
+    assert not owner.ready and not c.profile_permitted(bound.target)
+
+
+async def test_station_reconnect_unplugged_updates_physical_state(site):
+    from custom_components.wallbox_manager.core.telemetry import (
+        Channel,
+        Quantity,
+        State,
+    )
+
+    owner, c, bound, peer, p, _ = await prepared(site)
+    parked = asyncio.Event()
+
+    async def wait(_):
+        parked.set()
+        await asyncio.Event().wait()
+
+    p.wait = wait
+    counts = len(peer.requests), len(peer.permissions)
+    await reconnect(owner, c, bound, peer, p, unplugged=True)
+    await asyncio.wait_for(parked.wait(), 2)
+    assert c.confirmed_point(bound.target) is None
+    assert counts == (len(peer.requests), len(peer.permissions))
+    assert owner.ready and owner.record["enabled_intent"]
+    state = c.runtime.get(bound.target.station)
+    for quantity, expected in (
+        (Quantity.CONNECTOR_STATE, State.AVAILABLE),
+        (Quantity.CHARGING_STATE, State.IDLE),
+    ):
+        observation = state.observation(Channel(bound.target, quantity))
+        assert observation.value == expected
+        assert c.runtime.physical_state_fresh(observation)
+    assert not c.runtime.sessions.get(bound.target).active
+
+
+async def test_station_reconnect_adopts_changed_point_then_reconciles_profile(site):
+    from fractions import Fraction
+
+    from test_ocpp21_control import point
+
+    owner, (a, _), _ = site
+    c, bound, peer, p, key = a
+    await owner.activate(key)
+    await p.set_value(bound.target, "power_kw", 2.3)
+    p.wait = lambda _: asyncio.Event().wait()
+    await p.permission(bound.target, True)
+    schedule(peer, point(current=Fraction(6)))
+    count = len(peer.requests), len(peer.permissions)
+    await reconnect(owner, c, bound, peer, p)
+    await asyncio.wait_for(asyncio.shield(p.recoveries[bound.target]), 2)
+    assert c.recovery_status[bound.target] == "point_adopted"
+    assert c.confirmed_point(bound.target).current_a == 10
+    assert len(peer.requests) == count[0] + 1
+    assert len(peer.permissions) == count[1]
+
+
+async def test_station_reconnect_voltage_missing_waits_existing_retry(site):
+    owner, c, bound, peer, p, _ = await prepared(site)
+    waiting, retry = asyncio.Event(), asyncio.Event()
+
+    async def wait(seconds):
+        assert seconds == 60
+        waiting.set()
+        await retry.wait()
+
+    p.wait = wait
+    counts = len(peer.requests), len(peer.permissions)
+    token = await reconnect(owner, c, bound, peer, p, voltage=False)
+    await asyncio.wait_for(waiting.wait(), 2)
+    assert c.confirmed_point(bound.target) is None
+    assert c.recovery_status[bound.target] == "voltage_unavailable"
+    measured(c.runtime, token, bound.target)
+    retry.set()
+    # Park the regulation task launched after adoption independently of retry.
+    p.wait = lambda _: asyncio.Event().wait()
+    await asyncio.wait_for(asyncio.shield(p.recoveries[bound.target]), 2)
+    assert c.recovery_status[bound.target] == "point_adopted"
+    assert counts == (len(peer.requests), len(peer.permissions))
+
+
+@pytest.mark.parametrize("diagnostics", [False, True])
+async def test_reconnect_diagnostics_describe_transitions_without_idle_noise(
+    site, diagnostics, caplog
+):
+    owner, c, bound, peer, p, _ = await prepared(site)
+    p.entry.options["pv_diagnostic_logging"] = diagnostics
+    caplog.set_level(logging.INFO)
+    await reconnect(owner, c, bound, peer, p)
+    await asyncio.wait_for(asyncio.shield(p.recoveries[bound.target]), 2)
+
+    def records():
+        return [
+            json.loads(r.message.removeprefix("WBMGR subsystem=reconnect "))
+            for r in caplog.records
+            if r.message.startswith("WBMGR subsystem=reconnect ")
+        ]
+
+    lines = records()
+    assert bool(lines) is diagnostics
+    if diagnostics:
+        assert any(not r["connected"] and r["prior_ownership_retained"] for r in lines)
+        assert any(r["connected"] and r["authority"] == "unknown" for r in lines)
+        assert any(
+            r["authority"] == "remote"
+            and r["ownership"] == "restored_ownership"
+            and r["enabled_intent"]
+            and r["enabled_actual"]
+            for r in lines
+        )
+        assert any(any(o["fresh"] for o in r["physical_states"]) for r in lines)
+    owner.changed()
+    measured(c.runtime, c.runtime.get(bound.target.station).token, bound.target)
+    assert records() == lines
+    token = c.runtime.get(bound.target.station).token
+    c.runtime.observe_authority(
+        token,
+        AuthorityObservation(
+            bound.target.station,
+            ControlAuthority.LOCAL,
+            datetime.now(UTC),
+            "test",
+        ),
+    )
+    if diagnostics:
+        assert records()[-1]["ownership"] == "ownership_rejected_local"
+        assert records()[-1]["prior_ownership_retained"] is False
+
+
+async def test_remote_reconnect_without_prior_takeover_never_grants_ownership(site):
+    owner, (a, _), _ = site
+    c, bound, _, p, _ = a
+    runtime = c.runtime
+    runtime.disconnect(bound.token)
+    token = runtime.connect(bound.target.station)
+    runtime.observe_authority(
+        token,
+        AuthorityObservation(
+            bound.target.station,
+            ControlAuthority.REMOTE,
+            datetime.now(UTC),
+            "test",
+        ),
+    )
+    assert owner.record is None and not owner.ready
+    assert not c.profile_permitted(bound.target)
+    assert not p.recoveries
+
+
+async def test_reconnect_reconciles_retained_on_intent_when_station_reset_to_off(site):
+    owner, c, bound, peer, p, _ = await prepared(site)
+    peer.enabled = False
+    counts = len(peer.permissions), len(peer.authority_requests)
+    await reconnect(owner, c, bound, peer, p)
+    await asyncio.wait_for(asyncio.shield(p.recoveries[bound.target]), 2)
+    assert owner.ready and owner.record["enabled_intent"]
+    assert c.runtime.enabled(bound.target) is True
+    assert p.setting(bound.target)["profile"] == "PV_SURPLUS"
+    assert len(peer.permissions) == counts[0] + 1
+    assert len(peer.authority_requests) == counts[1]
+
+
+async def test_successful_ocpp_off_updates_canonical_sensor_without_cp_event(site):
+    from ocpp.v21 import call
+
+    from custom_components.wallbox_manager.core.telemetry import Channel, Quantity
+    from custom_components.wallbox_manager.sensor import StateObservationSensor
+
+    owner, c, bound, peer, p, _ = await prepared(site)
+    await peer.call(
+        call.StatusNotification(
+            timestamp=datetime.now(UTC).isoformat(),
+            evse_id=1,
+            connector_id=1,
+            connector_status="Occupied",
+        )
+    )
+    await peer.call(
+        call.TransactionEvent(
+            event_type="Updated",
+            timestamp=datetime.now(UTC).isoformat(),
+            trigger_reason="ChargingStateChanged",
+            seq_no=2,
+            transaction_info={"transaction_id": "active", "charging_state": "Charging"},
+            evse={"id": 1, "connector_id": 1},
+        )
+    )
+    sensors = [
+        StateObservationSensor(c.runtime, c.entry_id, Channel(bound.target, q))
+        for q in (Quantity.CONNECTOR_STATE, Quantity.CHARGING_STATE)
+    ]
+    assert [e.native_value for e in sensors] == ["occupied", "charging"]
+    remove = c.runtime.subscribe(
+        lambda snapshot: [setattr(e, "snapshot", snapshot) for e in sensors]
+    )
+    try:
+        result = await p.permission(bound.target, False)
+        assert result.status.value == "applied"
+        assert [e.native_value for e in sensors] == ["occupied", "connected"]
+        assert not sensors[0].state_fresh and sensors[1].state_fresh
+    finally:
         remove()
