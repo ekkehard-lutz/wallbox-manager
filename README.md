@@ -114,8 +114,9 @@ unsupported maxima do not create sensors (in particular no invented 2p maximum).
 Existing entity identities remain in the registry offline. Diagnostic source and
 evidence attributes distinguish OCPP observations from configured operator fallback.
 
-Configure fallback fields individually in integration options, associated with
-explicit station/EVSE/connector IDs. No vendor, model, firmware, serial or global
+Open the discovered wallbox configuration subentry to configure its missing
+fallback fields; no central station picker is needed. Complete OCPP inventory
+requires no manual entries. No vendor, model, firmware, serial or global
 verification checkbox is required. Decimal and fractional currents are accepted.
 References never override verified wallbox values. Normal current limits belong
 to the runtime controls, not the reference form.
@@ -148,12 +149,11 @@ The OCPP 2.1 adapter discovers the exact writable Actual variable, sends
 SetVariables with `OCPP`, requires a matching Accepted response, and then confirms
 Actual `OCPP` with GetVariables. `Local` means local control; other values remain
 unknown. This descriptive extension is not a universal standardized OCPP variable.
-After confirmation, takeover reads actual Enabled and preserves it. If enabled,
-it applies the stored operating target once, including zero. If disabled, it keeps
-the stored target without sending a profile or permission write. No restored
-permission value is used; desired targets do not change.
-The button result reports acquisition; connector diagnostics report application,
-which can still be blocked by missing transaction, voltage or capability evidence.
+After authority confirmation, takeover explicitly sends charging permission OFF
+and confirms it, including when hardware was already OFF. It does not apply a
+stored operating target. Completion requires confirmed OFF; charging ON is a
+separate subsequent user action. The active-wallbox coordinator also stops the
+previous Remote wallbox before switching. Desired targets remain unchanged.
 
 Connection/boot generations, newer edits, concurrent takeover requests and local
 loss events fence queued work and late results. Discovery/telemetry/reconnects never
@@ -162,8 +162,8 @@ connection, using the inspected station's hard-wired local-loss NotifyEvent path
 this assumes timely delivery of those events, not a remote ownership lease. A
 command already sent cannot be recalled. `wallbox-stationary` already supplies the
 read/write/readback and local-loss interface and needs no change. Hardware validation
-remains outstanding. Future profile selection can explicitly reuse the generic
-`take_control` operation instead of hiding takeover in ordinary edits.
+remains outstanding. Explicit active-wallbox selection and the Take control button
+use the same guarded operation. Ordinary profile selection never acquires authority.
 
 ### Physical feedback and phase retention
 
@@ -199,8 +199,8 @@ but unconfirmed state is unknown, never a restored value. The station must suppl
 a hardware-confirmed reader; its descriptive inventory value is not used as live
 state. Polls never initiate charging, retries, takeover or target synchronization.
 
-Explicit ON prepares the stored operating point first, then sends permission and
-reads actual state back. Missing transaction, capability or evidence prevents ON.
+Explicit ON is allowed only for the active, ready wallbox. It prepares the stored
+operating point first, then sends permission and reads actual state back. Missing transaction, capability or evidence prevents ON.
 OFF changes permission without changing the target and does not need a transaction.
 Writable station-scoped permission is usable only for one unambiguous connector.
 Queue, generation, authority, hardware-state and electrical safety fences apply.
@@ -259,63 +259,121 @@ Wallbox
 Standard OCPP functionality is preferred whenever possible. Vendor-specific
 functionality may be implemented through isolated OCPP DataTransfer extensions.
 
-## Planned charging profiles and control ownership
+## Grid charging profile (v0.3.x)
 
-The planned user-selectable Wallbox Manager profiles are:
+The implemented **Grid (`NETZ`)** profile charges at a requested fixed power in kW.
+Exactly one backend-selected active wallbox is eligible for profile control.
+**Active wallbox does not mean charging enabled.** Other wallboxes may independently
+charge in Local; they are external site loads for the profile controller.
 
-- OFF
-- PV_SURPLUS
-- PV_OPTIMUM
-- PV_MAXIMUM
-- GRID
+With one wallbox, press **Take control**. With multiple wallboxes, select the active
+wallbox. Both are explicit authority requests: the backend stops/confirms the old
+Remote wallbox, acquires the selected station, explicitly sends OFF and confirms
+OFF before completing selection. **Every takeover forces charging permission OFF.**
+A separate user action starts charging. Startup/reload, profile selection and
+background events never acquire authority. Power edits while active/enabled apply after a one-second trailing-edge backend
+debounce; explicit permission changes bypass this debounce. Per-wallbox settings persist
+separately. With authority, profile selection disables permission; without authority,
+profile selection/settings are configuration-only and send no OCPP commands.
 
-The PV profiles work standalone using configured, vendor-neutral HA sensors:
-separate non-negative grid import/export and battery charge/discharge power in W,
-battery SOC and observed reserve in %, plus remaining-current-day PV forecast in
-kWh for PV_OPTIMUM. Signed vendor readings can be split with HA template/helper
-sensors; Wallbox Manager does not write inverter registers.
+The backend retains phase-lockout retries, bounded vehicle-current observation,
+station current limits and primitive safeguards. Optional battery references belong
+to the central integration; only the active actually charging wallbox owns a
+journaled temporary reserve, with restoration and external-change precedence.
 
-- PV_SURPLUS preserves a configurable high battery SOC while using current surplus.
-- PV_OPTIMUM has separate daytime minimum and evening battery SOC targets, with
-  a configured average household consumption in W, battery capacity in kWh and
-  forecast/safety reserve in kWh. The forecast means total PV generation remaining
-  today, before household consumption. Predicted household energy shortfall until
-  sunset is converted to additional SOC above the evening target, clamped between
-  minimum SOC and 100%. HA supplies today’s sunset; after sunset the remaining
-  duration and forecast contribution are zero, without planning against tomorrow.
-- PV_MAXIMUM maximizes PV plus permitted battery contribution using its own minimum
-  SOC, independent of PV_OPTIMUM.
+HACS installs the bundled card with the integration. After restart/browser refresh,
+add only:
 
-Known battery reserves take precedence over lower profile minima. If expected
-battery discharge becomes unavailable while grid import persists, flow-based
-fallback reduces charging toward PV-only surplus. Small grid-import tolerance
-covers control resolution and latency; it is not an intentional charging budget.
-Missing/stale required inputs inhibit the dependent profile.
+```yaml
+type: custom:wallbox-manager-card
+```
 
-Two additional states represent control ownership and cannot be selected as
-normal Wallbox Manager profiles:
+In storage resource mode, the integration automatically serves the JS and creates
+one Lovelace module resource. YAML resources require manual configuration (see
+the registration guide below). No entity mapping or
+copy to `/config/www` is required. Discovery uses stable backend role/identity
+metadata and survives entity renames. After verifying automatic loading, remove
+temporary manually registered copies such as `/local/wallbox-manager-card.js`.
+See [automatic registration verification](docs/frontend-registration.md).
 
-- LOCAL: control was taken locally at the wallbox.
-- REMOTE: control was explicitly granted to an external Energy Manager.
+The compact card shows requested charging power, discharge reserve, optional start
+delay and optional charging duration for NETZ, or only battery target SoC for PV Surplus. Technical regulation
+settings are in the integration options. Its two-column status section shows measured
+power, session duration as total `H:MM`, and the confirmed applied phase/current
+limit, including any phase-lockout substitute.
+Known backend technical limits bound requests. The optional battery control is
+labelled **Discharge reserve / Entladereserve**. Grid uses the per-wallbox
+`phase_switch_deviation_pct` preference without relaxing approximation policies;
+disabled charging and OFF/0 A do not retain the previous phase mode.
 
-Selecting a normal Wallbox Manager profile is an explicit user action and may
-therefore acquire remote/OCPP authority from the wallbox. A fresh explicit “Take
-control” action in Energy Manager can also directly leave LOCAL and acquire REMOTE
-through a trusted HA/Wallbox Manager user-action mechanism; selecting a normal
-profile first is not required. Keep LOCAL latched until device authority is verified.
-Failure leaves LOCAL with no usable lease or background retry. On success, create
-a fresh lease and require a fresh target before REMOTE becomes ACTIVE.
+See [Grid profile, ownership, migration and card installation](docs/grid-profile.md)
+for the exact state model, guarded sequence, station-scoped capability subentries,
+battery lifecycle and failure behavior.
 
-If the wallbox is switched to local control, Wallbox Manager must not
-automatically reacquire remote authority.
+PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
+PV_DAILY_OPTIMUM, PV_MAXIMUM and the external Energy Manager interface remain deferred.
 
-REMOTE control uses an owner-specific runtime lease and heartbeat. Technical
-interruptions preserve the desired profile and existing owner authorization. After
-reconciliation, normal profiles resume automatically; REMOTE requires an
-authenticated recovery handshake, a fresh lease and a fresh target, without another
-user click. A deliberate LOCAL takeover blocks automatic recovery and requires
-a new explicit user action to leave LOCAL. Ordinary API calls, heartbeats and
-recovery handshakes cannot assert that authorization or bypass the LOCAL latch.
+## Integration settings and profile timing
+
+The native Home Assistant options form separates **General parameters / Allgemeine
+Parameter** (diagnostics, minimum reserve, battery SoC, PV power, consumption power)
+from **Regulation parameters / Regelparameter** (regulation interval, PV start/stop
+delays, SoC hysteresis, power smoothing window). Consumption means **total site
+consumption including the selected wallbox**. Existing settings are migrated;
+explicit central values win. Conflicting old per-wallbox values are selected by
+sorted stored target identity, per setting, with all originals archived in the
+options. No integration version change is needed. Diagnostic-only edits do not
+reload the integration.
+
+Power smoothing defaults to **5 seconds**; **0 disables it**. Only PV and total
+consumption power are averaged. This is a time-weighted moving window: 2000 W for
+4 seconds and 1000 W for 1 second produces 1800 W over 5 seconds. Startup averages
+only known time. Larger windows suppress short load spikes but respond more slowly.
+The regulation interval is independent: a 5-second interval can use a 15-second
+window. SoC, voltage, safety state and selected-wallbox actual power remain raw.
+Missing or stale readings pause decisions without synthesizing OFF; new readings
+cannot invalidate a dispatched command snapshot.
+
+NETZ **Start delay / Startverzögerung** and **Charging duration / Ladedauer** are
+optional relative durations in `hh:mm`, never local clock times. Hours can exceed
+23 (`24:00`, `120:15`); minutes must be 00–59. Empty means unset; `00:00` is zero
+(a zero charging duration expires immediately).
+
+| Start delay | Charging duration | Behavior |
+| --- | --- | --- |
+| Empty | Empty | Immediate, unlimited |
+| Set | Empty | Delayed, then unlimited |
+| Empty | Set | Immediate, stops after duration |
+| Set | Set | Delayed, duration counted from scheduled start |
+
+For example, `01:30` plus `02:00` waits 90 minutes from Charging Permission ON,
+then allows charging for two hours from the scheduled start. These are **one-shot**
+inputs for the next authorization. Editing or selecting NETZ does not start a timer.
+ON captures the values into a persisted request and clears the pending inputs.
+The existing hours/minutes fields then show deadline-derived countdowns, rounded
+up to whole minutes and disabled for editing. At each deadline the corresponding
+field becomes unset. Explicit zero duration immediately invokes permission OFF,
+even if a delay was entered.
+
+Duration expiry uses the same confirmed Charging Permission OFF path as the switch,
+not just a zero-power request. Failed disables retain a stopping request and retry
+at the existing 60-second interval; HA never assumes hardware permission is OFF.
+Manual OFF or profile selection cancels and consumes an armed request. Later ON
+is immediate/unlimited unless new timing values were entered. Requested power and
+discharge reserve remain persistent.
+
+Reload/restart preserves absolute start/end deadlines; downtime counts and recovery
+processes missed expiry through the normal authority/ownership/control fences.
+Beta.15 configured timings migrate as pending one-shot inputs for the next explicit
+ON; their old recurring activation timestamp is discarded. Consumed timings never
+become pending again. Profile attributes expose armed state, deadlines, captured
+duration, and idle/waiting/active/stopping/consumed/cancelled state.
+
+Requested power uses backend `technical_min_kw` / `technical_max_kw`, calculated
+from verified capability envelopes, exact current steps/limits, eligible phases
+and fresh observed voltages. No nominal voltage is assumed. The compact editor
+steps by 0.1 kW below 10 kW, by 1 kW above it, with reversible 9.9↔10.0 transitions
+and clamping to known bounds. Direct entry retains backend OperatingPoint selection.
 
 ## Planned Energy Manager interface
 
@@ -344,7 +402,8 @@ automations.
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
 now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
-Charging profiles and the planned Energy Manager interface remain future work.
+The v0.3.x Grid and PV Surplus profiles build on these controls. PV Daily Optimum,
+PV Maximum and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
 phase envelopes, voltage observations, power requests and solver results are
@@ -353,10 +412,12 @@ uses actual per-phase voltages, and returns an offered operating point, logical 
 or an explicit unreachable reason. A deferred-result contract is reserved for the
 future phase-transition planner. It does not command a charger or claim measured
 EV consumption. Metering and runtime state are reported separately by adapters.
-Ownership and charging profiles remain future work.
+External ownership leases remain future work.
 
 Run development checks with `.venv/bin/ruff check .`,
-`.venv/bin/ruff format --check .` and `.venv/bin/pytest`. Core tests require no running
+`.venv/bin/ruff format --check .`, `.venv/bin/pytest`,
+`node --check custom_components/wallbox_manager/www/wallbox-manager-card.js` and
+`node tests/test_wallbox_card.cjs`. Core tests require no running
 Home Assistant instance; Python 3.14 CI runs these same checks.
 
 ## Read-only OCPP endpoint
@@ -404,3 +465,33 @@ and [MIT notices](custom_components/wallbox_manager/THIRD_PARTY_NOTICES.md).
 ## License
 
 Wallbox Manager is licensed under the MIT License. See `LICENSE`.
+
+### PV Surplus primitive profile
+
+The 0.3.x PV Surplus profile regulates charging from central PV/consumer power
+references, with optional battery SoC start/stop hysteresis. It reuses the common
+solver, explicit charging permission and active-wallbox ownership. See
+[PV Surplus configuration and behavior](docs/pv-surplus-profile.md).
+
+PV beta.2 refinements add backend profile availability, configuration without
+control authority, and separate PV start/stop delays (defaults 0/90 seconds).
+Profile settings remain stored when hidden. See the
+[PV profile documentation](docs/pv-surplus-profile.md) and
+[automatic card registration and verification](docs/frontend-registration.md),
+including migration of existing integration-path Lovelace resources.
+
+Wallbox Manager offers one integration-level **Diagnostic logging** option
+(German: **Diagnoseprotokoll**, disabled by default) for troubleshooting.
+Detailed records use `WBMGR subsystem=pv` for PV evaluations and
+`WBMGR subsystem=recovery` for restart/reload recovery in any charging profile.
+See [diagnostic logging and recovery evidence](docs/diagnostic-logging.md) and
+[PV diagnostic fields](docs/pv-surplus-profile.md#opt-in-wallbox-manager-diagnostics).
+Source sensor freshness is independent of the controller interval; the inspected
+Fronius PV Manager currently polls every 30 seconds. Its proposed fast/slow design
+is [analysis only](docs/fronius-polling-analysis.md).
+
+The bundled card uses the Lovelace resource collection as its sole loader. Stale
+integration-path resources are updated automatically and duplicates are removed;
+one JavaScript module row remains in Resources. Restart Home Assistant after
+installing this fix to clear the previous extra-module registration, then fully
+reload the browser. See [lifecycle details](docs/frontend-registration.md).

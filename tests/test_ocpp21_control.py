@@ -62,6 +62,7 @@ class Peer(ChargePoint):
         self.enabled_read_value = None
         self.status = "Accepted"
         self.profile_response = None
+        self.composite_response = None
         self.authority = "OCPP"
         self.authority_status = "Accepted"
         self.authority_read_value = None
@@ -112,8 +113,28 @@ class Peer(ChargePoint):
             ]
         )
 
+    @on("GetCompositeSchedule")
+    async def composite_schedule(self, evse_id, duration, charging_rate_unit=None):
+        self.operations.append("schedule_get")
+        if self.composite_response:
+            return self.composite_response(evse_id, duration)
+        return call_result.GetCompositeSchedule(status="Rejected")
+
     @on("GetVariables")
     async def get_variables(self, get_variable_data):
+        if get_variable_data[0]["variable"]["name"] == "PhaseRotation":
+            self.operations.append("phase_get")
+            return call_result.GetVariables(
+                get_variable_result=[
+                    {
+                        "component": item["component"],
+                        "variable": item["variable"],
+                        "attribute_status": "Accepted",
+                        "attribute_value": getattr(self, "phase_read_value", "Rxx"),
+                    }
+                    for item in get_variable_data
+                ]
+            )
         if get_variable_data[0]["variable"]["name"] == "ChargingEnabled":
             self.operations.append("enabled_get")
             return call_result.GetVariables(

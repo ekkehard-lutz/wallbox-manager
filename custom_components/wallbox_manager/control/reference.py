@@ -18,6 +18,11 @@ FIELDS = {
 
 class ConfiguredReference:
     def __init__(self, options):
+        self.children = tuple(
+            ConfiguredReference(value)
+            for station in options.get("station_references", {}).values()
+            for value in station.values()
+        )
         self.options = options
         self.target = None
         if options.get("reference_station_id"):
@@ -35,6 +40,10 @@ class ConfiguredReference:
         )
 
     def capabilities(self, target, at):
+        if self.children:
+            return tuple(
+                c for child in self.children for c in child.capabilities(target, at)
+            )
         if (
             self.target is None
             or not isinstance(target, ConnectorId)

@@ -1,0 +1,411 @@
+# PV Surplus primitive profile (0.3.x)
+
+PV Surplus shares the Grid profile's persisted settings, explicit charging
+permission, active-wallbox ownership, common operating-point solver and OCPP
+execution runtime. With authority, profile selection explicitly disables charging
+and waits for confirmation. Without authority, selecting/configuring profiles only
+stores settings and sends no OCPP commands. Neither action takes authority.
+An explicit takeover preserves configuration, leaves charging disabled and still
+requires a separate enable action.
+
+## Central references and measurement quality
+
+Configure Home Assistant entity references in the integration options under
+**General parameters / Allgemeine Parameter**:
+
+- `leistung_pv`: PV generation power (required).
+- `leistung_verbraucher`: total consumer power, **including** the selected
+  wallbox (required).
+- `soc_speicher_aktuell`: battery SoC (optional). Its configuration alone enables
+  battery-aware PV operation; the Grid reserve reference is not required.
+
+Grid is always available. Backend profile options include PV Surplus only when
+both power references are configured, independently of battery/reserve mappings.
+Temporary sensor outages keep the profile in the selector and pause regulation;
+already confirmed charging continues unchanged.
+The card hides the selector if there is only one available profile. Removing a
+required mapping fences pending work and requests OFF; automatic fallback to Grid
+waits for confirmed disabled permission. Without authority it remains pending until
+OFF can be confirmed, rather than taking over a locally controlled wallbox.
+
+Options persist across reloads. Power accepts W, kW and MW and is normalized to
+watts. SoC requires percent (`%`), within 0–100. Unknown, unavailable, non-numeric,
+non-finite, future or more than 90 seconds unreported readings suspend new PV
+regulation decisions. They do not request zero power: the confirmed operating
+point remains the last known hardware state. Explicit measurement expiry is also
+respected. The next valid measurement cycle resumes normal regulation.
+A configured but invalid SoC never falls back to battery-free operation.
+
+Actual charging power is discovered by stable session-power metadata: integration
+entry, station, EVSE, connector and current runtime incarnation. Exactly one
+matching sensor is required; other wallboxes are excluded. No requested power,
+current limit or historical applied point substitutes for a missing measurement.
+Fresh session-power expiry is exposed on the existing sensor. Consequently,
+missing initial session measurements also prevent automatic charging.
+
+```
+available_power = pv_power - consumer_power + selected_actual_charging_power
+```
+
+For 8000 W PV, 5000 W consumers and 3000 W selected charging, the result is 6000 W.
+Zero or negative available power prevents a start and starts the stop-delay timer
+for an ongoing charge. Adding back actual charging power avoids repeatedly subtracting the controlled wallbox's own consumption.
+
+## Central regulation and time-window smoothing
+
+**Regulation parameters / Regelparameter** contains the regulation interval
+(default 5 s), PV start delay (0 s), PV stop delay (90 s), SoC hysteresis (5 percentage
+points), and power smoothing window (5 s, range 0–300 s). Existing stored values
+are retained during migration; these defaults apply only when absent. The card
+only exposes battery target SoC for this profile. Advanced approximation entities
+remain available, but are not shown in the everyday card.
+
+PV and total consumption each have an independent, event-driven history. HA state
+changes record normalized watts and a monotonic timestamp; there is no sampling
+poll. Each value is constant until the next event or its validity expiry. At a
+regulation decision, integrate each valid segment over `[now - window, now]` and
+divide by the total valid duration. Keep the segment crossing the left boundary
+and discard earlier samples. For example, 4 s × 2000 W + 1 s × 1000 W over 5 s gives
+1800 W. With only two known seconds at startup, divide by two, not five. Unknown
+gaps have no weight and are never inserted as zero. At zero window use raw power.
+
+Larger windows reduce short duty-cycle load spikes but react more slowly. The
+window is independent of the regulation interval. Battery SoC/reserve, voltage,
+actual wallbox power and all safety/control state are not smoothed. Current raw
+measurements must still pass freshness and validity checks before averaging.
+History cannot authorize a decision while a current reading is unavailable.
+After dispatch the chosen operating point remains a snapshot: subsequent events
+are recorded for the next cycle, without re-solving the command in flight.
+
+Detailed PV diagnostics include raw and smoothed PV/load watts, window seconds,
+enabled state and known-history seconds per channel. Normal logging volume is
+unchanged. History is deliberately rebuilt on reload; unknown past time is not
+invented.
+
+## Without a battery
+
+Advanced users can set the existing approximation entity to the common solver's
+canonical value:
+
+- `up` / NOT_BELOW / Not below target: use at least the available power, within
+  achievable hardware limits; some grid import is possible.
+- `down` / NOT_ABOVE / Not above target (default): do not exceed available power;
+  a target below the minimum feasible positive point prevents a start and starts
+  the configured stop delay for an ongoing charge.
+
+No minimum-current or device/vehicle limits are bypassed.
+
+## Battery state machine
+
+Settings are `soll_soc_speicher` (default 95%) and `soc_hysterese` (default 5
+percentage points). The stop threshold is target minus hysteresis. Target settings
+are restricted to 0–99%, hysteresis to 0–99 percentage points; policy calculations additionally
+clamp the upper threshold to 99%. Hysteresis may equal or exceed the target: the
+resulting zero or negative stop threshold cannot be crossed by a valid
+nonnegative SoC. This does not bypass the start threshold or other stop/control
+conditions.
+
+| Situation | Action |
+| --- | --- |
+| Any start or restart, SoC ≤ target | OFF; waiting for SoC above target |
+| SoC > target | Charge with NOT_BELOW |
+| Already charging, stop threshold ≤ SoC ≤ target | Continue with NOT_ABOVE |
+| SoC < stop threshold | Latch battery stop; hold through stop delay, then OFF |
+| Insufficient available power | Hold confirmed phase/current through stop delay, then OFF |
+| Restart after any pause | Require SoC > target again |
+
+Equality at target permits continuation only. Equality at the stop threshold does
+not stop an ongoing charge. Battery eligibility is a separate stateful latch:
+once the lower boundary is crossed it remains stopped until SoC exceeds the
+upper target, even while electrical charging is deliberately held by the stop
+delay. The entire hysteresis band lies below the target (41%/5 pp means a strict
+start above 41% and a stop below 36%). `min_soc` applies only to the Grid profile; PV Surplus ignores legacy reserve
+values and hides the discharge-reserve input. It never creates a temporary
+MinRsvPct override. Leaving Grid can still restore an already-owned Grid override.
+Runtime continuation uses a confirmed APPLIED charging
+point and explicit profile state, not a transient OCPP Charging status. An active
+transaction identity handover (including a superseded startup identity) preserves
+confirmed continuation. A real Ended event clears continuation, battery eligibility
+and delay timers synchronously, even when Ended and Started arrive between PV ticks.
+The next genuine session requires the full start rule again.
+Permission stays enabled during profile-controlled OFF, waiting and pauses.
+Diagnostics distinguish active charging, PV pause, battery stop, waiting for SoC,
+invalid measurements and waiting for command confirmation.
+The PV profile does not modify the battery discharge reserve; Grid reserve
+restoration remains handled by the existing shared battery integration.
+
+## Regulation and safety
+
+`regulation_interval` defaults to 5 seconds (configurable 1–300 seconds). Every
+cycle reads current measurements and computes a fresh policy and solver result.
+Ordinary positive power adjustments during charging use the existing one-second
+debounce. Starts with zero start delay and OFF skip it. Battery-SoC policy stops
+use the same stop-delay state machine as insufficient PV. Event values update the
+battery latch; recovery above the upper threshold cancels a pending normal stop.
+Invalid measurements prevent new positive dispatch; they do not retrospectively
+invalidate a sent command, invalidate the regulator or synthesize OFF. Explicit control/safety invalidations still fence pending work immediately. With a configured zero stop delay, policy stops are immediate. Measurements are re-read after debounce and positive
+pre-dispatch fences reject invalid or stale policy inputs. The shared runtime
+applies PV policy before dispatch; completion checks only live control/safety state.
+Normal SoC/power events during point/permission execution are coalesced for the next
+regulation cycle, which applies the usual hysteresis and stop delay;
+every OFF clears continuation, including OFF requested through primitive controls.
+An already dispatched frame cannot be recalled, but its delayed reply cannot
+restore continuation after a safety stop; a zero-power command follows. Equal
+confirmed operating points produce no redundant OCPP operating-point commands. Phase lockouts retain the existing retry
+and cooldown implementation, including avoiding resending an already applied
+fallback point. Temporary refusals (including stale/busy) retain the last confirmed
+point and continuation state and use the existing 60-second retry interval.
+Changing desired surplus does not bypass or extend that deadline; safety OFF does.
+The control runtime serializes operating-point commands through completion of the
+adapter operation, including phase fallback. Pending commands retain their intent
+generation across normal PV evaluations; the next cycle reads the newest inputs.
+An accepted write rejected by the final fence is not reported as confirmed and
+requires reconciliation even if the next target equals the last confirmed point.
+
+Authority loss, deselection, profile transitions, permission disable and unload
+invalidate pending work. A deliberate HA shutdown/reload preserves historical
+ownership and user intent for fresh-evidence reconciliation as documented in
+[Grid profile recovery](grid-profile.md#restart-and-reload-reconciliation).
+It never restores queued work or treats stored state as current hardware proof. Safe zero-power capability must be
+verified before PV charging can start. A missing safe-stop capability is surfaced
+as a blocked request rather than inventing protocol support.
+
+The bundled card discovers all entities automatically. It shows approximation
+without a battery, or target SoC/hysteresis with a battery. Regulation interval and
+both delays are shown in both modes. Hiding controls never erases stored settings.
+Profile configuration remains editable without authority; the permission button
+then displays the real state but cannot issue a misleading enable action.
+English/German labels, live session data, APPLIED display and the explicit
+permission button remain available.
+
+## Asymmetric PV delays (beta.2)
+
+Persistent `pv_start_delay` defaults to 0 seconds and `pv_stop_delay` to 90 seconds;
+both accept 0–3600 seconds. Start delay counts only continuous eligible surplus,
+valid measurements, feasible positive solver output and the complete battery start
+rule. A lost condition resets it. With zero delay, enabling with valid measurements
+starts immediately; newly eligible measurements also wake a paused regulator.
+
+During active charging, insufficient surplus starts a separate stop deadline.
+The controller holds the last confirmed current and phase point, validated by the
+same solver against current electrical limits. This intentionally permits temporary
+grid import or battery discharge, including while SoC is in the continuation band.
+Sufficient surplus cancels this deadline. Expiry requests OFF without disabling
+permission; every subsequent restart requires the full start rule and start delay.
+If the held point is no longer electrically feasible, OFF is immediate.
+
+User OFF, authority loss and existing hard safety conditions bypass PV delays.
+Invalid/stale PV, load, selected-power or SoC measurements instead leave desired,
+pending and confirmed points unchanged, and reset continuous policy timers.
+Missing electrical evidence likewise produces no new setpoint rather than OFF;
+no new retry deadline is manufactured. A gap cannot establish a continuous low-PV
+or low-SoC interval. Crossing the PV storage-SoC threshold is a normal
+policy stop and uses the configured delay; it is not a hard battery protection signal. Regulation wakes at the earliest regulation,
+PV-delay or measurement-expiry deadline. Device phase/restart lockouts remain
+independent and cannot extend the PV stop deadline. Delayed positive commands are
+checked again at dispatch/acknowledgement against current policy and deadlines.
+
+## Limitations and hardware validation
+
+This is the accepted first-order power balance: no DC/AC conversion or inverter
+loss correction, no PV Daily Optimum, PV Maximum or external Energy Manager.
+Reference sensors must report at least every 90 seconds; delayed/asynchronous
+meter readings can temporarily distort the balance. No prediction or smoothing is
+included. Command execution time and a changed-target debounce can extend a cycle.
+
+Validate on hardware: zero-power suspension while permission remains enabled,
+restart from OFF, connector-specific power metadata and freshness, both phase
+transitions and lockout recovery, battery threshold crossings, sensor outages,
+authority handover and integration reload. Verified capabilities and simulated
+OCPP tests cannot replace these device checks.
+
+## Opt-in Wallbox Manager diagnostics
+
+Open **Settings → Devices & services → Wallbox Manager → Configure** and enable
+**Diagnostic logging** (German: **Diagnoseprotokoll**).
+It defaults to disabled, is saved in the integration options, and needs no OCPP
+control authority. A diagnostic-only change takes effect for subsequent evaluations
+without integration reload, charging/OCPP commands or changes to profile settings.
+Changing entity references at the same time still uses their existing reload path.
+Disable this option after troubleshooting: records are detailed and may be frequent.
+
+The same switch also enables restart/reload recovery diagnostics in all profiles,
+including NETZ; see [recovery diagnostics](diagnostic-logging.md). Content depends
+on the active feature/profile and current activity.
+
+Each actual PV evaluation writes exactly one physical **INFO** record prefixed
+`WBMGR subsystem=pv`, followed by compact JSON with stable sorted keys. Normal HA logs suffice;
+no `logger:` configuration is needed. Nested solver checks, debounce replanning
+and dispatch freshness fences belong to the same record. `trigger` distinguishes
+periodic regulation, permission evaluation, safety-stop execution, SoC-event
+policy evaluation and standalone wake-up plans. Read-only dispatch fences alone
+do not create additional cycles; an inactive/unauthorized regulator does not
+invent periodic cycles. Records finish when evaluation/command processing ends,
+before the interval wait; cancellation and exceptions also produce one record.
+Concurrent event/permission records can finish out of start order, so compare
+`started_at`, `evaluated_at`, identity and `trigger` as well as log order.
+
+Records contain:
+
+- Station/EVSE/connector/profile, authority/ownership, connection, hardware enable,
+  vehicle/charging state; scoped measured power/current/voltage and their validity.
+- External entity IDs, raw state, numeric value, unit, availability, report timestamp,
+  report age and explicit missing/non-numeric/unknown/unavailable/stale/future/expired
+  status; selected connector power sources are identified separately.
+- Profile thresholds/hysteresis/interval/delays, electrical envelopes and limits,
+  calculated non-wallbox load and surplus, policy target/direction, solver bounds,
+  selected point and resulting current/phase/power approximation.
+- Applied point before/after, last commanded solver point, new and previous command
+  outcomes, pending target, phase retry/backoff and elapsed/remaining delay.
+  `command_evaluated` means a new execution result, which can include reuse of an
+  already confirmed point; it does **not** claim an OCPP frame was sent.
+- Explicit `decision` and `reason` (plus `policy_reason`, `solver_reason`,
+  `command_reason` where applicable). Examples: START, HOLD, INCREASE, DECREASE,
+  START_PENDING, STOP_PENDING, STOP, OFF, INPUT_UNAVAILABLE, WAIT_PHASE_LOCKOUT,
+  COMMAND_FAILED, NO_AUTHORITY, CANCELLED. PLANNED denotes policy-only evaluation,
+  not a claim of successful execution. There is currently no separate software
+  enable/re-enable lockout timer; `enable_lockout=not_implemented` makes that explicit.
+
+Null means absent/unknown, never a fabricated zero. Power is watts, current amps,
+voltage volts, delay/age seconds, SoC percent. A diagnostic collection failure is
+isolated from control; it is explicitly marked rather than triggering a stop.
+Only selected numeric/state metadata is collected, not credentials, arbitrary
+entity attributes, protocol messages or endpoint URLs.
+
+### Freshness remains the existing policy
+
+Power/SoC and selected wallbox-power inputs use HA `last_reported` (fallback
+`last_updated` only for objects without that property). `last_reported` advances
+when an entity reports even the same value; `last_updated` advances only when its
+state/attributes change. This is **HA report age**, not proof of a new physical
+sample inside an inverter. The existing acceptance window is 0–90 seconds, with
+valid units/numbers/ranges and any `valid_until` deadline also required. Battery
+reserve is logged for context; the PV policy does not regulate or reject charging
+based on the reserve reference's age. OCPP measurements have their own timestamps
+and deadlines. No freshness rules or controller defaults changed.
+
+Multiple 5-second evaluations may use the same upstream sample. Fronius PV Manager
+currently has a **30-second coordinator interval**, confirmed by repository analysis;
+changing Wallbox Manager's interval cannot speed up those source entities. No
+new-sample gate, smoothing, or Fronius fast polling is introduced here. See the
+[read-only polling analysis and proposed next step](fronius-polling-analysis.md).
+
+### Next hardware test
+
+1. Install/restart, verify the automatically loaded card as described in
+   [frontend verification](frontend-registration.md), and enable diagnostics.
+2. Record selected reference entities, target SoC/hysteresis, start/stop delays and
+   interval. Reproduce the approximately 39% SoC / 38% target / 3.5 kW PV case.
+3. Save consecutive `WBMGR subsystem=pv` lines from before charging starts through the stop,
+   including event/safety-stop records. Compare `decision/reason`, source ages,
+   site load/surplus, policy target, selected and confirmed points, and retry/delay
+   state. A SoC above target alone does not explain the other input/safety branches.
+4. Check that diagnostic-only toggles produce no charging command or disconnect;
+   compare normal behavior with logging disabled. Check invalid/stale source and
+   phase-lockout cases under the existing hardware test procedure.
+5. Disable diagnostic logging and retain the captured records for analysis before
+   changing the control algorithm or upstream polling.
+
+### First-start reconciliation
+
+An explicit ON first prepares the electrical point while ChargingEnabled is still
+false, then confirms permission independently. A temporary preparation/permission
+refusal now starts an in-memory startup worker with the existing 60-second retry
+interval, even when no prior applied point exists. It re-reads policy and fresh
+execution evidence for each attempt. Only successful preparation and permission
+confirmation hand over to normal PV regulation. OFF, changed intent, ownership or
+authority loss, disconnect/reboot and unload revoke this pending authorization;
+restart/reload never restores the queued command or retry deadline. Persisted
+explicit user intent is independently reconciled through the ownership recovery
+path. Phase feedback alone cannot prove the current
+setpoint, so an uncertain operation is retried rather than inferred as applied.
+
+After dispatch, the original current/phase point and voltage basis remain fixed.
+The runtime still fences capabilities, hard limits, transaction, intent, ownership,
+authority, permission and connection changes. Volatile PV/load/session power,
+normal SoC, voltage and measurement timestamps belong to the next regulation cycle.
+New writes always require fresh phase-operation proof and valid regulation inputs.
+A temporary phase-feedback gap after confirmation keeps the positive desired
+request instead of manufacturing an OFF request. Incomplete planning evidence
+pauses regulation and breaks continuous policy timers; a fresh genuine stop
+condition must satisfy its configured delay. This never authorizes a write from
+cached phase/voltage evidence or bypasses explicit safety invalidations.
+
+The PV diagnostic record adds `startup_pending` and `command_fence_reason`; `retry_remaining_s` now
+also includes first-start retries. `policy_reason=actively_charging` describes a
+positive policy decision, not permission or hardware confirmation;
+`policy_allows_charging` makes that distinction explicit. Use `enabled`, `applied`
+and `ongoing_after` to determine actual permission and confirmed continuation.
+Connector availability is diagnostic telemetry, not transport connectivity or
+authority, and is not a command fence by itself.
+
+### Command snapshot validity versus live control/safety validity
+
+Each regulation iteration samples policy and electrical inputs and calculates one
+operating point. Before dispatch, including after OCPP queue/lock waits, the runtime
+checks input validity, current PV policy, electrical representability and fresh
+phase-operation proof. A snapshot that is no longer valid before the write is
+rejected; the adapter still checks exact wire representation and scope.
+
+After dispatch, the runtime does not re-solve the target or call the PV policy
+again. PV/load/selected charging power, normal SoC, voltage, their timestamps and
+ordinary charging activity do not invalidate completion. The confirmed point
+retains the dispatched snapshot's voltage and offered-power basis. For example,
+1p/9A calculated at 230 V remains the confirmed command when 228 V arrives before
+the acknowledgement; the next cycle calculates using 228 V. Measurement gaps hold
+the last confirmed point under the preceding transient-gap semantics. No smoothing
+or second operating-point cache is introduced.
+
+Live fences remain: intent/profile epochs and explicit cancellation, user OFF,
+ownership, permission revision, authority revision, connection/boot generation,
+adapter/transaction scope, capability proof and hard current limits. Any change
+to the capability/limit snapshot remains conservatively fenced. No independent
+hard battery-protection signal exists in normal PV SoC policy: its lower threshold
+uses the next cycle and configured stop delay, rather than cancelling a sent
+command. Explicit control actions still supersede it immediately.
+
+The existing pending slot covers point preparation and permission confirmation.
+A restarted regulator waits for superseded point cleanup before sampling again.
+Retry timing is unchanged; measurement drift alone no longer creates a retry.
+
+`command_fence_reason` separates `pre_dispatch_voltage_unavailable`,
+`pre_dispatch_setpoint_changed`, `pre_dispatch_pv_policy` and
+`pre_dispatch_phase_changed` from actual live invalidations: `intent_changed`,
+`profile_or_ownership_changed`, `connection_changed`, `authority_changed`,
+`permission_changed`, `caller_invalidated`, `capabilities_changed`,
+`electrical_limits_changed`, `transaction_changed` and
+`adapter_or_transaction_unavailable`. Ordinary post-dispatch drift leaves the
+fence reason unset.
+
+### Stateful stop diagnostics
+
+`stop_policy_reason` identifies the normal policy requesting a stop while
+`stop_delay_holding` identifies deliberate continued charging. The existing delay
+fields expose elapsed and remaining seconds from the original monotonic deadline;
+regulation uses `setdefault` and cannot extend it. Recovery cancels the timer and a
+later independent stop starts a fresh one. The held phase/current is revalidated
+using fresh voltage, without requiring unchanged voltage-derived watts.
+`battery_policy_allowed`, `battery_hysteresis_holding` and the two battery threshold
+fields distinguish latched continuation/waiting from an unrestricted policy result.
+`ownership_status` distinguishes explicit acquisition, restored ownership and
+rejected live identity/authority evidence.
+
+
+### Confirmed continuation across input and transport gaps
+
+`pv_plan()` distinguishes a feasible OFF result from no actionable result. The
+latter leaves the existing request and confirmed hardware point untouched;
+`pv_sequence()` skips dispatch until a valid plan exists. `pv_ongoing` is preserved
+through input gaps, while `pv_sessions` distinguishes identity handover from the
+ledger's actual session ends. There is no second operating-point cache.
+
+A wallbox disconnect still invalidates tasks and old command contexts. The shared
+control runtime retains historical confirmation without exposing it as live
+APPLIED proof while disconnected. Existing ownership recovery obtains fresh
+PhaseRotation/GetCompositeSchedule evidence after reconnect before resuming PV
+regulation. It does not issue an OFF/ON pair to reconstruct state. The existing
+60-second retry policy is unchanged; transient planning gaps do not enter it.
+If fresh permission evidence instead confirms that the station actually reset to
+OFF, the existing explicit ON/recovery path may prepare a verified zero-current
+point before enabling CP. That preparation still needs normal hardware confirmation;
+it is not inferred from an outage or used to interrupt an ongoing charge.

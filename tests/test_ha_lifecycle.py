@@ -40,10 +40,12 @@ async def test_setup_without_wallbox_and_unload(tmp_path):
     hass.config_entries.async_forward_entry_setups = AsyncMock()
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
     config = entry()
+    hass.config_entries._entries[config.entry_id] = config
     try:
         assert await async_setup_entry(hass, config)
         hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
-            config, ("binary_sensor", "sensor", "switch", "number", "select", "button")
+            config,
+            ("binary_sensor", "sensor", "switch", "number", "select", "button", "text"),
         )
         server = config.runtime_data.server
         assert config.runtime_data.state.stations == ()
@@ -86,19 +88,35 @@ async def test_config_flow_validation_and_duplicate_port():
 
 
 async def test_migrate_scaffold_entry():
-    config = SimpleNamespace(version=1, data={})
+    config = SimpleNamespace(version=1, data={}, options={})
 
     def update(e, **kwargs):
-        e.version = kwargs["version"]
-        e.data = kwargs["data"]
+        for key, value in kwargs.items():
+            setattr(e, key, value)
 
     hass = SimpleNamespace(config_entries=SimpleNamespace(async_update_entry=update))
     assert await async_migrate_entry(hass, config)
     assert config.data == {"host": "0.0.0.0", "port": 9000}
-    assert config.version == 2
+    assert config.version == 3
 
 
 async def test_platform_setup_failure_closes_listener(monkeypatch):
+    from custom_components.wallbox_manager import battery, ownership, profiles
+
+    monkeypatch.setattr(
+        ownership,
+        "async_get_ownership",
+        AsyncMock(
+            return_value=Mock(record=None, register=Mock(return_value=lambda: None))
+        ),
+    )
+
+    monkeypatch.setattr(battery, "BatteryReserve", lambda *args: Mock(load=AsyncMock()))
+    monkeypatch.setattr(
+        profiles,
+        "GridProfiles",
+        lambda *args: Mock(load=AsyncMock(), close=AsyncMock()),
+    )
     from custom_components.wallbox_manager import session_storage
 
     storage = Mock(load=AsyncMock(), close=AsyncMock())
@@ -144,6 +162,7 @@ async def test_entry_reload_restores_session_before_listening(tmp_path, monkeypa
     hass.config_entries.async_forward_entry_setups = AsyncMock()
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
     config = entry()
+    hass.config_entries._entries[config.entry_id] = config
     try:
         assert await async_setup_entry(hass, config)
         state = config.runtime_data.state

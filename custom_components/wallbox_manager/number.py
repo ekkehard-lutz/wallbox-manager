@@ -14,16 +14,36 @@ async def async_setup_entry(hass, entry, async_add_entities):
         hass,
         entry,
         async_add_entities,
-        lambda c, e, t: [
-            ControlNumber(c, e, t, key)
-            for key in (
-                "desired_charging_power",
-                "phase_switch_deviation_pct",
-                "allowed_current_1p",
-                "allowed_current_2p",
-                "allowed_current_3p",
+        lambda c, e, t: (
+            [
+                ControlNumber(c, e, t, key)
+                for key in (
+                    "desired_charging_power",
+                    "phase_switch_deviation_pct",
+                    "allowed_current_1p",
+                    "allowed_current_2p",
+                    "allowed_current_3p",
+                )
+            ]
+            + (
+                [
+                    ProfileNumber(c, e, t, "soll_power"),
+                    ProfileNumber(c, e, t, "min_soc"),
+                    *[
+                        ProfileNumber(c, e, t, key)
+                        for key in (
+                            "soll_soc_speicher",
+                            "soc_hysterese",
+                            "regulation_interval",
+                            "pv_start_delay",
+                            "pv_stop_delay",
+                        )
+                    ],
+                ]
+                if hasattr(c, "profiles")
+                else []
             )
-        ],
+        ),
     )
 
 
@@ -81,3 +101,79 @@ class ControlNumber(ControlEntity, NumberEntity):
 
     async def async_set_native_value(self, value):
         await self.control.change(self.target, **{self.field: self._value(value)})
+
+
+class ProfileNumber(ControlEntity, NumberEntity):
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, control, entry_id, target, key):
+        super().__init__(control, entry_id, target, key)
+        self.field = "power_kw" if key == "soll_power" else key
+        if key in (
+            "soc_hysterese",
+            "regulation_interval",
+            "pv_start_delay",
+            "pv_stop_delay",
+        ):
+            self._attr_entity_category = EntityCategory.CONFIG
+            self._attr_entity_registry_enabled_default = False
+        self._attr_native_unit_of_measurement = "kW" if key == "soll_power" else "%"
+        self._attr_native_step = 0.1 if key == "soll_power" else 1
+        if key in ("regulation_interval", "pv_start_delay", "pv_stop_delay"):
+            self._attr_native_unit_of_measurement = "s"
+            self._attr_native_min_value = 1 if key == "regulation_interval" else 0
+
+    @property
+    def available(self):
+        if self.field == "min_soc":
+            return self.control.profiles.battery.configured
+        return self.field in (
+            "power_kw",
+            "regulation_interval",
+            "pv_start_delay",
+            "pv_stop_delay",
+        ) or bool(self.control.profiles.references.get("soc_speicher_aktuell"))
+
+    @property
+    def native_value(self):
+        return self.control.profiles.setting(self.target)[self.field]
+
+    @property
+    def native_max_value(self):
+        if self.field == "power_kw":
+            maximum = self.control.power_ceiling(self.target)
+            if maximum is not None:
+                return float(maximum / 1000)
+        # HA requires a numeric input range; this is storage validation only.
+        # Consumers must use technical_max_kw, not this fallback, as capability.
+        return {
+            "soll_soc_speicher": 99,
+            "soc_hysterese": 99,
+            "regulation_interval": 300,
+            "pv_start_delay": 3600,
+            "pv_stop_delay": 3600,
+        }.get(self.field, 100)
+
+    @property
+    def extra_state_attributes(self):
+        attrs = super().extra_state_attributes
+        if self.field == "power_kw":
+            maximum = self.control.power_ceiling(self.target)
+            minimum = self.control.power_floor(self.target)
+            attrs["technical_min_kw"] = (
+                float(minimum / 1000) if minimum is not None else None
+            )
+            attrs["technical_max_kw"] = (
+                float(maximum / 1000) if maximum is not None else None
+            )
+        return attrs
+
+    def restore_state(self, previous):
+        pass
+
+    async def async_set_native_value(self, value):
+        if self.field == "soll_soc_speicher" and scalar(value).denominator != 1:
+            raise ValueError("battery target SoC must be a whole percent")
+        await self.control.profiles.set_value(self.target, self.field, value)

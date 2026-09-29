@@ -4,6 +4,7 @@ import json
 import math
 from collections.abc import Callable
 from contextvars import ContextVar
+from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
 from ocpp.exceptions import OCPPError
@@ -23,6 +24,7 @@ from ....control.commands import (
 from ....core.authority import ControlAuthority
 from ....core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
 from ....core.models import ConnectorId, EvseId, PhaseMode
+from ....diagnostics import recovery_record, recovery_snapshot
 from ....solver.operating_point import OperatingPoint
 from ..common.inventory import InventoryAdapter
 from .phase_feedback import accept_phase_events
@@ -350,6 +352,238 @@ class EvseControlAdapter:
         return CommandResult(
             CommandStatus.FAILED, reason=CommandReason.COMMUNICATION_ERROR
         )
+
+    async def read_physical_mode(self, *, is_current):
+        """Refresh the same scoped phase evidence used by NotifyEvent, read-only."""
+        from ....core.models import PhaseMode, PhysicalPhaseObservation
+        from .phase_feedback import LIFETIME
+
+        component = {
+            "name": "Connector",
+            "evse": {
+                "id": int(self.evse.value),
+                "connector_id": int(self.target.value),
+            },
+        }
+        variable = {"name": "PhaseRotation"}
+        at = datetime.now(UTC)
+        if not is_current():
+            recovery_record(
+                "phase_readback", reason="command_fence_stale", attempted=False
+            )
+            return
+        recovery_record("phase_readback", result="request", attempted=True)
+        try:
+            response = await self.adapter.call(
+                call.GetVariables(
+                    get_variable_data=[
+                        {
+                            "component": component,
+                            "variable": variable,
+                            "attribute_type": "Actual",
+                        }
+                    ]
+                ),
+                suppress=False,
+            )
+            rows = response.get_variable_result
+            if not is_current():
+                recovery_record(
+                    "phase_readback", reason="command_fence_stale", discarded=True
+                )
+                return
+            if len(rows) != 1:
+                recovery_record("phase_readback", reason="phase_response_rows_invalid")
+                return
+            row = rows[0]
+            recovery_record(
+                "phase_readback",
+                status=row.get("attribute_status")
+                if row.get("attribute_status")
+                in (
+                    "Accepted",
+                    "Rejected",
+                    "UnknownVariable",
+                    "UnknownComponent",
+                    "NotSupportedAttributeType",
+                )
+                else "unknown",
+                value=row.get("attribute_value")
+                if row.get("attribute_value") in ("Rxx", "RST")
+                else "unrecognized",
+            )
+            if (
+                row.get("component") != component
+                or row.get("variable") != variable
+                or row.get("attribute_type", "Actual") != "Actual"
+                or row.get("attribute_status") != "Accepted"
+            ):
+                recovery_record(
+                    "phase_readback",
+                    reason="phase_readback_rejected"
+                    if row.get("attribute_status") != "Accepted"
+                    else "phase_response_scope_invalid",
+                )
+                return
+            mode = {"Rxx": PhaseMode.canonical(1), "RST": PhaseMode.canonical(3)}.get(
+                row.get("attribute_value")
+            )
+            recovery_record(
+                "phase_readback",
+                phases=mode.count if mode else None,
+                reason="phase_value_invalid" if mode is None else None,
+            )
+            observed = self.adapter.runtime.observe_physical_phase(
+                self.token,
+                PhysicalPhaseObservation(
+                    self.target,
+                    mode,
+                    at,
+                    at + LIFETIME,
+                    "ocpp2.1:GetVariables:Connector.PhaseRotation",
+                ),
+            )
+            recovery_snapshot(
+                "phase_readback",
+                lambda: dict(
+                    result="observation_stored"
+                    if observed
+                    else "observation_discarded",
+                    fresh=at <= datetime.now(UTC) < at + LIFETIME,
+                    valid_until=(at + LIFETIME).isoformat(),
+                ),
+            )
+        except (
+            TimeoutError,
+            ConnectionClosed,
+            OSError,
+            OCPPError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            OverflowError,
+        ) as exc:
+            recovery_record(
+                "phase_readback",
+                reason="phase_readback_timeout"
+                if isinstance(exc, TimeoutError)
+                else "phase_readback_failed",
+                error_type=type(exc).__name__,
+            )
+            return
+
+    async def read_operating_limit(self, *, is_current):
+        """Read an effective, constant schedule; never infer a limit from EV draw."""
+        if not is_current():
+            recovery_record(
+                "composite_schedule", reason="command_fence_stale", attempted=False
+            )
+            return None
+        if self._active_transaction() is None:
+            recovery_record(
+                "composite_schedule", reason="transaction_missing", attempted=False
+            )
+            return None
+        transaction = self._active_transaction()
+        recovery_record(
+            "composite_schedule",
+            result="request",
+            attempted=True,
+            requested_evse=self.evse.value,
+            requested_duration=60,
+        )
+        try:
+            response = await self.adapter.call(
+                call.GetCompositeSchedule(
+                    duration=60, evse_id=int(self.evse.value), charging_rate_unit="A"
+                ),
+                suppress=False,
+            )
+            reason = (
+                "command_fence_stale"
+                if not is_current()
+                else "transaction_changed"
+                if self._active_transaction() != transaction
+                else "composite_schedule_rejected"
+                if response.status != "Accepted"
+                else None
+            )
+            recovery_record(
+                "composite_schedule",
+                status=response.status
+                if response.status in ("Accepted", "Rejected")
+                else "unknown",
+                reason=reason,
+            )
+            if reason:
+                return None
+            schedule = response.schedule
+            start = datetime.fromisoformat(
+                schedule["schedule_start"].replace("Z", "+00:00")
+            )
+            periods = schedule["charging_schedule_period"]
+            recovery_snapshot(
+                "composite_schedule",
+                lambda: dict(
+                    schedule_evse=schedule["evse_id"],
+                    schedule_start=start.isoformat(),
+                    charging_rate_unit=schedule["charging_rate_unit"],
+                    period_count=len(periods),
+                    current_a=periods[0].get("limit") if periods else None,
+                    number_phases=periods[0].get("number_phases") if periods else None,
+                ),
+            )
+            reason = (
+                "schedule_evse_mismatch"
+                if schedule["evse_id"] != int(self.evse.value)
+                else "schedule_unit_unsupported"
+                if schedule["charging_rate_unit"] != "A"
+                else "schedule_time_invalid"
+                if not start
+                <= datetime.now(UTC)
+                < start + timedelta(seconds=schedule["duration"])
+                else "schedule_periods_ambiguous"
+                if len(periods) != 1
+                else "schedule_period_invalid"
+                if periods[0]["start_period"] != 0
+                else "schedule_period_invalid"
+                if set(periods[0]) - {"start_period", "limit", "number_phases"}
+                else None
+            )
+            if reason:
+                recovery_record("composite_schedule", reason=reason)
+                return None
+            current = Fraction(str(periods[0]["limit"]))
+            count = periods[0].get("number_phases")
+            recovery_snapshot(
+                "composite_schedule",
+                lambda: dict(
+                    current_a=float(current),
+                    number_phases=count,
+                    reason="schedule_current_negative" if current < 0 else None,
+                ),
+            )
+            return (current, count) if current >= 0 else None
+        except (
+            TimeoutError,
+            ConnectionClosed,
+            OSError,
+            OCPPError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            OverflowError,
+        ) as exc:
+            recovery_record(
+                "composite_schedule",
+                reason="composite_schedule_timeout"
+                if isinstance(exc, TimeoutError)
+                else "composite_schedule_unavailable_or_invalid",
+                error_type=type(exc).__name__,
+            )
+            return None
 
     def _permission_component(self, *, writable=True):
         inventory = getattr(self.adapter, "permission_inventory", None)

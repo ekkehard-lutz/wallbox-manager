@@ -176,6 +176,7 @@ async def test_multiple_stations_read_only_generic_entities(diagnostics):
         "number",
         "select",
         "button",
+        "text",
     )
     for e in all_entities:
         assert not e.should_poll

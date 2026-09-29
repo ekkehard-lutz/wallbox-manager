@@ -14,7 +14,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.data_entry_flow import FlowResult, section
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .core.values import scalar
@@ -40,12 +40,17 @@ LISTENER_SCHEMA = vol.Schema(
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 2
+    VERSION = 3
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
         return ReferenceOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(cls, config_entry):
+        return {"wallbox": WallboxCapabilityFlow}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -132,23 +137,211 @@ def validate_reference_options(data):
     return data
 
 
+def migrate_options(options):
+    """Preserve explicit legacy topology; quarantine ambiguous references."""
+    data = dict(options)
+    legacy = {key: data.pop(key) for key in REFERENCE_FIELDS if key in data}
+    if legacy:
+        try:
+            validate_reference_options(legacy)
+        except ValueError, TypeError, ZeroDivisionError, OverflowError:
+            data["unassigned_references"] = legacy
+        else:
+            stations = {
+                k: dict(v) for k, v in data.get("station_references", {}).items()
+            }
+            station = stations.setdefault(legacy["reference_station_id"], {})
+            key = f"{legacy['reference_evse_id']}:{legacy['reference_connector_id']}"
+            station.setdefault(key, legacy)
+            data["station_references"] = stations
+    return data
+
+
 class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
     async def async_step_init(self, user_input=None):
-        errors = {}
+        from homeassistant.helpers.selector import (
+            EntitySelector,
+            EntitySelectorConfig,
+            NumberSelector,
+            NumberSelectorConfig,
+        )
+        from homeassistant.helpers.storage import Store
+
+        from .regulation import DEFAULTS, migrate_regulation
+
+        stored = (
+            await Store(
+                self.hass, 1, f"wallbox_manager.{self.config_entry.entry_id}.profiles"
+            ).async_load()
+            or {}
+        )
+        self.data = migrate_regulation(
+            migrate_options(self.config_entry.options), stored
+        )
+        fields = {
+            vol.Optional(
+                "pv_diagnostic_logging",
+                default=self.data.get("pv_diagnostic_logging", False),
+            ): bool,
+            vol.Optional(
+                "min_soc_speicher",
+                description={"suggested_value": self.data.get("min_soc_speicher")},
+            ): EntitySelector(EntitySelectorConfig(domain=["number", "input_number"])),
+            vol.Optional(
+                "soc_speicher_aktuell",
+                description={"suggested_value": self.data.get("soc_speicher_aktuell")},
+            ): EntitySelector(EntitySelectorConfig()),
+        }
+        for key in ("leistung_pv", "leistung_verbraucher"):
+            fields[
+                vol.Optional(key, description={"suggested_value": self.data.get(key)})
+            ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+        regulation = {}
+        for key, default in DEFAULTS.items():
+            regulation[vol.Required(key, default=self.data.get(key, default))] = (
+                NumberSelector(
+                    NumberSelectorConfig(
+                        min=1 if key == "regulation_interval" else 0,
+                        max=3600
+                        if key in ("pv_start_delay", "pv_stop_delay")
+                        else 99
+                        if key == "soc_hysterese"
+                        else 300,
+                        step=1,
+                        mode="box",
+                        unit_of_measurement="%" if key == "soc_hysterese" else "s",
+                    )
+                )
+            )
         schema = vol.Schema(
             {
-                vol.Optional(
-                    key,
-                    description={"suggested_value": self.config_entry.options.get(key)},
-                ): value
-                for key, value in REFERENCE_FIELDS.items()
+                vol.Required("general"): section(vol.Schema(fields)),
+                vol.Required("regulation"): section(vol.Schema(regulation)),
             }
         )
         if user_input is not None:
+            if "general" in user_input:
+                user_input = {
+                    **user_input["general"],
+                    **user_input.get("regulation", {}),
+                }
+            for key in DEFAULTS:
+                if key in user_input:
+                    self.data[key] = user_input[key]
+            for key in (
+                "min_soc_speicher",
+                "soc_speicher_aktuell",
+                "leistung_pv",
+                "leistung_verbraucher",
+            ):
+                self.data.pop(key, None)
+                if user_input.get(key):
+                    self.data[key] = user_input[key]
+            if "pv_diagnostic_logging" in user_input:
+                self.data["pv_diagnostic_logging"] = user_input["pv_diagnostic_logging"]
+            # A diagnostic-only edit must not disconnect or restart control.
+            self.automatic_reload = {
+                k: v for k, v in self.data.items() if k != "pv_diagnostic_logging"
+            } != {
+                k: v
+                for k, v in migrate_regulation(
+                    self.config_entry.options, stored
+                ).items()
+                if k != "pv_diagnostic_logging"
+            }
+            return self.async_create_entry(title="", data=self.data)
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
+class WallboxCapabilityFlow(config_entries.ConfigSubentryFlow):
+    """Reconfigure the already scoped wallbox, without a central station picker."""
+
+    async def async_step_user(self, user_input=None):
+        return self.async_abort(reason="discovered_automatically")
+
+    async def async_step_reconfigure(self, user_input=None):
+        from .core.models import ConnectorId, EvseId, StationId
+
+        entry = self._get_entry()
+        subentry = self._get_reconfigure_subentry()
+        identity = subentry.data
+        target = ConnectorId(
+            EvseId(StationId(identity["station"]), identity["evse"]),
+            identity["connector"],
+        )
+        from .control.reference import FIELDS
+        from .core.capabilities import EvidenceState
+
+        runtime = getattr(entry, "runtime_data", None)
+        state = runtime.state.get(target.station) if runtime else None
+        known = (
+            {
+                c.key
+                for c in state.electrical
+                if c.scope in (target, target.evse)
+                and c.evidence.state
+                in (
+                    EvidenceState.VERIFIED,
+                    EvidenceState.UNSUPPORTED,
+                    EvidenceState.DEGRADED,
+                )
+            }
+            if state and state.connected
+            else set()
+        )
+        fields = {
+            key: value
+            for key, value in REFERENCE_FIELDS.items()
+            if key in FIELDS and FIELDS[key] not in known
+        }
+        # Maxima for an explicitly unsupported phase count are irrelevant.
+        counts = (
+            next(
+                (
+                    c.value
+                    for c in state.electrical
+                    if c.scope == target.evse
+                    and c.key == "supported_phases"
+                    and c.evidence.state == EvidenceState.VERIFIED
+                ),
+                None,
+            )
+            if state
+            else None
+        )
+        if counts:
+            fields = {
+                k: v
+                for k, v in fields.items()
+                if not k.startswith("reference_max_") or int(k[-2]) in counts
+            }
+        saved = subentry.data.get("references", {})
+        errors = {}
+        if user_input is not None:
             try:
-                data = validate_reference_options(schema(user_input))
-            except ValueError, TypeError, ZeroDivisionError, OverflowError, vol.Invalid:
+                data = validate_reference_options(
+                    {
+                        **user_input,
+                        "reference_station_id": target.station.value,
+                        "reference_evse_id": int(target.evse.value),
+                        "reference_connector_id": int(target.value),
+                    }
+                )
+                if set(user_input) - set(fields):
+                    raise ValueError("OCPP capability is authoritative")
+            except ValueError, TypeError, ZeroDivisionError, OverflowError:
                 errors["base"] = "invalid_reference"
             else:
-                return self.async_create_entry(title="", data=data)
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+                return self.async_update_and_abort(
+                    entry, subentry, data={**identity, "references": data}
+                )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(k, description={"suggested_value": saved.get(k)}): v
+                    for k, v in fields.items()
+                }
+            ),
+            errors=errors,
+        )

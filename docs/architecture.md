@@ -11,6 +11,33 @@ The [upstream adoption analysis](upstream-ocpp-analysis.md) records source evide
 and the exact upstream revision used. Implementation must update these documents
 and the README as decisions become operational.
 
+## Implemented v0.3.x Grid profile (beta.2 refinement)
+
+[Grid profile architecture and lifecycle](grid-profile.md) is authoritative for
+this iteration. `ProfileOwnership` is a singleton per HA installation, shared by
+all loaded listener entries. It persists one entry/station/EVSE/connector identity;
+readiness and transitions are transient. The central `ControlRuntime` gates ON and
+operating-point dispatch by that ownership, including queued-command fences.
+
+Explicit active-wallbox selection acquires authority only after the prior Remote
+wallbox is confirmed OFF. Every successful takeover explicitly sends and confirms
+OFF on the new station. Only then is the selection persisted/ready; ON is a separate
+user action. Non-active Local wallboxes are independent external loads. Startup,
+profile selection and background events cannot take authority. Unavailable previous
+owners inhibit replacement rather than being silently forgotten.
+
+Profile settings remain per connector. Battery references remain central entry
+options, and only the active profile can own the reserve journal. Discovered HA
+subentries own station/connector technical fallbacks; they do not manufacture extra
+devices or listeners. Existing registry identities remain stable. Frontend discovery
+uses explicit entity-role and target metadata. HA serves and registers the bundled
+extra frontend module; the card owns no safety or persistence logic.
+
+This supersedes older proposals below about Grid budgets, profile-selection
+takeover, automatic profile restart and a strictly read-only reserve. The broader
+ownership/PV sections below are historical design proposals awaiting separate
+agreement, not implemented algorithms.
+
 ## Product and boundaries
 
 `wallbox_manager` is the Home Assistant integration domain. OCPP is an internal
@@ -1149,10 +1176,11 @@ The current implementation is deliberately smaller than the future profile/lease
 ownership design above. `ControlAuthority` and timestamped `AuthorityObservation`
 are protocol-neutral station observations. Unknown/local authority inhibits normal
 power and permission dispatch while edits continue to persist. Explicit acquisition
-uses a generic authority adapter operation, confirms authority, then synchronizes
-stored targets once without changing desired values. Actual Disabled remains
-disabled; there is no persistent desired permission. No automatic acquisition, restoration dispatch, retry or return action is
-implemented. Future profile selection may explicitly invoke this same operation.
+uses a generic authority adapter operation. Since the beta.2 profile refinement,
+it confirms authority, then explicitly sends OFF and confirms OFF, without a stored
+target application. There is no persistent desired permission. Active-wallbox
+selection uses the installation guard; ordinary profile selection cannot acquire
+authority. No automatic acquisition or return-to-Local action is implemented.
 
 The OCPP 2.1 binding uses discovered station-scoped Actual
 `WallboxController.ControlAuthority` (`Local`/`OCPP`), an implementation-defined
@@ -1179,9 +1207,10 @@ Legacy switch restore records are ignored while entity identity remains stable.
 
 `request_enabled` is transient: ON prepares the saved operating point, revalidates
 it after queue waits, requests permission and reads actual state; OFF requests
-permission directly. Failed/LOCAL requests never become future work. Takeover
-reads permission and never writes it; only already-enabled hardware receives a
-one-time saved target application. Read-only polling begins after discovery and
+permission directly. Failed/LOCAL requests never become future work. Beta.2
+takeover always explicitly disables and confirms permission; it never applies a
+saved target. ON and operating points also require active ownership. Read-only
+polling begins after discovery and
 is owned/cancelled by the transport session. No observation triggers a write.
 
 `ZeroCurrentSupported` on the Connector is an implementation-defined verified
@@ -1196,3 +1225,36 @@ The station owns all CP and connection-detection mechanics. Its actual enable
 reader confirms the EVSE register through existing command dispatch; unavailable
 hardware produces an unsuccessful read rather than a synthetic Disabled value.
 No lockout timers or timer configuration are implemented in Stage 1.
+
+## PV Surplus implementation (0.3.x)
+
+`GridProfiles` now owns both NETZ and PV_SURPLUS settings and task lifetimes.
+`pv_surplus.py` supplies measurement validation and the battery policy; it does
+not implement an electrical solver or protocol control. Positive targets and OFF
+use `ControlRuntime.resolve/apply_stored`, with the existing command fences,
+phase-lockout fallback and one-second power debounce. PV-only reuse of confirmed
+points avoids duplicate dispatch, including a retained phase-lockout fallback.
+The profile continuation latch is cleared by pauses, invalid measurements and
+lifecycle invalidation. Reference options and profile settings persist, while
+permission and continuation do not resume on reload. Grid battery reserve
+requests exclude PV profiles. See [PV Surplus](pv-surplus-profile.md) for the
+implemented rules and the distinction from future profile designs above.
+
+### PV beta.2 policy refinements
+
+Profile availability is exposed by the backend per connector and depends on the
+owning entry's configured power references, not live sensor availability. Missing
+mappings fence positive commands; automatic fallback waits for confirmed OFF.
+Profile selection and settings without authority are configuration-only actions.
+Explicit ownership takeover and explicit charging permission remain separate.
+
+`pv_plan` wraps the existing `ControlRuntime.resolve` solver with start/stop
+monotonic deadlines. `resolve(request=...)` provides side-effect-free candidate
+selection, including the minimum feasible point during stop delay. The original
+PV continuation latch, command generations, phase-lockout retry and OCPP dispatch
+are reused. Safety events and measurement expiry bypass delay deadlines. Runtime
+deadlines are never persisted, while user settings are.
+
+Frontend registration uses supported frontend/collection APIs, handles late
+component setup and guards duplicate execution of the bundled card. See
+[frontend registration](frontend-registration.md).

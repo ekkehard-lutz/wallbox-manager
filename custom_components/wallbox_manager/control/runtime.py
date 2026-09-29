@@ -1,5 +1,6 @@
 """Manual charging orchestration; no HA or protocol types and no automatic retry."""
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -8,8 +9,14 @@ from ..core.authority import ControlAuthority
 from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
+from ..diagnostics import (
+    diagnostic_recovery,
+    profile_name,
+    recovery_record,
+    recovery_snapshot,
+)
 from ..solver.operating_point import SolverResult
-from ..solver.power import solve
+from ..solver.power import maximum_power, solve
 from .commands import (
     CommandReason,
     CommandResult,
@@ -26,7 +33,12 @@ from .requests import Direction, PowerRequest
 
 @dataclass(frozen=True)
 class ControlInputs:
-    """One read of existing normalized contracts, not a capability registry."""
+    """One coherent read of normalized contracts, not a capability registry.
+
+    Voltage and activity are regulation samples. Capabilities, hard limits and
+    transaction identity are live command validity. Current/eligible phase proof
+    gates new dispatch; expected feedback changes do not redefine a sent command.
+    """
 
     capabilities: CapabilitySnapshot
     voltage: VoltageObservation
@@ -54,7 +66,10 @@ class ManualIntent:
     phase_switch_deviation_pct: Fraction = Fraction(5)
     current_limits: dict[int, Fraction] = field(default_factory=dict)
     generation: int = 0
+    profile_modes: tuple[int, ...] | None = None
+    phase_retry: bool = False
     status: str = "idle"
+    fence_reason: str | None = None
     solver_result: SolverResult | None = None
     command_result: CommandResult | None = None
 
@@ -86,6 +101,11 @@ class ControlRuntime:
         self.intents: dict[EvseId | ConnectorId, ManualIntent] = {}
         self._listeners = set()
         self._closed = False
+        self._confirmed_points = {}
+        self.recovery_status = {}
+        self.pending_points = {}
+        self._point_locks = {}
+        self._unconfirmed_targets = set()
         self._inactive = set()
         self.authority_adapter = authority_adapter
         self._takeover_generations = {}
@@ -156,6 +176,7 @@ class ControlRuntime:
 
     def close(self):
         self._closed = True
+        self._confirmed_points.clear()
         self._unsubscribe_defaults()
         for intent in self.intents.values():
             intent.generation += 1
@@ -195,7 +216,9 @@ class ControlRuntime:
         intent.status = "idle"
         return intent
 
-    def resolve(self, target, *, substitute_mode=None):
+    def resolve(
+        self, target, *, substitute_mode=None, request=None, dispatch_modes=None
+    ):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
             return None, None, "disconnected"
@@ -213,7 +236,8 @@ class ControlRuntime:
         ):
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
-        if intent.request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
+        request = request or intent.request
+        if request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
             from ..solver.operating_point import Reason, ResultStatus
 
             return (
@@ -221,14 +245,23 @@ class ControlRuntime:
                 SolverResult(ResultStatus.UNREACHABLE, Reason.STOP_UNVERIFIED),
                 "zero_current_unverified",
             )
+        # Only post-dispatch policy validation supplies the already verified
+        # dispatched modes; all new writes use fresh phase-operation evidence.
+        eligible_modes = (
+            inputs.eligible_modes if dispatch_modes is None else dispatch_modes
+        )
         result = solve(
-            PowerRequest(intent.request.target_w, intent.request.direction, True),
+            PowerRequest(request.target_w, request.direction, True),
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
-            eligible_modes=inputs.eligible_modes
+            eligible_modes=tuple(
+                m
+                for m in eligible_modes
+                if intent.profile_modes is None or m.count in intent.profile_modes
+            )
             if substitute_mode is None
-            else tuple(m for m in inputs.eligible_modes if m == substitute_mode),
+            else tuple(m for m in eligible_modes if m == substitute_mode),
             charging_only=substitute_mode is not None,
             limits=inputs.limits
             + tuple(
@@ -253,18 +286,82 @@ class ControlRuntime:
             self.blocker(target) if result.point is not None else result.reason.value,
         )
 
+    def power_floor(self, target):
+        return self.power_ceiling(target, minimum=True)
+
+    def power_ceiling(self, target, *, minimum=False):
+        """Known feasible ceiling, independent of the requested operating point.
+
+        Unknown/stale evidence is not a station rating. Reuse the electrical
+        solver's hard limits and current grid; never synthesize 230 V.
+        """
+        state = self.runtime.get(target.station)
+        inputs = self.inputs(target) if state and state.connected else None
+        if inputs is None:
+            return None
+        caps = inputs.capabilities
+        now = datetime.now(UTC)
+        if (
+            caps.scope != target
+            or caps.connection_generation != state.token.connection_generation
+            or caps.boot_generation != state.token.boot_generation
+            or caps.firmware != state.identity.firmware
+        ):
+            return None
+        return maximum_power(
+            caps,
+            inputs.voltage,
+            minimum=minimum,
+            now=now,
+            eligible_modes=inputs.eligible_modes,
+            limits=inputs.limits
+            + tuple(
+                CurrentLimit(
+                    e.mode,
+                    0,
+                    self.intent(target).current_limits[e.mode.count],
+                    "desired_control_limit",
+                )
+                for e in caps.envelopes
+                if e.mode.count in self.intent(target).current_limits
+            ),
+        )
+
+    def confirmed_point(self, target):
+        """Read-only projection of an APPLIED result in its confirmed context.
+
+        Intent edits do not change hardware. Pending/retryable commands retain
+        the last confirmed point, separately from their unconfirmed target.
+        Failed or superseded dispatch clears uncertain state.
+        """
+        record = self._confirmed_points.get(target)
+        state = self.runtime.get(target.station)
+        enabled = self.runtime.enabled_observation(target)
+        if (
+            not record
+            or self._closed
+            or not state
+            or not state.connected
+            or record[1] != state.token
+            or record[2] != state.authority_revision
+            or not enabled
+            or record[3] != enabled.revision
+            or self.runtime.enabled(target) is not True
+            or self.runtime.authority(target.station) != ControlAuthority.REMOTE
+            or not self.profile_permitted(target)
+        ):
+            return None
+        return record[0]
+
     def attributes(self, target):
         intent = self.intent(target)
-        inputs, _, blocked = self.resolve(target)
-        applied = (
-            intent.solver_result.point
-            if intent.solver_result
-            and intent.command_result
-            and intent.command_result.status == CommandStatus.APPLIED
-            and intent.command_result.area == ControlArea.OPERATING_POINT
-            else None
-        )
+        if hasattr(self, "profiles") and target in self.profiles.debounce_tasks:
+            inputs, blocked = self.inputs(target), "power_edit_pending"
+        else:
+            inputs, _, blocked = self.resolve(target)
+        applied = self.confirmed_point(target)
         return {
+            "electrical_recovery_status": self.recovery_status.get(target),
             "applied_current_a": float(applied.current_a or 0) if applied else None,
             "applied_phase_count": applied.mode.count
             if applied and applied.mode
@@ -276,6 +373,16 @@ class ControlRuntime:
             "control_authority": self.runtime.authority(target.station).value,
             "physical_phase_mode": [p.value for p in inputs.current_mode.phases]
             if inputs and inputs.current_mode
+            else None,
+            "physical_phase_valid_until": next(
+                (
+                    o.valid_until.isoformat()
+                    for o in self.runtime.get(target.station).physical_phases
+                    if o.scope == target
+                ),
+                None,
+            )
+            if self.runtime.get(target.station)
             else None,
             "execution_ready": blocked is None and self.adapter(target) is not None,
             "execution_blocked_reason": blocked
@@ -296,6 +403,7 @@ class ControlRuntime:
         # Compatibility for callers: permission is a transient command, not intent.
         enabled = changes.pop("allowed", None)
         if changes:
+            self.intent(target).profile_modes = None
             intent = self._edit(target, changes)
             if intent.request.target_w == 0 or self.runtime.enabled(target) is not True:
                 self._inactive.add(target)
@@ -304,10 +412,25 @@ class ControlRuntime:
             return await self.request_enabled(target, enabled)
         return await self.apply_stored(target)
 
-    async def request_enabled(self, target, enabled):
+    def profile_permitted(self, target):
+        return not hasattr(self, "ownership") or self.ownership.permits(self, target)
+
+    async def request_enabled(self, target, enabled, *, fence=lambda: True):
         if type(enabled) is not bool:
             raise ValueError("enabled must be boolean")
+        if enabled and not self.profile_permitted(target):
+            self.intent(target).status = "inactive_wallbox"
+            self.publish(target)
+            return CommandResult(
+                CommandStatus.TEMPORARILY_REJECTED,
+                ControlArea.CHARGING_PERMISSION,
+                CommandReason.NO_AUTHORITY,
+                "inactive_wallbox",
+            )
         intent = self.intent(target)
+        if not enabled:
+            self._inactive.add(target)
+            self._confirmed_points.pop(target, None)
         intent.generation += 1
         intent.command_result = intent.solver_result = None
         generation = intent.generation
@@ -341,7 +464,9 @@ class ControlRuntime:
         if enabled:
             self._inactive.add(target)
             observation = self.runtime.enabled_observation(target)
-            result = await self.apply_stored(target, prepare=True, prepared=prepared)
+            result = await self.apply_stored(
+                target, prepare=True, prepared=prepared, fence=fence
+            )
             if result is None or result.status != CommandStatus.APPLIED:
                 return result
             if (
@@ -351,18 +476,324 @@ class ControlRuntime:
                 != observation.revision
             ):
                 return stale_command_result()
-        return await self._permission(
-            target,
-            intent,
-            generation,
-            enabled,
-            fence=prepared.get("fence", lambda: True),
+        # Preparing the point and confirming ON are one regulation decision.
+        # Keep its existing pending slot through permission I/O so sensor events
+        # cannot cancel it between these two confirmed control operations.
+        pending = self._confirmed_points.get(target, (None,))[0]
+        if enabled:
+            self.pending_points[target] = pending
+        try:
+            result = await self._permission(
+                target,
+                intent,
+                generation,
+                enabled,
+                fence=prepared.get("fence", fence),
+            )
+        finally:
+            if enabled and self.pending_points.get(target) is pending:
+                self.pending_points.pop(target, None)
+        if enabled and generation == intent.generation:
+            record = self._confirmed_points.get(target)
+            if result.status == CommandStatus.APPLIED and record:
+                # The separately confirmed ON advances the permission revision.
+                self._confirmed_points[target] = (
+                    *record[:3],
+                    self.runtime.enabled_observation(target).revision,
+                )
+            else:
+                self._confirmed_points.pop(target, None)
+            self.publish(target)
+        return result
+
+    @diagnostic_recovery
+    async def reconcile_applied(self, target, *, fence):
+        """Adopt an authoritative schedule readback in a freshly fenced context."""
+        recovery_record("attempt", result="started")
+        self.recovery_status[target] = "waiting_electrical_evidence"
+        adapter = self.adapter(target)
+        state = self.runtime.get(target.station)
+        inputs = self.inputs(target)
+        enabled = self.runtime.enabled_observation(target)
+        generation = self.intent(target).generation
+        if not state or not inputs or not enabled or not adapter or not fence():
+            recovery_record(
+                "rejected",
+                reason=(
+                    "runtime_unavailable"
+                    if not state
+                    else "capability_evidence_missing"
+                    if not inputs
+                    else "charging_enabled_unknown"
+                    if not enabled
+                    else "adapter_unavailable"
+                    if not adapter
+                    else "command_fence_stale"
+                ),
+            )
+            return None
+
+        recovery_snapshot(
+            "phase_evidence",
+            lambda: dict(
+                observations=[
+                    dict(
+                        source=o.source,
+                        phases=o.mode.count if o.mode else None,
+                        state="expired"
+                        if not o.fresh(datetime.now(UTC))
+                        else "unknown"
+                        if o.mode is None
+                        else "valid",
+                        valid_until=o.valid_until.isoformat(),
+                    )
+                    for o in state.physical_phases
+                    if o.scope == target
+                ],
+                state="present"
+                if any(o.scope == target for o in state.physical_phases)
+                else "absent",
+            ),
         )
 
-    async def apply_stored(
-        self, target, *, prepare=False, fence=lambda: True, prepared=None
+        def current(*, refreshing_phase=False):
+            fresh = self.runtime.get(target.station)
+            observation = self.runtime.enabled_observation(target)
+            fresh_inputs = self.inputs(target)
+            if refreshing_phase and fresh_inputs:
+                fresh_inputs = replace(
+                    fresh_inputs,
+                    current_mode=inputs.current_mode,
+                    eligible_modes=inputs.eligible_modes,
+                )
+            reason = (
+                "command_fence_stale"
+                if not fence()
+                else "runtime_closed"
+                if self._closed
+                else "profile_not_permitted"
+                if not self.profile_permitted(target)
+                else "connection_generation_changed"
+                if not self.runtime.current(state.token)
+                else "authority_changed"
+                if fresh.authority_revision != state.authority_revision
+                else "no_authority"
+                if self.runtime.authority(target.station) != ControlAuthority.REMOTE
+                else "charging_enabled_unknown"
+                if not observation
+                else "charging_enabled_changed"
+                if observation.revision != enabled.revision
+                else "generation_changed"
+                if self.intent(target).generation != generation
+                else "point_command_pending"
+                if target in self.pending_points
+                else "capability_evidence_missing"
+                if fresh_inputs is None
+                else "electrical_inputs_changed"
+                if replace(fresh_inputs, voltage=inputs.voltage) != inputs
+                else None
+            )
+            if reason:
+                recovery_record("fence", reason=reason)
+            return reason is None
+
+        refresh = getattr(adapter, "read_physical_mode", None)
+        if refresh:
+            await refresh(is_current=lambda: current(refreshing_phase=True))
+            if not current(refreshing_phase=True):
+                recovery_record("rejected", reason="phase_readback_stale")
+                self.recovery_status[target] = "phase_readback_stale"
+                return None
+            inputs = self.inputs(target)
+        else:
+            recovery_record(
+                "phase_readback", attempted=False, reason="phase_readback_not_supported"
+            )
+        read = getattr(adapter, "read_operating_limit", None)
+        if not read:
+            recovery_record(
+                "composite_schedule",
+                attempted=False,
+                reason="composite_schedule_not_supported",
+            )
+        result = await read(is_current=current) if read else None
+        if result is None or not current():
+            recovery_record("rejected", reason="readback_rejected_or_stale")
+            self.recovery_status[target] = "readback_rejected_or_stale"
+            return None
+        self.recovery_status[target] = "readback_obtained"
+        amps, phases = result
+        inputs = self.inputs(target)
+        mode = inputs.current_mode
+        recovery_snapshot(
+            "electrical_evidence",
+            lambda: dict(
+                physical_phases=mode.count if mode else None,
+                schedule_phases=phases,
+                current_a=float(amps),
+                generation=generation,
+                authority_revision=state.authority_revision,
+                enabled_revision=enabled.revision,
+                requested_power_w=float(self.intent(target).request.target_w),
+                profile=profile_name(self.profiles, target)
+                if hasattr(self, "profiles")
+                else None,
+                voltages=[
+                    dict(
+                        phase=v.phase.value,
+                        voltage_v=float(v.voltage_v),
+                        fresh=v.observed_at <= datetime.now(UTC) < v.valid_until,
+                        valid_until=v.valid_until.isoformat(),
+                    )
+                    for v in inputs.voltage.phases
+                ],
+                phase_observations=[
+                    dict(
+                        source=o.source,
+                        phases=o.mode.count if o.mode else None,
+                        state="expired"
+                        if not o.fresh(datetime.now(UTC))
+                        else "unknown"
+                        if o.mode is None
+                        else "valid",
+                    )
+                    for o in self.runtime.get(target.station).physical_phases
+                    if o.scope == target
+                ],
+                voltage_available=bool(inputs.voltage.phases),
+                envelopes=[
+                    dict(
+                        phases=e.mode.count,
+                        minimum_a=float(e.min_current_a),
+                        maximum_a=float(e.max_current_a),
+                        step_a=float(e.current_step_a),
+                        evidence=e.evidence.state.value,
+                    )
+                    for e in inputs.capabilities.envelopes
+                ],
+                limits=[
+                    dict(
+                        phases=v.mode.count,
+                        minimum_a=float(v.min_current_a),
+                        maximum_a=float(v.max_current_a),
+                    )
+                    for v in inputs.limits
+                ],
+                desired_current_limits={
+                    str(k): float(v)
+                    for k, v in self.intent(target).current_limits.items()
+                },
+            ),
+        )
+        if amps:
+            if mode is None or mode.count != phases:
+                recovery_record(
+                    "rejected",
+                    reason="phase_evidence_unavailable"
+                    if mode is None
+                    else "schedule_phase_missing"
+                    if phases is None
+                    else "schedule_phase_mismatch",
+                )
+                self.recovery_status[target] = "physical_phase_unavailable_or_mismatch"
+                return None
+            volts = inputs.voltage.active_voltages(mode, datetime.now(UTC))
+            if volts is None:
+                recovery_snapshot(
+                    "rejected",
+                    lambda: dict(
+                        reason="voltage_missing"
+                        if any(
+                            phase not in {v.phase for v in inputs.voltage.phases}
+                            for phase in mode.phases
+                        )
+                        else "voltage_stale",
+                    ),
+                )
+                self.recovery_status[target] = "voltage_unavailable"
+                return None
+            watts = amps * sum(volts)
+        else:
+            watts = Fraction(0)
+        _, solved, blocked = self.resolve(
+            target,
+            request=PowerSettings(watts, Direction.NEAREST),
+            substitute_mode=mode if amps else None,
+        )
+        if (
+            blocked
+            or not solved
+            or not solved.point
+            or (amps and solved.point.current_a != amps)
+        ):
+            recovery_record(
+                "rejected",
+                reason="electrical_resolution_rejected",
+                blocked=blocked,
+                solver_reason=solved.reason.value if solved else None,
+            )
+            self.recovery_status[target] = "electrical_resolution_rejected"
+            return None
+        self.recovery_status[target] = "point_validated"
+        self._confirmed_points[target] = (
+            solved.point,
+            state.token,
+            state.authority_revision,
+            enabled.revision,
+        )
+        self._unconfirmed_targets.discard(target)
+        self.recovery_status[target] = "point_adopted"
+        recovery_snapshot(
+            "adoption",
+            lambda: dict(
+                result="point_adopted",
+                phases=solved.point.mode.count if solved.point.mode else 0,
+                current_a=float(solved.point.current_a or 0),
+                voltages_v=[float(v) for v in solved.point.phase_voltages_v],
+                power_w=float(solved.point.offered_power_w),
+                charging_command_sent=False,
+            ),
+        )
+        self.publish(target)
+        return solved.point
+
+    async def wait_for_pending_point(self, target):
+        """Let a superseded operation drain before a regulator samples again."""
+        lock = self._point_locks.get(target)
+        if lock is not None:
+            async with lock:
+                pass
+
+    async def apply_stored(self, target, **kwargs):
+        """Serialize transitions through confirmation, including phase fallback."""
+        generation = self.intent(target).generation
+        lock = self._point_locks.setdefault(target, asyncio.Lock())
+        async with lock:
+            if generation != self.intent(target).generation:
+                return stale_command_result()
+            self.pending_points[target] = None
+            try:
+                return await self._apply_stored(target, **kwargs)
+            except BaseException:
+                self._confirmed_points.pop(target, None)
+                raise
+            finally:
+                self.pending_points.pop(target, None)
+
+    async def _apply_stored(
+        self,
+        target,
+        *,
+        prepare=False,
+        fence=lambda: True,
+        prepared=None,
+        reuse_applied=False,
     ):
         """Apply a target once; never change hardware permission."""
+        if not self.profile_permitted(target):
+            self.intent(target).status = "inactive_wallbox"
+            self.publish(target)
+            return None
         intent = self.intent(target)
         generation = intent.generation
         state = self.runtime.get(target.station)
@@ -397,50 +828,92 @@ class ControlRuntime:
         authority_revision = state.authority_revision
 
         substitute_mode = None
+        intent.phase_retry = False
+        intent.fence_reason = None
 
-        def current(*, after_dispatch=False, permission_confirmed=False):
+        def control_valid(*, after_dispatch=False, permission_confirmed=False):
+            """Live lifecycle/safety proof, independent of the regulation sample."""
+
+            def reject(reason):
+                intent.fence_reason = reason
+                return None
+
+            if self._closed or generation != intent.generation:
+                return reject("intent_changed")
+            if not self.profile_permitted(target):
+                return reject("profile_or_ownership_changed")
+            if not self.runtime.current(token):
+                return reject("connection_changed")
             if (
-                self._closed
-                or not fence()
-                or generation != intent.generation
-                or (
-                    not permission_confirmed
-                    and (
-                        self.runtime.enabled(target) is not actual
-                        or self.runtime.enabled_observation(target).revision
-                        != enabled_revision
-                    )
-                )
-                or not self.runtime.current(token)
-                or self.runtime.authority(target.station) != ControlAuthority.REMOTE
+                self.runtime.authority(target.station) != ControlAuthority.REMOTE
                 or self.runtime.get(target.station).authority_revision
                 != authority_revision
             ):
-                return False
-            fresh, result, reason = self.resolve(
-                target, substitute_mode=substitute_mode
+                return reject("authority_changed")
+            permission = self.runtime.enabled_observation(target)
+            if not permission_confirmed and (
+                self.runtime.enabled(target) is not actual
+                or permission is None
+                or permission.revision != enabled_revision
+            ):
+                return reject("permission_changed")
+            caller = (
+                getattr(fence, "after_dispatch", fence) if after_dispatch else fence
+            )
+            if not caller():
+                return reject("caller_invalidated")
+            fresh = self.inputs(target)
+            if fresh is None or fresh.capabilities != inputs.capabilities:
+                return reject("capabilities_changed")
+            if fresh.limits != inputs.limits:
+                return reject("electrical_limits_changed")
+            if fresh.transaction_id != inputs.transaction_id:
+                return reject("transaction_changed")
+            if self.blocker(target) is not None:
+                return reject("adapter_or_transaction_unavailable")
+            return fresh
+
+        def current(*, after_dispatch=False, permission_confirmed=False):
+            fresh = control_valid(
+                after_dispatch=after_dispatch, permission_confirmed=permission_confirmed
             )
             if fresh is None:
                 return False
-            if resolved.point.charging:
-                if (
-                    fresh.voltage.active_voltages(
-                        resolved.point.mode, datetime.now(UTC)
-                    )
-                    != resolved.point.phase_voltages_v
-                ):
-                    return False
-            # Compare required electrical values, not sample timestamps.
-            fresh = replace(fresh, voltage=inputs.voltage)
-            if after_dispatch or not resolved.point.charging:
-                fresh = replace(
-                    fresh,
-                    current_mode=inputs.current_mode,
-                    actively_charging=inputs.actively_charging,
-                    eligible_modes=inputs.eligible_modes,
+            if after_dispatch:
+                # The wire command is fixed. New PV/SoC/power/voltage samples,
+                # expiry and ordinary activity/phase feedback belong to the next
+                # cycle, never to retrospective solving of this command.
+                return True
+            # Queue/lock waits still require a fresh, representable snapshot and
+            # current phase-operation proof immediately before a hardware write.
+            _, result, reason = self.resolve(target, substitute_mode=substitute_mode)
+            if (
+                resolved.point.charging
+                and fresh.voltage.active_voltages(
+                    resolved.point.mode, datetime.now(UTC)
                 )
-                return fresh == inputs and self.blocker(target) is None
-            return reason is None and fresh == inputs and result.point == resolved.point
+                is None
+            ):
+                intent.fence_reason = "pre_dispatch_voltage_unavailable"
+                return False
+            if result is None or not resolved.point.same_setpoint(result.point):
+                intent.fence_reason = "pre_dispatch_setpoint_changed"
+                return False
+            if hasattr(self, "profiles") and not self.profiles.permits_point(
+                target, resolved.point
+            ):
+                intent.fence_reason = "pre_dispatch_pv_policy"
+                return False
+            if resolved.point.charging and (
+                reason is not None
+                or fresh.current_mode != inputs.current_mode
+                or fresh.eligible_modes != inputs.eligible_modes
+            ):
+                intent.fence_reason = "pre_dispatch_phase_changed"
+                return False
+            return True
+
+        current.after_dispatch = lambda: current(after_dispatch=True)
 
         if prepared is not None:
 
@@ -451,6 +924,18 @@ class ControlRuntime:
                 after_dispatch=True, permission_confirmed=True
             )
             prepared["fence"] = prepared_fence
+        prior_point = self.confirmed_point(target)
+        if (
+            reuse_applied
+            and target not in self._unconfirmed_targets
+            and prior_point == resolved.point
+            and current()
+        ):
+            intent.command_result = CommandResult(CommandStatus.APPLIED)
+            intent.status = "applied"
+            self.publish(target)
+            return intent.command_result
+        self.pending_points[target] = resolved.point
         intent.status = "pending"
         self.publish(target)
         result = await apply_operating_point(
@@ -465,6 +950,7 @@ class ControlRuntime:
             and inputs.current_mode != resolved.point.mode
             and current()
         ):
+            intent.phase_retry = True
             # One synchronous recalculation within this explicit command only.
             # Keep all original fences, including confirmed physical phase state.
             substitute_mode = inputs.current_mode
@@ -474,16 +960,45 @@ class ControlRuntime:
             if blocked is None and substitute.point is not None:
                 resolved = substitute
                 intent.solver_result = resolved
-                result = await apply_operating_point(
-                    adapter, resolved.point, is_current=current
-                )
+                if (
+                    reuse_applied
+                    and target not in self._unconfirmed_targets
+                    and prior_point == resolved.point
+                    and current()
+                ):
+                    result = CommandResult(CommandStatus.APPLIED)
+                else:
+                    result = await apply_operating_point(
+                        adapter, resolved.point, is_current=current
+                    )
+        # Record the actual invalidating context even when the adapter already
+        # rejected an obsolete connection/authority before returning its result.
+        still_current = current(after_dispatch=True)
         if generation != intent.generation or (
-            result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
+            result.status == CommandStatus.APPLIED and not still_current
         ):
+            if generation != intent.generation:
+                self._confirmed_points.pop(target, None)
+            # The adapter accepted a write whose final fence no longer matches.
+            # Retain historical confirmation, but require reconciliation even if
+            # the next desired target equals that old point.
+            self._unconfirmed_targets.add(target)
             result = stale_command_result()
+        if result.status in (CommandStatus.FAILED, CommandStatus.UNSUPPORTED):
+            self._confirmed_points.pop(target, None)
         if generation == intent.generation:
-            if result.status == CommandStatus.APPLIED and resolved.point.charging:
-                self._inactive.discard(target)
+            if result.status == CommandStatus.APPLIED:
+                self._unconfirmed_targets.discard(target)
+                self._confirmed_points[target] = (
+                    resolved.point,
+                    token,
+                    authority_revision,
+                    self.runtime.enabled_observation(target).revision,
+                )
+                if resolved.point.charging:
+                    self._inactive.discard(target)
+                else:
+                    self._inactive.add(target)
             intent.command_result = result
             intent.status = result.status.value
             self.publish(target)
@@ -511,6 +1026,7 @@ class ControlRuntime:
             return (
                 not self._closed
                 and intent.generation == generation
+                and (not enabled or self.profile_permitted(target))
                 and self.runtime.current(token)
                 and self.runtime.authority(target.station) == ControlAuthority.REMOTE
                 and self.runtime.get(target.station).authority_revision
@@ -546,14 +1062,25 @@ class ControlRuntime:
         return result
 
     async def take_control(self, station):
-        """Explicit acquisition, followed by one fenced application of saved intent.
+        """An explicit takeover participates in the installation ownership guard."""
+        if hasattr(self, "ownership"):
+            return await self.ownership.activate_station(self, station)
+        return await self._take_control(station)
 
-        Ordinary edits never call this. Future profile selection can intentionally
-        reuse it. Concurrent edits/new presses invalidate the pending synchronization.
-        """
+    async def _take_control(self, station):
+        """Acquire authority, explicitly disable every connector and confirm OFF."""
         state = self.runtime.get(station)
+        for target in tuple(self._confirmed_points):
+            if target.station == station:
+                self._confirmed_points.pop(target, None)
         adapter = self.authority_adapter(station)
-        if self._closed or state is None or not state.connected or adapter is None:
+        if (
+            self._closed
+            or state is None
+            or not state.connected
+            or adapter is None
+            or not state.connectors
+        ):
             return CommandResult(
                 CommandStatus.UNSUPPORTED,
                 ControlArea.AUTHORITY,
@@ -577,21 +1104,36 @@ class ControlRuntime:
         result = await take_control(adapter, is_current=current)
         if not current():
             result = stale_command_result()
-        if generation == self._takeover_generations.get(station):
-            self.takeover_results[station] = result
-        if (
-            result.status == CommandStatus.APPLIED
-            and self.runtime.authority(station) == ControlAuthority.REMOTE
-        ):
+        if result.status == CommandStatus.APPLIED:
             for target in targets:
-                if not current():
-                    break
-                # Starting after acquisition cannot retain a relay parked by Local.
-                self._inactive.add(target)
                 bound = self.adapter(target)
                 if bound is None:
-                    continue
+                    result = CommandResult(
+                        CommandStatus.UNSUPPORTED,
+                        ControlArea.CHARGING_PERMISSION,
+                        CommandReason.UNSUPPORTED_OPERATION,
+                    )
+                    break
                 await bound.read_enabled()
-                if current():
-                    await self.apply_stored(target, fence=current)
+                if not current():
+                    result = stale_command_result()
+                    break
+                # Account for the generation advance owned by this OFF request.
+                intents[target] += 1
+                result = await self.request_enabled(target, False, fence=current)
+                if (
+                    not result
+                    or result.status != CommandStatus.APPLIED
+                    or self.runtime.enabled(target) is not False
+                ):
+                    result = result or CommandResult(
+                        CommandStatus.FAILED,
+                        ControlArea.CHARGING_PERMISSION,
+                        CommandReason.HARDWARE_ERROR,
+                    )
+                    break
+            if not current():
+                result = stale_command_result()
+        if generation == self._takeover_generations.get(station):
+            self.takeover_results[station] = result
         return result

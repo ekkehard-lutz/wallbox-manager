@@ -86,9 +86,10 @@ class ControlAdapter(Protocol):
     Apply a resolved electrical operating point. OFF requires verified stop
     semantics. Permission changes use the distinct charging-permission operation.
     APPLIED requires confirmation of the whole requested operation.
-    A validity callback may expose after_dispatch() for permission readback:
-    the expected hardware-state transition is then allowed, while intent,
-    authority, transaction and prepared-target safety fences remain active.
+    A validity callback may expose after_dispatch() for completion/readback:
+    the calculated point is then fixed, while intent, authority, permission,
+    transaction and prepared-target safety fences remain active. Volatile
+    regulation samples must not retrospectively re-solve an already sent point.
 
     Check is_current after queue/lock waits and immediately before each device
     side effect, with no intervening await before dispatch. Keep device-specific

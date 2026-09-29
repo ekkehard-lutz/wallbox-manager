@@ -152,7 +152,9 @@ async def test_local_edits_only_store_intent(authority, changes):
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-async def test_takeover_confirms_then_applies_saved_once(authority, enabled):
+async def test_takeover_confirms_explicit_off_without_applying_saved_target(
+    authority, enabled
+):
     control, bound, peer, _ = authority
     control.restore(bound.target, target_w=2300, allowed=enabled)
     peer.enabled = enabled
@@ -164,7 +166,7 @@ async def test_takeover_confirms_then_applies_saved_once(authority, enabled):
     )
     assert control.intent(bound.target).request == saved.request
     assert control.intent(bound.target).current_limits == saved.current_limits
-    assert control.intent(bound.target).generation == saved.generation
+    assert control.intent(bound.target).generation == saved.generation + 1
     assert peer.authority_requests == [
         {
             "component": COMPONENT,
@@ -177,14 +179,13 @@ async def test_takeover_confirms_then_applies_saved_once(authority, enabled):
         "authority_set",
         "authority_get",
         "enabled_get",
-        *(["profile"] if enabled else []),
+        "permission",
+        "enabled_get",
     ]
-    assert not peer.permissions
-    if enabled:
-        point = control.intent(bound.target).solver_result.point
-        assert point.mode.count == 1 and point.current_a == 10
-    else:
-        assert not peer.requests
+    assert len(peer.permissions) == 1
+    assert peer.permissions[0]["attribute_value"] == "false"
+    assert control.runtime.enabled(bound.target) is False
+    assert not peer.requests
     # Ordinary edits under confirmed Remote never request authority again.
     await control.change(bound.target, target_w=2400)
     assert len(peer.authority_requests) == 1
@@ -310,6 +311,7 @@ async def test_local_event_fences_commands_waiting_for_transport(authority, oper
     if operation != "takeover":
         peer.enabled = True
         await control.take_control(bound.target.station)
+        await control.change(bound.target, target_w=2300, allowed=True)
     control.restore(bound.target, target_w=2300, allowed=True)
     before = list(peer.operations)
     queued = asyncio.Event()
@@ -348,8 +350,9 @@ async def test_local_loss_during_profile_prevents_enable(authority):
     control, bound, peer, _ = authority
     control.restore(bound.target, target_w=2300, allowed=True)
     peer.enabled = True
+    await control.take_control(bound.target.station)
     peer.release.clear()
-    pending = asyncio.create_task(control.take_control(bound.target.station))
+    pending = asyncio.create_task(control.request_enabled(bound.target, True))
     await asyncio.wait_for(peer.received.wait(), 1)
     live = bound.adapter
     live.runtime.observe_authority(
@@ -363,6 +366,8 @@ async def test_local_loss_during_profile_prevents_enable(authority):
     assert peer.operations == [
         "authority_set",
         "authority_get",
+        "enabled_get",
+        "permission",
         "enabled_get",
         "profile",
     ]
@@ -411,5 +416,7 @@ async def test_invalid_or_zero_phase_voltage_preserves_valid_one_phase(
     control.restore(bound.target, target_w=2300, allowed=True)
     peer.enabled = True
     await control.take_control(bound.target.station)
+    assert control.runtime.enabled(bound.target) is False
+    await control.request_enabled(bound.target, True)
     point = control.intent(bound.target).solver_result.point
     assert point.mode.count == 1 and point.current_a == 10

@@ -190,6 +190,27 @@
       },
       "allowed_current_3p": {
         "name": "{scope} Zulässiger Strom 3p"
+      },
+      "soll_power": {
+        "name": "Sollleistung {scope}"
+      },
+      "min_soc": {
+        "name": "{scope} Entladereserve"
+      },
+      "soll_soc_speicher": {
+        "name": "Speicher-Ziel-SoC"
+      },
+      "soc_hysterese": {
+        "name": "SoC-Hysterese"
+      },
+      "regulation_interval": {
+        "name": "Regelintervall"
+      },
+      "pv_start_delay": {
+        "name": "PV-Startverzögerung"
+      },
+      "pv_stop_delay": {
+        "name": "PV-Stoppverzögerung"
       }
     },
     "select": {
@@ -200,37 +221,104 @@
           "nearest": "Nächstgelegene Leistung",
           "up": "Nicht unterschreiten"
         }
+      },
+      "charging_profile": {
+        "name": "Ladeprofil {scope}",
+        "state": {
+          "NETZ": "Netz",
+          "PV_SURPLUS": "PV-Überschuss"
+        }
+      },
+      "active_wallbox": {
+        "name": "Aktive Wallbox"
+      },
+      "pv_approximation": {
+        "name": "PV-Leistungsannäherung",
+        "state": {
+          "up": "Nicht unter Soll",
+          "down": "Nicht über Soll"
+        }
       }
     },
     "button": {
       "take_control": {
         "name": "Steuerung übernehmen"
       }
+    },
+    "text": {
+      "grid_start_delay": {
+        "name": "Startverzögerung"
+      },
+      "grid_duration": {
+        "name": "Ladedauer"
+      }
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Fähigkeiten als Referenz",
-        "description": "Nur fehlende Fähigkeiten ergänzen. Verifizierte OCPP-Werte haben immer Vorrang. Station, EVSE und Konnektor explizit zuordnen; einzelne Felder sind optional. Dezimalwerte und Brüche wie 6.5 oder 13/2 sind erlaubt. Normale Stromgrenzen werden an den Steuerelementen eingestellt.",
-        "data": {
-          "reference_station_id": "Stations-ID",
-          "reference_evse_id": "EVSE-ID",
-          "reference_connector_id": "Konnektor-ID",
-          "reference_phases": "Unterstützte Phasenanzahlen (z. B. 1,3)",
-          "reference_modes": "Explizite Leiterzuordnung (z. B. l1;l1,l2,l3)",
-          "reference_min_a": "Minimaler Strom (A)",
-          "reference_step_a": "Stromschrittweite (A)",
-          "reference_phase_switching": "Phasenumschaltung unterstützt",
-          "reference_enable_disable": "Ladefreigabe unterstützt",
-          "reference_max_1a": "Maximaler Strom 1p (A)",
-          "reference_max_2a": "Maximaler Strom 2p (A)",
-          "reference_max_3a": "Maximaler Strom 3p (A)"
+        "title": "Wallbox Manager",
+        "description": "PV-Überschuss benötigt beide Leistungsreferenzen. Ohne Speicher-SoC arbeitet es ohne Speicher; die Entladereserve ist davon unabhängig.",
+        "sections": {
+          "general": {
+            "name": "Allgemeine Parameter",
+            "data": {
+              "min_soc_speicher": "Mindestreserve",
+              "soc_speicher_aktuell": "Ladezustand",
+              "leistung_pv": "PV-Leistung",
+              "leistung_verbraucher": "Verbrauchsleistung",
+              "pv_diagnostic_logging": "Diagnoseprotokoll"
+            },
+            "data_description": {
+              "pv_diagnostic_logging": "Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert.",
+              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox."
+            }
+          },
+          "regulation": {
+            "name": "Regelparameter",
+            "data": {
+              "regulation_interval": "Regelintervall",
+              "pv_start_delay": "PV-Startverzögerung",
+              "pv_stop_delay": "PV-Stoppverzögerung",
+              "soc_hysterese": "SoC-Hysterese",
+              "power_smoothing_window": "Leistungsglättung Zeitfenster"
+            }
+          }
         }
       }
-    },
-    "error": {
-      "invalid_reference": "Gültige Zuordnung und widerspruchsfreie Referenzwerte eingeben."
+    }
+  },
+  "config_subentries": {
+    "wallbox": {
+      "title": "Wallbox",
+      "initiate_flow": {
+        "user": "Wallbox",
+        "reconfigure": "Fähigkeiten konfigurieren"
+      },
+      "step": {
+        "reconfigure": {
+          "title": "Stationsfähigkeiten",
+          "description": "Nur fehlende OCPP-Angaben ergänzen. Ein leeres Formular benötigt keine Ergänzungen.",
+          "data": {
+            "reference_phases": "Unterstützte Phasenanzahlen (z. B. 1,3)",
+            "reference_min_a": "Minimaler Strom (A)",
+            "reference_step_a": "Stromschrittweite (A)",
+            "reference_phase_switching": "Phasenumschaltung unterstützt",
+            "reference_enable_disable": "Ladefreigabe unterstützt",
+            "reference_max_1a": "Maximaler Strom 1p (A)",
+            "reference_max_2a": "Maximaler Strom 2p (A)",
+            "reference_max_3a": "Maximaler Strom 3p (A)"
+          }
+        }
+      },
+      "error": {
+        "invalid_reference": "Gültige Zuordnung und widerspruchsfreie Referenzwerte eingeben."
+      },
+      "abort": {
+        "reconfigure_successful": "Stationsfähigkeiten gespeichert.",
+        "discovered_automatically": "Wallboxen werden automatisch über OCPP angelegt."
+      },
+      "entry_type": "Wallbox"
     }
   }
 }
