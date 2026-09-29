@@ -1,4 +1,4 @@
-"""Fresh voltage may change watts, but not a command's discrete phase/current."""
+"""Voltage belongs to the command snapshot; live safety fences remain independent."""
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -77,7 +77,7 @@ async def test_first_start_accepts_normal_voltage_drift(grid):
     assert result.status == CommandStatus.APPLIED
     point = c.confirmed_point(t)
     assert point.current_a == 6 and point.mode.count == 1
-    assert point.offered_power_w == 6 * DRIFTED != planned.offered_power_w
+    assert point.offered_power_w == planned.offered_power_w
     assert c.runtime.enabled(t) is True and p.pv_ongoing[t]
     assert not p.pv_startups and t not in c._unconfirmed_targets
     assert c.intent(t).fence_reason is None
@@ -97,14 +97,12 @@ async def test_regulation_accepts_same_discrete_point_at_new_voltage(grid):
     await apply(p, t)
     point = c.confirmed_point(t)
     assert previous.current_a == 6 and point.current_a == 8
-    assert point.mode == previous.mode and point.phase_voltages_v == (DRIFTED,)
+    assert point.mode == previous.mode and point.phase_voltages_v == (PLANNED,)
     assert p.pv_ongoing[t]
 
 
 @pytest.mark.parametrize("invalid", [None, "missing", "expired", "future", "zero"])
-async def test_material_change_or_invalid_voltage_requires_reconciliation(
-    grid, invalid
-):
+async def test_post_dispatch_voltage_changes_do_not_reinterpret_snapshot(grid, invalid):
     p, t, (c, _, peer, *_), _ = await setup(grid)
 
     def response(_):
@@ -113,14 +111,16 @@ async def test_material_change_or_invalid_voltage_requires_reconciliation(
 
     peer.profile_response = response
     result = await p.permission(t, True)
-    assert result.reason == CommandReason.STALE
-    assert c.intent(t).fence_reason == (
-        "electrical_setpoint_changed" if invalid is None else "voltage_unavailable"
-    )
-    assert c.confirmed_point(t) is None and c.runtime.enabled(t) is False
-    assert t in c._unconfirmed_targets and p.pv_retry_until[t] == 60
+    assert result.status == CommandStatus.APPLIED
+    assert c.intent(t).fence_reason is None
+    assert c.confirmed_point(t).current_a == 6
+    assert c.confirmed_point(t).phase_voltages_v == (PLANNED,)
+    assert c.runtime.enabled(t) is True
+    assert t not in c._unconfirmed_targets and t not in p.pv_retry_until
     if invalid is None:
         assert c.resolve(t)[1].point.current_a == 7
+    else:
+        assert p.pv_edit(t) is None  # Missing inputs hold, never invent OFF.
 
 
 @pytest.mark.parametrize("change", ["capability", "limit", "authority", "generation"])
@@ -152,10 +152,9 @@ async def test_voltage_drift_does_not_hide_other_fence_changes(grid, change):
     assert c.confirmed_point(t) is None and c.runtime.enabled(t) is False
 
 
-async def test_small_drift_across_current_step_is_still_material(grid):
+async def test_small_drift_across_current_step_belongs_to_next_cycle(grid):
     p, t, (c, _, peer, *_), _ = await setup(grid)
-    # No percentage tolerance: even the same 0.31 V change is material when
-    # NOT_BELOW would require 7 A rather than the previously resolved 6 A.
+    # The next NOT_BELOW decision needs 7 A; the dispatched 6 A stays APPLIED.
     measurements(p, t, pv=1379, load=0, actual=0, soc=96)
     assert p.pv_plan(t)[3].point.current_a == 6
 
@@ -165,7 +164,8 @@ async def test_small_drift_across_current_step_is_still_material(grid):
 
     peer.profile_response = response
     result = await p.permission(t, True)
-    assert result.reason == CommandReason.STALE
-    assert c.intent(t).fence_reason == "electrical_setpoint_changed"
-    assert c.resolve(t)[1].point.current_a == 7
-    assert p.pv_retry_until[t] == 60
+    assert result.status == CommandStatus.APPLIED
+    assert c.intent(t).fence_reason is None
+    assert c.confirmed_point(t).current_a == 6
+    assert (await apply(p, t)).current_a == 7
+    assert t not in p.pv_retry_until

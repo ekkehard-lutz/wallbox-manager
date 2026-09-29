@@ -192,9 +192,11 @@ async def test_profile_inflight_semantic_fences(authority, change):
             )
     peer.release.set()
     result = await pending
-    if change in ("refresh", "drift"):
+    if change in ("refresh", "drift", "voltage"):
         assert result.status == CommandStatus.APPLIED
         assert len(peer.permissions) == 1
+        assert control.confirmed_point(bound.target).current_a == 10
+        assert control.intent(bound.target).fence_reason is None
         assert live.runtime.enabled(bound.target) is True
     else:
         assert result.reason == CommandReason.STALE
@@ -337,8 +339,12 @@ async def test_enable_queue_rechecks_prepared_target(authority, change):
     release.set()
     result = await pending
     assert len(peer.requests) == 1
-    if change in ("refresh", "drift"):
+    if change in ("refresh", "drift", "voltage", "expired"):
+        # The prepared point was already dispatched; permission completes the
+        # same decision, with live control fences but no voltage re-solving.
         assert result.status == CommandStatus.APPLIED
+        assert control.confirmed_point(bound.target).current_a == 10
+        assert control.intent(bound.target).fence_reason is None
         assert len(peer.permissions) == 1
     else:
         assert result.reason == CommandReason.STALE

@@ -33,7 +33,12 @@ from .requests import Direction, PowerRequest
 
 @dataclass(frozen=True)
 class ControlInputs:
-    """One read of existing normalized contracts, not a capability registry."""
+    """One coherent read of normalized contracts, not a capability registry.
+
+    Voltage and activity are regulation samples. Capabilities, hard limits and
+    transaction identity are live command validity. Current/eligible phase proof
+    gates new dispatch; expected feedback changes do not redefine a sent command.
+    """
 
     capabilities: CapabilitySnapshot
     voltage: VoltageObservation
@@ -467,13 +472,23 @@ class ControlRuntime:
                 != observation.revision
             ):
                 return stale_command_result()
-        result = await self._permission(
-            target,
-            intent,
-            generation,
-            enabled,
-            fence=prepared.get("fence", fence),
-        )
+        # Preparing the point and confirming ON are one regulation decision.
+        # Keep its existing pending slot through permission I/O so sensor events
+        # cannot cancel it between these two confirmed control operations.
+        pending = self._confirmed_points.get(target, (None,))[0]
+        if enabled:
+            self.pending_points[target] = pending
+        try:
+            result = await self._permission(
+                target,
+                intent,
+                generation,
+                enabled,
+                fence=prepared.get("fence", fence),
+            )
+        finally:
+            if enabled and self.pending_points.get(target) is pending:
+                self.pending_points.pop(target, None)
         if enabled and generation == intent.generation:
             record = self._confirmed_points.get(target)
             if result.status == CommandStatus.APPLIED and record:
@@ -738,6 +753,13 @@ class ControlRuntime:
         self.publish(target)
         return solved.point
 
+    async def wait_for_pending_point(self, target):
+        """Let a superseded operation drain before a regulator samples again."""
+        lock = self._point_locks.get(target)
+        if lock is not None:
+            async with lock:
+                pass
+
     async def apply_stored(self, target, **kwargs):
         """Serialize transitions through confirmation, including phase fallback."""
         generation = self.intent(target).generation
@@ -804,44 +826,63 @@ class ControlRuntime:
         substitute_mode = None
         intent.phase_retry = False
         intent.fence_reason = None
-        validated_point = resolved.point
 
-        def current(*, after_dispatch=False, permission_confirmed=False):
-            nonlocal validated_point
+        def control_valid(*, after_dispatch=False, permission_confirmed=False):
+            """Live lifecycle/safety proof, independent of the regulation sample."""
+
+            def reject(reason):
+                intent.fence_reason = reason
+                return None
+
+            if self._closed or generation != intent.generation:
+                return reject("intent_changed")
+            if not self.profile_permitted(target):
+                return reject("profile_or_ownership_changed")
+            if not self.runtime.current(token):
+                return reject("connection_changed")
             if (
-                self._closed
-                or not (
-                    getattr(fence, "after_dispatch", fence)()
-                    if after_dispatch
-                    else fence()
-                )
-                or not self.profile_permitted(target)
-                or generation != intent.generation
-                or (
-                    not permission_confirmed
-                    and (
-                        self.runtime.enabled(target) is not actual
-                        or self.runtime.enabled_observation(target).revision
-                        != enabled_revision
-                    )
-                )
-                or not self.runtime.current(token)
-                or self.runtime.authority(target.station) != ControlAuthority.REMOTE
+                self.runtime.authority(target.station) != ControlAuthority.REMOTE
                 or self.runtime.get(target.station).authority_revision
                 != authority_revision
             ):
-                intent.fence_reason = "intent_authority_permission_or_caller"
-                return False
-            fresh, result, reason = self.resolve(
-                target,
-                substitute_mode=substitute_mode,
-                dispatch_modes=(resolved.point.mode,)
-                if after_dispatch and resolved.point.charging
-                else None,
+                return reject("authority_changed")
+            permission = self.runtime.enabled_observation(target)
+            if not permission_confirmed and (
+                self.runtime.enabled(target) is not actual
+                or permission is None
+                or permission.revision != enabled_revision
+            ):
+                return reject("permission_changed")
+            caller = (
+                getattr(fence, "after_dispatch", fence) if after_dispatch else fence
+            )
+            if not caller():
+                return reject("caller_invalidated")
+            fresh = self.inputs(target)
+            if fresh is None or fresh.capabilities != inputs.capabilities:
+                return reject("capabilities_changed")
+            if fresh.limits != inputs.limits:
+                return reject("electrical_limits_changed")
+            if fresh.transaction_id != inputs.transaction_id:
+                return reject("transaction_changed")
+            if self.blocker(target) is not None:
+                return reject("adapter_or_transaction_unavailable")
+            return fresh
+
+        def current(*, after_dispatch=False, permission_confirmed=False):
+            fresh = control_valid(
+                after_dispatch=after_dispatch, permission_confirmed=permission_confirmed
             )
             if fresh is None:
-                intent.fence_reason = "inputs_unavailable"
                 return False
+            if after_dispatch:
+                # The wire command is fixed. New PV/SoC/power/voltage samples,
+                # expiry and ordinary activity/phase feedback belong to the next
+                # cycle, never to retrospective solving of this command.
+                return True
+            # Queue/lock waits still require a fresh, representable snapshot and
+            # current phase-operation proof immediately before a hardware write.
+            _, result, reason = self.resolve(target, substitute_mode=substitute_mode)
             if (
                 resolved.point.charging
                 and fresh.voltage.active_voltages(
@@ -849,37 +890,26 @@ class ControlRuntime:
                 )
                 is None
             ):
-                intent.fence_reason = "voltage_unavailable"
+                intent.fence_reason = "pre_dispatch_voltage_unavailable"
                 return False
             if result is None or not resolved.point.same_setpoint(result.point):
-                intent.fence_reason = "electrical_setpoint_changed"
+                intent.fence_reason = "pre_dispatch_setpoint_changed"
                 return False
             if hasattr(self, "profiles") and not self.profiles.permits_point(
-                target, result.point, after_dispatch=after_dispatch
+                target, resolved.point
             ):
-                intent.fence_reason = "pv_policy"
+                intent.fence_reason = "pre_dispatch_pv_policy"
                 return False
-            # Compare required electrical values, not sample timestamps.
-            fresh = replace(fresh, voltage=inputs.voltage)
-            if after_dispatch or not resolved.point.charging:
-                fresh = replace(
-                    fresh,
-                    current_mode=inputs.current_mode,
-                    actively_charging=inputs.actively_charging,
-                    eligible_modes=inputs.eligible_modes,
-                )
-                valid = fresh == inputs and self.blocker(target) is None
-            else:
-                valid = (
-                    reason is None
-                    and fresh == inputs
-                    and resolved.point.same_setpoint(result.point)
-                )
-            if not valid:
-                intent.fence_reason = "electrical_transaction_or_pre_dispatch_phase"
-            if valid:
-                validated_point = result.point
-            return valid
+            if resolved.point.charging and (
+                reason is not None
+                or fresh.current_mode != inputs.current_mode
+                or fresh.eligible_modes != inputs.eligible_modes
+            ):
+                intent.fence_reason = "pre_dispatch_phase_changed"
+                return False
+            return True
+
+        current.after_dispatch = lambda: current(after_dispatch=True)
 
         if prepared is not None:
 
@@ -937,8 +967,11 @@ class ControlRuntime:
                     result = await apply_operating_point(
                         adapter, resolved.point, is_current=current
                     )
+        # Record the actual invalidating context even when the adapter already
+        # rejected an obsolete connection/authority before returning its result.
+        still_current = current(after_dispatch=True)
         if generation != intent.generation or (
-            result.status == CommandStatus.APPLIED and not current(after_dispatch=True)
+            result.status == CommandStatus.APPLIED and not still_current
         ):
             if generation != intent.generation:
                 self._confirmed_points.pop(target, None)
@@ -953,7 +986,7 @@ class ControlRuntime:
             if result.status == CommandStatus.APPLIED:
                 self._unconfirmed_targets.discard(target)
                 self._confirmed_points[target] = (
-                    validated_point,
+                    resolved.point,
                     token,
                     authority_revision,
                     self.runtime.enabled_observation(target).revision,

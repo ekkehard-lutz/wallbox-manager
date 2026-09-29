@@ -135,7 +135,7 @@ async def test_retry_deadline_survives_changing_desired_target(
     assert operation.await_count == 2
 
 
-async def test_accepted_but_stale_reply_retains_history_and_reconciles(grid):
+async def test_accepted_reply_survives_new_surplus_until_next_cycle(grid):
     p, t, (c, _, peer, *_), _ = await prepare(grid)
     measurements(p, t, pv=4140, load=0, actual=0)
     await p.permission(t, True)
@@ -153,10 +153,11 @@ async def test_accepted_but_stale_reply_retains_history_and_reconciles(grid):
     finally:
         peer.release.set()
         result = await pending
-    assert result.reason == CommandReason.STALE
+    assert result.status == CommandStatus.APPLIED
     p.pv_confirm(t)
-    assert c.confirmed_point(t) == confirmed and p.pv_ongoing[t]
+    assert c.confirmed_point(t).current_a == 20 and p.pv_ongoing[t]
+    assert c.intent(t).fence_reason is None
     count = len(peer.requests)
     assert await apply(p, t) == confirmed
-    assert len(peer.requests) == count + 1  # Old confirmation cannot skip correction.
+    assert len(peer.requests) == count + 1  # Next cycle applies the new 18 A decision.
     assert t not in c._unconfirmed_targets

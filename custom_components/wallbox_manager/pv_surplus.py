@@ -125,6 +125,8 @@ class PVSurplus:
             settings = self.setting(target)
             if settings["profile"] != "PV_SURPLUS":
                 continue
+            if target in self.control.pending_points:
+                continue  # Normal SoC policy belongs to the next regulation tick.
             with cycle(self, target, "soc_event"):
                 try:
                     soc = reading(
@@ -398,9 +400,13 @@ class PVSurplus:
         return Fraction(0), Direction.DOWN, status, resolve(Fraction(0), Direction.DOWN)
 
     def pv_edit(self, target):
-        if target not in self.control.pending_points:
+        pending = target in self.control.pending_points
+        if not pending:
             self.control.intent(target).profile_modes = None
         power, direction, status, result = self.pv_plan(target)
+        if pending:
+            # Coalesce all policy targets without superseding the command.
+            return result
         intent = self.control.intent(target)
         if result is None:
             self.status[target] = status
@@ -415,10 +421,6 @@ class PVSurplus:
             )[1]
             if result is None or result.point is None:
                 return None
-        if target in self.control.pending_points and power > 0:
-            # Measurements remain the latest desired input; leave the executing
-            # generation intact until its adapter has completed confirmation.
-            return result
         intent.profile_modes = (
             (result.point.mode.count,) if status == "pv_stop_delay" else None
         )
@@ -462,6 +464,8 @@ class PVSurplus:
         for target in tuple(self.tasks):
             if self.setting(target)["profile"] != "PV_SURPLUS":
                 continue
+            if target in self.control.pending_points:
+                continue  # Keep the dispatched decision; the next tick samples anew.
             attrs = (
                 (state or event.data.get("old_state")).attributes
                 if state or event.data.get("old_state")
@@ -545,8 +549,7 @@ class PVSurplus:
                 or self.pv_request(target) == expected
             )
 
-        # After dispatch the live PV policy still validates the prepared point.
-        # A changed but safe surplus is not a superseding user command.
+        # Once dispatched, only control context can supersede this snapshot.
         fence.after_dispatch = lambda: self.epochs.get(target, 0) == epoch
         return await self.control.request_enabled(target, True, fence=fence)
 
@@ -634,6 +637,9 @@ class PVSurplus:
                     )
                     self.pv_confirm(target)
             while self.valid(target, epoch):
+                await self.control.wait_for_pending_point(target)
+                if not self.valid(target, epoch):
+                    return
                 with cycle(self, target, "regulation"):
                     result = self.pv_edit(target)
                     point = result.point if result else None
@@ -650,6 +656,7 @@ class PVSurplus:
                     )
                     if (
                         point is not None
+                        and target not in self.control.pending_points
                         and not holding
                         and not waiting_retry
                         and (
@@ -672,12 +679,16 @@ class PVSurplus:
                                 continue
                         expected = self.pv_request(target)
                         stopping = self.control.intent(target).request.target_w == 0
+
+                        def fence(stopping=stopping, expected=expected):
+                            return self.valid(target, epoch) and (
+                                stopping or self.pv_request(target) == expected
+                            )
+
+                        fence.after_dispatch = lambda: self.valid(target, epoch)
                         await self.control.apply_stored(
                             target,
-                            fence=lambda stopping=stopping, expected=expected: (
-                                self.valid(target, epoch)
-                                and (stopping or self.pv_request(target) == expected)
-                            ),
+                            fence=fence,
                             reuse_applied=True,
                         )
                         if intent.phase_retry or (

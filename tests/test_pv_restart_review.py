@@ -68,7 +68,7 @@ async def test_common_runtime_off_cannot_leave_continuation_latched(grid):
     assert not p.pv_ongoing[t]
 
 
-async def test_low_soc_dip_fences_queued_continuation_even_after_recovery(grid):
+async def test_normal_soc_dip_recovered_before_dispatch_does_not_cancel_command(grid):
     p, t, (c, bound, peer, *_) = await started(grid)
     measurements(p, t, soc=93)
     p.pv_edit(t)
@@ -83,10 +83,10 @@ async def test_low_soc_dip_fences_queued_continuation_even_after_recovery(grid):
         measurements(p, t, soc=89)
         measurements(p, t, soc=93)
         await asyncio.sleep(0)
-    await pending
-    await applied(c, t, False)
+    assert (await pending).status.value == "applied"
+    assert c.confirmed_point(t).charging
     assert all(
-        request[1]["charging_schedule"][0]["charging_schedule_period"][0]["limit"] == 0
+        request[1]["charging_schedule"][0]["charging_schedule_period"][0]["limit"] > 0
         for request in peer.requests[count:]
     )
     assert c.runtime.enabled(t) is True
@@ -281,9 +281,7 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
 
 
 @pytest.mark.parametrize("soc", [90, 95])
-async def test_late_positive_reply_cannot_restore_continuation_after_soc_fall(
-    grid, soc
-):
+async def test_normal_soc_fall_during_dispatch_is_handled_on_next_cycle(grid, soc):
     p, t, (c, _, peer, *_) = await started(grid)
     measurements(p, t, pv=0, soc=96)
     p.pv_edit(t)
@@ -295,17 +293,12 @@ async def test_late_positive_reply_cannot_restore_continuation_after_soc_fall(
     peer.release.clear()
     p.launch(t)
     await asyncio.wait_for(peer.received.wait(), 1)
-    # A dispatched frame cannot be recalled, but its delayed reply must not
-    # re-arm continuation; a fenced zero-power command must follow immediately.
+    # Normal SoC policy does not cancel the pending command. At these values
+    # the newly confirmed charge may continue inside the hysteresis band.
     measurements(p, t, soc=soc)
     await asyncio.sleep(0)
     peer.release.set()
-    await applied(c, t, False)
-    assert not p.pv_ongoing[t]
+    await applied(c, t, True)
     assert c.runtime.enabled(t) is True
-    assert (
-        peer.requests[-1][1]["charging_schedule"][0]["charging_schedule_period"][0][
-            "limit"
-        ]
-        == 0
-    )
+    assert c.intent(t).fence_reason is None
+    assert p.pv_edit(t).point.charging

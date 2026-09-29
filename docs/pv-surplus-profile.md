@@ -106,11 +106,12 @@ Ordinary positive power adjustments during charging use the existing one-second
 debounce. Starts with zero start delay and OFF skip it. Battery-SoC policy stops
 use the same stop-delay state machine as insufficient PV. Event values update the
 battery latch; recovery above the upper threshold cancels a pending normal stop.
-Invalid measurements prevent new positive dispatch and confirmation through the
-existing live-policy fences; they do not invalidate the regulator or synthesize
-OFF. Explicit control/safety invalidations still fence pending work immediately. With a configured zero stop delay, policy stops are immediate. Measurements are re-read after debounce and positive
-command fences reject changed or stale policy inputs. The shared control runtime
-also applies the PV policy immediately before dispatch and after command replies;
+Invalid measurements prevent new positive dispatch; they do not retrospectively
+invalidate a sent command, invalidate the regulator or synthesize OFF. Explicit control/safety invalidations still fence pending work immediately. With a configured zero stop delay, policy stops are immediate. Measurements are re-read after debounce and positive
+pre-dispatch fences reject invalid or stale policy inputs. The shared runtime
+applies PV policy before dispatch; completion checks only live control/safety state.
+Normal SoC/power events during point/permission execution are coalesced for the next
+regulation cycle, which applies the usual hysteresis and stop delay;
 every OFF clears continuation, including OFF requested through primitive controls.
 An already dispatched frame cannot be recalled, but its delayed reply cannot
 restore continuation after a safety stop; a zero-power command follows. Equal
@@ -283,10 +284,11 @@ explicit user intent is independently reconciled through the ownership recovery
 path. Phase feedback alone cannot prove the current
 setpoint, so an uncertain operation is retried rather than inferred as applied.
 
-After an accepted command, PV policy checks use its previously verified phase mode
-while continuing to check live power/SoC policy and electrical limits. The runtime
-still fences changes to voltage, capabilities, limits, transaction, intent,
-authority and permission. New writes always require fresh phase-operation proof.
+After dispatch, the original current/phase point and voltage basis remain fixed.
+The runtime still fences capabilities, hard limits, transaction, intent, ownership,
+authority, permission and connection changes. Volatile PV/load/session power,
+normal SoC, voltage and measurement timestamps belong to the next regulation cycle.
+New writes always require fresh phase-operation proof and valid regulation inputs.
 A temporary phase-feedback gap after confirmation keeps the positive desired
 request instead of manufacturing an OFF request. Incomplete planning evidence
 pauses regulation and breaks continuous policy timers; a fresh genuine stop
@@ -301,23 +303,43 @@ and `ongoing_after` to determine actual permission and confirmed continuation.
 Connector availability is diagnostic telemetry, not transport connectivity or
 authority, and is not a command fence by itself.
 
-### Voltage drift during command confirmation
+### Command snapshot validity versus live control/safety validity
 
-The command fence validates fresh voltage semantically: re-solve the stored power
-request and direction, then compare charging/OFF, phase mode and current. Voltage
-samples and voltage-derived offered watts need not be identical. After dispatch,
-use the already verified dispatched phase mode; before a new write, use fresh
-phase eligibility. The confirmed point records the freshly validated voltage and
-power basis. No percentage or absolute voltage tolerance is introduced: even a
-small change is material if it crosses a discrete current step under the selected
-approximation policy. Capability, current-limit, transaction, authority, intent
-and permission fences remain independent and unchanged.
+Each regulation iteration samples policy and electrical inputs and calculates one
+operating point. Before dispatch, including after OCPP queue/lock waits, the runtime
+checks input validity, current PV policy, electrical representability and fresh
+phase-operation proof. A snapshot that is no longer valid before the write is
+rejected; the adapter still checks exact wire representation and scope.
 
-`command_fence_reason=voltage_unavailable` identifies missing, expired or otherwise
-invalid required phase voltage. `electrical_setpoint_changed` identifies a fresh
-resolution that cannot retain the dispatched phase/current/OFF setting. Harmless
-drift is accepted without a stale fence reason. An accepted but materially changed
-point continues to use the existing reconciliation and retry path.
+After dispatch, the runtime does not re-solve the target or call the PV policy
+again. PV/load/selected charging power, normal SoC, voltage, their timestamps and
+ordinary charging activity do not invalidate completion. The confirmed point
+retains the dispatched snapshot's voltage and offered-power basis. For example,
+1p/9A calculated at 230 V remains the confirmed command when 228 V arrives before
+the acknowledgement; the next cycle calculates using 228 V. Measurement gaps hold
+the last confirmed point under the preceding transient-gap semantics. No smoothing
+or second operating-point cache is introduced.
+
+Live fences remain: intent/profile epochs and explicit cancellation, user OFF,
+ownership, permission revision, authority revision, connection/boot generation,
+adapter/transaction scope, capability proof and hard current limits. Any change
+to the capability/limit snapshot remains conservatively fenced. No independent
+hard battery-protection signal exists in normal PV SoC policy: its lower threshold
+uses the next cycle and configured stop delay, rather than cancelling a sent
+command. Explicit control actions still supersede it immediately.
+
+The existing pending slot covers point preparation and permission confirmation.
+A restarted regulator waits for superseded point cleanup before sampling again.
+Retry timing is unchanged; measurement drift alone no longer creates a retry.
+
+`command_fence_reason` separates `pre_dispatch_voltage_unavailable`,
+`pre_dispatch_setpoint_changed`, `pre_dispatch_pv_policy` and
+`pre_dispatch_phase_changed` from actual live invalidations: `intent_changed`,
+`profile_or_ownership_changed`, `connection_changed`, `authority_changed`,
+`permission_changed`, `caller_invalidated`, `capabilities_changed`,
+`electrical_limits_changed`, `transaction_changed` and
+`adapter_or_transaction_unavailable`. Ordinary post-dispatch drift leaves the
+fence reason unset.
 
 ### Stateful stop diagnostics
 

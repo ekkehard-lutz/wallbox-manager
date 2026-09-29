@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -101,7 +102,7 @@ async def test_first_rejection_schedules_retry_without_command_storm(
 
 
 async def test_uncertain_first_reply_reconciles_after_retry_deadline(grid):
-    p, t, (c, _, peer, *_), clock = await startup(grid)
+    p, t, (c, _, peer, _, source, _), clock = await startup(grid)
     gate, parked = asyncio.Event(), asyncio.Event()
 
     async def wait(_):
@@ -112,15 +113,16 @@ async def test_uncertain_first_reply_reconciles_after_retry_deadline(grid):
     p.wait = wait
 
     def response(_):
-        # A post-dispatch PV policy change rejects confirmation of the old point.
-        # No historical point exists, but the explicit enable must remain retryable.
-        measurements(p, t, pv=0, load=358, actual=0, soc=96)
+        # A non-volatile capability change still invalidates confirmation.
+        source.snapshot = replace(
+            source.snapshot, revision=source.snapshot.revision + 1
+        )
         return call_result.SetChargingProfile(status="Accepted")
 
     peer.profile_response = response
     result = await p.permission(t, True)
     assert result.reason == CommandReason.STALE
-    assert c.intent(t).fence_reason == "pv_policy"
+    assert c.intent(t).fence_reason == "capabilities_changed"
     assert t in c._unconfirmed_targets
     assert c.confirmed_point(t) is None and p.pv_retry_until[t] == 60
     await asyncio.wait_for(parked.wait(), 1)
