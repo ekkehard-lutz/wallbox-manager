@@ -364,6 +364,17 @@ hard battery-protection signal exists in normal PV SoC policy: its lower thresho
 uses the next cycle and configured stop delay, rather than cancelling a sent
 command. Explicit control actions still supersede it immediately.
 
+Initial enable uses the profile epoch as its caller fence, including while queued
+before the first hardware write. It does not compare live `pv_request()` with the
+sample used to prepare the request: a normal PV/load update is not cancellation.
+The shared runtime still checks current PV policy, valid voltage, representability
+and phase evidence before dispatch, and all live lifecycle/safety fences through
+permission confirmation. Thus an invalid pre-dispatch sample can still reject a
+write; a changed but valid demand alone does not produce `caller_invalidated`.
+This matters especially after reconnect when ChargingEnabled is false and there
+is no confirmed point: an unnecessary STALE result otherwise enters the startup
+worker's 60-second retry path before normal regulation can begin.
+
 The existing pending slot covers point preparation and permission confirmation.
 A restarted regulator waits for superseded point cleanup before sampling again.
 Retry timing is unchanged; measurement drift alone no longer creates a retry.

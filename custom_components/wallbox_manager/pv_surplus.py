@@ -583,17 +583,13 @@ class PVSurplus:
 
     async def pv_enable_attempt(self, target, epoch):
         """Continue one explicitly authorized enable, never acquire authority."""
-        expected = self.pv_request(target)
-
-        def fence():
-            return self.epochs.get(target, 0) == epoch and (
-                self.control.intent(target).request.target_w == 0
-                or self.pv_request(target) == expected
-            )
-
-        # Once dispatched, only control context can supersede this snapshot.
-        fence.after_dispatch = lambda: self.epochs.get(target, 0) == epoch
-        return await self.control.request_enabled(target, True, fence=fence)
+        # The prepared request is this attempt's regulation snapshot. Normal
+        # measurement updates must not act as caller cancellation while queued.
+        # apply_stored retains live policy/electrical checks before dispatch and
+        # lifecycle/safety checks through point and permission confirmation.
+        return await self.control.request_enabled(
+            target, True, fence=lambda: self.epochs.get(target, 0) == epoch
+        )
 
     def pv_startup_valid(self, target, epoch):
         context = self.pv_startups.get(target)
