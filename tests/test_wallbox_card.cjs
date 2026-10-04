@@ -748,3 +748,23 @@ test('countdown replaces pending inputs, disables edits and reconstructs on card
   first.card.hass={...first.card._hass,states:data};
   for(const id of ['grid_start_delay','grid_duration']) for(const part of ['hours','minutes']) assert.equal(first.get(`${id}-${part}`).value,'');
 });
+
+test('PV Optimum shows independent controls, current target and no Grid or Surplus controls', async()=>{
+  const data=states(true);
+  data['select.anything'].state='PV_OPTIMUM';
+  Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS','PV_OPTIMUM'],battery_configured:true,optimum_target_soc:42.25});
+  for(const [key,value] of Object.entries({optimum_lower_soc:20,optimum_upper_soc:80,optimum_max_discharge_w:3500,estimated_daily_house_consumption_kwh:12.5})) data[`number.${key}`]=state(key,'A',String(value));
+  const {get,calls}=card(data);
+  assert.equal(get('power-row').hidden,true);
+  assert.equal(get('reserve-row').hidden,true);
+  assert.equal(get('soll_soc_speicher-row').hidden,true);
+  assert.equal(get('grid_duration-row').hidden,true);
+  assert.equal(get('optimum-target').textContent,'42.3 %');
+  assert.equal(get('optimum_max_discharge_w-row').hidden,false);
+  const input=get('estimated_daily_house_consumption_kwh');
+  input.value='15.5'; input.checkValidity=()=>true;
+  input.onchange();
+  assert.equal(calls[0][0],'number');
+  assert.equal(calls[0][2].entity_id,'number.estimated_daily_house_consumption_kwh');
+  assert.equal(calls[0][2].value,15.5);
+});

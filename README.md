@@ -311,7 +311,8 @@ for the exact state model, guarded sequence, station-scoped capability subentrie
 battery lifecycle and failure behavior.
 
 PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
-PV_DAILY_OPTIMUM, PV_MAXIMUM and the external Energy Manager interface remain deferred.
+PV Optimum is described in [its profile documentation](docs/pv-optimum-design.md).
+PV Maximum and the external Energy Manager interface remain deferred.
 
 ## Integration settings and profile timing
 
@@ -391,8 +392,8 @@ The implemented pure solver supports these target-power directions:
 - UP
 
 Standalone profiles handle simple current-day PV logic and energy-flow feedback.
-Advanced forecasts, prices, departure/vehicle targets, learned behavior and site-wide
-optimization belong to the future Energy Manager, which supplies current power
+Advanced forecasts beyond the configured PV/linear household estimate, prices,
+departure/vehicle targets, learned behavior and site-wide optimization belong to the future Energy Manager, which supplies current power
 intent through REMOTE. Wallbox Manager retains technical operating-point solving.
 
 Home Assistant entities remain available for user interaction, display and
@@ -402,7 +403,7 @@ automations.
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
 now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
-The v0.3.x Grid and PV Surplus profiles build on these controls. PV Daily Optimum,
+The Grid, PV Surplus and PV Optimum profiles build on these controls.
 PV Maximum and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent

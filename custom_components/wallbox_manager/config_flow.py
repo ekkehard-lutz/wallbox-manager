@@ -192,7 +192,9 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 description={"suggested_value": self.data.get("soc_speicher_aktuell")},
             ): EntitySelector(EntitySelectorConfig()),
         }
-        for key in ("leistung_pv", "leistung_verbraucher"):
+        from .pv_optimum import OPTIMUM_REFERENCES
+
+        for key in OPTIMUM_REFERENCES[1:]:
             fields[
                 vol.Optional(key, description={"suggested_value": self.data.get(key)})
             ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
@@ -233,6 +235,7 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 "soc_speicher_aktuell",
                 "leistung_pv",
                 "leistung_verbraucher",
+                *OPTIMUM_REFERENCES[3:],
             ):
                 self.data.pop(key, None)
                 if user_input.get(key):

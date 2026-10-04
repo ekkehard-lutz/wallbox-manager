@@ -10,6 +10,7 @@ from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
 from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
+from .pv_regulators import pv_balance
 
 PV_DEFAULTS = {
     "approximation": "down",
@@ -23,13 +24,15 @@ MAX_AGE_SECONDS = 90
 _LOGGER = logging.getLogger(__name__)
 
 
-def reading(state, now, *, soc=False):
+def reading(state, now, *, soc=False, energy=False):
     """Reject missing units, non-finite values, old and future observations."""
     if state is None:
         raise ValueError("missing measurement")
     value = Fraction(state.state)
     unit = state.attributes.get("unit_of_measurement")
     units = {"%": 1} if soc else {"W": 1, "kW": 1000, "MW": 1000000}
+    if energy:
+        units = {"Wh": 1, "kWh": 1000, "MWh": 1000000}
     if unit not in units:
         raise ValueError("invalid unit")
     timestamp = getattr(state, "last_reported", state.last_updated)
@@ -100,13 +103,15 @@ class PVSurplus:
 
     def permits_point(self, target, point, *, after_dispatch=False):
         """Apply the existing PV policy at the shared command dispatch fence."""
-        if self.setting(target)["profile"] != "PV_SURPLUS":
+        if self.setting(target)["profile"] not in ("PV_SURPLUS", "PV_OPTIMUM"):
             return not point.charging or self.grid_phase(target)[0] == "active"
         if not point.charging:
             # OFF ends continuation even when another primitive control requested it.
             self.pv_ongoing[target] = False
             return True
-        if self.closed or "PV_SURPLUS" not in self.available_profiles(target):
+        if self.closed or self.setting(target)[
+            "profile"
+        ] not in self.available_profiles(target):
             return False
         power, direction, status, plan = self.pv_plan(
             target,
@@ -193,7 +198,7 @@ class PVSurplus:
                 if self.valid(target, self.epochs[target]):
                     self.launch(target, stop_first=True)
 
-    def pv_measurements(self, target):
+    def pv_measurements(self, target, *, details=False):
         now = datetime.now(UTC)
         pv_state = self.hass.states.get(self.references.get("leistung_pv", ""))
         load_state = self.hass.states.get(
@@ -255,13 +260,14 @@ class PVSurplus:
             if value := state.attributes.get("valid_until"):
                 expiry.append(datetime.fromisoformat(value))
         self.pv_expiry[target] = min(expiry)
+        available = pv_balance(pv, load, actual)
         if record := active(self, target):
             record.data.update(
                 site_load_w=number(load - actual),
-                surplus_w=number(pv - load + actual),
+                surplus_w=number(available),
                 measured_power_w=number(actual),
             )
-        return pv - load + actual, soc
+        return (available, soc, actual) if details else (available, soc)
 
     def pv_sync_session(self, target):
         """An identity handover is not an electrical stop; a real Ended is."""
@@ -294,6 +300,8 @@ class PVSurplus:
     def pv_request(self, target):
         self.pv_sync_session(target)
         try:
+            if self.setting(target)["profile"] == "PV_OPTIMUM":
+                return self.optimum_request(target)
             available, soc = self.pv_measurements(target)
             return decision(
                 available, soc, self.setting(target), self.pv_battery_state(target, soc)
@@ -308,7 +316,7 @@ class PVSurplus:
         settings = self.setting(target)
         now = self.monotonic()
         inputs = self.control.inputs(target)
-        if "PV_SURPLUS" not in self.available_profiles(target):
+        if self.setting(target)["profile"] not in self.available_profiles(target):
             power, status = Fraction(0), "profile_unavailable"
         elif inputs is None or inputs.capabilities.stop.state != EvidenceState.VERIFIED:
             power, status = Fraction(0), "safe_stop_unavailable"
@@ -361,6 +369,7 @@ class PVSurplus:
             status
             in ("paused_insufficient_pv", "stopped_battery_soc", "waiting_battery_soc")
             and ongoing
+            and settings["profile"] != "PV_OPTIMUM"
         ):
             confirmed = self.control.confirmed_point(target)
             volts = (
@@ -492,6 +501,8 @@ class PVSurplus:
         if self.closed:
             return
         state = event.data.get("new_state")
+        if entity == self.references.get("leistung_pv"):
+            self.optimum_observe_day(observation=state)
         for key in ("leistung_pv", "leistung_verbraucher"):
             if entity == self.references.get(key):
                 try:
@@ -504,7 +515,7 @@ class PVSurplus:
                     self.monotonic(), value, valid_for=valid_for
                 )
         for target in tuple(self.tasks):
-            if self.setting(target)["profile"] != "PV_SURPLUS":
+            if self.setting(target)["profile"] not in ("PV_SURPLUS", "PV_OPTIMUM"):
                 continue
             if target in self.control.pending_points:
                 continue  # Keep the dispatched decision; the next tick samples anew.
@@ -600,8 +611,8 @@ class PVSurplus:
             context
             and not self.closed
             and self.epochs.get(target, 0) == epoch
-            and self.setting(target)["profile"] == "PV_SURPLUS"
-            and "PV_SURPLUS" in self.available_profiles(target)
+            and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM")
+            and self.setting(target)["profile"] in self.available_profiles(target)
             and self.can_control(target)
             and state
             and state.connected

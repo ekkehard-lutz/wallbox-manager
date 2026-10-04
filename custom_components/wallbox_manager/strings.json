@@ -211,6 +211,18 @@
       },
       "pv_stop_delay": {
         "name": "PV stop delay"
+      },
+      "optimum_lower_soc": {
+        "name": "{scope} PV Optimum lower target SoC"
+      },
+      "optimum_upper_soc": {
+        "name": "{scope} PV Optimum upper target SoC"
+      },
+      "optimum_max_discharge_w": {
+        "name": "{scope} PV Optimum maximum storage discharge power"
+      },
+      "estimated_daily_house_consumption_kwh": {
+        "name": "{scope} PV Optimum daily household consumption without EV"
       }
     },
     "select": {
@@ -226,7 +238,8 @@
         "name": "Charging profile {scope}",
         "state": {
           "NETZ": "Grid",
-          "PV_SURPLUS": "PV Surplus"
+          "PV_SURPLUS": "PV Surplus",
+          "PV_OPTIMUM": "PV Optimum"
         }
       },
       "active_wallbox": {
@@ -267,11 +280,21 @@
               "soc_speicher_aktuell": "Battery SoC",
               "leistung_pv": "PV power",
               "leistung_verbraucher": "Consumption power",
-              "pv_diagnostic_logging": "Diagnostic logging"
+              "pv_diagnostic_logging": "Diagnostic logging",
+              "storage_discharge_power": "Storage discharge power",
+              "storage_capacity": "Nominal storage capacity (WHRtg)",
+              "remaining_pv_energy": "Expected remaining PV energy today",
+              "grid_import_power": "Grid import power",
+              "grid_export_power": "Grid export power"
             },
             "data_description": {
               "pv_diagnostic_logging": "Enables detailed Wallbox Manager diagnostics for troubleshooting. Content depends on the active feature, profile and current activity. Disabled by default.",
-              "leistung_verbraucher": "Total consumption including the selected wallbox."
+              "leistung_verbraucher": "Total consumption including the selected wallbox.",
+              "storage_discharge_power": "Actual nonnegative discharge power; zero while charging.",
+              "storage_capacity": "Fronius nominal storage capacity: WHRtg / model_120_whrtg, in Wh or kWh.",
+              "remaining_pv_energy": "Expected remaining PV production today, in Wh or kWh.",
+              "grid_import_power": "Nonnegative power drawn from the grid.",
+              "grid_export_power": "Nonnegative power fed into the grid."
             }
           },
           "regulation": {

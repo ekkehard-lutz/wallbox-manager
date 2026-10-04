@@ -208,7 +208,9 @@ checked again at dispatch/acknowledgement against current policy and deadlines.
 ## Limitations and hardware validation
 
 This is the accepted first-order power balance: no DC/AC conversion or inverter
-loss correction, no PV Daily Optimum, PV Maximum or external Energy Manager.
+loss correction, no PV Maximum or external Energy Manager.
+[PV Optimum](pv-optimum-design.md) reuses the same power balance with its own
+independent target policy.
 Reference sensors must report at least every 90 seconds; delayed/asynchronous
 meter readings can temporarily distort the balance. No prediction or smoothing is
 included. Command execution time and a changed-target debounce can extend a cycle.

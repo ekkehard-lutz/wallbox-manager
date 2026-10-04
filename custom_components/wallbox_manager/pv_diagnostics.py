@@ -150,6 +150,17 @@ class Cycle:
                 "soc_speicher_aktuell",
                 "leistung_pv",
                 "leistung_verbraucher",
+                *(
+                    (
+                        "storage_discharge_power",
+                        "storage_capacity",
+                        "remaining_pv_energy",
+                        "grid_import_power",
+                        "grid_export_power",
+                    )
+                    if p.setting(t)["profile"] == "PV_OPTIMUM"
+                    else ()
+                ),
             )
         }
         if selected is not None:
@@ -443,7 +454,7 @@ def diagnostic_plan(method):
 def diagnostic_permission(method):
     @wraps(method)
     async def wrapped(self, target, enabled, **kwargs):
-        if self.setting(target)["profile"] != "PV_SURPLUS":
+        if self.setting(target)["profile"] not in ("PV_SURPLUS", "PV_OPTIMUM"):
             return await method(self, target, enabled, **kwargs)
         with cycle(self, target, "permission"):
             return await method(self, target, enabled, **kwargs)

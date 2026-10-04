@@ -211,6 +211,18 @@
       },
       "pv_stop_delay": {
         "name": "PV-Stoppverzögerung"
+      },
+      "optimum_lower_soc": {
+        "name": "{scope} PV Optimum unterer Ziel-SoC"
+      },
+      "optimum_upper_soc": {
+        "name": "{scope} PV Optimum oberer Ziel-SoC"
+      },
+      "optimum_max_discharge_w": {
+        "name": "{scope} PV Optimum maximale Speicher-Entladeleistung"
+      },
+      "estimated_daily_house_consumption_kwh": {
+        "name": "{scope} PV Optimum täglicher Hausverbrauch ohne EV"
       }
     },
     "select": {
@@ -226,7 +238,8 @@
         "name": "Ladeprofil {scope}",
         "state": {
           "NETZ": "Netz",
-          "PV_SURPLUS": "PV-Überschuss"
+          "PV_SURPLUS": "PV-Überschuss",
+          "PV_OPTIMUM": "PV Optimum"
         }
       },
       "active_wallbox": {
@@ -267,11 +280,21 @@
               "soc_speicher_aktuell": "Ladezustand",
               "leistung_pv": "PV-Leistung",
               "leistung_verbraucher": "Verbrauchsleistung",
-              "pv_diagnostic_logging": "Diagnoseprotokoll"
+              "pv_diagnostic_logging": "Diagnoseprotokoll",
+              "storage_discharge_power": "Speicher-Entladeleistung",
+              "storage_capacity": "Nennkapazität des Speichers (WHRtg)",
+              "remaining_pv_energy": "Erwartete verbleibende PV-Energie heute",
+              "grid_import_power": "Netzbezugsleistung",
+              "grid_export_power": "Netzeinspeiseleistung"
             },
             "data_description": {
               "pv_diagnostic_logging": "Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert.",
-              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox."
+              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox.",
+              "storage_discharge_power": "Tatsächliche nichtnegative Entladeleistung; null beim Laden.",
+              "storage_capacity": "Fronius Nennkapazität des Speichers: WHRtg / model_120_whrtg, in Wh oder kWh.",
+              "remaining_pv_energy": "Erwartete verbleibende PV-Produktion heute, in Wh oder kWh.",
+              "grid_import_power": "Nichtnegative aus dem Netz bezogene Leistung.",
+              "grid_export_power": "Nichtnegative ins Netz eingespeiste Leistung."
             }
           },
           "regulation": {

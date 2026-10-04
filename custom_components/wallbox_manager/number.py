@@ -7,6 +7,7 @@ from homeassistant.helpers.entity import EntityCategory
 
 from .control_entity import ControlEntity, setup_control_entities
 from .core.values import scalar
+from .pv_optimum import OPTIMUM_DEFAULTS
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -32,6 +33,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     *[
                         ProfileNumber(c, e, t, key)
                         for key in (
+                            *OPTIMUM_DEFAULTS,
                             "soll_soc_speicher",
                             "soc_hysterese",
                             "regulation_interval",
@@ -125,6 +127,13 @@ class ProfileNumber(ControlEntity, NumberEntity):
             self._attr_native_unit_of_measurement = "s"
             self._attr_native_min_value = 1 if key == "regulation_interval" else 0
 
+        if key == "optimum_max_discharge_w":
+            self._attr_native_unit_of_measurement = "W"
+            self._attr_native_step = 100
+        elif key == "estimated_daily_house_consumption_kwh":
+            self._attr_native_unit_of_measurement = "kWh"
+            self._attr_native_step = 0.1
+
     @property
     def available(self):
         if self.field == "min_soc":
@@ -149,6 +158,8 @@ class ProfileNumber(ControlEntity, NumberEntity):
         # HA requires a numeric input range; this is storage validation only.
         # Consumers must use technical_max_kw, not this fallback, as capability.
         return {
+            "optimum_max_discharge_w": 100000,
+            "estimated_daily_house_consumption_kwh": 1000,
             "soll_soc_speicher": 99,
             "soc_hysterese": 99,
             "regulation_interval": 300,
