@@ -375,6 +375,21 @@ This matters especially after reconnect when ChargingEnabled is false and there
 is no confirmed point: an unnecessary STALE result otherwise enters the startup
 worker's 60-second retry path before normal regulation can begin.
 
+Ongoing regulation likewise uses only live controller validity as its caller
+fence. Once the iteration has prepared its request, a newer PV/load/session-power
+sample does not cancel it by exact demand comparison. The shared runtime retains
+pre-dispatch policy, voltage, electrical representability and phase-proof checks;
+all lifecycle/safety checks remain active through confirmation. The following
+ordinary regulation cycle consumes the newest samples without a spurious 60-second
+STALE retry. UP/DOWN approximation, hysteresis and start/stop delays are unchanged.
+
+Regression coverage holds the OCPP call lock before dispatch, starting from a
+confirmed 1p/12A and preparing 13A or 11A. It changes measurements while queued,
+then checks confirmation, next-cycle convergence and live safety invalidation.
+The older acknowledgement-race test changes samples only after the peer receives
+the frame, when the pre-dispatch caller fence has already passed; it cannot detect
+the queued-command equality bug and remains complementary coverage.
+
 The existing pending slot covers point preparation and permission confirmation.
 A restarted regulator waits for superseded point cleanup before sampling again.
 Retry timing is unchanged; measurement drift alone no longer creates a retry.

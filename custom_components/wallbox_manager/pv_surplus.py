@@ -715,18 +715,12 @@ class PVSurplus:
                                 return
                             if self.pv_edit(target) is None:
                                 continue
-                        expected = self.pv_request(target)
-                        stopping = self.control.intent(target).request.target_w == 0
-
-                        def fence(stopping=stopping, expected=expected):
-                            return self.valid(target, epoch) and (
-                                stopping or self.pv_request(target) == expected
-                            )
-
-                        fence.after_dispatch = lambda: self.valid(target, epoch)
+                        # Dispatch this iteration's prepared request. New sensor
+                        # samples belong to the next cycle, not caller validity.
+                        # The runtime retains live dispatch and safety checks.
                         await self.control.apply_stored(
                             target,
-                            fence=fence,
+                            fence=lambda: self.valid(target, epoch),
                             reuse_applied=True,
                         )
                         if intent.phase_retry or (

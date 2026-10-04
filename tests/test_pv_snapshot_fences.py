@@ -386,3 +386,170 @@ async def test_startup_live_fences_reject_before_wire_dispatch(
     assert c.confirmed_point(t) is None
     assert c.runtime.enabled(t) is not True
     assert len(peer.requests) == count
+
+
+@pytest.mark.parametrize("amps", [13, 11])
+@pytest.mark.parametrize("change", ["pv", "load", "session_power", "voltage", "soc"])
+async def test_regulator_snapshot_survives_measurement_before_dispatch(
+    grid, monkeypatch, amps, change
+):
+    p, t, (c, bound, peer, *_), _, tick = await running(grid)
+    measurements(p, t, pv=2760, load=0, actual=0, soc=96)
+    await tick()
+    assert c.confirmed_point(t).current_a == 12
+    measurements(p, t, pv=amps * 230, load=0, actual=0, soc=96)
+    import custom_components.wallbox_manager.control.runtime as module
+
+    prepared = asyncio.Event()
+    real_apply = module.apply_operating_point
+
+    async def apply(*args, **kwargs):
+        prepared.set()
+        return await real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(module, "apply_operating_point", apply)
+    count = len(peer.requests)
+    # Unlike the acknowledgement test above, change samples BEFORE the wire
+    # call: peer.received would already be past the faulty caller fence.
+    async with bound.adapter._call_lock:
+        pending = asyncio.create_task(tick())
+        await asyncio.wait_for(prepared.wait(), 1)
+        point = c.pending_points[t]
+        assert (point.mode.count, point.current_a) == (1, amps)
+        request = p.pv_request(t)
+        generation, epoch = c.intent(t).generation, p.epochs[t]
+        assert len(peer.requests) == count
+        if change == "pv":
+            measurements(p, t, pv=(amps + 1) * 230, load=0, actual=0, soc=96)
+        elif change == "load":
+            measurements(p, t, pv=amps * 230, load=230, actual=0, soc=96)
+        elif change == "session_power":
+            measurements(p, t, pv=amps * 230, load=0, actual=230, soc=96)
+        elif change == "voltage":
+            voltage(c, t, 231)
+        else:
+            measurements(p, t, pv=amps * 230, load=0, actual=0, soc=97)
+        if change in ("pv", "load", "session_power"):
+            assert p.pv_request(t) != request
+        assert c.intent(t).generation == generation and p.epochs[t] == epoch
+    await pending
+    assert c.intent(t).command_result.status == CommandStatus.APPLIED, c.intent(
+        t
+    ).fence_reason
+    assert c.intent(t).fence_reason is None
+    assert c.confirmed_point(t) == point
+    assert len(peer.requests) == count + 1
+    assert t not in p.pv_retry_until
+    await tick()
+    expected = amps + {"pv": 1, "load": -1, "session_power": 1}.get(change, 0)
+    assert c.confirmed_point(t).current_a == expected
+    if change == "voltage":
+        assert c.confirmed_point(t).phase_voltages_v == (231,)
+    assert t not in p.pv_retry_until
+    count = len(peer.requests)
+    await tick()
+    assert len(peer.requests) == count
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "epoch",
+        "closed",
+        "profile",
+        "authority",
+        "ownership",
+        "connection",
+        "permission",
+        "limit",
+        "capability",
+        "transaction",
+        "adapter",
+        "off",
+        "intent",
+    ],
+)
+async def test_regulator_live_changes_fence_before_dispatch(grid, monkeypatch, change):
+    p, t, (c, bound, peer, _, source, _), _, tick = await running(grid)
+    measurements(p, t, pv=2990, load=0, actual=0, soc=96)
+    import custom_components.wallbox_manager.control.runtime as module
+
+    prepared, completed = asyncio.Event(), asyncio.Event()
+    real_apply = module.apply_operating_point
+    outcomes = []
+
+    async def apply(*args, **kwargs):
+        prepared.set()
+        try:
+            result = await real_apply(*args, **kwargs)
+            outcomes.append(result)
+            return result
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(module, "apply_operating_point", apply)
+    count = len(peer.requests)
+    followup = None
+    async with bound.adapter._call_lock:
+        pending = asyncio.create_task(tick())
+        await asyncio.wait_for(prepared.wait(), 1)
+        point = c.pending_points[t]
+        assert point.current_a == 13
+        if change == "epoch":
+            p.invalidate(t)
+        elif change == "closed":
+            monkeypatch.setattr(p, "closed", True)
+        elif change == "profile":
+            followup = asyncio.create_task(p.select(t, "NETZ"))
+            await asyncio.sleep(0)
+        elif change == "authority":
+            c.runtime.observe_authority(
+                bound.token,
+                AuthorityObservation(
+                    t.station, ControlAuthority.LOCAL, datetime.now(UTC), "test"
+                ),
+            )
+        elif change == "ownership":
+            c.profile_permitted = lambda _: False
+        elif change == "connection":
+            c.runtime.disconnect(bound.token)
+            c.runtime.connect(t.station, protocol="ocpp", protocol_version="2.1")
+        elif change == "permission":
+            c.runtime.observe_enabled(
+                bound.token,
+                replace(
+                    c.runtime.enabled_observation(t),
+                    enabled=False,
+                    observed_at=datetime.now(UTC),
+                ),
+            )
+        elif change == "limit":
+            source.permitted = (CurrentLimit(point.mode, 0, 8, "hard_limit"),)
+        elif change == "capability":
+            source.snapshot = replace(
+                source.snapshot, revision=source.snapshot.revision + 1
+            )
+        elif change == "transaction":
+            inputs = c.inputs
+            monkeypatch.setattr(
+                c,
+                "inputs",
+                lambda target: replace(inputs(target), transaction_id="new"),
+            )
+        elif change == "adapter":
+            monkeypatch.setattr(c, "blocker", lambda _: "adapter_unavailable")
+        elif change == "off":
+            followup = asyncio.create_task(p.permission(t, False))
+            await asyncio.sleep(0)
+        else:
+            c._edit(t, {"target_w": 0})
+    try:
+        await asyncio.wait_for(completed.wait(), 1)
+        if followup:
+            await followup
+        assert all(result.status != CommandStatus.APPLIED for result in outcomes)
+        assert c.confirmed_point(t) != point
+        assert len(peer.requests) == count
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
