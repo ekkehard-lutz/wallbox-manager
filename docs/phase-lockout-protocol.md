@@ -45,3 +45,16 @@ The substitute solver result plus command status describe what was attempted
 and whether it was accepted; physical feedback remains independent. No preferred
 point is queued, and expiry/telemetry causes no dispatch. A subsequent identical
 explicit power request runs the ordinary calculation again.
+
+## PV Optimum reachability
+
+Optimum additionally retains specific phase rejection as scoped runtime evidence.
+Ordinary planning then uses only the confirmed mode. Its minimum-positive policy
+can explicitly raise the effective energy budget to that mode's safe minimum;
+this does not relax DOWN approximation for manual controls or other profiles.
+A task-scoped probe at the existing retry cadence may try the preferred transition
+again. The restriction remains known during the probe and is not cleared merely
+because 60 seconds passed. Successful different-mode application, changed physical
+mode, or a new connection/authority context replaces the old evidence. Generic
+BUSY/restart rejection never creates phase evidence. Probe permission is carried
+only by that serialized command, including its transport dispatch guards.

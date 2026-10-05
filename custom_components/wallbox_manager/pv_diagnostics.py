@@ -299,6 +299,12 @@ class Cycle:
             decision, reason = "HOLD", intent.status
         elif intent.phase_retry:
             decision, reason = "WAIT_PHASE_LOCKOUT", "phase_switch_lockout"
+        elif reason == "optimum_minimum_hold":
+            decision = "MINIMUM_HOLD"
+        elif reason == "optimum_pause_pending":
+            decision = "PAUSE_PENDING"
+        elif reason == "optimum_deliberate_pause":
+            decision = "DELIBERATE_PAUSE"
         elif reason == "pv_start_delay":
             decision = "START_PENDING"
         elif reason == "pv_stop_delay":
@@ -334,7 +340,10 @@ class Cycle:
             ownership_status=getattr(
                 getattr(p.control, "ownership", None), "status", None
             ),
-            stop_delay_holding=reason == "pv_stop_delay",
+            stop_delay_holding=reason in ("pv_stop_delay", "optimum_pause_pending"),
+            minimum_positive_hold=reason
+            in ("optimum_minimum_hold", "optimum_pause_pending"),
+            deliberate_pause=reason == "optimum_deliberate_pause",
             ongoing_before=self.ongoing_before,
             ongoing_after=p.pv_ongoing.get(t, False),
             applied_before=point(self.before),

@@ -66,6 +66,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.pv_expiry = {}
         self.pv_retry_until = {}
         self.pv_retry_request = {}
+        self.pv_phase_retry = {}
         self.pv_startups = {}
         self.monotonic = time.monotonic
         self.wall_time = time.time
@@ -312,6 +313,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.pv_startups.pop(target, None)
         self.pv_retry_until.pop(target, None)
         self.pv_retry_request.pop(target, None)
+        self.pv_phase_retry.pop(target, None)
         self.pv_sessions.pop(target, None)
         self.pv_start_since.pop(target, None)
         self.pv_stop_since.pop(target, None)
@@ -335,6 +337,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if not result or result.status != CommandStatus.APPLIED:
                 return
         self.control._edit(target, {"target_w": Fraction(0)})
+        self.control.intent(target).reachable_only = profile == "PV_OPTIMUM"
         if self.epochs[target] != epoch:
             return
         self.setting(target)["profile"] = profile
@@ -544,12 +547,24 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         ):
             return await self.permission(target, False, _grid_expiry=True)
         self.control.intent(target).profile_modes = None
-        self.control._edit(
-            target, {"target_w": self.grid_target(target) if enabled else Fraction(0)}
-        )
+        if self.setting(target)["profile"] != "PV_OPTIMUM":
+            self.control._edit(
+                target,
+                {"target_w": self.grid_target(target) if enabled else Fraction(0)},
+            )
         if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
             if enabled:
-                self.pv_edit(target)
+                plan = self.pv_edit(target)
+                if plan is None and self.setting(target)["profile"] == "PV_OPTIMUM":
+                    # No policy is not OFF, even if permission is disabled and
+                    # the station retains a previous positive current profile.
+                    if self.control.runtime.enabled_observation(target) is not None:
+                        self.pv_schedule_startup(target, epoch)
+                    return CommandResult(
+                        CommandStatus.TEMPORARILY_REJECTED,
+                        reason=CommandReason.BUSY,
+                        detail="Waiting for a valid PV Optimum decision.",
+                    )
             else:
                 self.control._edit(target, {"target_w": Fraction(0)})
         generation = self.control.intent(target).generation + 1

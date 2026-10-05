@@ -201,6 +201,8 @@ class PVOptimum:
         elif soc > desired + Fraction(str(settings["soc_hysterese"])):
             mode = "FAST_DISCHARGE"
         mode_changed = mode != self.optimum_modes.get(target)
+        if mode_changed:
+            self.pv_stop_since.pop(target, None)
         if mode_changed and asyncio.current_task() is not self.tasks.get(target):
             self.optimum_wakes.setdefault(target, asyncio.Event()).set()
         self.optimum_modes[target] = mode
@@ -240,7 +242,7 @@ class PVOptimum:
             except ValueError, TypeError, ZeroDivisionError, OverflowError:
                 self.optimum_targets.pop(target, None)
                 self.optimum_modes.pop(target, None)
-                self.optimum_regulators.pop(target, None)
+                self.pv_input_gap(target)
             else:
                 if policy[1] == "FAST_DISCHARGE":
                     try:
@@ -248,7 +250,7 @@ class PVOptimum:
                         # Only the existing PV loop may dispatch an operating point.
                         self.optimum_request(target, policy=policy)
                     except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                        self.optimum_regulators.pop(target, None)
+                        self.pv_input_gap(target)
             self.control.publish(target)
 
     def optimum_request(self, target, *, policy=None):
@@ -280,8 +282,82 @@ class PVOptimum:
         else:
             self.optimum_regulators.pop(target, None)
             power = max(Fraction(0), available)
+        if record := active(self, target):
+            record.data.update(
+                raw_regulator_target_w=number(power),
+                observed_net_grid_import_w=number(
+                    max(
+                        0,
+                        values["grid_import_power"] - values["grid_export_power"],
+                    )
+                ),
+            )
         return (
             power,
             Direction.DOWN,
             "actively_charging" if power > 0 else "paused_insufficient_pv",
         )
+
+    def optimum_pause_policy(
+        self, target, power, result, *, advance, transition_mode=None
+    ):
+        """Separate an energy deficit from permission to enter expensive OFF.
+
+        FAST keeps a reachable positive floor indefinitely. BALANCE reuses the
+        configured stop delay, holding that floor (not an obsolete high offer).
+        At least one regulation interval is required even with stop delay zero:
+        one transient sample must never pause an established Optimum charge.
+        Unknown inputs are handled by pv_plan before entering this policy.
+        """
+        from .pv_diagnostics import active, number
+        from .solver.operating_point import Reason
+
+        minimum = self.control.minimum_positive(
+            target,
+            dispatch_modes=(transition_mode,) if transition_mode else None,
+        )
+
+        if record := active(self, target):
+            record.data.update(
+                minimum_reachable_power_w=number(minimum.point.offered_power_w)
+                if minimum and minimum.point
+                else None,
+            )
+        if result.point.charging:
+            if advance:
+                self.pv_stop_since.pop(target, None)
+            return None
+        if minimum is None or minimum.point is None:
+            # Known electrical infeasibility keeps existing safe OFF behavior;
+            # lack of reachability evidence is a no-decision, never a new pause.
+            if minimum is None or minimum.reason != Reason.ELECTRICAL_LIMIT:
+                if advance:
+                    self.pv_stop_since.pop(target, None)
+                return power, Direction.DOWN, "telemetry_unavailable", None
+            return 0, Direction.DOWN, "optimum_no_positive_point", result
+        confirmed = self.control.confirmed_point(target)
+        continuing = bool(
+            confirmed.charging
+            if confirmed is not None
+            else self.control.runtime.enabled(target) is True
+        )
+        if self.optimum_fast(target):
+            if advance:
+                self.pv_stop_since.pop(target, None)
+            status = "optimum_minimum_hold"
+        elif continuing:
+            now = self.monotonic()
+            if advance:
+                self.pv_stop_since.setdefault(target, now)
+            since = self.pv_stop_since.get(target)
+            settings = self.setting(target)
+            delay = max(settings["pv_stop_delay"], settings["regulation_interval"])
+            if since is not None and now >= since + delay:
+                return 0, Direction.DOWN, "optimum_deliberate_pause", result
+            status = "optimum_pause_pending"
+        else:
+            # Already OFF (or first activation) needs no positive-to-zero debounce.
+            return 0, Direction.DOWN, "optimum_deliberate_pause", result
+        if record := active(self, target):
+            record.data["policy_reason"] = status
+        return minimum.point.offered_power_w, Direction.DOWN, status, minimum

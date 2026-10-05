@@ -312,6 +312,12 @@ battery lifecycle and failure behavior.
 
 PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
 PV Optimum is described in [its profile documentation](docs/pv-optimum-design.md).
+While FAST_DISCHARGE is active it holds the lowest reachable positive charging
+point instead of pausing on a low power calculation; this can leave grid import.
+The minimum depends on phase reachability and electrical limits. Near the target,
+PV_BALANCE can deliberately pause after sustained insufficient power using the
+configured stop delay. A zero-current pause can activate the wallbox's restart
+lockout; safety/control stops still take precedence.
 PV Maximum and the external Energy Manager interface remain deferred.
 
 ## Integration settings and profile timing

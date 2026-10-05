@@ -130,8 +130,8 @@ PV-start/PV-stop delay settings retain their existing independent roles.
 
 ## Policy and shared power regulation
 
-`pv_optimum.py` owns only Optimum's day state, forecast, independent target and
-mode selection. FAST_DISCHARGE enters strictly above target plus the existing
+`pv_optimum.py` owns Optimum's day state, forecast, independent target,
+mode selection and deliberate-pause policy. FAST_DISCHARGE enters strictly above target plus the existing
 central SoC hysteresis (default 5 percentage points), and exits at or below target.
 No new hysteresis setting is added. Recharging above target while the EV is absent
 can re-enter FAST_DISCHARGE; there is no target-reached-for-today latch.
@@ -192,14 +192,54 @@ the existing confirmed-hardware-state behavior.
 The fast primitive has no SoC or PV-day knowledge and accepts explicit tuning.
 It can be reused by a future independently targeted PV Maximum profile.
 
-Optimum always passes DOWN approximation to the existing operating-point solver.
-PV_BALANCE does not budget deliberate battery discharge. Optimum does not hold a
-previous battery-supported operating point through the Surplus stop delay; a
-valid zero/below-minimum request pauses immediately. The existing start delay,
-PV_BALANCE command debounce, phase/current constraints, phase lockouts, retry machinery,
-input-gap semantics and authority fences still apply. No independent current or
-phase selection exists. Zero power uses the existing OCPP zero-current profile
-and leaves ChargingEnabled unchanged.
+### Minimum charging and deliberate pauses
+
+FAST_DISCHARGE intentionally stays at the lowest currently reachable positive
+charging point when an ordinary power budget falls below minimum. This applies
+at startup and while charging, including measurement settling and large household
+load steps. It continues for as long as FAST_DISCHARGE remains active; persistent
+low budgets do not start a separate fast-mode stop timer. The raw regulator,
+three-second battery grace and prompt correction of uncovered import are unchanged.
+Holding minimum can leave **residual grid import**. That is an explicit policy
+tradeoff, not a claim that the battery can absorb the entire household load.
+
+The minimum comes from verified electrical limits and measured voltages. It is
+not always 1p/6 A: when currently constrained to three phases it may be 3p/6 A,
+or a higher current if known vehicle/installation limits require it. A lower phase
+mode is considered only with applicable transition evidence. Specific station
+phase-lockout rejection restricts normal Optimum selection to the confirmed mode.
+The existing bounded retry may probe a transition again; elapsed retry time does
+not prove the station guard has expired. Accepted transitions or changed physical
+feedback clear the restriction. Unknown evidence suspends decisions rather than
+inventing a safe positive point.
+
+At/below the target, PV_BALANCE uses the same balance regulator as PV Surplus.
+For an established charge, insufficient power first holds the reachable positive
+minimum, rather than retaining a previously high battery-supported offer. A pause
+requires continuous valid insufficient-power evidence for the configured
+`pv_stop_delay` (default **90 seconds**), with a minimum of one
+`regulation_interval` (default **5 seconds**) even when the stop delay is zero.
+Recovery, input gaps and SoC-mode changes reset that evidence. An already-paused
+or initially disabled station need not start charging merely to debounce a pause.
+No new configuration option is added; PV Surplus's existing delay semantics are
+unchanged.
+
+A deliberate pause sends the existing OCPP zero-current profile and leaves
+ChargingEnabled unchanged. It can trigger the station's configured restart
+lockout (600 seconds on the tested wallbox). Positive retries retain the existing
+approximately 60-second backoff. Generic BUSY never becomes phase-lockout evidence.
+
+The policy raises an insufficient FAST budget to the common positive floor; it
+does not change DOWN rounding globally. Safety/control stops and hard electrical
+limits still take precedence. Missing inputs mean no decision, including during
+Optimum enable preparation: no unconditional zero profile is inserted before a
+valid positive start. FAST starts do not insert a start-delay OFF step. Balance
+start delay and command debounce retain their roles when not already charging.
+
+Diagnostics distinguish `optimum_minimum_hold`, `optimum_pause_pending`,
+`optimum_deliberate_pause` and `optimum_no_positive_point`. They include the raw
+regulator target, minimum reachable power and observed net grid import, so a
+minimum hold is distinguishable from ordinary target realization.
 
 Shared execution remains in the existing PV mixin and ControlRuntime. Diagnostics
 include the new external measurements, calculated target, mode and PV-day state.
@@ -215,7 +255,11 @@ settings, EV absence/re-entry, stale/missing inputs, solver constraints, permiss
 and authority. `tests/test_pv_optimum_timing.py` covers the independent clocks,
 immediate replanning, cached-target freshness and SoC-mode wakeups. The shared
 regulator tests include full/partial/no headroom, grace recovery/expiry, exhausted
-limits and unchanged upward smoothing under one-second observation. Frontend tests cover independent controls and decimal household
+limits and unchanged upward smoothing under one-second observation.
+`tests/test_pv_optimum_hold.py` exercises the real policy/regulator/solver/OCPP path:
+startup lag, phase restrictions and retry probes, current grids and limits,
+FAST hold, BALANCE persistence, safety fences and a simulated 600-second restart
+lockout. Frontend tests cover independent controls and decimal household
 estimates. The complete existing PV/authority/OCPP regression suite remains in use.
 
 No integration version, release, tag or merge is part of this change.

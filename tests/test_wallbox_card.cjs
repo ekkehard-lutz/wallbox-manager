@@ -768,3 +768,20 @@ test('PV Optimum shows independent controls, current target and no Grid or Surpl
   assert.equal(calls[0][2].entity_id,'number.estimated_daily_house_consumption_kwh');
   assert.equal(calls[0][2].value,15.5);
 });
+
+for (const language of ['en','de']) {
+  for (const [status,en,de] of [
+    ['optimum_minimum_hold', /grid import may remain/, /Netzbezug ist möglich/],
+    ['optimum_pause_pending', /checking sustained/, /prüft anhaltend/],
+    ['optimum_deliberate_pause', /deliberately pauses/, /pausiert bewusst/],
+    ['optimum_no_positive_point', /No safe positive/, /Kein sicherer positiver/],
+  ]) test(`Optimum policy status ${status} in ${language}`,()=>{
+    const data=states(true);
+    data['select.anything'].state='PV_OPTIMUM';
+    Object.assign(data['select.anything'].attributes,{profile_status:status,options:['PV_OPTIMUM']});
+    const {card:c,get}=card(data);
+    c.hass={...c._hass,language};
+    assert.equal(get('status').hidden,false);
+    assert.match(get('status').textContent,language==='de'?de:en);
+  });
+}

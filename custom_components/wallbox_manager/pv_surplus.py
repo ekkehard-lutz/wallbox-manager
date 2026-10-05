@@ -5,7 +5,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
-from .control.commands import CommandStatus
+from .control.commands import CommandReason, CommandStatus
 from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
@@ -103,11 +103,22 @@ class PVSurplus:
             )
         return allowed
 
-    def permits_point(self, target, point, *, after_dispatch=False):
+    def permits_point(
+        self, target, point, *, after_dispatch=False, transition_mode=None
+    ):
         """Apply the existing PV policy at the shared command dispatch fence."""
         if self.setting(target)["profile"] not in ("PV_SURPLUS", "PV_OPTIMUM"):
             return not point.charging or self.grid_phase(target)[0] == "active"
         if not point.charging:
+            if (
+                self.setting(target)["profile"] == "PV_OPTIMUM"
+                and self.control.intent(target).policy_pause
+            ):
+                # An economic OFF queued before a recovery must still be a
+                # deliberate pause at dispatch. Explicit control stops bypass it.
+                _, _, _, plan = self.pv_plan(target, advance=False)
+                if plan is None or plan.point is None or plan.point.charging:
+                    return False
             # OFF ends continuation even when another primitive control requested it.
             self.pv_ongoing[target] = False
             return True
@@ -118,7 +129,7 @@ class PVSurplus:
         power, direction, status, plan = self.pv_plan(
             target,
             advance=False,
-            transition_mode=point.mode if after_dispatch else None,
+            transition_mode=point.mode if after_dispatch else transition_mode,
         )
         if plan is None:
             return False  # Holding hardware is not permission for a new write.
@@ -332,6 +343,7 @@ class PVSurplus:
             return self.control.resolve(
                 target,
                 request=PowerSettings(watts, policy),
+                reachable=settings["profile"] == "PV_OPTIMUM",
                 dispatch_modes=(transition_mode,)
                 if transition_mode is not None
                 else None,
@@ -361,6 +373,19 @@ class PVSurplus:
                 ),
                 None,
             )
+        if settings["profile"] == "PV_OPTIMUM" and status in (
+            "actively_charging",
+            "paused_insufficient_pv",
+        ):
+            policy = self.optimum_pause_policy(
+                target,
+                power,
+                result,
+                advance=advance,
+                transition_mode=transition_mode,
+            )
+            if policy is not None:
+                return policy
         if (
             status == "actively_charging"
             and result
@@ -427,7 +452,16 @@ class PVSurplus:
             and result.point
             and result.point.charging
         ):
-            if not ongoing and settings["pv_start_delay"] > 0:
+            if (
+                not ongoing
+                and settings["pv_start_delay"] > 0
+                and not self.optimum_fast(target)
+                and not (
+                    settings["profile"] == "PV_OPTIMUM"
+                    and (confirmed := self.control.confirmed_point(target))
+                    and confirmed.charging
+                )
+            ):
                 if advance:
                     self.pv_start_since.setdefault(target, now)
                 since = self.pv_start_since.get(target)
@@ -447,6 +481,9 @@ class PVSurplus:
         pending = target in self.control.pending_points
         if not pending:
             self.control.intent(target).profile_modes = None
+            self.control.intent(target).reachable_only = (
+                self.setting(target)["profile"] == "PV_OPTIMUM"
+            )
         power, direction, status, result = self.pv_plan(target)
         if pending:
             # Coalesce all policy targets without superseding the command.
@@ -454,7 +491,10 @@ class PVSurplus:
         intent = self.control.intent(target)
         if result is None:
             self.status[target] = status
-            if self.control.runtime.enabled(target) is not False:
+            if (
+                self.setting(target)["profile"] == "PV_OPTIMUM"
+                or self.control.runtime.enabled(target) is not False
+            ):
                 return None  # Retain desired, in-flight and confirmed points.
             # Explicit ON/recovery may prepare a freshly confirmed disabled
             # station at zero before enabling CP. This cannot stop ongoing
@@ -470,8 +510,14 @@ class PVSurplus:
         )
         if intent.request.target_w != power or intent.request.direction != direction:
             self.control._edit(target, {"target_w": power, "direction": direction})
+        intent.policy_pause = status == "optimum_deliberate_pause"
         self.status[target] = status
-        if status not in ("actively_charging", "pv_stop_delay"):
+        if status not in (
+            "actively_charging",
+            "pv_stop_delay",
+            "optimum_minimum_hold",
+            "optimum_pause_pending",
+        ):
             self.pv_ongoing[target] = False
         return result
 
@@ -491,6 +537,8 @@ class PVSurplus:
             "actively_charging",
             "pv_start_delay",
             "pv_stop_delay",
+            "optimum_minimum_hold",
+            "optimum_pause_pending",
         ):
             deadlines.append(
                 max(
@@ -576,7 +624,13 @@ class PVSurplus:
         session = self.control.runtime.sessions.get(target)
         self.pv_ongoing[target] = bool(
             (
-                self.status.get(target) in ("actively_charging", "pv_stop_delay")
+                self.status.get(target)
+                in (
+                    "actively_charging",
+                    "pv_stop_delay",
+                    "optimum_minimum_hold",
+                    "optimum_pause_pending",
+                )
                 or (
                     self.pv_ongoing.get(target, False)
                     and self.status.get(target)
@@ -652,7 +706,12 @@ class PVSurplus:
                 if self.monotonic() < self.pv_retry_until[target]:
                     continue
                 with cycle(self, target, "startup_retry"):
-                    self.pv_edit(target)
+                    if (
+                        self.pv_edit(target) is None
+                        and self.setting(target)["profile"] == "PV_OPTIMUM"
+                    ):
+                        self.pv_retry_until[target] = self.monotonic() + 60
+                        continue
                     # The edits below belong to this authorized retry. Other
                     # edits between attempts still revoke its captured generation.
                     context = self.pv_startups[target]
@@ -700,7 +759,17 @@ class PVSurplus:
                 started = self.monotonic()
                 if event := self.optimum_wakes.get(target):
                     event.clear()
-                with cycle(self, target, "regulation"):
+                with (
+                    self.control.phase_probe(
+                        target,
+                        enabled=(
+                            self.setting(target)["profile"] == "PV_OPTIMUM"
+                            and self.control.phase_restricted(target)
+                            and self.monotonic() >= self.pv_retry_until.get(target, 0)
+                        ),
+                    ),
+                    cycle(self, target, "regulation"),
+                ):
                     result = self.pv_edit(target)
                     point = result.point if result else None
                     intent = self.control.intent(target)
@@ -708,6 +777,11 @@ class PVSurplus:
                         self.monotonic() < self.pv_retry_until.get(target, 0)
                         and point
                         and point.charging
+                        and not (
+                            self.setting(target)["profile"] == "PV_OPTIMUM"
+                            and self.control.phase_restricted(target)
+                            and self.pv_phase_retry.get(target, False)
+                        )
                     )
                     holding = (
                         self.status.get(target) == "pv_stop_delay"
@@ -752,11 +826,22 @@ class PVSurplus:
                             == CommandStatus.TEMPORARILY_REJECTED
                         ):
                             self.pv_retry_request[target] = intent.request
+                            self.pv_phase_retry[target] = bool(
+                                intent.phase_retry
+                                and intent.command_result
+                                and (
+                                    intent.command_result.status
+                                    == CommandStatus.APPLIED
+                                    or intent.command_result.reason
+                                    == CommandReason.PHASE_SWITCH_LOCKOUT
+                                )
+                            )
                             if self.monotonic() >= self.pv_retry_until.get(target, 0):
                                 self.pv_retry_until[target] = self.monotonic() + 60
                         else:
                             self.pv_retry_until.pop(target, None)
                             self.pv_retry_request.pop(target, None)
+                            self.pv_phase_retry.pop(target, None)
                     self.pv_confirm(target)
                     self.control.publish(target)
                 seconds = self.pv_wait_seconds(target)

@@ -1,6 +1,7 @@
 """Manual charging orchestration; no HA or protocol types and no automatic retry."""
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -68,6 +69,8 @@ class ManualIntent:
     generation: int = 0
     profile_modes: tuple[int, ...] | None = None
     phase_retry: bool = False
+    reachable_only: bool = False
+    policy_pause: bool = False
     status: str = "idle"
     fence_reason: str | None = None
     solver_result: SolverResult | None = None
@@ -105,6 +108,8 @@ class ControlRuntime:
         self.recovery_status = {}
         self.pending_points = {}
         self._point_locks = {}
+        self._phase_restrictions = {}
+        self._phase_probes = {}
         self._unconfirmed_targets = set()
         self._inactive = set()
         self.authority_adapter = authority_adapter
@@ -210,14 +215,112 @@ class ControlRuntime:
         request = replace(intent.request, **changes)
         intent.current_limits = limits
         intent.request = request
+        intent.policy_pause = False
         intent.phase_switch_deviation_pct = tolerance
         intent.generation += 1
         intent.solver_result = intent.command_result = None
         intent.status = "idle"
         return intent
 
+    def phase_restricted(self, target):
+        """Specific station rejection, scoped to live authority and physical mode.
+
+        There is deliberately no expiry inferred from a generic retry interval.
+        Changed physical feedback or a successful transition supplies new evidence.
+        """
+        restriction = self._phase_restrictions.get(target)
+        if restriction is None:
+            return False
+        state, inputs = self.runtime.get(target.station), self.inputs(target)
+        token, authority, mode = restriction
+        if (
+            state is None
+            or state.token != token
+            or state.authority_revision != authority
+            or (
+                inputs
+                and inputs.current_mode is not None
+                and inputs.current_mode != mode
+            )
+        ):
+            self._phase_restrictions.pop(target, None)
+            return False
+        return True
+
+    @contextmanager
+    def phase_probe(self, target, *, enabled=False):
+        """Permit one task's bounded retry, never declare the restriction expired.
+
+        Ordinary planners/observers still see the restriction. Only an accepted
+        different-mode command clears it; rejection retains it and uses fallback.
+        """
+        previous = self._phase_probes.get(target)
+        if enabled:
+            self._phase_probes[target] = asyncio.current_task()
+        try:
+            yield
+        finally:
+            if enabled:
+                if previous is None:
+                    self._phase_probes.pop(target, None)
+                else:
+                    self._phase_probes[target] = previous
+
+    def _eligible_modes(self, target, inputs, *, reachable=False, dispatch_modes=None):
+        modes = inputs.eligible_modes if dispatch_modes is None else dispatch_modes
+        intent = self.intent(target)
+        if reachable or intent.reachable_only:
+            if inputs.current_mode is None and dispatch_modes is None:
+                return ()
+            if self.phase_restricted(target) and (
+                self._phase_probes.get(target) is None
+                or self._phase_probes[target] is not asyncio.current_task()
+            ):
+                modes = tuple(m for m in modes if m == inputs.current_mode)
+        return tuple(
+            m
+            for m in modes
+            if intent.profile_modes is None or m.count in intent.profile_modes
+        )
+
+    def _current_limits(self, target, inputs):
+        intent = self.intent(target)
+        return inputs.limits + tuple(
+            CurrentLimit(
+                e.mode, 0, intent.current_limits[e.mode.count], "desired_control_limit"
+            )
+            for e in inputs.capabilities.envelopes
+            if e.mode.count in intent.current_limits
+        )
+
+    def minimum_positive(self, target, *, dispatch_modes=None):
+        """Resolve an actual reachable positive point through the common grid.
+
+        Disabled permission may prepare a point for an explicitly authorized ON;
+        the existing command lifecycle still owns permission and dispatch fences.
+        Unknown phase/voltage/authorization never manufactures a positive floor.
+        """
+        if not self.profile_permitted(target) or self.runtime.enabled(target) is None:
+            return None
+        if self.blocker(target) is not None:
+            return None
+        _, result, _ = self.resolve(
+            target,
+            request=PowerSettings(0, Direction.DOWN),
+            dispatch_modes=dispatch_modes,
+            minimum_positive=True,
+        )
+        return result
+
     def resolve(
-        self, target, *, substitute_mode=None, request=None, dispatch_modes=None
+        self,
+        target,
+        *,
+        substitute_mode=None,
+        request=None,
+        dispatch_modes=None,
+        minimum_positive=False,
+        reachable=False,
     ):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
@@ -237,7 +340,11 @@ class ControlRuntime:
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
         request = request or intent.request
-        if request.target_w == 0 and caps.stop.state != EvidenceState.VERIFIED:
+        if (
+            request.target_w == 0
+            and caps.stop.state != EvidenceState.VERIFIED
+            and not minimum_positive
+        ):
             from ..solver.operating_point import Reason, ResultStatus
 
             return (
@@ -247,33 +354,29 @@ class ControlRuntime:
             )
         # Only post-dispatch policy validation supplies the already verified
         # dispatched modes; all new writes use fresh phase-operation evidence.
-        eligible_modes = (
-            inputs.eligible_modes if dispatch_modes is None else dispatch_modes
+        eligible_modes = self._eligible_modes(
+            target,
+            inputs,
+            reachable=minimum_positive or reachable,
+            dispatch_modes=dispatch_modes,
         )
+        if (
+            (intent.reachable_only or minimum_positive or reachable)
+            and not eligible_modes
+            and (request.target_w > 0 or minimum_positive)
+        ):
+            return inputs, None, "phase_reachability_unavailable"
         result = solve(
             PowerRequest(request.target_w, request.direction, True),
             caps,
             inputs.voltage,
             now=datetime.now(UTC),
-            eligible_modes=tuple(
-                m
-                for m in eligible_modes
-                if intent.profile_modes is None or m.count in intent.profile_modes
-            )
+            eligible_modes=eligible_modes
             if substitute_mode is None
             else tuple(m for m in eligible_modes if m == substitute_mode),
             charging_only=substitute_mode is not None,
-            limits=inputs.limits
-            + tuple(
-                CurrentLimit(
-                    e.mode,
-                    0,
-                    intent.current_limits[e.mode.count],
-                    "desired_control_limit",
-                )
-                for e in caps.envelopes
-                if e.mode.count in intent.current_limits
-            ),
+            minimum_positive=minimum_positive,
+            limits=self._current_limits(target, inputs),
             current_mode=inputs.current_mode,
             actively_charging=inputs.actively_charging
             and self.runtime.enabled(target) is True
@@ -828,7 +931,8 @@ class ControlRuntime:
         authority_revision = state.authority_revision
 
         substitute_mode = None
-        intent.phase_retry = False
+        command_request = intent.request
+        intent.phase_retry = intent.reachable_only and self.phase_restricted(target)
         intent.fence_reason = None
 
         def control_valid(*, after_dispatch=False, permission_confirmed=False):
@@ -873,7 +977,9 @@ class ControlRuntime:
                 return reject("adapter_or_transaction_unavailable")
             return fresh
 
-        def current(*, after_dispatch=False, permission_confirmed=False):
+        probing_phase = self._phase_probes.get(target) is asyncio.current_task()
+
+        def validate_current(*, after_dispatch=False, permission_confirmed=False):
             fresh = control_valid(
                 after_dispatch=after_dispatch, permission_confirmed=permission_confirmed
             )
@@ -886,7 +992,9 @@ class ControlRuntime:
                 return True
             # Queue/lock waits still require a fresh, representable snapshot and
             # current phase-operation proof immediately before a hardware write.
-            _, result, reason = self.resolve(target, substitute_mode=substitute_mode)
+            _, result, reason = self.resolve(
+                target, substitute_mode=substitute_mode, request=command_request
+            )
             if (
                 resolved.point.charging
                 and fresh.voltage.active_voltages(
@@ -900,7 +1008,7 @@ class ControlRuntime:
                 intent.fence_reason = "pre_dispatch_setpoint_changed"
                 return False
             if hasattr(self, "profiles") and not self.profiles.permits_point(
-                target, resolved.point
+                target, resolved.point, transition_mode=substitute_mode
             ):
                 intent.fence_reason = "pre_dispatch_pv_policy"
                 return False
@@ -912,6 +1020,16 @@ class ControlRuntime:
                 intent.fence_reason = "pre_dispatch_phase_changed"
                 return False
             return True
+
+        def current(*, after_dispatch=False, permission_confirmed=False):
+            # Transport guards can run in the serialized sender task. Carry only
+            # this command's probe permission across that boundary, not to normal
+            # observation tasks that happen to run while its I/O is pending.
+            with self.phase_probe(target, enabled=probing_phase):
+                return validate_current(
+                    after_dispatch=after_dispatch,
+                    permission_confirmed=permission_confirmed,
+                )
 
         current.after_dispatch = lambda: current(after_dispatch=True)
 
@@ -951,11 +1069,26 @@ class ControlRuntime:
             and current()
         ):
             intent.phase_retry = True
+            self._phase_restrictions[target] = (
+                token,
+                authority_revision,
+                inputs.current_mode,
+            )
             # One synchronous recalculation within this explicit command only.
             # Keep all original fences, including confirmed physical phase state.
             substitute_mode = inputs.current_mode
+            if intent.reachable_only and hasattr(self, "profiles"):
+                # The profile owns permission to exceed a raw energy budget at
+                # its positive floor; the common runtime still chooses the point.
+                power, direction, _, plan = self.profiles.pv_plan(
+                    target,
+                    advance=False,
+                    transition_mode=inputs.current_mode,
+                )
+                if plan is not None and plan.point is not None and plan.point.charging:
+                    command_request = PowerSettings(power, direction)
             _, substitute, blocked = self.resolve(
-                target, substitute_mode=substitute_mode
+                target, substitute_mode=substitute_mode, request=command_request
             )
             if blocked is None and substitute.point is not None:
                 resolved = substitute
@@ -988,6 +1121,12 @@ class ControlRuntime:
             self._confirmed_points.pop(target, None)
         if generation == intent.generation:
             if result.status == CommandStatus.APPLIED:
+                if (
+                    resolved.point.charging
+                    and resolved.point.mode != inputs.current_mode
+                ):
+                    self._phase_restrictions.pop(target, None)
+                    intent.phase_retry = False
                 self._unconfirmed_targets.discard(target)
                 self._confirmed_points[target] = (
                     resolved.point,

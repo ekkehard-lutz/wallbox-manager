@@ -102,6 +102,9 @@ def test_missing_or_stale_evidence_breaks_start_debounce(explicit_gap):
 
 def setup_optimum(p, t, *, soc=90, pv=8000, load=5000, actual=3000):
     measurements(p, t, pv=pv, load=load, actual=actual, soc=soc)
+    from custom_components.wallbox_manager.core.models import PhaseMode
+
+    p.control.capability_source.mode = PhaseMode.canonical(1)
     for key, value, unit in (
         ("storage_discharge_power", 1000, "W"),
         ("storage_capacity", 11059, "Wh"),
@@ -227,6 +230,8 @@ async def test_independent_profile_targets_and_persistence(grid):
 async def test_discrete_solver_and_zero_pause_preserve_permission(grid):
     p, t, (c, _, peer, *_) = grid
     setup_optimum(p, t, soc=90)
+    clock = [0]
+    p.monotonic = lambda: clock[0]
     p.wait = lambda _: asyncio.Event().wait()
     await p.permission(t, True)
     point = c.confirmed_point(t)
@@ -234,6 +239,9 @@ async def test_discrete_solver_and_zero_pause_preserve_permission(grid):
     assert point.offered_power_w <= p.pv_request(t)[0]
     assert c.runtime.enabled(t) is True
     measurements(p, t, pv=0, load=5000, actual=3000, soc=70)
+    result = p.pv_edit(t)
+    assert result.point.charging and p.status[t] == "optimum_pause_pending"
+    clock[0] = p.setting(t)["regulation_interval"]
     result = p.pv_edit(t)
     assert result.point.offered_power_w == 0
     await c.apply_stored(t)
@@ -366,7 +374,8 @@ async def test_battery_supported_start_crosses_minimum_via_common_solver(grid):
     )
     clock = [0]
     p.monotonic = lambda: clock[0]
-    assert not p.pv_edit(t).point.charging
+    initial = p.pv_edit(t).point
+    assert initial.charging and initial.current_a == 6 and initial.mode.count == 1
     clock[0] = 5
     point = p.pv_edit(t).point
     assert point.charging and point.current_a == 6 and point.mode.count == 1
