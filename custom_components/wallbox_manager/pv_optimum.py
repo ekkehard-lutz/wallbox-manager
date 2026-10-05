@@ -299,7 +299,14 @@ class PVOptimum:
         )
 
     def optimum_pause_policy(
-        self, target, power, result, *, advance, transition_mode=None
+        self,
+        target,
+        power,
+        result,
+        *,
+        advance,
+        transition_mode=None,
+        energy_desired=False,
     ):
         """Separate an energy deficit from permission to enter expensive OFF.
 
@@ -315,6 +322,7 @@ class PVOptimum:
         minimum = self.control.minimum_positive(
             target,
             dispatch_modes=(transition_mode,) if transition_mode else None,
+            energy_desired=energy_desired,
         )
 
         if record := active(self, target):

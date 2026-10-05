@@ -297,7 +297,7 @@ class Cycle:
             )
         elif intent.status not in ("applied", "idle", "pending") and after is None:
             decision, reason = "HOLD", intent.status
-        elif intent.phase_retry:
+        elif intent.phase_retry and self.data.get("phase_transition_blocked", True):
             decision, reason = "WAIT_PHASE_LOCKOUT", "phase_switch_lockout"
         elif reason == "optimum_minimum_hold":
             decision = "MINIMUM_HOLD"
@@ -341,8 +341,8 @@ class Cycle:
                 getattr(p.control, "ownership", None), "status", None
             ),
             stop_delay_holding=reason in ("pv_stop_delay", "optimum_pause_pending"),
-            minimum_positive_hold=reason
-            in ("optimum_minimum_hold", "optimum_pause_pending"),
+            minimum_positive_hold=self.data.get("executable_minimum_hold", False)
+            or reason in ("optimum_minimum_hold", "optimum_pause_pending"),
             deliberate_pause=reason == "optimum_deliberate_pause",
             ongoing_before=self.ongoing_before,
             ongoing_after=p.pv_ongoing.get(t, False),

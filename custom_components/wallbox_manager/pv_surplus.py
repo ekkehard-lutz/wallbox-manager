@@ -133,6 +133,23 @@ class PVSurplus:
         )
         if plan is None:
             return False  # Holding hardware is not permission for a new write.
+        if self.setting(target)["profile"] == "PV_OPTIMUM" and not after_dispatch:
+            inputs = self.control.inputs(target)
+            desired = self.control.intent(target).energy_desired
+            if inputs is None or (
+                point.mode != inputs.current_mode
+                and (
+                    desired is None
+                    or desired.point is None
+                    or not desired.point.charging
+                    or desired.point.mode != point.mode
+                )
+            ):
+                # A lower-power old phase is not authorized just because an
+                # increased fresh budget could still afford it. Current within
+                # the still-desired phase retains normal DOWN coalescing.
+                self.control.intent(target).fence_reason = "pre_dispatch_desired_phase"
+                return False
         if status == "pv_stop_delay":
             return point.same_setpoint(self.control.confirmed_point(target))
         return (
@@ -326,8 +343,50 @@ class PVSurplus:
 
     @diagnostic_plan
     def pv_plan(self, target, *, advance=True, transition_mode=None):
-        """Time policy around the common solver, never a second electrical solver."""
-        power, direction, status = self.pv_request(target)
+        """Plan fresh energy preference, then its temporarily executable realization.
+
+        Both solves share one regulator sample and the existing policy/solver.
+        The desired result is observational state, never a queued retry command.
+        Only executable planning advances pause/start persistence.
+        """
+        request = self.pv_request(target)
+        intent = self.control.intent(target)
+        if self.setting(target)["profile"] == "PV_OPTIMUM":
+            desired = self._pv_plan(target, request, advance=False, energy_desired=True)
+            intent.energy_desired = desired[3]
+        else:
+            intent.energy_desired = None
+        executable = self._pv_plan(
+            target, request, advance=advance, transition_mode=transition_mode
+        )
+        if self.setting(target)["profile"] == "PV_OPTIMUM" and (
+            record := active(self, target)
+        ):
+            from .pv_diagnostics import point
+
+            record.data.update(
+                desired=point(intent.energy_desired.point)
+                if intent.energy_desired
+                else None,
+                executable=point(executable[3].point) if executable[3] else None,
+                phase_transition_blocked=bool(
+                    intent.energy_desired
+                    and intent.energy_desired.point
+                    and intent.energy_desired.point.charging
+                    and self.control.phase_restricted(target)
+                    and (inputs := self.control.inputs(target))
+                    and intent.energy_desired.point.mode != inputs.current_mode
+                ),
+                executable_minimum_hold=executable[2]
+                in ("optimum_minimum_hold", "optimum_pause_pending"),
+            )
+        return executable
+
+    def _pv_plan(
+        self, target, request, *, advance, transition_mode=None, energy_desired=False
+    ):
+        """Apply existing profile policy with explicit electrical selection scope."""
+        power, direction, status = request
         settings = self.setting(target)
         now = self.monotonic()
         inputs = self.control.inputs(target)
@@ -344,6 +403,7 @@ class PVSurplus:
                 target,
                 request=PowerSettings(watts, policy),
                 reachable=settings["profile"] == "PV_OPTIMUM",
+                energy_desired=energy_desired,
                 dispatch_modes=(transition_mode,)
                 if transition_mode is not None
                 else None,
@@ -383,6 +443,7 @@ class PVSurplus:
                 result,
                 advance=advance,
                 transition_mode=transition_mode,
+                energy_desired=energy_desired,
             )
             if policy is not None:
                 return policy
@@ -820,10 +881,16 @@ class PVSurplus:
                             fence=lambda: self.valid(target, epoch),
                             reuse_applied=True,
                         )
+                        phase_superseded = bool(
+                            intent.command_result
+                            and intent.command_result.reason == CommandReason.STALE
+                            and intent.fence_reason == "pre_dispatch_desired_phase"
+                        )
                         if intent.phase_retry or (
                             intent.command_result
                             and intent.command_result.status
                             == CommandStatus.TEMPORARILY_REJECTED
+                            and not phase_superseded
                         ):
                             self.pv_retry_request[target] = intent.request
                             self.pv_phase_retry[target] = bool(
@@ -834,6 +901,10 @@ class PVSurplus:
                                     == CommandStatus.APPLIED
                                     or intent.command_result.reason
                                     == CommandReason.PHASE_SWITCH_LOCKOUT
+                                    # Local replanning is not station BUSY: keep
+                                    # phase probes bounded but allow same-phase
+                                    # correction on the next regulation cycle.
+                                    or phase_superseded
                                 )
                             )
                             if self.monotonic() >= self.pv_retry_until.get(target, 0):

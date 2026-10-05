@@ -207,7 +207,8 @@ The minimum comes from verified electrical limits and measured voltages. It is
 not always 1p/6 A: when currently constrained to three phases it may be 3p/6 A,
 or a higher current if known vehicle/installation limits require it. A lower phase
 mode is considered only with applicable transition evidence. Specific station
-phase-lockout rejection restricts normal Optimum selection to the confirmed mode.
+phase-lockout rejection restricts executable Optimum selection to the confirmed
+mode while fresh energy-desired selection still considers verified other modes.
 The existing bounded retry may probe a transition again; elapsed retry time does
 not prove the station guard has expired. Accepted transitions or changed physical
 feedback clear the restriction. Unknown evidence suspends decisions rather than
@@ -239,7 +240,13 @@ start delay and command debounce retain their roles when not already charging.
 Diagnostics distinguish `optimum_minimum_hold`, `optimum_pause_pending`,
 `optimum_deliberate_pause` and `optimum_no_positive_point`. They include the raw
 regulator target, minimum reachable power and observed net grid import, so a
-minimum hold is distinguishable from ordinary target realization.
+minimum hold is distinguishable from ordinary target realization. They also expose
+`desired` and `executable` operating points, `phase_transition_blocked`, and a
+minimum-hold flag that remains visible alongside `WAIT_PHASE_LOCKOUT`. A temporary
+phase restriction can therefore show desired 1p operation alongside an executable
+3p positive hold. Both derive from the same fresh regulator sample; retries never
+replay an old desired point. Recovery to a desired 3p point supersedes an earlier
+1p preference, including revalidation before a queued phase-changing wire write.
 
 Shared execution remains in the existing PV mixin and ControlRuntime. Diagnostics
 include the new external measurements, calculated target, mode and PV-day state.
@@ -298,3 +305,8 @@ Correction validation: **1388 Python tests passed** (five pre-existing dependenc
 deprecation warnings), **108 frontend tests passed**, Ruff lint and formatting
 passed (146 Python files), JavaScript syntax passed, and `git diff --check` passed.
 No merge, tag, release or integration-version change is included.
+
+The focused regressions in `tests/test_pv_optimum_desired.py` cover distinct desired
+and executable points, bounded automatic retry with a fresh current, recovery to
+3p across retry deadlines, and a transport-lock race that rejects an obsolete 1p
+phase while retaining safe current coalescing when the desired phase is unchanged.

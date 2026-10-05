@@ -69,6 +69,8 @@ class ManualIntent:
     generation: int = 0
     profile_modes: tuple[int, ...] | None = None
     phase_retry: bool = False
+    # Latest policy observation, never a command retained for retry.
+    energy_desired: SolverResult | None = None
     reachable_only: bool = False
     policy_pause: bool = False
     status: str = "idle"
@@ -266,15 +268,27 @@ class ControlRuntime:
                 else:
                     self._phase_probes[target] = previous
 
-    def _eligible_modes(self, target, inputs, *, reachable=False, dispatch_modes=None):
+    def _eligible_modes(
+        self,
+        target,
+        inputs,
+        *,
+        reachable=False,
+        dispatch_modes=None,
+        energy_desired=False,
+    ):
         modes = inputs.eligible_modes if dispatch_modes is None else dispatch_modes
         intent = self.intent(target)
         if reachable or intent.reachable_only:
             if inputs.current_mode is None and dispatch_modes is None:
                 return ()
-            if self.phase_restricted(target) and (
-                self._phase_probes.get(target) is None
-                or self._phase_probes[target] is not asyncio.current_task()
+            if (
+                not energy_desired
+                and self.phase_restricted(target)
+                and (
+                    self._phase_probes.get(target) is None
+                    or self._phase_probes[target] is not asyncio.current_task()
+                )
             ):
                 modes = tuple(m for m in modes if m == inputs.current_mode)
         return tuple(
@@ -293,12 +307,14 @@ class ControlRuntime:
             if e.mode.count in intent.current_limits
         )
 
-    def minimum_positive(self, target, *, dispatch_modes=None):
+    def minimum_positive(self, target, *, dispatch_modes=None, energy_desired=False):
         """Resolve an actual reachable positive point through the common grid.
 
         Disabled permission may prepare a point for an explicitly authorized ON;
         the existing command lifecycle still owns permission and dispatch fences.
         Unknown phase/voltage/authorization never manufactures a positive floor.
+        energy_desired excludes only learned temporary lockout from this query;
+        the returned preference still needs executable resolution before dispatch.
         """
         if not self.profile_permitted(target) or self.runtime.enabled(target) is None:
             return None
@@ -309,6 +325,7 @@ class ControlRuntime:
             request=PowerSettings(0, Direction.DOWN),
             dispatch_modes=dispatch_modes,
             minimum_positive=True,
+            energy_desired=energy_desired,
         )
         return result
 
@@ -321,6 +338,7 @@ class ControlRuntime:
         dispatch_modes=None,
         minimum_positive=False,
         reachable=False,
+        energy_desired=False,
     ):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
@@ -358,6 +376,7 @@ class ControlRuntime:
             target,
             inputs,
             reachable=minimum_positive or reachable,
+            energy_desired=energy_desired,
             dispatch_modes=dispatch_modes,
         )
         if (
@@ -1010,7 +1029,8 @@ class ControlRuntime:
             if hasattr(self, "profiles") and not self.profiles.permits_point(
                 target, resolved.point, transition_mode=substitute_mode
             ):
-                intent.fence_reason = "pre_dispatch_pv_policy"
+                if intent.fence_reason != "pre_dispatch_desired_phase":
+                    intent.fence_reason = "pre_dispatch_pv_policy"
                 return False
             if resolved.point.charging and (
                 reason is not None
