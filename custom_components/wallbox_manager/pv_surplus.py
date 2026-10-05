@@ -10,6 +10,7 @@ from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
 from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
+from .pv_optimum import FAST_OBSERVATION_SECONDS
 from .pv_regulators import pv_balance
 
 PV_DEFAULTS = {
@@ -292,6 +293,7 @@ class PVSurplus:
 
     def pv_input_gap(self, target):
         """Break continuous policy timers without editing desired/applied state."""
+        self.optimum_regulators.pop(target, None)
         self.pv_start_since.pop(target, None)
         self.pv_stop_since.pop(target, None)
         self.pv_expiry.pop(target, None)
@@ -307,6 +309,7 @@ class PVSurplus:
                 available, soc, self.setting(target), self.pv_battery_state(target, soc)
             )
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
+            self.optimum_regulators.pop(target, None)
             return Fraction(0), Direction.DOWN, "measurements_unavailable"
 
     @diagnostic_plan
@@ -474,7 +477,9 @@ class PVSurplus:
     def pv_wait_seconds(self, target):
         now = self.monotonic()
         settings = self.setting(target)
-        deadlines = [settings["regulation_interval"]]
+        deadlines = [
+            1 if self.optimum_fast(target) else settings["regulation_interval"]
+        ]
         for timers, field in (
             (self.pv_start_since, "pv_start_delay"),
             (self.pv_stop_since, "pv_stop_delay"),
@@ -501,8 +506,10 @@ class PVSurplus:
         if self.closed:
             return
         state = event.data.get("new_state")
-        if entity == self.references.get("leistung_pv"):
-            self.optimum_observe_day(observation=state)
+        if entity == self.references.get("leistung_pv") and self.optimum_observe_day(
+            observation=state
+        ):
+            self.optimum_refresh(datetime.now(UTC))
         for key in ("leistung_pv", "leistung_verbraucher"):
             if entity == self.references.get(key):
                 try:
@@ -689,6 +696,9 @@ class PVSurplus:
                 await self.control.wait_for_pending_point(target)
                 if not self.valid(target, epoch):
                     return
+                started = self.monotonic()
+                if event := self.optimum_wakes.get(target):
+                    event.clear()
                 with cycle(self, target, "regulation"):
                     result = self.pv_edit(target)
                     point = result.point if result else None
@@ -720,6 +730,7 @@ class PVSurplus:
                             and point.charging
                             and point != self.control.confirmed_point(target)
                             and self.pv_ongoing.get(target, False)
+                            and not self.optimum_fast(target)
                         ):
                             await self.debounce_wait(1)
                             if not self.valid(target, epoch):
@@ -747,7 +758,16 @@ class PVSurplus:
                             self.pv_retry_request.pop(target, None)
                     self.pv_confirm(target)
                     self.control.publish(target)
-                await self.wait(self.pv_wait_seconds(target))
+                seconds = self.pv_wait_seconds(target)
+                if self.optimum_fast(target):
+                    seconds = min(
+                        seconds,
+                        max(0, FAST_OBSERVATION_SECONDS - (self.monotonic() - started)),
+                    )
+                if self.setting(target)["profile"] == "PV_OPTIMUM":
+                    await self.optimum_wait(target, seconds)
+                else:
+                    await self.wait(seconds)
         except asyncio.CancelledError:
             raise
         except Exception:

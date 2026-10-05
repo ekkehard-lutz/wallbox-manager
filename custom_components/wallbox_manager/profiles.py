@@ -18,7 +18,13 @@ from .diagnostics import diagnostic_recovery, recovery_record, recovery_snapshot
 from .grid_timing import GridTiming, duration_seconds
 from .power_history import PowerHistory
 from .pv_diagnostics import diagnostic_permission
-from .pv_optimum import OPTIMUM_DEFAULTS, OPTIMUM_REFERENCES, PVDay, PVOptimum
+from .pv_optimum import (
+    FAST_OBSERVATION_SECONDS,
+    OPTIMUM_DEFAULTS,
+    OPTIMUM_REFERENCES,
+    PVDay,
+    PVOptimum,
+)
 from .pv_surplus import PV_DEFAULTS, PVSurplus
 from .regulation import DEFAULTS, migrate_regulation
 
@@ -46,6 +52,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.optimum_modes = {}
         self.optimum_regulators = {}
         self.optimum_targets = {}
+        self.optimum_plans = {}
+        self.optimum_wakes = {}
         self.optimum_unsubscribe = None
         self.optimum_day_store = Store(
             hass, 1, f"wallbox_manager.{entry.entry_id}.pv_day"
@@ -85,6 +93,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         )
 
     async def load(self):
+        self.optimum_plans.clear()
         stored = await self.store.async_load() or {}
         for key, value in stored.items():
             try:
@@ -118,14 +127,14 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             saved = await self.optimum_day_store.async_load() or {}
             if saved.get("state") in ("before", "active", "ended"):
                 self.optimum_day = PVDay(saved.get("date"), saved["state"])
-            self.optimum_observe_day()
+            self.optimum_refresh(datetime.now(UTC))
 
             @callback
             def observe(now):
                 self.optimum_refresh(now)
 
             self.optimum_unsubscribe = async_track_time_interval(
-                self.hass, observe, timedelta(seconds=5)
+                self.hass, observe, timedelta(seconds=FAST_OBSERVATION_SECONDS)
             )
 
     def seed_power_history(self):
@@ -329,6 +338,9 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         if self.epochs[target] != epoch:
             return
         self.setting(target)["profile"] = profile
+        self.optimum_plans.pop(target, None)
+        if profile == "PV_OPTIMUM":
+            self.optimum_refresh(datetime.now(UTC))
         await self.save()
         await self.reconcile_battery(exclude=target)
         self.control.publish(target)

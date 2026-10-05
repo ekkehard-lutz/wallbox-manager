@@ -295,6 +295,7 @@ async def test_sunset_horizon_house_model_and_next_setting_rollover(grid):
         lookup["sun.sun"].attributes["next_setting"] = (
             sunset + timedelta(days=1)
         ).isoformat()
+        p.monotonic = lambda: p.optimum_plans[t][1]
         p.optimum_policy(t, now)
         assert p.optimum_targets[t] == 40  # No tomorrow-household budget.
         lookup["sun.sun"].last_updated = now - timedelta(seconds=91)

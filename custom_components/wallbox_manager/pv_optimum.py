@@ -1,5 +1,6 @@
 """Independent Optimum SoC policy and PV-day observation, never device control."""
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
@@ -8,6 +9,9 @@ from homeassistant.util import dt as dt_util
 
 from .control.requests import Direction
 from .pv_regulators import FastDischargeRegulator
+
+FAST_OBSERVATION_SECONDS = 1
+TARGET_PLANNING_SECONDS = 300
 
 OPTIMUM_DEFAULTS = {
     "optimum_lower_soc": 20,
@@ -103,6 +107,8 @@ class PVOptimum:
                 },
                 0,
             )
+            return True
+        return False
 
     def optimum_policy(self, target, now=None):
         from .pv_surplus import power_valid_for, reading
@@ -128,7 +134,7 @@ class PVOptimum:
             raise ValueError("missing storage evidence")
         lower = Fraction(str(settings["optimum_lower_soc"]))
         upper = Fraction(str(settings["optimum_upper_soc"]))
-        desired = upper
+        seconds = 0
         if self.optimum_day.state == "active":
             sun = self.hass.states.get("sun.sun")
             if sun is None or sun.state not in ("above_horizon", "below_horizon"):
@@ -156,25 +162,63 @@ class PVOptimum:
                 if local_sunset == local_today
                 else 0
             )
-            house = remaining_house_energy(
-                settings["estimated_daily_house_consumption_kwh"],
-                Fraction(str(seconds)),
-            )
-            desired = target_soc(
-                lower,
-                upper,
-                values["storage_capacity"],
-                values["remaining_pv_energy"],
-                house,
-            )
+        key = (
+            self.optimum_day.date,
+            self.optimum_day.state,
+            lower,
+            upper,
+            settings["estimated_daily_house_consumption_kwh"],
+        )
+        planned = self.optimum_plans.get(target)
+        tick = self.monotonic()
+        if planned is None or planned[0] != key or tick >= planned[1]:
+            desired = upper
+            if self.optimum_day.state == "active":
+                house = remaining_house_energy(
+                    settings["estimated_daily_house_consumption_kwh"],
+                    Fraction(str(seconds)),
+                )
+                desired = target_soc(
+                    lower,
+                    upper,
+                    values["storage_capacity"],
+                    values["remaining_pv_energy"],
+                    house,
+                )
+            planned = key, tick + TARGET_PLANNING_SECONDS, desired
+            self.optimum_plans[target] = planned
+        desired = planned[2]
         mode = self.optimum_modes.get(target, "PV_BALANCE")
         if soc <= desired:
             mode = "PV_BALANCE"
         elif soc > desired + Fraction(str(settings["soc_hysterese"])):
             mode = "FAST_DISCHARGE"
+        mode_changed = mode != self.optimum_modes.get(target)
+        if mode_changed and asyncio.current_task() is not self.tasks.get(target):
+            self.optimum_wakes.setdefault(target, asyncio.Event()).set()
         self.optimum_modes[target] = mode
         self.optimum_targets[target] = desired
         return values, mode, min(expiry)
+
+    def optimum_fast(self, target):
+        return (
+            self.setting(target)["profile"] == "PV_OPTIMUM"
+            and self.optimum_modes.get(target) == "FAST_DISCHARGE"
+        )
+
+    async def optimum_wait(self, target, seconds):
+        """Wake an existing balance loop on a responsive SoC mode transition."""
+        event = self.optimum_wakes.setdefault(target, asyncio.Event())
+        tasks = [
+            asyncio.create_task(self.wait(seconds)),
+            asyncio.create_task(event.wait()),
+        ]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def optimum_refresh(self, now):
         """Track policy independently of EV connection, permission or authority."""
@@ -185,15 +229,23 @@ class PVOptimum:
             if self.setting(target)["profile"] != "PV_OPTIMUM":
                 continue
             try:
-                self.optimum_policy(target, now)
+                policy = self.optimum_policy(target, now)
             except ValueError, TypeError, ZeroDivisionError, OverflowError:
                 self.optimum_targets.pop(target, None)
                 self.optimum_modes.pop(target, None)
                 self.optimum_regulators.pop(target, None)
+            else:
+                if policy[1] == "FAST_DISCHARGE":
+                    try:
+                        # Observe even while serialized OCPP work is pending.
+                        # Only the existing PV loop may dispatch an operating point.
+                        self.optimum_request(target, policy=policy)
+                    except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                        self.optimum_regulators.pop(target, None)
             self.control.publish(target)
 
-    def optimum_request(self, target):
-        values, mode, expiry = self.optimum_policy(target)
+    def optimum_request(self, target, *, policy=None):
+        values, mode, expiry = policy or self.optimum_policy(target)
         available, _, actual = self.pv_measurements(target, details=True)
         self.pv_expiry[target] = min(self.pv_expiry[target], expiry)
         settings = self.setting(target)
