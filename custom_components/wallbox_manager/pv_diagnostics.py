@@ -15,6 +15,7 @@ from functools import wraps
 
 from .core.telemetry import Channel, Quantity, state_flag
 from .diagnostics import OPTION
+from .freshness import LIVE_FRESHNESS, freshness_for
 
 _LOGGER = logging.getLogger(__name__)
 _ACTIVE = ContextVar("pv_diagnostic_cycle", default=None)
@@ -41,10 +42,8 @@ def point(value):
     }
 
 
-def entity_sample(state, entity_id, now):
+def entity_sample(state, entity_id, now, *, max_age=LIVE_FRESHNESS):
     """HA report age, not value-change age or invented device sample time."""
-    from .pv_surplus import MAX_AGE_SECONDS
-
     result = {
         "entity_id": entity_id,
         "state": None,
@@ -69,9 +68,9 @@ def entity_sample(state, entity_id, now):
         else "last_updated",
         unit=state.attributes.get("unit_of_measurement"),
         freshness="fresh"
-        if 0 <= age <= MAX_AGE_SECONDS
+        if 0 <= age <= max_age
         else "stale"
-        if age > MAX_AGE_SECONDS
+        if age > max_age
         else "future",
     )
     try:
@@ -144,6 +143,7 @@ class Cycle:
                 p.hass.states.get(p.references[key]) if p.references.get(key) else None,
                 p.references.get(key),
                 now,
+                max_age=freshness_for(key),
             )
             for key in (
                 "min_soc_speicher",

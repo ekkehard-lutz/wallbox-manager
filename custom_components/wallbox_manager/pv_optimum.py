@@ -8,6 +8,7 @@ from fractions import Fraction
 from homeassistant.util import dt as dt_util
 
 from .control.requests import Direction
+from .freshness import freshness_for
 from .pv_regulators import FastDischargeRegulator
 
 FAST_OBSERVATION_SECONDS = 1
@@ -125,10 +126,16 @@ class PVOptimum:
                 now,
                 soc=key == "soc_speicher_aktuell",
                 energy=key in ("storage_capacity", "remaining_pv_energy"),
+                max_age=freshness_for(key),
             )
             if values[key] < 0:
                 raise ValueError("negative Optimum measurement")
-            expiry.append(now + timedelta(seconds=power_valid_for(state, now)))
+            expiry.append(
+                now
+                + timedelta(
+                    seconds=power_valid_for(state, now, max_age=freshness_for(key))
+                )
+            )
         soc = values["soc_speicher_aktuell"]
         if values["storage_capacity"] <= 0:
             raise ValueError("missing storage evidence")

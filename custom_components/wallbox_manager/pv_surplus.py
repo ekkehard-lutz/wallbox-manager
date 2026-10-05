@@ -9,6 +9,7 @@ from .control.commands import CommandStatus
 from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
+from .freshness import LIVE_FRESHNESS
 from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
 from .pv_optimum import FAST_OBSERVATION_SECONDS
 from .pv_regulators import pv_balance
@@ -21,11 +22,11 @@ PV_DEFAULTS = {
     "pv_start_delay": 0,
     "pv_stop_delay": 90,
 }
-MAX_AGE_SECONDS = 90
+MAX_AGE_SECONDS = LIVE_FRESHNESS
 _LOGGER = logging.getLogger(__name__)
 
 
-def reading(state, now, *, soc=False, energy=False):
+def reading(state, now, *, soc=False, energy=False, max_age=LIVE_FRESHNESS):
     """Reject missing units, non-finite values, old and future observations."""
     if state is None:
         raise ValueError("missing measurement")
@@ -37,7 +38,7 @@ def reading(state, now, *, soc=False, energy=False):
     if unit not in units:
         raise ValueError("invalid unit")
     timestamp = getattr(state, "last_reported", state.last_updated)
-    if not 0 <= (now - timestamp).total_seconds() <= MAX_AGE_SECONDS:
+    if not 0 <= (now - timestamp).total_seconds() <= max_age:
         raise ValueError("stale measurement")
     expiry = state.attributes.get("valid_until")
     if expiry and datetime.fromisoformat(expiry) <= now:
@@ -48,12 +49,12 @@ def reading(state, now, *, soc=False, energy=False):
     return value
 
 
-def power_valid_for(state, now):
+def power_valid_for(state, now, *, max_age=LIVE_FRESHNESS):
     """Known validity bounds history segments as well as current snapshots."""
     if state is None:
         return 0
     expiry = getattr(state, "last_reported", state.last_updated) + timedelta(
-        seconds=MAX_AGE_SECONDS
+        seconds=max_age
     )
     if explicit := state.attributes.get("valid_until"):
         expiry = min(expiry, datetime.fromisoformat(explicit))

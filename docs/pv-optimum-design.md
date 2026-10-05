@@ -40,9 +40,14 @@ a profile setting. MaxDisChaRte is never used. A 3500 W configured limit remains
 3500 W regardless of a battery's higher physical capability.
 
 PV Optimum becomes selectable when all eight references are mapped. Temporary
-unavailability does not remove it. The existing 90-second report-age, numeric,
-unit and explicit-expiry checks apply, also to energy/capacity. Sources must report
-within that interval; old readings are not silently treated as constants or zeros.
+unavailability does not remove it. Live inputs retain the existing 90-second
+report-age limit. Only `remaining_pv_energy` uses the generic slow freshness class
+(`SLOW_FRESHNESS = 900` seconds): an age of exactly 900 seconds is accepted; older
+forecasts are stale. Storage capacity and every other input retain their existing
+freshness limits. Numeric, unit, future-timestamp and explicit-expiry validation
+remain unchanged. Diagnostics and regulation use the same freshness class. No
+forecast integration is refreshed or polled: only existing HA states are consumed.
+Old readings are not silently treated as constants or zeros.
 Missing/invalid inputs suspend new decisions and retain confirmed hardware state,
 as in the existing PV runtime. No positive command is authorized by stale data.
 
