@@ -27,7 +27,6 @@ from .pv_optimum import (
     FAST_OBSERVATION_SECONDS,
     OPTIMUM_DEFAULTS,
     OPTIMUM_REFERENCES,
-    PVDay,
     PVOptimum,
 )
 from .pv_surplus import PV_DEFAULTS, PVSurplus
@@ -53,7 +52,9 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             key: PowerHistory(self.references.get("power_smoothing_window", 5))
             for key in ("leistung_pv", "leistung_verbraucher")
         }
-        self.optimum_day = PVDay()
+        self.optimum_days = {}
+        self.optimum_saved_days = {}
+        self.optimum_forecasts = {}
         self.optimum_modes = {}
         self.optimum_initializations = set()
         self.optimum_connections = {}
@@ -134,8 +135,14 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             from homeassistant.helpers.event import async_track_time_interval
 
             saved = await self.optimum_day_store.async_load() or {}
-            if saved.get("state") in ("before", "active", "ended"):
-                self.optimum_day = PVDay(saved.get("date"), saved["state"])
+            # beta.5 active/ended did not prove surplus or forecast exhaustion.
+            self.optimum_days.clear()
+            self.optimum_saved_days = (
+                saved["days"]
+                if saved.get("version") == 2 and isinstance(saved.get("days"), dict)
+                else {}
+            )
+            self.optimum_save_day()
             self.optimum_refresh(datetime.now(UTC))
 
             @callback
@@ -242,7 +249,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if target in self.enable_requests
             else None,
             "optimum_mode": self.optimum_modes.get(target),
-            "pv_day_state": self.optimum_day.state,
+            "pv_day_state": self.optimum_day_for(target).state,
             "profile_status": self.status.get(target, "idle"),
             "available_profiles": self.available_profiles(target),
             "battery_configured": bool(self.references.get("soc_speicher_aktuell"))

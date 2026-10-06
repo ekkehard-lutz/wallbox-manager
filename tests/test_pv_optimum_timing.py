@@ -2,7 +2,6 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,7 +17,7 @@ from custom_components.wallbox_manager.pv_optimum import PVDay, target_soc
 
 def active_policy(p, t):
     now = setup_optimum(p, t, soc=50)
-    p.optimum_day = PVDay(dt_util.as_local(now).date().isoformat(), "active")
+    p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "DYNAMIC")
     clock = [0]
     p.monotonic = lambda: clock[0]
     return now, clock
@@ -38,7 +37,7 @@ async def test_target_initial_then_exact_five_minute_planning(grid):
         p.optimum_policy(t)
         assert p.optimum_targets[t] == 40
         assert calculate.call_count == 1
-        set_sensor(p, "remaining_pv_energy", 0, "Wh")
+        set_sensor(p, "remaining_pv_energy", 2211.8, "Wh")
         for tick in (1, 17, 90, 299.999):
             clock[0] = tick
             p.optimum_policy(t)
@@ -46,7 +45,7 @@ async def test_target_initial_then_exact_five_minute_planning(grid):
             assert calculate.call_count == 1
         clock[0] = 300
         p.optimum_policy(t)
-        assert p.optimum_targets[t] == 80
+        assert p.optimum_targets[t] == 60
         assert calculate.call_count == 2
 
 
@@ -68,38 +67,27 @@ async def test_soc_compares_against_cached_target_between_planning_cycles(grid):
         assert p.optimum_plans[t][1] == deadline
 
 
-async def test_day_start_and_end_bypass_planning_deadline_in_same_event(grid):
+async def test_surplus_and_finished_bypass_planning_deadline(grid):
     p, t, _ = grid
     now, clock = active_policy(p, t)
-    date = dt_util.as_local(now).date().isoformat()
-    p.optimum_day = PVDay(date, "before")
+    p.optimum_days[t] = PVDay(
+        dt_util.as_local(now).date().isoformat(), "BEFORE_SURPLUS"
+    )
+    set_sensor(p, "leistung_pv", 0)
     p.optimum_policy(t)
     assert p.optimum_targets[t] == 80
     clock[0] = 1
-    p.optimum_day.since = now - timedelta(seconds=300)
-    p.optimum_day.valid_until = now + timedelta(seconds=90)
-    p.pv_measurement_changed(
-        SimpleNamespace(
-            data={
-                "entity_id": p.references["leistung_pv"],
-                "new_state": p.hass.states.get(p.references["leistung_pv"]),
-            }
-        )
-    )
-    assert p.optimum_day.state == "active"
+    set_sensor(p, "leistung_pv", 8000)
+    p.optimum_policy(t)
+    assert p.optimum_day_for(t).state == "DYNAMIC"
     assert p.optimum_targets[t] == 40
-    clock[0] = 2
     set_sensor(p, "leistung_pv", 0)
-    p.optimum_day.since = now - timedelta(seconds=900)
-    p.pv_measurement_changed(
-        SimpleNamespace(
-            data={
-                "entity_id": p.references["leistung_pv"],
-                "new_state": p.hass.states.get(p.references["leistung_pv"]),
-            }
-        )
-    )
-    assert p.optimum_day.state == "ended"
+    clock[0] = 2
+    p.optimum_policy(t)
+    assert p.optimum_day_for(t).state == "DYNAMIC"
+    set_sensor(p, "remaining_pv_energy", 0, "Wh")
+    p.optimum_policy(t)
+    assert p.optimum_day_for(t).state == "FINISHED"
     assert p.optimum_targets[t] == 80
 
 
@@ -111,8 +99,18 @@ async def test_activation_and_reload_replan_immediately_and_observe_each_second(
     await p.select(t, "PV_OPTIMUM")
     assert p.optimum_targets[t] == 80
     set_sensor(p, "remaining_pv_energy", 4423.6, "Wh")
+    from custom_components.wallbox_manager.profiles import target_key
+
     await p.optimum_day_store.async_save(
-        {"date": dt_util.as_local(now).date().isoformat(), "state": "active"}
+        {
+            "version": 2,
+            "days": {
+                target_key(t): {
+                    "date": dt_util.as_local(now).date().isoformat(),
+                    "state": "DYNAMIC",
+                }
+            },
+        }
     )
     with patch(
         "homeassistant.helpers.event.async_track_time_interval",

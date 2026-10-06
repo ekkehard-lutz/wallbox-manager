@@ -229,13 +229,8 @@ class PVSurplus:
                 if self.valid(target, self.epochs[target]):
                     self.launch(target, stop_first=True)
 
-    def pv_measurements(self, target, *, details=False):
-        now = datetime.now(UTC)
-        pv_state = self.hass.states.get(self.references.get("leistung_pv", ""))
-        load_state = self.hass.states.get(
-            self.references.get("leistung_verbraucher", "")
-        )
-        candidates = [
+    def selected_power_states(self, target):
+        return [
             s
             for s in self.hass.states.async_all("sensor")
             if s.attributes.get("wallbox_manager_role") == "session_power"
@@ -246,6 +241,53 @@ class PVSurplus:
             and s.attributes.get("runtime_incarnation")
             == self.control.runtime.runtime_id
         ]
+
+    def household_measurements(self, target, now):
+        """Raw household proof for the planner, independent of regulator smoothing."""
+        from .core.telemetry import Channel, Quantity, State
+
+        pv = reading(self.hass.states.get(self.references.get("leistung_pv", "")), now)
+        load = reading(
+            self.hass.states.get(self.references.get("leistung_verbraucher", "")), now
+        )
+        candidates = self.selected_power_states(target)
+        if len(candidates) == 1:
+            actual = reading(candidates[0], now)
+        elif candidates:
+            raise ValueError("ambiguous selected EV power")
+        else:
+            runtime = self.control.runtime
+            state = runtime.get(target.station)
+            observation = (
+                state.observation(Channel(target, Quantity.CHARGING_STATE))
+                if state
+                else None
+            )
+            if not (
+                state
+                and state.connected
+                and (
+                    runtime.enabled(target) is False
+                    or (
+                        observation
+                        and runtime.physical_state_fresh(observation)
+                        and observation.value == State.IDLE
+                    )
+                )
+            ):
+                raise ValueError("missing selected EV no-load proof")
+            actual = Fraction(0)
+        if min(pv, load, actual) < 0 or load < actual:
+            raise ValueError("inconsistent household measurement")
+        return pv, -pv_balance(0, load, actual)
+
+    def pv_measurements(self, target, *, details=False):
+        now = datetime.now(UTC)
+        pv_state = self.hass.states.get(self.references.get("leistung_pv", ""))
+        load_state = self.hass.states.get(
+            self.references.get("leistung_verbraucher", "")
+        )
+        candidates = self.selected_power_states(target)
         if record := active(self, target):
             record.capture_inputs(candidates)
         pv, load = reading(pv_state, now), reading(load_state, now)

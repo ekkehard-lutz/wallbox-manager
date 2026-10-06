@@ -33,9 +33,20 @@ OPTIMUM_REFERENCES = (
 )
 
 
-def remaining_house_energy(daily_kwh, seconds_until_sunset):
-    """Replaceable first-order household forecast, excluding all EV energy."""
-    return Fraction(str(daily_kwh)) * 1000 * max(0, seconds_until_sunset) / 86400
+def remaining_house_energy(daily_kwh, remaining_seconds):
+    """A 24-hour average load integrated to the actual next local midnight."""
+    return Fraction(str(daily_kwh)) * 1000 * max(0, remaining_seconds) / 86400
+
+
+def remaining_day_seconds(now):
+    """UTC subtraction preserves 23/25-hour local days across DST changes."""
+    local = dt_util.as_local(now)
+    midnight = datetime.combine(
+        local.date() + timedelta(days=1), datetime.min.time(), local.tzinfo
+    )
+    return Fraction(
+        str((midnight.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
+    )
 
 
 def target_soc(lower, upper, capacity_wh, remaining_pv_wh, house_wh):
@@ -49,31 +60,16 @@ def target_soc(lower, upper, capacity_wh, remaining_pv_wh, house_wh):
 @dataclass
 class PVDay:
     date: str | None = None
-    state: str = "before"
-    since: datetime | None = None
-    valid_until: datetime | None = None
+    state: str = "BEFORE_SURPLUS"
 
-    def observe(self, now, local_date, watts, valid_until):
-        """Accumulate only continuously valid evidence; midnight resets the latch."""
+    def observe(self, local_date, surplus=None):
         if self.date != local_date:
-            self.date, self.state, self.since = local_date, "before", None
-            self.valid_until = None
-        if self.valid_until is None or now > self.valid_until:
-            self.since = None
-        self.valid_until = valid_until
-        if watts is None:
-            self.since = None
-            return
-        eligible = watts >= 100 if self.state == "before" else watts < 100
-        if self.state == "ended" or not eligible:
-            self.since = None
-            return
-        if self.since is None:
-            self.since = now
-        delay = 300 if self.state == "before" else 900
-        if (now - self.since).total_seconds() >= delay:
-            self.state = "active" if self.state == "before" else "ended"
-            self.since = None
+            self.date, self.state = local_date, "BEFORE_SURPLUS"
+        if self.state == "BEFORE_SURPLUS" and surplus is not None and surplus > 0:
+            self.state = "DYNAMIC"
+
+    def saved(self):
+        return {"date": self.date, "state": self.state}
 
 
 class PVOptimum:
@@ -112,47 +108,151 @@ class PVOptimum:
         elif not session.active and session.end_reason != "superseded":
             profile_event(self, target, "vehicle_disconnected")
 
-    def optimum_observe_day(self, now=None, *, observation=...):
-        from .pv_surplus import power_valid_for, reading
+    def optimum_day_for(self, target):
+        from .profiles import target_key
 
-        if self.closed or not all(
-            self.references.get(key) for key in OPTIMUM_REFERENCES
-        ):
-            return
-        now = now or datetime.now(UTC)
-        before = (self.optimum_day.date, self.optimum_day.state)
-        state = (
-            self.hass.states.get(self.references.get("leistung_pv", ""))
-            if observation is ...
-            else observation
-        )
-        try:
-            watts = reading(state, now)
-            expiry = now + timedelta(seconds=power_valid_for(state, now))
-        except ValueError, TypeError, ZeroDivisionError, OverflowError:
-            watts, expiry = None, now
-        self.optimum_day.observe(
-            now, dt_util.as_local(now).date().isoformat(), watts, expiry
-        )
-        if before != (self.optimum_day.date, self.optimum_day.state):
-            self.optimum_day_store.async_delay_save(
-                lambda: {
-                    "date": self.optimum_day.date,
-                    "state": self.optimum_day.state,
-                },
-                0,
+        if target not in self.optimum_days:
+            saved = self.optimum_saved_days.get(target_key(target), {})
+            self.optimum_days[target] = (
+                PVDay(saved.get("date"), saved["state"])
+                if isinstance(saved, dict)
+                and saved.get("state") in ("BEFORE_SURPLUS", "DYNAMIC", "FINISHED")
+                else PVDay()
             )
+        return self.optimum_days[target]
+
+    def optimum_save_day(self):
+        from .profiles import target_key
+
+        self.optimum_day_store.async_delay_save(
+            lambda: {
+                "version": 2,
+                "days": {
+                    **self.optimum_saved_days,
+                    **{
+                        target_key(t): day.saved()
+                        for t, day in self.optimum_days.items()
+                    },
+                },
+            },
+            0,
+        )
+
+    def optimum_observe_day(self, now=None, *, target=None, observation=...):
+        """Daily surplus proof uses raw, fresh load excluding this selected EV."""
+        if self.closed:
+            return False
+        now = now or datetime.now(UTC)
+        if target is None:
+            changed = False
+            for connector in tuple(self.control.intents):
+                if self.setting(connector)["profile"] == "PV_OPTIMUM":
+                    changed |= self.optimum_observe_day(now, target=connector)
+            return changed
+        day = self.optimum_day_for(target)
+        before = day.saved()
+        local_date = dt_util.as_local(now).date().isoformat()
+        # Reset at midnight independently of measurement availability.
+        day.observe(local_date)
+        if day.state == "BEFORE_SURPLUS":
+            try:
+                pv, household = self.household_measurements(target, now)
+                day.observe(local_date, pv - household)
+            except ValueError, TypeError, ZeroDivisionError, OverflowError:
+                pass
+        if before != day.saved():
+            self.optimum_save_day()
+            profile_event(self, target, "planner_phase", phase=day.state, date=day.date)
             return True
         return False
+
+    def optimum_target(self, target, now):
+        """Fixed targets need no forecast; dynamic plans use remaining-day energy."""
+        from .pv_surplus import reading
+
+        self.optimum_observe_day(now, target=target)
+        day = self.optimum_day_for(target)
+        settings = self.setting(target)
+        lower = Fraction(str(settings["optimum_lower_soc"]))
+        upper = Fraction(str(settings["optimum_upper_soc"]))
+        desired = upper
+        if day.state == "DYNAMIC":
+            pv = reading(
+                self.hass.states.get(self.references.get("remaining_pv_energy", "")),
+                now,
+                energy=True,
+                max_age=freshness_for("remaining_pv_energy"),
+            )
+            capacity = reading(
+                self.hass.states.get(self.references.get("storage_capacity", "")),
+                now,
+                energy=True,
+                max_age=freshness_for("storage_capacity"),
+            )
+            if pv < 0 or capacity <= 0:
+                raise ValueError("invalid planning energy")
+            house = remaining_house_energy(
+                settings["estimated_daily_house_consumption_kwh"],
+                remaining_day_seconds(now),
+            )
+            self.optimum_forecasts[target] = {
+                "remaining_pv_wh": float(pv),
+                "remaining_house_wh": float(house),
+                "remaining_surplus_wh": float(pv - house),
+            }
+            if pv <= house:
+                day.state = "FINISHED"
+                self.optimum_save_day()
+                profile_event(
+                    self,
+                    target,
+                    "planner_phase",
+                    phase=day.state,
+                    date=day.date,
+                    **self.optimum_forecasts[target],
+                )
+            else:
+                key = (
+                    day.date,
+                    day.state,
+                    lower,
+                    upper,
+                    settings["estimated_daily_house_consumption_kwh"],
+                )
+                planned = self.optimum_plans.get(target)
+                tick = self.monotonic()
+                if planned is None or planned[0] != key or tick >= planned[1]:
+                    planned = (
+                        key,
+                        tick + TARGET_PLANNING_SECONDS,
+                        target_soc(lower, upper, capacity, pv, house),
+                    )
+                    self.optimum_plans[target] = planned
+                desired = planned[2]
+        if day.state != "DYNAMIC":
+            self.optimum_plans.pop(target, None)
+        if self.optimum_targets.get(target) != desired:
+            profile_event(
+                self,
+                target,
+                "target_soc",
+                target_soc=float(desired),
+                phase=day.state,
+                lower=float(lower),
+                upper=float(upper),
+                **self.optimum_forecasts.get(target, {}),
+            )
+        self.optimum_targets[target] = desired
+        return desired
 
     def optimum_policy(self, target, now=None):
         from .pv_surplus import power_valid_for, reading
 
         now = now or datetime.now(UTC)
-        self.optimum_observe_day(now)
+        # Establish the independent target before checking execution evidence.
+        desired = self.optimum_target(target, now)
         settings = self.setting(target)
-        values = {}
-        expiry = []
+        values, expiry = {}, []
         for key in OPTIMUM_REFERENCES:
             state = self.hass.states.get(self.references.get(key, ""))
             values[key] = reading(
@@ -170,65 +270,9 @@ class PVOptimum:
                     seconds=power_valid_for(state, now, max_age=freshness_for(key))
                 )
             )
-        soc = values["soc_speicher_aktuell"]
         if values["storage_capacity"] <= 0:
             raise ValueError("missing storage evidence")
-        lower = Fraction(str(settings["optimum_lower_soc"]))
-        upper = Fraction(str(settings["optimum_upper_soc"]))
-        seconds = 0
-        if self.optimum_day.state == "active":
-            sun = self.hass.states.get("sun.sun")
-            if sun is None or sun.state not in ("above_horizon", "below_horizon"):
-                raise ValueError("sun information unavailable")
-            reported = getattr(sun, "last_reported", sun.last_updated)
-            if (
-                not 0 <= (now - reported).total_seconds() <= 90
-                or power_valid_for(sun, now) <= 0
-            ):
-                raise ValueError("stale sun information")
-            expiry.append(now + timedelta(seconds=power_valid_for(sun, now)))
-            sunset = dt_util.parse_datetime(sun.attributes.get("next_setting", ""))
-            if sunset is None or sunset.tzinfo is None:
-                raise ValueError("sunset unavailable")
-            # HA advances next_setting to tomorrow after today's sunset. Never
-            # plan another 24 hours of household consumption in that case.
-            local_sunset = dt_util.as_local(sunset).date()
-            local_today = dt_util.as_local(now).date()
-            if local_sunset not in (local_today, local_today + timedelta(days=1)) or (
-                local_sunset != local_today and sun.state != "below_horizon"
-            ):
-                raise ValueError("sunset does not describe today")
-            seconds = (
-                max(0, (sunset - now).total_seconds())
-                if local_sunset == local_today
-                else 0
-            )
-        key = (
-            self.optimum_day.date,
-            self.optimum_day.state,
-            lower,
-            upper,
-            settings["estimated_daily_house_consumption_kwh"],
-        )
-        planned = self.optimum_plans.get(target)
-        tick = self.monotonic()
-        if planned is None or planned[0] != key or tick >= planned[1]:
-            desired = upper
-            if self.optimum_day.state == "active":
-                house = remaining_house_energy(
-                    settings["estimated_daily_house_consumption_kwh"],
-                    Fraction(str(seconds)),
-                )
-                desired = target_soc(
-                    lower,
-                    upper,
-                    values["storage_capacity"],
-                    values["remaining_pv_energy"],
-                    house,
-                )
-            planned = key, tick + TARGET_PLANNING_SECONDS, desired
-            self.optimum_plans[target] = planned
-        desired = planned[2]
+        soc = values["soc_speicher_aktuell"]
         mode = self.optimum_modes.get(target)
         initializing = mode is None or target in self.optimum_initializations
         if initializing:
@@ -254,7 +298,6 @@ class PVOptimum:
         if mode_changed and asyncio.current_task() is not self.tasks.get(target):
             self.optimum_wakes.setdefault(target, asyncio.Event()).set()
         self.optimum_modes[target] = mode
-        self.optimum_targets[target] = desired
         return values, mode, min(expiry)
 
     def optimum_fast(self, target):
@@ -310,7 +353,7 @@ class PVOptimum:
             record.data.update(
                 optimum_target_soc=number(self.optimum_targets[target]),
                 optimum_mode=mode,
-                pv_day_state=self.optimum_day.state,
+                pv_day_state=self.optimum_day_for(target).state,
             )
         if mode == "FAST_DISCHARGE":
             regulator = self.optimum_regulators.setdefault(

@@ -36,7 +36,7 @@ def test_dynamic_target_capacity_and_clamps(forecast, house, expected):
     assert target_soc(20, 80, 11059, Fraction(str(forecast)), house) == expected
 
 
-def test_linear_house_forecast_uses_sunset_not_midnight():
+def test_linear_house_forecast_integrates_remaining_day_seconds():
     assert remaining_house_energy(24, 6 * 3600) == 6000
     assert remaining_house_energy(24, -3600) == 0
 
@@ -50,54 +50,22 @@ def test_capacity_energy_units(unit, value):
     assert reading(state, now, energy=True) == 11059
 
 
-def observe(day, start, seconds, watts, valid=True):
-    now = start + timedelta(seconds=seconds)
-    day.observe(
-        now,
-        now.date().isoformat(),
-        watts if valid else None,
-        now + timedelta(seconds=90) if valid else now,
-    )
-
-
-def test_day_threshold_continuity_clouds_end_and_midnight():
+def test_daily_surplus_latch_and_midnight():
     day = PVDay()
-    start = datetime(2026, 10, 4, 8, tzinfo=UTC)
-    observe(day, start, 0, 99)
-    assert day.state == "before"
-    observe(day, start, 10, 100)
-    observe(day, start, 20, 99)
-    for seconds in range(30, 330, 30):
-        observe(day, start, seconds, 100)
-        assert day.state == "before"
-    observe(day, start, 330, 100)
-    assert day.state == "active"
-    for seconds in range(360, 900, 30):
-        observe(day, start, seconds, 99)
-    observe(day, start, 900, 100)
-    assert day.state == "active" and day.since is None
-    for seconds in range(930, 1830, 30):
-        observe(day, start, seconds, 0)
-        assert day.state == "active"
-    observe(day, start, 1830, 0)
-    assert day.state == "ended"
-    for seconds in range(1860, 2400, 30):
-        observe(day, start, seconds, 500)
-    assert day.state == "ended"
-    tomorrow = start + timedelta(days=1)
-    observe(day, tomorrow, 0, 100)
-    assert day.state == "before"
-
-
-@pytest.mark.parametrize("explicit_gap", [True, False])
-def test_missing_or_stale_evidence_breaks_start_debounce(explicit_gap):
-    day = PVDay()
-    start = datetime(2026, 10, 4, 8, tzinfo=UTC)
-    observe(day, start, 0, 100)
-    if explicit_gap:
-        observe(day, start, 60, 100, valid=False)
-    observe(day, start, 300, 100)
-    assert day.state == "before" and day.since == start + timedelta(seconds=300)
+    day.observe("2026-10-04", -1)
+    assert day.state == "BEFORE_SURPLUS"
+    day.observe("2026-10-04", 0)
+    assert day.state == "BEFORE_SURPLUS"
+    day.observe("2026-10-04", 1)
+    assert day.state == "DYNAMIC"
+    for surplus in (-10000, 0, None):
+        day.observe("2026-10-04", surplus)
+        assert day.state == "DYNAMIC"
+    day.state = "FINISHED"
+    day.observe("2026-10-04", 10000)
+    assert day.state == "FINISHED"
+    day.observe("2026-10-05")
+    assert day.state == "BEFORE_SURPLUS"
 
 
 def setup_optimum(p, t, *, soc=90, pv=8000, load=5000, actual=3000):
@@ -134,11 +102,11 @@ def setup_optimum(p, t, *, soc=90, pv=8000, load=5000, actual=3000):
 
 async def test_before_start_and_after_end_target_upper_night_consumption_allowed(grid):
     p, t, _ = grid
-    now = setup_optimum(p, t, soc=70)
+    now = setup_optimum(p, t, soc=70, pv=0)
     p.pv_request(t)
     assert p.optimum_targets[t] == 80
     assert p.optimum_modes[t] == "PV_BALANCE"
-    p.optimum_day = PVDay(dt_util.as_local(now).date().isoformat(), "ended")
+    p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "FINISHED")
     p.pv_request(t)
     assert p.optimum_targets[t] == 80 and p.optimum_modes[t] == "PV_BALANCE"
     assert p.battery.record is None
@@ -148,7 +116,7 @@ async def test_before_start_and_after_end_target_upper_night_consumption_allowed
 async def test_dynamic_policy_and_regulator_selection_hysteresis(grid):
     p, t, _ = grid
     now = setup_optimum(p, t, soc=50)
-    p.optimum_day = PVDay(dt_util.as_local(now).date().isoformat(), "active")
+    p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "DYNAMIC")
     with patch(
         "custom_components.wallbox_manager.pv_regulators.FastDischargeRegulator.request",
         return_value=4000,
@@ -170,7 +138,7 @@ async def test_dynamic_policy_and_regulator_selection_hysteresis(grid):
 async def test_target_and_reentry_independent_of_ev_power_or_connection(grid):
     p, t, (c, *_) = grid
     now = setup_optimum(p, t, soc=40)
-    p.optimum_day = PVDay(dt_util.as_local(now).date().isoformat(), "active")
+    p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "DYNAMIC")
     p.hass.states.async_remove("sensor.selected")
     p.optimum_refresh(now)
     assert p.optimum_targets[t] == 40
@@ -238,7 +206,7 @@ async def test_discrete_solver_and_zero_pause_preserve_permission(grid):
     assert point.charging and point.current_a.denominator == 1
     assert point.offered_power_w <= p.pv_request(t)[0]
     assert c.runtime.enabled(t) is True
-    measurements(p, t, pv=0, load=5000, actual=3000, soc=70)
+    measurements(p, t, pv=0, load=5000, actual=3000, soc=30)
     result = p.pv_edit(t)
     assert result.point.charging and p.status[t] == "optimum_pause_pending"
     clock[0] = p.setting(t)["regulation_interval"]
@@ -271,64 +239,50 @@ async def test_configuration_never_takes_authority(grid):
     assert c.runtime.authority(t.station) == ControlAuthority.LOCAL
 
 
-async def test_sunset_horizon_house_model_and_next_setting_rollover(grid):
-    p, t, _ = grid
-    setup_optimum(p, t)
-    # Explicit future evaluation with refreshed fixture timestamps avoids wall-clock
-    # time-of-day assumptions and exercises HA's next_setting date rollover.
-    now = datetime.now(UTC).replace(
-        hour=12, minute=0, second=0, microsecond=0
-    ) + timedelta(days=1)
-    lookup = {}
-    for key in OPTIMUM_REFERENCES:
-        state = p.hass.states.get(p.references[key])
-        lookup[p.references[key]] = SimpleNamespace(
-            state=state.state, attributes=state.attributes, last_updated=now
-        )
-    sunset = now + timedelta(hours=6)
-    lookup["sun.sun"] = SimpleNamespace(
-        state="above_horizon",
-        attributes={"next_setting": sunset.isoformat()},
-        last_updated=now,
-    )
-    p.setting(t)["estimated_daily_house_consumption_kwh"] = 24
-    p.optimum_day = PVDay(dt_util.as_local(now).date().isoformat(), "active")
-    with patch.object(type(p.hass.states), "get", side_effect=lookup.get):
-        p.optimum_policy(t, now)
-        assert p.optimum_targets[t] == 80  # 6 kWh house > 4.4236 kWh PV.
-        p.setting(t)["estimated_daily_house_consumption_kwh"] = 4
-        p.optimum_policy(t, now)
-        assert p.optimum_targets[t] == 80 - Fraction("3423.6") / 11059 * 100
-        lookup["sun.sun"].state = "below_horizon"
-        lookup["sun.sun"].attributes["next_setting"] = (
-            sunset + timedelta(days=1)
-        ).isoformat()
-        p.monotonic = lambda: p.optimum_plans[t][1]
-        p.optimum_policy(t, now)
-        assert p.optimum_targets[t] == 40  # No tomorrow-household budget.
-        lookup["sun.sun"].last_updated = now - timedelta(seconds=91)
-        with pytest.raises(ValueError, match="stale sun"):
-            p.optimum_policy(t, now)
+async def test_remaining_day_house_and_finished_latch(grid):
+    from custom_components.wallbox_manager.pv_optimum import remaining_day_seconds
 
-
-async def test_day_end_restored_without_debounce_or_second_day(grid):
     p, t, _ = grid
     now = setup_optimum(p, t)
+    p.setting(t)["estimated_daily_house_consumption_kwh"] = 1
+    house = remaining_house_energy(1, remaining_day_seconds(now))
+    p.optimum_policy(t, now)
+    assert p.optimum_targets[t] == 80 - (Fraction("4423.6") - house) / 11059 * 100
+    p.hass.states.async_set(
+        "sensor.remaining_pv_energy", 0, {"unit_of_measurement": "Wh"}
+    )
+    p.optimum_policy(t)
+    assert p.optimum_day_for(t).state == "FINISHED"
+    assert p.optimum_targets[t] == 80
+    p.hass.states.async_set(
+        "sensor.remaining_pv_energy", 99999, {"unit_of_measurement": "Wh"}
+    )
+    p.optimum_policy(t)
+    assert p.optimum_targets[t] == 80
+
+
+async def test_finished_restored_and_legacy_not_trusted(grid):
+    from custom_components.wallbox_manager.profiles import target_key
+
+    p, t, _ = grid
+    now = setup_optimum(p, t, pv=0)
     date = dt_util.as_local(now).date().isoformat()
+    await p.optimum_day_store.async_save(
+        {"version": 2, "days": {target_key(t): {"date": date, "state": "FINISHED"}}}
+    )
+    await p.load()
+    assert p.optimum_day_for(t).state == "FINISHED"
     await p.optimum_day_store.async_save({"date": date, "state": "ended"})
     await p.load()
-    assert p.optimum_day.state == "ended"
-    assert p.optimum_day.since is None
-    p.optimum_observe_day()
-    assert p.optimum_day.state == "ended"
-    assert p.optimum_unsubscribe is not None
+    assert p.optimum_day_for(t).state == "BEFORE_SURPLUS"
 
 
 async def test_balance_reuses_regulator_and_never_uses_surplus_upper_approximation(
     grid,
 ):
     p, t, _ = grid
-    setup_optimum(p, t, soc=50, pv=1, load=0, actual=0)
+    now = setup_optimum(p, t, soc=50, pv=1, load=0, actual=0)
+    p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "FINISHED")
     p.setting(t).update(soll_soc_speicher=10, approximation="up", pv_stop_delay=3600)
     with patch(
         "custom_components.wallbox_manager.pv_surplus.pv_balance", return_value=1

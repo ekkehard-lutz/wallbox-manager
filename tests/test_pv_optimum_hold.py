@@ -42,6 +42,13 @@ def configure(grid):
     p, t, context = grid
     setup_optimum(p, t, actual=0)
     samples(p, t)
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.wallbox_manager.pv_optimum import PVDay
+
+    p.optimum_days[t] = PVDay(
+        dt_util.as_local(datetime.now(UTC)).date().isoformat(), "FINISHED"
+    )
     clock = [0]
     p.monotonic = lambda: clock[0]
     p.setting(t)["pv_stop_delay"] = 10
