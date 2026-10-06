@@ -11,6 +11,7 @@ from ..core.capabilities import CapabilitySnapshot, CurrentLimit, EvidenceState
 from ..core.models import ConnectorId, EvseId, PhaseMode, VoltageObservation
 from ..core.values import scalar
 from ..diagnostics import (
+    command_event,
     diagnostic_recovery,
     profile_name,
     recovery_record,
@@ -930,7 +931,9 @@ class ControlRuntime:
         if not self.profile_permitted(target):
             self.intent(target).status = "inactive_wallbox"
             self.publish(target)
-            return self.preparation_wait(target, "inactive_wallbox") if prepare else None
+            return (
+                self.preparation_wait(target, "inactive_wallbox") if prepare else None
+            )
         intent = self.intent(target)
         generation = intent.generation
         state = self.runtime.get(target.station)
@@ -1091,6 +1094,7 @@ class ControlRuntime:
         self.pending_points[target] = resolved.point
         intent.status = "pending"
         self.publish(target)
+        command_event(self, target, "command_attempt", operating_point=resolved.point)
         result = await apply_operating_point(
             adapter, resolved.point, is_current=current
         )
@@ -1154,6 +1158,13 @@ class ControlRuntime:
             result = stale_command_result()
         if result.status in (CommandStatus.FAILED, CommandStatus.UNSUPPORTED):
             self._confirmed_points.pop(target, None)
+        command_event(
+            self,
+            target,
+            "command_outcome",
+            operating_point=resolved.point,
+            result=result,
+        )
         if generation == intent.generation:
             if result.status == CommandStatus.APPLIED:
                 if (
@@ -1224,11 +1235,13 @@ class ControlRuntime:
         current.after_dispatch = lambda: current(after_dispatch=True)
         intent.status = "pending"
         self.publish(target)
+        command_event(self, target, "command_attempt")
         result = await apply_charging_permission(adapter, enabled, is_current=current)
         if result.status != CommandStatus.APPLIED and self.runtime.current(token):
             await adapter.read_enabled()
         if not current(after_dispatch=True):
             result = stale_command_result()
+        command_event(self, target, "command_outcome", result=result)
         if publish and generation == intent.generation:
             intent.command_result = result
             intent.status = result.status.value

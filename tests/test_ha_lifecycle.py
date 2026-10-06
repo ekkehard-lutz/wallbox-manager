@@ -65,7 +65,8 @@ async def test_bind_error_is_retryable(monkeypatch):
     )
     monkeypatch.setattr(CentralSystem, "start", AsyncMock(side_effect=OSError("busy")))
     hass = SimpleNamespace(
-        async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a))
+        async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a)),
+        config_entries=SimpleNamespace(async_update_entry=Mock()),
     )
     with pytest.raises(ConfigEntryNotReady):
         await async_setup_entry(hass, entry())
@@ -129,6 +130,7 @@ async def test_platform_setup_failure_closes_listener(monkeypatch):
     hass = SimpleNamespace(
         async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a)),
         config_entries=SimpleNamespace(
+            async_update_entry=Mock(),
             async_forward_entry_setups=AsyncMock(side_effect=RuntimeError("platform")),
             async_unload_platforms=AsyncMock(return_value=True),
         ),

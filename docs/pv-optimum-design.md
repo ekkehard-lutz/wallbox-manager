@@ -1,7 +1,7 @@
 # PV Optimum
 
 PV Optimum uses home-battery energy for EV charging while planning to recover its
-own upper target SoC approximately at sunset. It does not control the battery's
+own upper target SoC when forecast surplus for the remaining local day is exhausted. It does not control the battery's
 reserve or maintain a nighttime SoC. PV Surplus's independent target remains
 unchanged. PV Maximum is not implemented.
 
@@ -53,35 +53,46 @@ as in the existing PV runtime. No positive command is authorized by stale data.
 
 ## Day detection and forecast
 
-PV power at least 100 W continuously for 300 seconds starts the PV day. Below
-100 W continuously for 900 seconds ends it. Unknown or expired PV evidence breaks
-the continuous interval. Short clouds do not end the day. The ended state is
-latched through that local calendar day and persisted across reloads. Local
-midnight resets the state. Debounce evidence is not restored after restart.
+The daily planner is independent of SoC mode selection and has three phases:
 
-The existing HA interval callback now observes current SoC, day state and fresh
-power inputs every second, even without EV connection, charging permission or
-authority. While in FAST_DISCHARGE it also evaluates the shared fast regulator,
-including while a serialized OCPP command is pending. PV state-change events
-observe threshold crossings too. The observer cannot send charging or battery
-commands; only the existing authorized PV execution loop can do that.
+- `BEFORE_SURPLUS`: target is the configured upper boundary.
+- `DYNAMIC`: starts on the first fresh, strict `PV > total consumers - selected EV`
+  comparison. Equality does not start it. Clouds and extended instantaneous deficits
+  never clear this latch.
+- `FINISHED`: entered as soon as remaining PV energy today is less than or equal to
+  estimated remaining household energy today. Target becomes upper immediately and
+  stays there even if later forecasts improve.
 
-During the active PV day, `sun.sun.next_setting` provides the local sunset planning
-horizon. After HA advances next_setting to tomorrow with the sun below the horizon,
-remaining time is zero; tomorrow's household consumption is never budgeted.
-Unavailable, stale or inconsistent sun information suspends dynamic decisions.
-There is no user-configured sun mapping.
+Per-connector date/phase records are saved in the existing PV-day Store using a
+version-2 payload. Legacy `active`/`ended` records are not trusted as proof of the
+new conditions. Local midnight resets the phase. A new valid surplus can then
+start the new day. Reload restores the phase, not cached measurement evidence.
+
+The trigger shares selected-session sensor selection and the existing `pv_balance`
+subtraction with regulation. Missing selected power is not zero: fallback requires
+live confirmed permission OFF or fresh authoritative physical idle evidence.
+Ambiguous, stale, negative or inconsistent household measurements do not start
+planning. Other EV loads remain part of household consumption under the selected-EV
+scope; this is not an all-EV subtraction.
+
+Both forecast terms cover the remainder of the local calendar day:
 
 ```
-remaining_house_Wh = daily_house_kWh * 1000 * max(0, seconds_until_sunset) / 86400
-recoverable_soc = (remaining_PV_Wh - remaining_house_Wh) / capacity_Wh * 100
+remaining_seconds = UTC(next_local_midnight) - UTC(now)
+remaining_house_Wh = daily_house_kWh * 1000 * remaining_seconds / 86400
+remaining_surplus_Wh = remaining_PV_today_Wh - remaining_house_Wh
+recoverable_soc = remaining_surplus_Wh / nominal_capacity_Wh * 100
 target_soc = clamp(upper_soc - recoverable_soc, lower_soc, upper_soc)
 ```
 
-The household forecast is a separate pure function, replaceable without changing
-the state machine or power regulators. Before production starts and after actual
-production ends, target_soc is upper_soc. Household discharge below that upper
-value overnight is allowed; it is only an EV policy target.
+The household setting represents a 24-hour average load. Actual elapsed time to
+local midnight accounts for 23/25-hour DST days. No sunset entity, sunset-minus-one-
+hour truncation or interval Solcast forecast is required. A nonpositive remaining
+surplus ends DYNAMIC before the ordinary cache deadline.
+
+Fixed upper targets in BEFORE_SURPLUS and FINISHED do not need a fresh forecast
+for display. Charging commands still require all existing fresh execution inputs.
+The observer cannot dispatch commands or change inverter settings.
 
 ## Three independent time scales
 
@@ -91,19 +102,14 @@ value overnight is allowed; it is only an EV policy target.
 | Transient import grace | 3 seconds | Monotonic first-import deadline owned by the shared FastDischargeRegulator |
 | Target-SoC planning | 300 seconds | Per-connector in-memory plan with a monotonic expiry |
 
-Target calculation uses the unchanged formula above. A plan is calculated
-immediately on selection/activation and startup/reload, on BEFORE -> ACTIVE and
-ACTIVE -> ENDED transitions, at local midnight, and when its target parameters
-change. If inputs are unavailable, calculation waits for valid evidence rather
-than manufacturing a target. Normal forecast changes are consumed at the next
-five-minute planning deadline. Plans are not restored as measurement evidence.
+Positive-surplus target calculations are cached for 300 seconds. Midnight,
+first surplus, forecast exhaustion, explicit Enable, genuine vehicle connection
+and reload bypass stale planning state. Exhaustion is checked on observations,
+not deferred until the next five-minute replan. Plans are never restored as proof
+of current measurements.
 
-Freshness is still validated on every observation and pre-dispatch decision,
-including forecast/capacity/sun information even when the target is cached.
-The existing 90-second freshness window does **not** require one physical sensor
-publication per second. Current SoC is compared against the cached target every
-second with the existing hysteresis. Mode transitions wake a sleeping PV_BALANCE
-loop; they do not wait for its regulation interval or the planning deadline.
+The independent one-second observer validates current execution evidence and
+advances SoC mode against the current target. Mode changes wake BALANCE promptly.
 
 The execution loop uses a one-second start-to-start deadline in FAST_DISCHARGE,
 subtracting time already spent evaluating/executing. It does not add the normal
@@ -130,11 +136,13 @@ PV-start/PV-stop delay settings retain their existing independent roles.
 
 ## Policy and shared power regulation
 
-`pv_optimum.py` owns Optimum's day state, forecast, independent target,
-mode selection and deliberate-pause policy. FAST_DISCHARGE enters strictly above target plus the existing
-central SoC hysteresis (default 5 percentage points), and exits at or below target.
-No new hysteresis setting is added. Recharging above target while the EV is absent
-can re-enter FAST_DISCHARGE; there is no target-reached-for-today latch.
+`pv_optimum.py` owns the daily planner and the separate SoC state machine.
+Explicit Enable and genuine vehicle return initialize FAST when `SoC > target`,
+otherwise BALANCE. Thus 84%/80%/5pp activates FAST even at zero PV. Within an
+activation FAST exits at `SoC <= target`; BALANCE re-enters FAST only at
+`SoC > target + hysteresis` (exact equality remains BALANCE). Target changes,
+generic invalidation and input recovery do not constitute a new activation.
+Temporary input gaps preserve mode while blocking unsafe new decisions.
 
 `pv_regulators.py` owns reusable power-only primitives:
 
@@ -256,8 +264,8 @@ Changing a profile-specific setting does not invalidate another profile's contro
 
 `tests/test_pv_regulators.py` covers the shared arithmetic, user limit, existing
 battery contribution, asymmetric reaction, grid deadband and invalid values.
-`tests/test_pv_optimum.py` covers day thresholds/debounce, gaps, midnight, reload,
-energy conversion, target clamps, sunset budgeting, mode hysteresis, independent
+`tests/test_pv_optimum.py` covers daily surplus/reserve latches, gaps, midnight, reload,
+energy conversion, target clamps, remaining-day budgeting, mode hysteresis, independent
 settings, EV absence/re-entry, stale/missing inputs, solver constraints, permission
 and authority. `tests/test_pv_optimum_timing.py` covers the independent clocks,
 immediate replanning, cached-target freshness and SoC-mode wakeups. The shared
@@ -271,7 +279,10 @@ estimates. The complete existing PV/authority/OCPP regression suite remains in u
 
 No integration version, release, tag or merge is part of this change.
 
-## Timing correction report
+## Historical beta.4 timing correction report
+
+The day detection and sunset planning described by that earlier correction are
+superseded by the remaining-day planner above.
 
 Feature branch: `codex/pv-optimum`, continuing the reviewed implementation
 `2873dfab82f0fda1a5dd7e6b02baeca7083e5483`.

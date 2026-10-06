@@ -223,17 +223,14 @@ OCPP tests cannot replace these device checks.
 
 ## Opt-in Wallbox Manager diagnostics
 
-Open **Settings → Devices & services → Wallbox Manager → Configure** and enable
-**Diagnostic logging** (German: **Diagnoseprotokoll**).
-It defaults to disabled, is saved in the integration options, and needs no OCPP
-control authority. A diagnostic-only change takes effect for subsequent evaluations
-without integration reload, charging/OCPP commands or changes to profile settings.
-Changing entity references at the same time still uses their existing reload path.
-Disable this option after troubleshooting: records are detailed and may be frequent.
+Open **Settings → Devices & services → Wallbox Manager → Configure** and choose
+**Diagnostic level** (**Diagnosestufe**): 0 off, 1 events, 2 events with relevant
+data, 3 full trace. The saved choice updates live without control reload or writes.
+The former boolean migrates false to 0 and true to 3. See
+[levels, migration and recovery diagnostics](diagnostic-logging.md).
 
-The same switch also enables restart/reload recovery diagnostics in all profiles,
-including NETZ; see [recovery diagnostics](diagnostic-logging.md). Content depends
-on the active feature/profile and current activity.
+The following full-cycle field description applies to Level 3. Levels 1/2 emit
+centrally deduplicated semantic events; Level 2 adds relevant explanatory data.
 
 Each actual PV evaluation writes exactly one physical **INFO** record prefixed
 `WBMGR subsystem=pv`, followed by compact JSON with stable sorted keys. Normal HA logs suffice;
@@ -310,17 +307,20 @@ new-sample gate, smoothing, or Fronius fast polling is introduced here. See the
 
 ### First-start reconciliation
 
-An explicit ON first prepares the electrical point while ChargingEnabled is still
-false, then confirms permission independently. A temporary preparation/permission
-refusal now starts an in-memory startup worker with the existing 60-second retry
-interval, even when no prior applied point exists. It re-reads policy and fresh
-execution evidence for each attempt. Only successful preparation and permission
-confirmation hand over to normal PV regulation. OFF, changed intent, ownership or
-authority loss, disconnect/reboot and unload revoke this pending authorization;
-restart/reload never restores the queued command or retry deadline. Persisted
-explicit user intent is independently reconciled through the ownership recovery
-path. Phase feedback alone cannot prove the current
-setpoint, so an uncertain operation is retried rather than inferred as applied.
+An explicit ON first prepares the latest safe electrical point while permission
+is still false, then separately confirms ChargingEnabled=true by readback.
+Temporary preparation blockers, including a missing transaction, return structured
+retryable outcomes. One accepted request remains pending through the existing
+60-second startup backoff. Repeated pending requests coalesce; already confirmed
+ON is idempotent when the current point is confirmed. Unconfirmed state after
+reload still requires reconciliation. Missing Optimum policy never manufactures
+an OFF point over a retained station profile.
+
+OFF, profile supersession, authority loss and obsolete connection/session context
+fence pending work. Command generations and pre-dispatch checks remain active.
+Permanent failures/unsupported operations terminate the attempt. Restart recovery
+continues to use separately persisted ownership/permission intent and fresh proof;
+queued commands and retry deadlines are not restored.
 
 After dispatch, the original current/phase point and voltage basis remain fixed.
 The runtime still fences capabilities, hard limits, transaction, intent, ownership,

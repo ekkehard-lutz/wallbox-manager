@@ -18,6 +18,7 @@ from homeassistant.data_entry_flow import FlowResult, section
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .core.values import scalar
+from .diagnostics import LEVEL_OPTION, OPTION, migrate_diagnostics
 
 
 def bind_address(value: str) -> str:
@@ -164,6 +165,8 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
             EntitySelectorConfig,
             NumberSelector,
             NumberSelectorConfig,
+            SelectSelector,
+            SelectSelectorConfig,
         )
         from homeassistant.helpers.storage import Store
 
@@ -175,14 +178,20 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
             ).async_load()
             or {}
         )
-        self.data = migrate_regulation(
-            migrate_options(self.config_entry.options), stored
+        self.data = migrate_diagnostics(
+            migrate_regulation(migrate_options(self.config_entry.options), stored)
         )
         fields = {
             vol.Optional(
-                "pv_diagnostic_logging",
-                default=self.data.get("pv_diagnostic_logging", False),
-            ): bool,
+                LEVEL_OPTION,
+                default=str(self.data[LEVEL_OPTION]),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=["0", "1", "2", "3"],
+                    translation_key="diagnostic_level",
+                    mode="dropdown",
+                )
+            ),
             vol.Optional(
                 "min_soc_speicher",
                 description={"suggested_value": self.data.get("min_soc_speicher")},
@@ -240,17 +249,17 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                 self.data.pop(key, None)
                 if user_input.get(key):
                     self.data[key] = user_input[key]
-            if "pv_diagnostic_logging" in user_input:
-                self.data["pv_diagnostic_logging"] = user_input["pv_diagnostic_logging"]
+            if LEVEL_OPTION in user_input:
+                self.data[LEVEL_OPTION] = int(user_input[LEVEL_OPTION])
             # A diagnostic-only edit must not disconnect or restart control.
             self.automatic_reload = {
-                k: v for k, v in self.data.items() if k != "pv_diagnostic_logging"
+                k: v for k, v in self.data.items() if k not in (OPTION, LEVEL_OPTION)
             } != {
                 k: v
                 for k, v in migrate_regulation(
                     self.config_entry.options, stored
                 ).items()
-                if k != "pv_diagnostic_logging"
+                if k not in (OPTION, LEVEL_OPTION)
             }
             return self.async_create_entry(title="", data=self.data)
         return self.async_show_form(step_id="init", data_schema=schema)

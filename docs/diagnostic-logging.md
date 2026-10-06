@@ -1,18 +1,35 @@
 # Wallbox Manager diagnostic logging
 
-Open **Settings → Devices & services → Wallbox Manager → Configure**.
-Enable **Diagnostic logging** (German: **Diagnoseprotokoll**) for troubleshooting.
-The single persistent option defaults to disabled. The internal key remains
-`pv_diagnostic_logging` so existing installations retain their saved choice.
-No migration or second switch is required. Diagnostic content depends on the
-active feature, profile and current activity. Disable it after troubleshooting.
-Normal warnings and errors are independent of this option.
+Open **Settings → Devices & services → Wallbox Manager → Configure** and choose
+**Diagnostic level** (German: **Diagnosestufe**).
 
-English help text:
-> Enables detailed Wallbox Manager diagnostics for troubleshooting. Content depends on the active feature, profile and current activity. Disabled by default.
+| Level | Output |
+| --- | --- |
+| 0 — Off / Aus | No dedicated trace. Normal operational warnings/errors remain active. |
+| 1 — Events and errors / Ereignisse und Fehler | Deduplicated decisions, lifecycle transitions and meaningful command events. |
+| 2 — Events with relevant data / Ereignisse mit relevanten Daten | The same events with explanatory measurements and context. |
+| 3 — Full diagnostic trace / Vollständige Diagnosespur | Complete cyclic PV records and detailed recovery stages, plus lifecycle events. |
 
-German help text:
-> Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert.
+The persisted integer `diagnostic_level` replaces the legacy boolean
+`pv_diagnostic_logging`. Legacy false/absent migrates to 0, true migrates to 3;
+an explicit new level wins. Options-only level changes take effect live without
+control reload, OCPP reconnect or commands. The default is 0; no card control is
+needed. The level applies to PV, recovery, physical state, ownership and battery
+reserve diagnostics.
+
+Deduplication is centralized per entry, connector and event family. Identity uses
+mode/phase/reason, discrete phase/current operating points, permission and control
+states. Raw watts, voltage drift, SoC drift, timestamps and countdowns are payload,
+not identity. Level 2 attaches relevant context only when a semantic event is new.
+Real command attempts/outcomes remain visible; reuse of a confirmed point does not
+create a fake command event. Changing levels clears the dedup baseline.
+
+`WBMGR subsystem=control` events expose explicit Enable requests, pending reasons,
+retries, confirmation, cancellation and failure, plus planner/SoC transitions.
+Level 2 adds request epoch, generation, fence reason and preparation context.
+`enable_pending` does not mean confirmed hardware ON. The charging switch always
+represents readback. Dedicated collection/serialization failures cannot change
+control behavior. Genuine command failures also have normal ERROR logging at 0.
 
 Records are INFO lines with a stable prefix followed by compact, sorted JSON:
 
@@ -22,7 +39,7 @@ WBMGR subsystem=recovery {"stage":...}
 WBMGR subsystem=reconnect {"connected":...,"ownership":...}
 ```
 
-PV records preserve the existing evaluation cadence and fields; see
+At Level 3, PV records preserve the existing evaluation cadence and fields; see
 [PV diagnostics](pv-surplus-profile.md#opt-in-wallbox-manager-diagnostics).
 Recovery records work with NETZ, PV_SURPLUS and profiles using the same recovery
 path. There is no raw OCPP frame logging, transaction identifier, credential or
@@ -91,7 +108,7 @@ itself; the existing subsequent profile reconciliation still runs unchanged.
 
 ## Next hardware test
 
-Enable **Diagnoseprotokoll**, select NETZ at 4 kW with charging enabled, and
+Select **Diagnosestufe 3**, select NETZ at 4 kW with charging enabled, and
 confirm 1 phase / 17 A before a full Home Assistant restart. Keep the station on
 its separate test commit supporting explicit Connector.PhaseRotation.Actual
 GetVariables. Collect `ha core logs | grep 'WBMGR subsystem=recovery'` after

@@ -285,6 +285,14 @@ class Runtime:
             if old.authority == observation.authority:
                 return False
             observation = replace(observation, authority=ControlAuthority.UNKNOWN)
+        if self.entry and (old is None or old.authority != observation.authority):
+            diagnostic_event(
+                self.entry,
+                "authority",
+                station=token.station.value,
+                event="authority_changed",
+                authority=observation.authority.value,
+            )
         self._publish(
             replace(
                 state,

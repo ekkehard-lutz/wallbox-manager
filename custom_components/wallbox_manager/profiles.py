@@ -19,6 +19,7 @@ from .diagnostics import (
     profile_event,
     recovery_record,
     recovery_snapshot,
+    reset_diagnostics,
 )
 from .grid_timing import GridTiming, duration_seconds
 from .power_history import PowerHistory
@@ -365,6 +366,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         if self.epochs[target] != epoch:
             return
         self.setting(target)["profile"] = profile
+        profile_event(self, target, "profile_selected", profile_name=profile)
         self.optimum_plans.pop(target, None)
         if profile == "PV_OPTIMUM":
             self.optimum_refresh(datetime.now(UTC))
@@ -529,7 +531,12 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                     CommandReason.BUSY,
                     "Enable already pending.",
                 )
-            if self.control.runtime.enabled(target) is True and not _resume:
+            if (
+                self.control.runtime.enabled(target) is True
+                and not _resume
+                and self.control.confirmed_point(target) is not None
+                and target not in self.control._unconfirmed_targets
+            ):
                 return CommandResult(
                     CommandStatus.APPLIED, ControlArea.CHARGING_PERMISSION
                 )
@@ -621,17 +628,16 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                     self.optimum_initialize(target)
                 plan = self.pv_edit(target)
                 if plan is None and self.setting(target)["profile"] == "PV_OPTIMUM":
-                    # No policy is not OFF, even if permission is disabled and
-                    # the station retains a previous positive current profile.
+                    # No policy is not OFF. Keep the activation pending without
+                    # touching a possibly retained positive station profile.
+                    waiting = self.control.preparation_wait(
+                        target,
+                        self.control.blocker(target)
+                        or self.status.get(target, "policy_unavailable"),
+                    )
                     if self.control.runtime.enabled_observation(target) is not None:
                         self.pv_schedule_startup(target, epoch)
-                    return CommandResult(
-                        CommandStatus.TEMPORARILY_REJECTED,
-                        reason=CommandReason.BUSY,
-                        detail="Waiting for a valid PV Optimum decision.",
-                    )
-            else:
-                self.control._edit(target, {"target_w": Fraction(0)})
+                    return waiting
         generation = self.control.intent(target).generation + 1
         start_context = self.control.runtime.get(target.station)
         if enabled and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
@@ -1084,6 +1090,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         if self.closed:
             return
         self.closed = True
+        reset_diagnostics(self.entry)
         if hasattr(self.control, "ownership"):
             await self.control.ownership.suspend(self.control)
         if self.optimum_unsubscribe:

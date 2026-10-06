@@ -487,8 +487,10 @@ Profile settings remain stored when hidden. See the
 [automatic card registration and verification](docs/frontend-registration.md),
 including migration of existing integration-path Lovelace resources.
 
-Wallbox Manager offers one integration-level **Diagnostic logging** option
-(German: **Diagnoseprotokoll**, disabled by default) for troubleshooting.
+Wallbox Manager offers one integration-level **Diagnostic level** setting
+(German: **Diagnosestufe**): 0 off (default), 1 events and errors, 2 events with
+relevant data, 3 full trace. Levels 1/2 deduplicate unchanged decisions. Legacy
+boolean diagnostics migrate to 0/3, and level changes do not restart control.
 Detailed records use `WBMGR subsystem=pv` for PV evaluations and
 `WBMGR subsystem=recovery` for restart/reload recovery in any charging profile.
 See [diagnostic logging and recovery evidence](docs/diagnostic-logging.md) and

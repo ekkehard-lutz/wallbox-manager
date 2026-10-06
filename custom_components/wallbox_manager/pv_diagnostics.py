@@ -14,7 +14,7 @@ from fractions import Fraction
 from functools import wraps
 
 from .core.telemetry import Channel, Quantity, state_flag
-from .diagnostics import OPTION
+from .diagnostics import cycle_event, diagnostic_level
 from .freshness import LIVE_FRESHNESS, freshness_for
 
 _LOGGER = logging.getLogger(__name__)
@@ -387,18 +387,21 @@ class Cycle:
                 "elapsed_s": elapsed,
                 "remaining_s": max(0, total - elapsed) if elapsed is not None else None,
             }
-        _LOGGER.info(
-            "WBMGR subsystem=pv %s",
-            json.dumps(
-                self.data, separators=(",", ":"), sort_keys=True, allow_nan=False
-            ),
-        )
+        if diagnostic_level(p.entry) < 3:
+            cycle_event(p.entry, self.data)
+        else:
+            _LOGGER.info(
+                "WBMGR subsystem=pv %s",
+                json.dumps(
+                    self.data, separators=(",", ":"), sort_keys=True, allow_nan=False
+                ),
+            )
 
 
 @contextmanager
 def cycle(profile, target, trigger):
     """Exactly one record even on early return, cancellation or failed dispatch."""
-    if active(profile, target) or not profile.entry.options.get(OPTION, False):
+    if active(profile, target) or not diagnostic_level(profile.entry):
         yield
         return
     record = None

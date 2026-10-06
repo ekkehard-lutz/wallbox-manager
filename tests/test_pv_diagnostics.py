@@ -128,11 +128,11 @@ async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
     flow = ReferenceOptionsFlow()
     flow.hass, flow.handler = p.hass, config.entry_id
     count = len(peer.requests)
-    result = await flow.async_step_init({"pv_diagnostic_logging": True})
+    result = await flow.async_step_init({"diagnostic_level": "3"})
     assert not flow.automatic_reload
     # Exercise HA's actual options persistence boundary.
     await p.hass.config_entries.options.async_finish_flow(flow, result)
-    assert config.options["pv_diagnostic_logging"] is True
+    assert config.options["diagnostic_level"] == 3
     assert len(peer.requests) == count
     assert not p.tasks
     again = ReferenceOptionsFlow()
@@ -140,9 +140,9 @@ async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
     form = await again.async_step_init()
     assert (
         form["data_schema"]({"general": {}, "regulation": {}})["general"][
-            "pv_diagnostic_logging"
+            "diagnostic_level"
         ]
-        is True
+        == "3"
     )
 
 
@@ -305,9 +305,9 @@ async def test_diagnostics_default_disabled(grid):
     form = await flow.async_step_init()
     assert (
         form["data_schema"]({"general": {}, "regulation": {}})["general"][
-            "pv_diagnostic_logging"
+            "diagnostic_level"
         ]
-        is False
+        == "0"
     )
 
 
@@ -316,15 +316,15 @@ def test_diagnostic_translations_are_generic():
 
     root = Path(__file__).parents[1] / "custom_components/wallbox_manager"
     for filename, label in [
-        ("strings.json", "Diagnostic logging"),
-        ("translations/en.json", "Diagnostic logging"),
-        ("translations/de.json", "Diagnoseprotokoll"),
+        ("strings.json", "Diagnostic level"),
+        ("translations/en.json", "Diagnostic level"),
+        ("translations/de.json", "Diagnosestufe"),
     ]:
         step = json.loads((root / filename).read_text())["options"]["step"]["init"][
             "sections"
         ]["general"]
-        assert step["data"]["pv_diagnostic_logging"] == label
-        help_text = step["data_description"]["pv_diagnostic_logging"]
+        assert step["data"]["diagnostic_level"] == label
+        help_text = step["data_description"]["diagnostic_level"]
         assert "PV" not in help_text
         assert "Wallbox" in help_text
         assert "deaktiviert" in help_text or "Disabled by default" in help_text
