@@ -55,6 +55,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         }
         self.optimum_day = PVDay()
         self.optimum_modes = {}
+        self.optimum_initializations = set()
+        self.optimum_connections = {}
         self.optimum_regulators = {}
         self.optimum_targets = {}
         self.optimum_plans = {}
@@ -608,6 +610,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                     return CommandResult(
                         CommandStatus.TEMPORARILY_REJECTED, reason=CommandReason.STALE
                     )
+                if self.setting(target)["profile"] == "PV_OPTIMUM":
+                    self.optimum_initialize(target)
                 plan = self.pv_edit(target)
                 if plan is None and self.setting(target)["profile"] == "PV_OPTIMUM":
                     # No policy is not OFF, even if permission is disabled and
@@ -839,6 +843,17 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.sessions_changed()
 
     def sessions_changed(self):
+        for target in tuple(self.control.intents):
+            if self.setting(target)["profile"] == "PV_OPTIMUM":
+                self.optimum_connection(target)
+            session = self.control.runtime.sessions.get(target)
+            if (
+                target in self.enable_requests
+                and session
+                and not session.active
+                and session.end_reason != "superseded"
+            ):
+                self.invalidate(target)
         for target in tuple(self.pv_sessions):
             session = self.control.runtime.sessions.get(target)
             if session and not session.active:

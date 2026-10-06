@@ -8,6 +8,7 @@ from fractions import Fraction
 from homeassistant.util import dt as dt_util
 
 from .control.requests import Direction
+from .diagnostics import profile_event
 from .freshness import freshness_for
 from .pv_regulators import FastDischargeRegulator
 
@@ -77,6 +78,39 @@ class PVDay:
 
 class PVOptimum:
     """Policy adapter using the shared PV runtime and power regulators."""
+
+    def optimum_initialize(self, target):
+        """Mark an activation once; delayed evidence must not lose initialization."""
+        self.optimum_plans.pop(target, None)
+        self.optimum_initializations.add(target)
+        self.optimum_regulators.pop(target, None)
+        self.pv_stop_since.pop(target, None)
+        session = self.control.runtime.sessions.get(target)
+        self.optimum_connections[target] = (
+            (session.session_id, session.active) if session else None
+        )
+
+    def optimum_connection(self, target):
+        session = self.control.runtime.sessions.get(target)
+        if session is None:
+            return
+        current = (session.session_id, session.active)
+        previous = self.optimum_connections.get(target)
+        if current == previous:
+            return
+        self.optimum_connections[target] = current
+        handover = bool(
+            previous
+            and any(
+                old.session_id == previous[0] and old.end_reason == "superseded"
+                for old in self.control.runtime.sessions.history(target)
+            )
+        )
+        if session.active and not handover:
+            self.optimum_initialize(target)
+            profile_event(self, target, "vehicle_connected")
+        elif not session.active and session.end_reason != "superseded":
+            profile_event(self, target, "vehicle_disconnected")
 
     def optimum_observe_day(self, now=None, *, observation=...):
         from .pv_surplus import power_valid_for, reading
@@ -195,13 +229,27 @@ class PVOptimum:
             planned = key, tick + TARGET_PLANNING_SECONDS, desired
             self.optimum_plans[target] = planned
         desired = planned[2]
-        mode = self.optimum_modes.get(target, "PV_BALANCE")
-        if soc <= desired:
+        mode = self.optimum_modes.get(target)
+        initializing = mode is None or target in self.optimum_initializations
+        if initializing:
+            mode = "FAST_DISCHARGE" if soc > desired else "PV_BALANCE"
+            self.optimum_initializations.discard(target)
+        elif soc <= desired:
             mode = "PV_BALANCE"
         elif soc > desired + Fraction(str(settings["soc_hysterese"])):
             mode = "FAST_DISCHARGE"
         mode_changed = mode != self.optimum_modes.get(target)
-        if mode_changed:
+        if mode_changed or initializing:
+            profile_event(
+                self,
+                target,
+                "soc_mode",
+                mode=mode,
+                initialized=initializing,
+                soc=float(soc),
+                target_soc=float(desired),
+                hysteresis=settings["soc_hysterese"],
+            )
             self.pv_stop_since.pop(target, None)
         if mode_changed and asyncio.current_task() is not self.tasks.get(target):
             self.optimum_wakes.setdefault(target, asyncio.Event()).set()
@@ -240,8 +288,6 @@ class PVOptimum:
             try:
                 policy = self.optimum_policy(target, now)
             except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                self.optimum_targets.pop(target, None)
-                self.optimum_modes.pop(target, None)
                 self.pv_input_gap(target)
             else:
                 if policy[1] == "FAST_DISCHARGE":

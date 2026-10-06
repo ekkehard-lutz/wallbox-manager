@@ -1,6 +1,7 @@
 """Explicit activation survives temporary preparation and initializes SoC once."""
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from test_control_runtime import manual as manual
@@ -81,3 +82,40 @@ async def test_pending_and_confirmed_enable_are_idempotent(grid, profile):
     assert c.intent(t).generation == generation
     assert (len(peer.requests), len(peer.permissions)) == commands
     assert c.runtime.enabled(t) is True
+
+
+@pytest.mark.parametrize(
+    "soc,expected", [(84, "FAST_DISCHARGE"), (80, "PV_BALANCE"), (79, "PV_BALANCE")]
+)
+async def test_activation_boundary_and_input_recovery(grid, soc, expected):
+    p, t, _ = grid
+    setup_optimum(p, t, soc=soc, pv=0)
+    p.optimum_initialize(t)
+    p.optimum_policy(t)
+    assert p.optimum_modes[t] == expected
+    p.optimum_modes[t] = "PV_BALANCE"
+    p.invalidate(t)
+    measurements(p, t, soc=84, pv=0)
+    p.optimum_policy(t)
+    assert p.optimum_modes[t] == "PV_BALANCE"
+    p.hass.states.async_remove("sensor.pv")
+    p.optimum_refresh(datetime.now(UTC))
+    assert p.optimum_modes[t] == "PV_BALANCE"
+    measurements(p, t, soc=84, pv=0)
+    p.optimum_policy(t)
+    assert p.optimum_modes[t] == "PV_BALANCE"
+
+
+async def test_genuine_vehicle_return_initializes_fast(grid):
+    from test_ocpp21_control import transaction
+
+    p, t, (c, _, peer, *_rest) = grid
+    setup_optimum(p, t, soc=84, pv=0, actual=0)
+    p.optimum_initialize(t)
+    p.optimum_policy(t)
+    p.optimum_modes[t] = "PV_BALANCE"
+    identity = c.runtime.sessions.get(t).external_transaction_id
+    await transaction(peer, identity=identity, connector=1, kind="Ended")
+    await transaction(peer, identity="new-activation", connector=1)
+    p.optimum_policy(t)
+    assert p.optimum_modes[t] == "FAST_DISCHARGE"
