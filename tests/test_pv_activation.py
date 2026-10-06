@@ -54,3 +54,30 @@ async def test_transaction_blocker_retains_enable_and_reconciles(grid, profile):
     gate.set()
     await asyncio.wait_for(task, 2)
     assert c.runtime.enabled(t) is True
+
+
+@pytest.mark.parametrize("profile", ["PV_OPTIMUM", "PV_SURPLUS"])
+async def test_pending_and_confirmed_enable_are_idempotent(grid, profile):
+    p, t, (c, _, peer, *_rest) = grid
+    setup_optimum(p, t, soc=96)
+    p.setting(t)["profile"] = profile
+    p.wait = lambda _: asyncio.Event().wait()
+    blocker = c.blocker
+    c.blocker = lambda _: "transaction_unavailable"
+    await p.permission(t, True)
+    generation = c.intent(t).generation
+    worker = p.tasks[t]
+    for _ in range(3):
+        await p.permission(t, True)
+    assert c.intent(t).generation == generation
+    assert p.tasks[t] is worker
+    await p.permission(t, False)
+    assert t not in p.enable_requests and t not in p.pv_startups
+    c.blocker = blocker
+    await p.permission(t, True)
+    generation = c.intent(t).generation
+    commands = len(peer.requests), len(peer.permissions)
+    await p.permission(t, True)
+    assert c.intent(t).generation == generation
+    assert (len(peer.requests), len(peer.permissions)) == commands
+    assert c.runtime.enabled(t) is True

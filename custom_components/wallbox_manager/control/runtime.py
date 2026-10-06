@@ -537,6 +537,21 @@ class ControlRuntime:
     def profile_permitted(self, target):
         return not hasattr(self, "ownership") or self.ownership.permits(self, target)
 
+    def preparation_wait(self, target, reason):
+        """A missing preparation proof is a retryable outcome, never a lost ON."""
+        result = CommandResult(
+            CommandStatus.TEMPORARILY_REJECTED,
+            ControlArea.OPERATING_POINT,
+            CommandReason.TRANSACTION_UNAVAILABLE
+            if reason == "transaction_unavailable"
+            else CommandReason.BUSY,
+            reason,
+        )
+        self.intent(target).command_result = result
+        self.intent(target).status = reason
+        self.publish(target)
+        return result
+
     async def request_enabled(self, target, enabled, *, fence=lambda: True):
         if type(enabled) is not bool:
             raise ValueError("enabled must be boolean")
@@ -571,7 +586,7 @@ class ControlRuntime:
         if blocked:
             intent.status = blocked
             self.publish(target)
-            return None
+            return self.preparation_wait(target, blocked)
         if not permission_available(self.adapter(target)):
             result = CommandResult(
                 CommandStatus.UNSUPPORTED,
@@ -915,7 +930,7 @@ class ControlRuntime:
         if not self.profile_permitted(target):
             self.intent(target).status = "inactive_wallbox"
             self.publish(target)
-            return None
+            return self.preparation_wait(target, "inactive_wallbox") if prepare else None
         intent = self.intent(target)
         generation = intent.generation
         state = self.runtime.get(target.station)
@@ -936,7 +951,7 @@ class ControlRuntime:
         if blocked:
             intent.status = blocked
             self.publish(target)
-            return None
+            return self.preparation_wait(target, intent.status) if prepare else None
         enabled_revision = self.runtime.enabled_observation(target).revision
         inputs, resolved, blocked = self.resolve(target)
         intent.solver_result = resolved
@@ -944,7 +959,7 @@ class ControlRuntime:
         if blocked is not None or adapter is None:
             intent.status = blocked or "adapter_unavailable"
             self.publish(target)
-            return None
+            return self.preparation_wait(target, intent.status) if prepare else None
         state = self.runtime.get(target.station)
         token = state.token
         authority_revision = state.authority_revision

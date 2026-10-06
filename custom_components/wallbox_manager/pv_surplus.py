@@ -752,6 +752,7 @@ class PVSurplus:
             runtime.enabled_observation(target).revision,
             self.control.intent(target).generation,
         )
+        self.enable_requests.setdefault(target, asyncio.current_task())
         self.pv_retry_until[target] = self.monotonic() + 60
         self.status[target] = "awaiting_applied"
         self.tasks[target] = self.hass.async_create_background_task(
@@ -784,6 +785,7 @@ class PVSurplus:
                     if self.epochs.get(target, 0) != epoch:
                         return
                     if result and result.status == CommandStatus.APPLIED:
+                        self.enable_requests.pop(target, None)
                         self.pv_startups.pop(target, None)
                         self.pv_retry_until.pop(target, None)
                         self.pv_confirm(target)
@@ -799,6 +801,7 @@ class PVSurplus:
             if self.tasks.get(target) is asyncio.current_task():
                 self.tasks.pop(target, None)
                 self.pv_startups.pop(target, None)
+                self.enable_requests.pop(target, None)
                 self.pv_retry_until.pop(target, None)
             self.control.publish(target)
 

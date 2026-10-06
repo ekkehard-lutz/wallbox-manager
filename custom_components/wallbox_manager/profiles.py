@@ -68,6 +68,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.pv_retry_request = {}
         self.pv_phase_retry = {}
         self.pv_startups = {}
+        self.enable_requests = {}
         self.monotonic = time.monotonic
         self.wall_time = time.time
         self.timer_wait = asyncio.sleep
@@ -229,6 +230,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             "optimum_target_soc": float(self.optimum_targets[target])
             if target in self.optimum_targets
             else None,
+            "enable_pending": target in self.enable_requests,
+            "enable_wait_reason": self.control.intent(target).status
+            if target in self.enable_requests
+            else None,
             "optimum_mode": self.optimum_modes.get(target),
             "pv_day_state": self.optimum_day.state,
             "profile_status": self.status.get(target, "idle"),
@@ -295,6 +300,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         return actively_charging(state, target)
 
     def invalidate(self, target):
+        self.enable_requests.pop(target, None)
         self.optimum_regulators.pop(target, None)
         self.epochs[target] = self.epochs.get(target, 0) + 1
         for tasks in (
@@ -495,6 +501,32 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
 
     @diagnostic_permission
     async def permission(self, target, enabled, *, _grid_expiry=False, _resume=False):
+        """Coalesce one explicit PV activation through preparation and backoff."""
+        pv = self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM")
+        if enabled and pv and self.can_control(target):
+            if target in self.enable_requests:
+                return CommandResult(
+                    CommandStatus.TEMPORARILY_REJECTED,
+                    ControlArea.CHARGING_PERMISSION,
+                    CommandReason.BUSY,
+                    "Enable already pending.",
+                )
+            if self.control.runtime.enabled(target) is True and not _resume:
+                return CommandResult(
+                    CommandStatus.APPLIED, ControlArea.CHARGING_PERMISSION
+                )
+        try:
+            return await self._permission_request(
+                target, enabled, _grid_expiry=_grid_expiry, _resume=_resume
+            )
+        finally:
+            if self.enable_requests.get(target) is asyncio.current_task():
+                if target not in self.pv_startups:
+                    self.enable_requests.pop(target, None)
+
+    async def _permission_request(
+        self, target, enabled, *, _grid_expiry=False, _resume=False
+    ):
         if enabled and (
             not self.can_control(target)
             or self.setting(target)["profile"] not in self.available_profiles(target)
@@ -519,6 +551,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             )
         self.invalidate(target)
         epoch = self.epochs[target]
+        if enabled and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+            self.enable_requests[target] = asyncio.current_task()
         if hasattr(self.control, "ownership"):
             await self.control.ownership.permission_intent(
                 self.control, target, enabled
@@ -554,6 +588,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             )
         if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
             if enabled:
+                await self.control.wait_for_pending_point(target)
+                if self.epochs[target] != epoch:
+                    return CommandResult(
+                        CommandStatus.TEMPORARILY_REJECTED, reason=CommandReason.STALE
+                    )
                 plan = self.pv_edit(target)
                 if plan is None and self.setting(target)["profile"] == "PV_OPTIMUM":
                     # No policy is not OFF, even if permission is disabled and
@@ -754,13 +793,17 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
 
     def changed(self, snapshot):
         for target in (
-            self.tasks.keys() | self.debounce_tasks.keys() | self.grid_timers.keys()
+            self.tasks.keys()
+            | self.debounce_tasks.keys()
+            | self.grid_timers.keys()
+            | self.enable_requests.keys()
         ):
             if target.station == snapshot.token.station and (
                 not snapshot.connected
                 or (
                     self.control.runtime.enabled(target) is not True
                     and not self.pv_startup_valid(target, self.epochs.get(target, 0))
+                    and target not in self.enable_requests
                 )
                 or self.control.runtime.authority(target.station)
                 != ControlAuthority.REMOTE
