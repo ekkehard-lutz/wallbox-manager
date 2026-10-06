@@ -14,7 +14,12 @@ from .control.commands import CommandReason, CommandResult, CommandStatus, Contr
 from .core.authority import ControlAuthority
 from .core.telemetry import Channel, Quantity, State
 from .core.values import scalar
-from .diagnostics import diagnostic_recovery, recovery_record, recovery_snapshot
+from .diagnostics import (
+    diagnostic_recovery,
+    profile_event,
+    recovery_record,
+    recovery_snapshot,
+)
 from .grid_timing import GridTiming, duration_seconds
 from .power_history import PowerHistory
 from .pv_diagnostics import diagnostic_permission
@@ -300,6 +305,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         return actively_charging(state, target)
 
     def invalidate(self, target):
+        if target in self.enable_requests:
+            profile_event(
+                self, target, "enable_cancelled", reason="lifecycle_invalidated"
+            )
         self.enable_requests.pop(target, None)
         self.optimum_regulators.pop(target, None)
         self.epochs[target] = self.epochs.get(target, 0) + 1
@@ -551,6 +560,12 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             )
         self.invalidate(target)
         epoch = self.epochs[target]
+        profile_event(
+            self,
+            target,
+            "enable_requested" if enabled else "disable_requested",
+            epoch=epoch,
+        )
         if enabled and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
             self.enable_requests[target] = asyncio.current_task()
         if hasattr(self.control, "ownership"):
@@ -617,6 +632,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         if self.epochs[target] != epoch:
             return result
         if enabled and result and result.status == CommandStatus.APPLIED:
+            profile_event(self, target, "enable_confirmed", epoch=epoch)
             if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
                 self.pv_confirm(target)
             self.launch(target)
@@ -652,6 +668,17 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                 self.control.publish(target)
             else:
                 self.grid_launch_timer(target, retry=True)
+        if result and result.status in (
+            CommandStatus.FAILED,
+            CommandStatus.UNSUPPORTED,
+        ):
+            profile_event(
+                self,
+                target,
+                "enable_failed" if enabled else "disable_failed",
+                reason=result.reason,
+                detail=result.detail,
+            )
         if not enabled:
             await self.reconcile_battery(exclude=target)
         return result

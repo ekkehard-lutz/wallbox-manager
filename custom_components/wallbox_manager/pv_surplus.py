@@ -9,6 +9,7 @@ from .control.commands import CommandReason, CommandStatus
 from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
+from .diagnostics import profile_event
 from .freshness import LIVE_FRESHNESS
 from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
 from .pv_optimum import FAST_OBSERVATION_SECONDS
@@ -747,6 +748,14 @@ class PVSurplus:
 
     def pv_schedule_startup(self, target, epoch):
         runtime = self.control.runtime
+        profile_event(
+            self,
+            target,
+            "enable_pending",
+            reason=self.control.intent(target).status,
+            epoch=epoch,
+            retry_seconds=60,
+        )
         self.pv_startups[target] = (
             runtime.get(target.station).token,
             runtime.enabled_observation(target).revision,
@@ -768,6 +777,7 @@ class PVSurplus:
                 if self.monotonic() < self.pv_retry_until[target]:
                     continue
                 with cycle(self, target, "startup_retry"):
+                    profile_event(self, target, "enable_retry", epoch=epoch)
                     if (
                         self.pv_edit(target) is None
                         and self.setting(target)["profile"] == "PV_OPTIMUM"
@@ -785,6 +795,7 @@ class PVSurplus:
                     if self.epochs.get(target, 0) != epoch:
                         return
                     if result and result.status == CommandStatus.APPLIED:
+                        profile_event(self, target, "enable_confirmed", epoch=epoch)
                         self.enable_requests.pop(target, None)
                         self.pv_startups.pop(target, None)
                         self.pv_retry_until.pop(target, None)
@@ -793,6 +804,13 @@ class PVSurplus:
                         self.launch(target)
                         return
                     if result and result.status != CommandStatus.TEMPORARILY_REJECTED:
+                        profile_event(
+                            self,
+                            target,
+                            "enable_failed",
+                            reason=result.reason,
+                            detail=result.detail,
+                        )
                         return
                     self.pv_retry_until[target] = self.monotonic() + 60
                     self.status[target] = "awaiting_applied"

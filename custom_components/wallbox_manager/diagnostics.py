@@ -94,3 +94,17 @@ def diagnostic_event(entry, subsystem, **fields):
         )
     except Exception:
         pass
+
+
+def profile_event(profile, target, event, **fields):
+    """One semantic lifecycle boundary, independent of diagnostic cycles."""
+    diagnostic_event(
+        profile.entry,
+        "control",
+        station=target.station.value,
+        evse=target.evse.value,
+        connector=target.value,
+        event=event,
+        profile=profile_name(profile, target),
+        **fields,
+    )
