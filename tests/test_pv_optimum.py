@@ -261,7 +261,8 @@ async def test_remaining_day_house_and_finished_latch(grid):
     assert p.optimum_targets[t] == 80
 
 
-async def test_finished_restored_and_legacy_not_trusted(grid):
+@pytest.mark.parametrize("legacy", ["before", "active", "ended"])
+async def test_finished_restored_and_legacy_not_trusted(grid, legacy):
     from custom_components.wallbox_manager.profiles import target_key
 
     p, t, _ = grid
@@ -272,7 +273,7 @@ async def test_finished_restored_and_legacy_not_trusted(grid):
     )
     await p.load()
     assert p.optimum_day_for(t).state == "FINISHED"
-    await p.optimum_day_store.async_save({"date": date, "state": "ended"})
+    await p.optimum_day_store.async_save({"date": date, "state": legacy})
     await p.load()
     assert p.optimum_day_for(t).state == "BEFORE_SURPLUS"
 

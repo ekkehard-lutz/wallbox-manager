@@ -295,14 +295,17 @@ def profile_event(profile, target, event, **fields):
 
 def command_event(control, target, event, *, operating_point=None, result=None):
     """Observe real operation attempts/outcomes, not reuse of confirmations."""
-    if result is not None and result.status.value == "failed":
-        _LOGGER.error(
-            "Wallbox control operation failed: %s (%s)", result.reason, result.detail
-        )
-    profile = getattr(control, "profiles", None)
-    if profile is None:
-        return
     try:
+        if result is not None and result.status.value == "failed":
+            _LOGGER.error(
+                "Wallbox control operation failed: %s (%s)",
+                result.reason,
+                result.detail,
+            )
+        profile = getattr(control, "profiles", None)
+        if profile is None:
+            return
+
         from .pv_diagnostics import point
 
         profile_event(

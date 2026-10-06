@@ -187,7 +187,7 @@ class WallboxManagerCard extends HTMLElement {
     }
     get("permission").onclick = () => {
       const id = this.discovery.roles.charging_enabled;
-      this.call("switch", this._hass.states[id]?.state === "on" ? "turn_off" : "turn_on", {entity_id:id});
+      this.call("switch", (this._hass.states[id]?.state === "on" || this._hass.states[id]?.attributes.enable_pending) ? "turn_off" : "turn_on", {entity_id:id});
     };
     if (this._hass) this.hass = this._hass;
   }
@@ -354,7 +354,7 @@ class WallboxManagerCard extends HTMLElement {
       }
     }
     get("permission").disabled = busy || !ready || !available(permission);
-    get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
+    get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : attrs.enable_pending ? (de ? "Freigabe abbrechen" : "Cancel enabling charging") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     const optimum = state("charging_profile")?.state === "PV_OPTIMUM";
     const pv = optimum || state("charging_profile")?.state === "PV_SURPLUS";
     for (const [id,labels] of Object.entries(optimumFields)) {
@@ -416,7 +416,8 @@ class WallboxManagerCard extends HTMLElement {
       d.displayed && d.inventory[d.displayed]?.connected === false ? (de ? "Wallbox nicht verbunden. Verbindung prüfen." : "Wallbox disconnected. Check its connection.") : "",
       d.active && !d.inventory[d.active] ? (de ? "Aktive Wallbox fehlt. Bitte Verbindung prüfen." : "Active wallbox missing. Check its connection.") : "",
       ["error","write_unconfirmed"].includes(attrs.battery_status) ? (de ? "Batteriereserve konnte nicht gesetzt werden. Batterie prüfen." : "Could not set battery reserve. Check the battery.") : "",
-      ["failed","unsupported","temporarily_rejected"].includes(attrs.command_status) && !["phase_lockout","observing"].includes(attrs.profile_status) ? (de ? "Ladeeinstellung nicht angewendet. Verbindung und Wallbox prüfen." : "Charging setting not applied. Check the connection and wallbox.") : "",
+      attrs.enable_pending ? (de ? "Ladefreigabe vorgemerkt. Warte auf sichere Vorbereitung; erneutes Drücken ist nicht nötig." : "Charging enable pending. Waiting for safe preparation; no second press is needed.") : "",
+      !attrs.enable_pending && ["failed","unsupported","temporarily_rejected"].includes(attrs.command_status) && !["phase_lockout","observing"].includes(attrs.profile_status) ? (de ? "Ladeeinstellung nicht angewendet. Verbindung und Wallbox prüfen." : "Charging setting not applied. Check the connection and wallbox.") : "",
       ({grid_waiting:de ? "NETZ-Startverzögerung läuft." : "Waiting for Grid start delay.",grid_expired:de ? "NETZ-Ladedauer abgelaufen." : "Grid charging duration expired.",profile_unavailable:de ? "Profil nicht verfügbar. Warte auf bestätigtes OFF für den Wechsel zu Netz." : "Profile unavailable. Waiting for confirmed OFF before falling back to Grid.",pv_start_delay:de ? "PV-Startverzögerung läuft." : "Waiting for PV start delay.",pv_stop_delay:de ? "PV-Stoppverzögerung: Laden mit Mindestleistung." : "PV stop delay: charging at minimum power.",measurements_unavailable: de ? "PV-Regelung pausiert: Messwerte fehlen, sind ungültig oder veraltet." : "PV regulation paused: readings are missing, invalid or stale.",waiting_battery_soc:de ? "Warte auf Speicher-SoC über dem Zielwert." : "Waiting for battery SoC above target.",stopped_battery_soc:de ? "Laden wegen niedrigem Speicher-SoC gestoppt." : "Charging stopped due to low battery SoC.",optimum_minimum_hold:de ? "PV Optimum hält die erreichbare Mindestladeleistung; Netzbezug ist möglich." : "PV Optimum holds the reachable minimum charging power; grid import may remain.",optimum_pause_pending:de ? "PV Optimum hält die Mindestleistung und prüft anhaltend zu geringe PV-Leistung." : "PV Optimum holds minimum power while checking sustained insufficient PV.",optimum_deliberate_pause:de ? "PV Optimum pausiert bewusst wegen anhaltend zu geringer PV-Leistung." : "PV Optimum deliberately pauses for insufficient PV.",optimum_no_positive_point:de ? "Kein sicherer positiver Ladepunkt innerhalb der elektrischen Grenzen." : "No safe positive charging point within electrical limits.",paused_insufficient_pv:de ? "Laden wegen zu geringer PV-Leistung pausiert." : "Charging paused due to insufficient PV power."})[attrs.profile_status] || "",
       attrs.profile_status === "error" ? (de ? "Ladeprofil fehlgeschlagen. Wallbox prüfen." : "Charging profile failed. Check the wallbox.") : ""].filter(Boolean);
     get("status").textContent = messages.join(" "); get("status").hidden = !messages.length;

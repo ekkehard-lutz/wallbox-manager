@@ -104,7 +104,8 @@ def test_age_uses_report_not_last_change_and_exposes_stale():
     assert entity_sample(None, "sensor.missing", now)["freshness"] == "missing"
 
 
-async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+async def test_options_toggle_persists_without_authority_reload_or_writes(grid, level):
     from homeassistant.config_entries import ConfigEntries
     from test_ha_lifecycle import entry
 
@@ -128,22 +129,19 @@ async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
     flow = ReferenceOptionsFlow()
     flow.hass, flow.handler = p.hass, config.entry_id
     count = len(peer.requests)
-    result = await flow.async_step_init({"diagnostic_level": "3"})
+    result = await flow.async_step_init({"diagnostic_level": str(level)})
     assert not flow.automatic_reload
     # Exercise HA's actual options persistence boundary.
     await p.hass.config_entries.options.async_finish_flow(flow, result)
-    assert config.options["diagnostic_level"] == 3
+    assert config.options["diagnostic_level"] == level
     assert len(peer.requests) == count
     assert not p.tasks
     again = ReferenceOptionsFlow()
     again.hass, again.handler = p.hass, config.entry_id
     form = await again.async_step_init()
-    assert (
-        form["data_schema"]({"general": {}, "regulation": {}})["general"][
-            "diagnostic_level"
-        ]
-        == "3"
-    )
+    assert form["data_schema"]({"general": {}, "regulation": {}})["general"][
+        "diagnostic_level"
+    ] == str(level)
 
 
 async def test_diagnostic_collector_failure_does_not_change_plan(

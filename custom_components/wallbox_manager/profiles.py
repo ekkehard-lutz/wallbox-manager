@@ -78,6 +78,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.pv_phase_retry = {}
         self.pv_startups = {}
         self.enable_requests = {}
+        self.enable_sessions = {}
         self.monotonic = time.monotonic
         self.wall_time = time.time
         self.timer_wait = asyncio.sleep
@@ -320,6 +321,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                 self, target, "enable_cancelled", reason="lifecycle_invalidated"
             )
         self.enable_requests.pop(target, None)
+        self.enable_sessions.pop(target, None)
         self.optimum_regulators.pop(target, None)
         self.epochs[target] = self.epochs.get(target, 0) + 1
         for tasks in (
@@ -548,6 +550,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if self.enable_requests.get(target) is asyncio.current_task():
                 if target not in self.pv_startups:
                     self.enable_requests.pop(target, None)
+                    self.enable_sessions.pop(target, None)
+                    self.control.publish(target)
 
     async def _permission_request(
         self, target, enabled, *, _grid_expiry=False, _resume=False
@@ -584,6 +588,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         )
         if enabled and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
             self.enable_requests[target] = asyncio.current_task()
+            session = self.control.runtime.sessions.get(target)
+            self.enable_sessions[target] = (
+                session.session_id if session and session.active else None
+            )
         if hasattr(self.control, "ownership"):
             await self.control.ownership.permission_intent(
                 self.control, target, enabled
@@ -635,8 +643,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                         self.control.blocker(target)
                         or self.status.get(target, "policy_unavailable"),
                     )
-                    if self.control.runtime.enabled_observation(target) is not None:
-                        self.pv_schedule_startup(target, epoch)
+                    self.pv_schedule_startup(target, epoch)
                     return waiting
         generation = self.control.intent(target).generation + 1
         start_context = self.control.runtime.get(target.station)
@@ -863,10 +870,13 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if (
                 target in self.enable_requests
                 and session
+                and self.enable_sessions.get(target) is not None
                 and not session.active
                 and session.end_reason != "superseded"
             ):
                 self.invalidate(target)
+            elif target in self.enable_requests and session and session.active:
+                self.enable_sessions[target] = session.session_id
         for target in tuple(self.pv_sessions):
             session = self.control.runtime.sessions.get(target)
             if session and not session.active:
@@ -1123,3 +1133,4 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         ):
             await self.battery.update(None)
         await self.save()
+        reset_diagnostics(self.entry)

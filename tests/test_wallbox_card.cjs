@@ -785,3 +785,32 @@ for (const language of ['en','de']) {
     assert.match(get('status').textContent,language==='de'?de:en);
   });
 }
+
+test('one permission click and repeated busy rendering issue exactly one request',async()=>{
+  const {card:c,get}=card(states(true));
+  const calls=[];
+  let release;
+  c._hass.callService=(...args)=>{calls.push(args);return new Promise(resolve=>{release=resolve;});};
+  get('permission').onclick();
+  assert.equal(get('permission').disabled,true);
+  for(let n=0;n<5;n++) c.hass=c._hass;
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][1],'turn_on');
+  release();
+  await Promise.resolve();
+  assert.equal(calls.length,1);
+});
+
+for(const language of ['en','de']) test(`pending enable is visible and cancellable in ${language}`,async()=>{
+  const data=states(true);
+  data['select.anything'].attributes.enable_pending=true;
+  data['switch.another_name'].attributes.enable_pending=true;
+  const {card:c,calls,get}=card(data);
+  c.hass={...c._hass,language};
+  assert.match(get('permission').textContent,language==='de'?/abbrechen/:/Cancel/);
+  assert.match(get('status').textContent,language==='de'?/vorgemerkt/:/pending/);
+  get('permission').onclick();
+  await Promise.resolve();
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][1],'turn_off');
+});

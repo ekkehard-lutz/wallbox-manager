@@ -659,9 +659,15 @@ class PVSurplus:
         if self.closed:
             return
         state = event.data.get("new_state")
-        if entity == self.references.get("leistung_pv") and self.optimum_observe_day(
-            observation=state
-        ):
+        planner_input = entity in (
+            self.references.get("leistung_pv"),
+            self.references.get("leistung_verbraucher"),
+        ) or bool(
+            state and state.attributes.get("wallbox_manager_role") == "session_power"
+        )
+        if (
+            planner_input and self.optimum_observe_day()
+        ) or entity == self.references.get("remaining_pv_energy"):
             self.optimum_refresh(datetime.now(UTC))
         for key in ("leistung_pv", "leistung_verbraucher"):
             if entity == self.references.get(key):
@@ -772,7 +778,6 @@ class PVSurplus:
         context = self.pv_startups.get(target)
         runtime = self.control.runtime
         state = runtime.get(target.station)
-        enabled = runtime.enabled_observation(target)
         return bool(
             context
             and not self.closed
@@ -783,8 +788,7 @@ class PVSurplus:
             and state
             and state.connected
             and state.token == context[0]
-            and enabled
-            and enabled.revision == context[1]
+            and state.authority_revision == context[1]
             and self.control.intent(target).generation == context[2]
         )
 
@@ -800,7 +804,7 @@ class PVSurplus:
         )
         self.pv_startups[target] = (
             runtime.get(target.station).token,
-            runtime.enabled_observation(target).revision,
+            runtime.get(target.station).authority_revision,
             self.control.intent(target).generation,
         )
         self.enable_requests.setdefault(target, asyncio.current_task())
@@ -839,6 +843,7 @@ class PVSurplus:
                     if result and result.status == CommandStatus.APPLIED:
                         profile_event(self, target, "enable_confirmed", epoch=epoch)
                         self.enable_requests.pop(target, None)
+                        self.enable_sessions.pop(target, None)
                         self.pv_startups.pop(target, None)
                         self.pv_retry_until.pop(target, None)
                         self.pv_confirm(target)
@@ -853,15 +858,25 @@ class PVSurplus:
                             reason=result.reason,
                             detail=result.detail,
                         )
+                        self.enable_requests.pop(target, None)
+                        self.enable_sessions.pop(target, None)
                         return
                     self.pv_retry_until[target] = self.monotonic() + 60
                     self.status[target] = "awaiting_applied"
                     self.control.publish(target)
         finally:
             if self.tasks.get(target) is asyncio.current_task():
+                if target in self.enable_requests:
+                    profile_event(
+                        self,
+                        target,
+                        "enable_cancelled",
+                        reason="startup_context_invalidated",
+                    )
                 self.tasks.pop(target, None)
                 self.pv_startups.pop(target, None)
                 self.enable_requests.pop(target, None)
+                self.enable_sessions.pop(target, None)
                 self.pv_retry_until.pop(target, None)
             self.control.publish(target)
 

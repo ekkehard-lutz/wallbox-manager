@@ -34,15 +34,27 @@ def entry(version=2):
     )
 
 
-async def test_setup_without_wallbox_and_unload(tmp_path):
+@pytest.mark.parametrize(
+    "options,level",
+    [
+        ({}, 0),
+        ({"pv_diagnostic_logging": False}, 0),
+        ({"pv_diagnostic_logging": True}, 3),
+        ({"pv_diagnostic_logging": True, "diagnostic_level": 2}, 2),
+    ],
+)
+async def test_setup_without_wallbox_and_unload(tmp_path, options, level):
     hass = HomeAssistant(str(tmp_path))
     hass.config_entries = ConfigEntries(hass, {})
     hass.config_entries.async_forward_entry_setups = AsyncMock()
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
     config = entry()
     hass.config_entries._entries[config.entry_id] = config
+    hass.config_entries.async_update_entry(config, options=options)
     try:
         assert await async_setup_entry(hass, config)
+        assert config.options["diagnostic_level"] == level
+        assert "pv_diagnostic_logging" not in config.options
         hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
             config,
             ("binary_sensor", "sensor", "switch", "number", "select", "button", "text"),

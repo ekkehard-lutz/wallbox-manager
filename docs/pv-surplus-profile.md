@@ -320,7 +320,11 @@ OFF, profile supersession, authority loss and obsolete connection/session contex
 fence pending work. Command generations and pre-dispatch checks remain active.
 Permanent failures/unsupported operations terminate the attempt. Restart recovery
 continues to use separately persisted ownership/permission intent and fresh proof;
-queued commands and retry deadlines are not restored.
+queued commands and retry deadlines are not restored. Permission-evidence expiry
+between retries does not revoke the user request; every new command still captures
+and validates fresh permission evidence. A historical ended session before the
+request does not count as a new departure. The card shows pending preparation and
+provides a Cancel action that sends explicit Disable.
 
 After dispatch, the original current/phase point and voltage basis remain fixed.
 The runtime still fences capabilities, hard limits, transaction, intent, ownership,

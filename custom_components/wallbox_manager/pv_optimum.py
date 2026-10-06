@@ -154,6 +154,20 @@ class PVOptimum:
         local_date = dt_util.as_local(now).date().isoformat()
         # Reset at midnight independently of measurement availability.
         day.observe(local_date)
+        if before["date"] != day.date:
+            self.optimum_plans.pop(target, None)
+            self.optimum_forecasts.pop(target, None)
+            upper = Fraction(str(self.setting(target)["optimum_upper_soc"]))
+            if self.optimum_targets.get(target) != upper:
+                profile_event(
+                    self,
+                    target,
+                    "target_soc",
+                    target_soc=float(upper),
+                    phase="BEFORE_SURPLUS",
+                    reason="local_day_reset",
+                )
+            self.optimum_targets[target] = upper
         if day.state == "BEFORE_SURPLUS":
             try:
                 pv, household = self.household_measurements(target, now)
@@ -183,13 +197,7 @@ class PVOptimum:
                 energy=True,
                 max_age=freshness_for("remaining_pv_energy"),
             )
-            capacity = reading(
-                self.hass.states.get(self.references.get("storage_capacity", "")),
-                now,
-                energy=True,
-                max_age=freshness_for("storage_capacity"),
-            )
-            if pv < 0 or capacity <= 0:
+            if pv < 0:
                 raise ValueError("invalid planning energy")
             house = remaining_house_energy(
                 settings["estimated_daily_house_consumption_kwh"],
@@ -212,6 +220,14 @@ class PVOptimum:
                     **self.optimum_forecasts[target],
                 )
             else:
+                capacity = reading(
+                    self.hass.states.get(self.references.get("storage_capacity", "")),
+                    now,
+                    energy=True,
+                    max_age=freshness_for("storage_capacity"),
+                )
+                if capacity <= 0:
+                    raise ValueError("invalid planning energy")
                 key = (
                     day.date,
                     day.state,
@@ -252,27 +268,12 @@ class PVOptimum:
         # Establish the independent target before checking execution evidence.
         desired = self.optimum_target(target, now)
         settings = self.setting(target)
-        values, expiry = {}, []
-        for key in OPTIMUM_REFERENCES:
-            state = self.hass.states.get(self.references.get(key, ""))
-            values[key] = reading(
-                state,
-                now,
-                soc=key == "soc_speicher_aktuell",
-                energy=key in ("storage_capacity", "remaining_pv_energy"),
-                max_age=freshness_for(key),
-            )
-            if values[key] < 0:
-                raise ValueError("negative Optimum measurement")
-            expiry.append(
-                now
-                + timedelta(
-                    seconds=power_valid_for(state, now, max_age=freshness_for(key))
-                )
-            )
-        if values["storage_capacity"] <= 0:
-            raise ValueError("missing storage evidence")
-        soc = values["soc_speicher_aktuell"]
+        soc = reading(
+            self.hass.states.get(self.references.get("soc_speicher_aktuell", "")),
+            now,
+            soc=True,
+            max_age=freshness_for("soc_speicher_aktuell"),
+        )
         mode = self.optimum_modes.get(target)
         initializing = mode is None or target in self.optimum_initializations
         if initializing:
@@ -298,6 +299,28 @@ class PVOptimum:
         if mode_changed and asyncio.current_task() is not self.tasks.get(target):
             self.optimum_wakes.setdefault(target, asyncio.Event()).set()
         self.optimum_modes[target] = mode
+        # Mode depends only on valid SoC and target. Command budgets additionally
+        # require every original execution input, even in a fixed-upper phase.
+        values, expiry = {}, []
+        for key in OPTIMUM_REFERENCES:
+            state = self.hass.states.get(self.references.get(key, ""))
+            values[key] = reading(
+                state,
+                now,
+                soc=key == "soc_speicher_aktuell",
+                energy=key in ("storage_capacity", "remaining_pv_energy"),
+                max_age=freshness_for(key),
+            )
+            if values[key] < 0:
+                raise ValueError("negative Optimum measurement")
+            expiry.append(
+                now
+                + timedelta(
+                    seconds=power_valid_for(state, now, max_age=freshness_for(key))
+                )
+            )
+        if values["storage_capacity"] <= 0:
+            raise ValueError("missing storage evidence")
         return values, mode, min(expiry)
 
     def optimum_fast(self, target):

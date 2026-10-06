@@ -127,3 +127,19 @@ def test_remaining_local_day_obeys_dst(monkeypatch, month, day, hours):
     seconds = remaining_day_seconds(local.astimezone(UTC))
     assert seconds == hours * 3600
     assert remaining_house_energy(24, seconds) == Fraction(hours * 1000)
+
+
+async def test_household_event_starts_planning_and_exhaustion_needs_no_capacity(grid):
+    p, t, _ = grid
+    now = setup_optimum(p, t, pv=500, load=1000, actual=0)
+    p.optimum_target(t, now)
+    assert p.optimum_day_for(t).state == "BEFORE_SURPLUS"
+    p.hass.states.async_set("sensor.load", 100, {"unit_of_measurement": "W"})
+    assert p.optimum_day_for(t).state == "DYNAMIC"
+    p.hass.states.async_remove("sensor.storage_capacity")
+    p.hass.states.async_set(
+        "sensor.remaining_pv_energy", 0, {"unit_of_measurement": "Wh"}
+    )
+    assert p.optimum_day_for(t).state == "FINISHED"
+    assert p.optimum_targets[t] == 80
+    assert p.pv_plan(t)[3] is None
