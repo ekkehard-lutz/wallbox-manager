@@ -201,7 +201,7 @@
         "name": "Speicher-Ziel-SoC"
       },
       "soc_hysterese": {
-        "name": "SoC-Hysterese"
+        "name": "SoC-Hysterese und Ziel-Sicherheitsabstand"
       },
       "regulation_interval": {
         "name": "Regelintervall"
@@ -219,7 +219,7 @@
         "name": "{scope} PV Optimum oberer Ziel-SoC"
       },
       "optimum_max_discharge_w": {
-        "name": "{scope} PV Optimum maximale Speicher-Entladeleistung"
+        "name": "Maximale PV-Speicherentladeleistung"
       },
       "estimated_daily_house_consumption_kwh": {
         "name": "{scope} PV Optimum täglicher Hausverbrauch ohne EV"
@@ -239,7 +239,8 @@
         "state": {
           "NETZ": "Netz",
           "PV_SURPLUS": "PV-Überschuss",
-          "PV_OPTIMUM": "PV Optimum"
+          "PV_OPTIMUM": "PV Optimum",
+          "PV_MAXIMUM": "PV Maximum"
         }
       },
       "active_wallbox": {
@@ -303,7 +304,7 @@
               "regulation_interval": "Regelintervall",
               "pv_start_delay": "PV-Startverzögerung",
               "pv_stop_delay": "PV-Stoppverzögerung",
-              "soc_hysterese": "SoC-Hysterese",
+              "soc_hysterese": "SoC-Hysterese und Ziel-Sicherheitsabstand",
               "power_smoothing_window": "Leistungsglättung Zeitfenster"
             }
           }

@@ -201,7 +201,7 @@
         "name": "Battery target SoC"
       },
       "soc_hysterese": {
-        "name": "SoC hysteresis"
+        "name": "SoC hysteresis and target safety margin"
       },
       "regulation_interval": {
         "name": "Regulation interval"
@@ -219,7 +219,7 @@
         "name": "{scope} PV Optimum upper target SoC"
       },
       "optimum_max_discharge_w": {
-        "name": "{scope} PV Optimum maximum storage discharge power"
+        "name": "Maximum PV storage discharge"
       },
       "estimated_daily_house_consumption_kwh": {
         "name": "{scope} PV Optimum daily household consumption without EV"
@@ -239,7 +239,8 @@
         "state": {
           "NETZ": "Grid",
           "PV_SURPLUS": "PV Surplus",
-          "PV_OPTIMUM": "PV Optimum"
+          "PV_OPTIMUM": "PV Optimum",
+          "PV_MAXIMUM": "PV Maximum"
         }
       },
       "active_wallbox": {
@@ -303,7 +304,7 @@
               "regulation_interval": "Regulation interval",
               "pv_start_delay": "PV start delay",
               "pv_stop_delay": "PV stop delay",
-              "soc_hysterese": "SoC hysteresis",
+              "soc_hysterese": "SoC hysteresis and target safety margin",
               "power_smoothing_window": "Power smoothing window"
             }
           }

@@ -18,13 +18,13 @@ The four per-wallbox profile parameters are:
 
 Set the household estimate and discharge limit to appropriate values before using
 battery support. Zero household consumption means an explicitly zero estimate,
-not an inferred measurement. Lower/upper limits must satisfy 0 <= lower <= upper
-<= 100. Discharge limit accepts 0–100000 W; household estimate accepts 0–1000 kWh.
+not an inferred measurement. Lower/upper limits must satisfy R + H <= lower <= upper
+<= 100 - H; see [shared SoC policy](pv-soc-policy.md). Discharge limit accepts 0–100000 W; household estimate accepts 0–1000 kWh.
 The card exposes these four controls and the current calculated target.
 
 Existing mappings are reused: `leistung_pv`, `leistung_verbraucher` (total
 consumers **including** the selected wallbox) and `soc_speicher_aktuell`.
-Configure only these additional references in General parameters:
+Configure `min_soc_speicher` for the live reserve R, plus these additional references in General parameters:
 
 | Mapping | Required semantics |
 | --- | --- |
@@ -39,7 +39,8 @@ Capacity comes from Fronius **Nennkapazität des Speichers**, translation key
 a profile setting. MaxDisChaRte is never used. A 3500 W configured limit remains
 3500 W regardless of a battery's higher physical capability.
 
-PV Optimum becomes selectable when all eight references are mapped. Temporary
+PV Optimum becomes selectable when its execution/planning references are mapped;
+its policy additionally requires a valid live reserve. Temporary
 unavailability does not remove it. Live inputs retain the existing 90-second
 report-age limit. Only `remaining_pv_energy` uses the generic slow freshness class
 (`SLOW_FRESHNESS = 900` seconds): an age of exactly 900 seconds is accepted; older
@@ -136,19 +137,17 @@ PV-start/PV-stop delay settings retain their existing independent roles.
 
 ## Policy and shared power regulation
 
-`pv_optimum.py` owns the daily planner and the separate SoC state machine.
-Explicit Enable and genuine vehicle return initialize FAST when `SoC > target`,
-otherwise BALANCE. Thus 84%/80%/5pp activates FAST even at zero PV. Within an
-activation FAST exits at `SoC <= target`; BALANCE re-enters FAST only at
-`SoC > target + hysteresis` (exact equality remains BALANCE). Target changes,
-generic invalidation and input recovery do not constitute a new activation.
-Temporary input gaps preserve mode while blocking unsafe new decisions.
+`pv_optimum.py` retains the daily planner. All three PV profiles use the
+[common SoC state machine](pv-soc-policy.md) in `pv_soc.py`. STOP, BALANCE and FAST
+use the same L/M/U boundaries on activation, reconnect and continuation. There is
+no special initialization above T. At/above U all profiles enter FAST; at/below L
+all stop immediately. Temporary input gaps block new decisions.
 
 `pv_regulators.py` owns reusable power-only primitives:
 
 - `pv_balance`: existing signed PV minus total consumers plus selected actual
-  charging power. PV Surplus and PV Optimum call the same implementation. Surplus
-  retains its existing SoC eligibility, upper/lower approximation and delays.
+  charging power. All three PV profiles call the same implementation and resolve storage-aware
+  power requests with DOWN approximation.
 - `fast_discharge`: actual wallbox power plus a controlled fraction of net export
   and unused discharge headroom. Meaningful grid import suppresses all increases;
   its non-graced portion is subtracted immediately. Discharge above the configured
@@ -222,7 +221,8 @@ not prove the station guard has expired. Accepted transitions or changed physica
 feedback clear the restriction. Unknown evidence suspends decisions rather than
 inventing a safe positive point.
 
-At/below the target, PV_BALANCE uses the same balance regulator as PV Surplus.
+Whenever permitted by the common SoC policy, PV_BALANCE uses the same balance
+regulator as PV Surplus. At/below L, protective STOP takes precedence.
 For an established charge, insufficient power first holds the reachable positive
 minimum, rather than retaining a previously high battery-supported offer. A pause
 requires continuous valid insufficient-power evidence for the configured
@@ -230,8 +230,8 @@ requires continuous valid insufficient-power evidence for the configured
 `regulation_interval` (default **5 seconds**) even when the stop delay is zero.
 Recovery, input gaps and SoC-mode changes reset that evidence. An already-paused
 or initially disabled station need not start charging merely to debounce a pause.
-No new configuration option is added; PV Surplus's existing delay semantics are
-unchanged.
+No new delay option is added. PV Surplus retains its existing electrical
+insufficiency delay; low-SoC STOP bypasses that delay in every profile.
 
 A deliberate pause sends the existing OCPP zero-current profile and leaves
 ChargingEnabled unchanged. It can trigger the station's configured restart

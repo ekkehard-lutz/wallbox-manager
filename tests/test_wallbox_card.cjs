@@ -657,14 +657,14 @@ test('technical regulation fields are absent from card markup',()=>{
   }
 });
 
-for(const value of [0,99]) {
+for(const value of [7,98]) {
   test(`target SoC buttons respect ${value} boundary`,async()=>{
     const data=states(true);data['select.anything'].state='PV_SURPLUS';
     data['select.anything'].attributes.battery_configured=true;
-    data['number.target']=state('soll_soc_speicher','A',String(value));
+    data['number.target']=state('soll_soc_speicher','A',String(value),{min:7,max:98});
     const {card:c,get,calls}=card(data);
-    assert.equal(get(`soll_soc_speicher-${value===0?'down':'up'}`).disabled,true);
-    await c.stepNumber('soll_soc_speicher',value===0?-1:1);
+    assert.equal(get(`soll_soc_speicher-${value===7?'down':'up'}`).disabled,true);
+    await c.stepNumber('soll_soc_speicher',value===7?-1:1);
     assert.equal(calls.length,0);
     get('soll_soc_speicher').value=`${value}.0`;
     await get('soll_soc_speicher').onchange();
@@ -814,3 +814,23 @@ for(const language of ['en','de']) test(`pending enable is visible and cancellab
   assert.equal(calls.length,1);
   assert.equal(calls[0][1],'turn_off');
 });
+
+for (const language of ['en','de']) {
+  test(`PV Maximum exposes target and shared discharge limit in ${language}`, () => {
+    const data=states(true);
+    data['select.anything'].state='PV_MAXIMUM';
+    Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM'],battery_configured:true,optimum_target_soc:7});
+    data['number.limit']=state('optimum_max_discharge_w','A','3500');
+    const {card:c,get}=card(data);
+    c.hass={...c._hass,language};
+    assert.equal(get('power-row').hidden,true);
+    assert.equal(get('reserve-row').hidden,true);
+    assert.equal(get('soll_soc_speicher-row').hidden,true);
+    assert.equal(get('optimum_lower_soc-row').hidden,true);
+    assert.equal(get('optimum_upper_soc-row').hidden,true);
+    assert.equal(get('estimated_daily_house_consumption_kwh-row').hidden,true);
+    assert.equal(get('optimum_max_discharge_w-row').hidden,false);
+    assert.equal(get('optimum-target-row').hidden,false);
+    assert.equal(get('optimum-target').textContent,'7 %');
+  });
+}

@@ -312,6 +312,7 @@ battery lifecycle and failure behavior.
 
 PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
 PV Optimum is described in [its profile documentation](docs/pv-optimum-design.md).
+All three PV profiles, including PV Maximum, use the [shared SoC policy](docs/pv-soc-policy.md).
 While FAST_DISCHARGE is active it holds the lowest reachable positive charging
 point instead of pausing on a low power calculation; this can leave grid import.
 The minimum depends on phase reachability and electrical limits. Near the target,
@@ -409,7 +410,7 @@ automations.
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
 now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
-The Grid, PV Surplus and PV Optimum profiles build on these controls.
+The Grid, PV Surplus, PV Optimum and PV Maximum profiles build on these controls.
 PV Maximum and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent

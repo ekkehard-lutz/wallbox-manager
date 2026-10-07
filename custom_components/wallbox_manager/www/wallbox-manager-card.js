@@ -231,12 +231,12 @@ class WallboxManagerCard extends HTMLElement {
   }
   format(value) { return new Intl.NumberFormat(this._hass.language, {maximumFractionDigits:6,useGrouping:false}).format(value); }
   minimum(id) {
-    const value = id === "power" ? this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_min_kw : 0;
+    const value = id === "power" ? this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_min_kw : this._hass.states[this.discovery.roles[id]]?.attributes.min;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
   }
   maximum(id) {
     if (id === "reserve") return 100;
-    if (id === "soll_soc_speicher") return 99;
+    if (id === "soll_soc_speicher") return this._hass.states[this.discovery.roles[id]]?.attributes.max ?? 98;
     const value = this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_max_kw;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
   }
@@ -245,7 +245,7 @@ class WallboxManagerCard extends HTMLElement {
     if (input.disabled) return;
     const value = parseInput(input.value, this._hass.language);
     if (!Number.isFinite(value) || (id !== "power" && !Number.isInteger(value))) return;
-    const next = id === "power" ? powerStep(value,direction,this.maximum(id),this.minimum(id)) : Math.min(this.maximum(id),Math.max(0,Math.round(value) + direction));
+    const next = id === "power" ? powerStep(value,direction,this.maximum(id),this.minimum(id)) : Math.min(this.maximum(id),Math.max(this.minimum(id),Math.round(value) + direction));
     if (next === value) return;
     input.value = this.format(next);
     return this.editNumber(id);
@@ -337,7 +337,7 @@ class WallboxManagerCard extends HTMLElement {
     get("power-label").textContent = de ? "Angeforderte Ladeleistung" : "Requested charging power";
     get("reserve-label").textContent = de ? "Entladereserve" : "Discharge reserve";
     get("soll_soc_speicher-label").textContent = de ? "Speicher-Ziel-SoC" : "Battery target SoC";
-    this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(value => [value,value === "NETZ" ? (de ? "Netz" : "Grid") : value === "PV_SURPLUS" ? (de ? "PV-Überschuss" : "PV Surplus") : value === "PV_OPTIMUM" ? "PV Optimum" : value]));
+    this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(value => [value,value === "NETZ" ? (de ? "Netz" : "Grid") : value === "PV_SURPLUS" ? (de ? "PV-Überschuss" : "PV Surplus") : value === "PV_OPTIMUM" ? "PV Optimum" : value === "PV_MAXIMUM" ? "PV Maximum" : value]));
     get("profile").value = state("charging_profile")?.state || "";
     get("profile-row").hidden = (state("charging_profile")?.attributes.options || []).length <= 1;
     get("profile").disabled = busy || !available(state("charging_profile"));
@@ -356,16 +356,18 @@ class WallboxManagerCard extends HTMLElement {
     get("permission").disabled = busy || !ready || !available(permission);
     get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : attrs.enable_pending ? (de ? "Freigabe abbrechen" : "Cancel enabling charging") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
     const optimum = state("charging_profile")?.state === "PV_OPTIMUM";
-    const pv = optimum || state("charging_profile")?.state === "PV_SURPLUS";
+    const maximum = state("charging_profile")?.state === "PV_MAXIMUM";
+    const pv = optimum || maximum || state("charging_profile")?.state === "PV_SURPLUS";
     for (const [id,labels] of Object.entries(optimumFields)) {
-      get(`${id}-row`).hidden = !optimum;
+      get(`${id}-row`).hidden = id === "optimum_max_discharge_w" ? !pv : !optimum;
       get(`${id}-label`).textContent = labels[de ? 1 : 0];
       const s = state(id), input = get(id);
       input.disabled = busy || !available(s);
+      input.min = s?.attributes.min ?? 0;
       input.max = s?.attributes.max ?? (id === "optimum_max_discharge_w" ? 100000 : id === "estimated_daily_house_consumption_kwh" ? 1000 : 100);
       if (previous !== d.displayed || this.shadowRoot.activeElement !== input) input.value = available(s) ? s.state : "";
     }
-    get("optimum-target-row").hidden = !optimum;
+    get("optimum-target-row").hidden = !pv;
     get("optimum-target-label").textContent = de ? "Aktueller Ziel-SoC" : "Current target SoC";
     get("optimum-target").textContent = typeof attrs.optimum_target_soc === "number" ? `${this.format(Math.round(attrs.optimum_target_soc * 10) / 10)} %` : "—";
     get("power-row").hidden = pv;
@@ -394,7 +396,7 @@ class WallboxManagerCard extends HTMLElement {
       get(`${id}-clear`).disabled = busy || armed || !durationAvailable(s);
       get(`${id}-clear`).title = get(`${id}-clear`).ariaLabel = de ? `${label} zurücksetzen (nicht gesetzt)` : `Clear ${label} (unset)`;
     }
-    get("soll_soc_speicher-row").hidden = optimum || !pv || !attrs.battery_configured;
+    get("soll_soc_speicher-row").hidden = optimum || maximum || !pv || !attrs.battery_configured;
     if (this.hold && (this.hold.button.disabled || (["reserve","soll_soc_speicher"].includes(this.hold.id) && (!attrs.battery_configured || (this.hold.id === "reserve" ? pv : !pv))))) this.stopHold();
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
