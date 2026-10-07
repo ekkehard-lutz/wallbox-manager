@@ -147,6 +147,11 @@ async def test_real_stop_is_continuous_and_gap_restarts_its_delay(grid, reason):
 
     low()
     await tick()
+    if reason == "soc":
+        assert not c.confirmed_point(t).charging
+        assert t not in p.pv_stop_since
+        assert c.runtime.enabled(t) is True
+        return
     assert p.pv_stop_since[t] == 0
     clock[0] = 80
     p.hass.states.async_set("sensor.pv", "unavailable")
@@ -167,23 +172,20 @@ async def test_real_stop_is_continuous_and_gap_restarts_its_delay(grid, reason):
     assert c.runtime.enabled(t) is True
 
 
-async def test_low_soc_with_phase_gap_cannot_bypass_stop_delay(grid, monkeypatch):
+async def test_low_soc_with_phase_gap_stops_as_soon_as_execution_is_safe(
+    grid, monkeypatch
+):
     p, t, (c, _, peer, _, source, _), clock, tick = await running(grid)
-    confirmed, count = c.confirmed_point(t), len(peer.requests)
+    count = len(peer.requests)
     with monkeypatch.context() as patch:
         patch.setattr(source, "proof", False)
         measurements(p, t, pv=2070, load=0, actual=0, soc=89)
         await asyncio.sleep(0)
         await tick()
-        assert c.confirmed_point(t) == confirmed and len(peer.requests) == count
+        assert not c.confirmed_point(t).charging and len(peer.requests) == count + 1
     clock[0] = 5
     await tick()
-    assert p.pv_stop_since[t] == 5
-    clock[0] = 94
-    await tick()
-    assert c.confirmed_point(t) == confirmed
-    clock[0] = 95
-    await tick()
+    assert t not in p.pv_stop_since
     assert not c.confirmed_point(t).charging
 
 
@@ -215,7 +217,7 @@ async def test_real_ended_session_resets_soc_hysteresis_even_between_ticks(grid)
     await tick()
     assert not p.pv_ongoing[t]
     assert not c.confirmed_point(t).charging
-    assert p.status[t] == "waiting_battery_soc"
+    assert p.status[t] == "stopped_battery_soc"
 
 
 async def test_pv_transport_gap_retains_history_and_reconciles_without_off_on(

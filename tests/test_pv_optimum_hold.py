@@ -278,7 +278,7 @@ async def test_existing_soc_hysteresis_controls_mode_and_cancels_pause(grid):
     for second, soc, mode in [
         (1, 84, "FAST_DISCHARGE"),
         (2, 80, "PV_BALANCE"),
-        (3, 85, "PV_BALANCE"),
+        (3, 81, "PV_BALANCE"),
         (4, 86, "FAST_DISCHARGE"),
     ]:
         clock[0] = second

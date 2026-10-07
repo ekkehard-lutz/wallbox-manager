@@ -7,13 +7,17 @@ PV_PROFILES = ("PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM")
 TARGET_FIELDS = ("soll_soc_speicher", "optimum_lower_soc", "optimum_upper_soc")
 
 
+class UnsafeTargetRange(ValueError):
+    """Valid settings and reserve leave no safe target for charging."""
+
+
 def target_bounds(reserve, hysteresis):
     reserve, hysteresis = Fraction(str(reserve)), Fraction(str(hysteresis))
-    if not 0 <= reserve <= 100 or not 0 <= hysteresis <= 50:
+    if not 0 <= reserve <= 100 or not 0 <= hysteresis <= 99:
         raise ValueError("invalid reserve or hysteresis")
     lower, upper = reserve + hysteresis, 100 - hysteresis
     if lower > upper:
-        raise ValueError("no safe PV target interval")
+        raise UnsafeTargetRange("no safe PV target interval")
     return lower, upper
 
 

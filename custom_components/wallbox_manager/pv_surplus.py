@@ -14,11 +14,12 @@ from .freshness import LIVE_FRESHNESS
 from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
 from .pv_optimum import FAST_OBSERVATION_SECONDS
 from .pv_regulators import pv_balance
+from .pv_soc import UnsafeTargetRange
 
 PV_DEFAULTS = {
     "approximation": "down",
     "soll_soc_speicher": 95,
-    "soc_hysterese": 5,
+    "soc_hysterese": 2,
     "regulation_interval": 5,
     "pv_start_delay": 0,
     "pv_stop_delay": 90,
@@ -65,14 +66,6 @@ def power_valid_for(state, now, *, max_age=LIVE_FRESHNESS):
 def decision(available, soc, settings, ongoing):
     """A pause clears ongoing; every subsequent start crosses the strict threshold."""
     direction = Direction(settings["approximation"])
-    if soc is not None:
-        target = min(Fraction(str(settings["soll_soc_speicher"])), 99)
-        stop = target - Fraction(str(settings["soc_hysterese"]))
-        if soc < stop:
-            return Fraction(0), Direction.DOWN, "stopped_battery_soc"
-        if not ongoing and soc <= target:
-            return Fraction(0), Direction.DOWN, "waiting_battery_soc"
-        direction = Direction.UP if soc > target else Direction.DOWN
     if available <= 0:
         return Fraction(0), direction, "paused_insufficient_pv"
     return available, direction, "actively_charging"
@@ -81,38 +74,19 @@ def decision(available, soc, settings, ongoing):
 class PVSurplus:
     """Mixin sharing profile persistence, epochs, ownership and primitive controls."""
 
-    def pv_battery_state(self, target, soc):
-        """Latch battery eligibility independently of a delayed electrical stop."""
-        ongoing = self.pv_ongoing.get(target, False)
-        if soc is None:
-            return ongoing
-        settings = self.setting(target)
-        upper = Fraction(str(settings["soll_soc_speicher"]))
-        lower = upper - Fraction(str(settings["soc_hysterese"]))
-        allowed = self.pv_battery.get(target, ongoing)
-        if soc > upper:
-            allowed = True
-        elif soc < lower or not ongoing:
-            allowed = False
-        self.pv_battery[target] = allowed
-        if record := active(self, target):
-            record.data.update(
-                battery_policy_allowed=allowed,
-                battery_hysteresis_holding=ongoing and lower <= soc <= upper,
-                battery_start_threshold=number(upper),
-                battery_stop_threshold=number(lower),
-            )
-        return allowed
-
     def permits_point(
         self, target, point, *, after_dispatch=False, transition_mode=None
     ):
         """Apply the existing PV policy at the shared command dispatch fence."""
-        if self.setting(target)["profile"] not in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if self.setting(target)["profile"] not in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             return not point.charging or self.grid_phase(target)[0] == "active"
         if not point.charging:
             if (
-                self.setting(target)["profile"] == "PV_OPTIMUM"
+                self.shared_pv_execution(target)
                 and self.control.intent(target).policy_pause
             ):
                 # An economic OFF queued before a recovery must still be a
@@ -134,7 +108,7 @@ class PVSurplus:
         )
         if plan is None:
             return False  # Holding hardware is not permission for a new write.
-        if self.setting(target)["profile"] == "PV_OPTIMUM" and not after_dispatch:
+        if self.shared_pv_execution(target) and not after_dispatch:
             inputs = self.control.inputs(target)
             desired = self.control.intent(target).energy_desired
             if inputs is None or (
@@ -170,19 +144,28 @@ class PVSurplus:
         ):
             return
         for target in tuple(self.control.intents):
-            settings = self.setting(target)
-            if settings["profile"] != "PV_SURPLUS":
+            if not self.common_pv(target):
                 continue
             if target in self.control.pending_points:
                 continue  # Normal SoC policy belongs to the next regulation tick.
+            if (
+                not self.pv_ongoing.get(target, False)
+                and self.control.intent(target).request.target_w <= 0
+            ):
+                continue
             with cycle(self, target, "soc_event"):
                 try:
                     soc = reading(
                         event.data.get("new_state"), datetime.now(UTC), soc=True
                     )
-                    power, _, status = decision(
-                        Fraction(1), soc, settings, self.pv_battery_state(target, soc)
+                    mode = self.common_soc_policy(
+                        target,
+                        soc,
+                        self.pv_target(target, datetime.now(UTC)),
+                        datetime.now(UTC),
                     )
+                    power = int(mode != "STOP")
+                    status = "actively_charging" if power else "stopped_battery_soc"
                 except ValueError, TypeError, ZeroDivisionError, OverflowError:
                     power, status = Fraction(0), "measurements_unavailable"
                 if record := active(self, target):
@@ -204,14 +187,6 @@ class PVSurplus:
                     ):
                         self.pv_plan(target)
                     continue
-                if (
-                    status in ("stopped_battery_soc", "waiting_battery_soc")
-                    and self.pv_ongoing.get(target, False)
-                    and settings["pv_stop_delay"] > 0
-                ):
-                    _, _, planned, result = self.pv_plan(target)
-                    if planned == "pv_stop_delay" or result is None:
-                        continue
                 point = self.control.confirmed_point(target)
                 needs_stop = (
                     self.pv_ongoing.get(target, False)
@@ -374,12 +349,27 @@ class PVSurplus:
     def pv_request(self, target):
         self.pv_sync_session(target)
         try:
-            if self.setting(target)["profile"] == "PV_OPTIMUM":
+            if self.common_pv(target):
                 return self.optimum_request(target)
             available, soc = self.pv_measurements(target)
-            return decision(
-                available, soc, self.setting(target), self.pv_battery_state(target, soc)
-            )
+            return decision(available, soc, self.setting(target), False)
+        except UnsafeTargetRange:
+            from .diagnostics import profile_event
+
+            previous = self.optimum_modes.get(target, "STOP")
+            if previous != "STOP":
+                profile_event(
+                    self,
+                    target,
+                    "soc_mode",
+                    mode="STOP",
+                    previous_mode=previous,
+                    reason="no_safe_target_interval",
+                    target_profile=self.setting(target)["profile"],
+                )
+            self.optimum_modes[target] = "STOP"
+            self.optimum_regulators.pop(target, None)
+            return Fraction(0), Direction.DOWN, "stopped_battery_soc"
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
             self.optimum_regulators.pop(target, None)
             return Fraction(0), Direction.DOWN, "measurements_unavailable"
@@ -394,7 +384,7 @@ class PVSurplus:
         """
         request = self.pv_request(target)
         intent = self.control.intent(target)
-        if self.setting(target)["profile"] == "PV_OPTIMUM":
+        if self.shared_pv_execution(target):
             desired = self._pv_plan(target, request, advance=False, energy_desired=True)
             intent.energy_desired = desired[3]
         else:
@@ -402,9 +392,7 @@ class PVSurplus:
         executable = self._pv_plan(
             target, request, advance=advance, transition_mode=transition_mode
         )
-        if self.setting(target)["profile"] == "PV_OPTIMUM" and (
-            record := active(self, target)
-        ):
+        if self.shared_pv_execution(target) and (record := active(self, target)):
             from .pv_diagnostics import point
 
             record.data.update(
@@ -445,7 +433,7 @@ class PVSurplus:
             return self.control.resolve(
                 target,
                 request=PowerSettings(watts, policy),
-                reachable=settings["profile"] == "PV_OPTIMUM",
+                reachable=self.shared_pv_execution(target),
                 energy_desired=energy_desired,
                 dispatch_modes=(transition_mode,)
                 if transition_mode is not None
@@ -476,7 +464,9 @@ class PVSurplus:
                 ),
                 None,
             )
-        if settings["profile"] == "PV_OPTIMUM" and status in (
+        if (
+            self.shared_pv_execution(target) or self.optimum_fast(target)
+        ) and status in (
             "actively_charging",
             "paused_insufficient_pv",
         ):
@@ -499,10 +489,9 @@ class PVSurplus:
             status = "paused_insufficient_pv"
         ongoing = self.pv_ongoing.get(target, False)
         if (
-            status
-            in ("paused_insufficient_pv", "stopped_battery_soc", "waiting_battery_soc")
+            status in ("paused_insufficient_pv",)
             and ongoing
-            and settings["profile"] != "PV_OPTIMUM"
+            and not self.shared_pv_execution(target)
         ):
             confirmed = self.control.confirmed_point(target)
             volts = (
@@ -561,7 +550,7 @@ class PVSurplus:
                 and settings["pv_start_delay"] > 0
                 and not self.optimum_fast(target)
                 and not (
-                    settings["profile"] == "PV_OPTIMUM"
+                    self.shared_pv_execution(target)
                     and (confirmed := self.control.confirmed_point(target))
                     and confirmed.charging
                 )
@@ -585,8 +574,8 @@ class PVSurplus:
         pending = target in self.control.pending_points
         if not pending:
             self.control.intent(target).profile_modes = None
-            self.control.intent(target).reachable_only = (
-                self.setting(target)["profile"] == "PV_OPTIMUM"
+            self.control.intent(target).reachable_only = self.shared_pv_execution(
+                target
             )
         power, direction, status, result = self.pv_plan(target)
         if pending:
@@ -596,7 +585,7 @@ class PVSurplus:
         if result is None:
             self.status[target] = status
             if (
-                self.setting(target)["profile"] == "PV_OPTIMUM"
+                self.shared_pv_execution(target)
                 or self.control.runtime.enabled(target) is not False
             ):
                 return None  # Retain desired, in-flight and confirmed points.
@@ -681,7 +670,11 @@ class PVSurplus:
                     self.monotonic(), value, valid_for=valid_for
                 )
         for target in tuple(self.tasks):
-            if self.setting(target)["profile"] not in ("PV_SURPLUS", "PV_OPTIMUM"):
+            if self.setting(target)["profile"] not in (
+                "PV_SURPLUS",
+                "PV_OPTIMUM",
+                "PV_MAXIMUM",
+            ):
                 continue
             if target in self.control.pending_points:
                 continue  # Keep the dispatched decision; the next tick samples anew.
@@ -782,7 +775,8 @@ class PVSurplus:
             context
             and not self.closed
             and self.epochs.get(target, 0) == epoch
-            and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM")
+            and self.setting(target)["profile"]
+            in ("PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM")
             and self.setting(target)["profile"] in self.available_profiles(target)
             and self.can_control(target)
             and state
@@ -824,9 +818,8 @@ class PVSurplus:
                     continue
                 with cycle(self, target, "startup_retry"):
                     profile_event(self, target, "enable_retry", epoch=epoch)
-                    if (
-                        self.pv_edit(target) is None
-                        and self.setting(target)["profile"] == "PV_OPTIMUM"
+                    if self.pv_edit(target) is None and self.shared_pv_execution(
+                        target
                     ):
                         self.pv_retry_until[target] = self.monotonic() + 60
                         continue
@@ -902,7 +895,7 @@ class PVSurplus:
                     self.control.phase_probe(
                         target,
                         enabled=(
-                            self.setting(target)["profile"] == "PV_OPTIMUM"
+                            self.shared_pv_execution(target)
                             and self.control.phase_restricted(target)
                             and self.monotonic() >= self.pv_retry_until.get(target, 0)
                         ),
@@ -917,7 +910,7 @@ class PVSurplus:
                         and point
                         and point.charging
                         and not (
-                            self.setting(target)["profile"] == "PV_OPTIMUM"
+                            self.shared_pv_execution(target)
                             and self.control.phase_restricted(target)
                             and self.pv_phase_retry.get(target, False)
                         )
@@ -999,7 +992,7 @@ class PVSurplus:
                         seconds,
                         max(0, FAST_OBSERVATION_SECONDS - (self.monotonic() - started)),
                     )
-                if self.setting(target)["profile"] == "PV_OPTIMUM":
+                if self.shared_pv_execution(target):
                     await self.optimum_wait(target, seconds)
                 else:
                     await self.wait(seconds)

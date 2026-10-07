@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from types import SimpleNamespace
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, call, patch
 
 import pytest
 from homeassistant.util import dt as dt_util
@@ -25,6 +25,7 @@ from custom_components.wallbox_manager.pv_optimum import (
     remaining_house_energy,
     target_soc,
 )
+from custom_components.wallbox_manager.pv_regulators import pv_balance
 from custom_components.wallbox_manager.pv_surplus import reading
 
 
@@ -105,10 +106,10 @@ async def test_before_start_and_after_end_target_upper_night_consumption_allowed
     now = setup_optimum(p, t, soc=70, pv=0)
     p.pv_request(t)
     assert p.optimum_targets[t] == 80
-    assert p.optimum_modes[t] == "PV_BALANCE"
+    assert p.optimum_modes[t] == "STOP"
     p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "FINISHED")
     p.pv_request(t)
-    assert p.optimum_targets[t] == 80 and p.optimum_modes[t] == "PV_BALANCE"
+    assert p.optimum_targets[t] == 80 and p.optimum_modes[t] == "STOP"
     assert p.battery.record is None
     assert p.battery.diagnostics.get("write_count", 0) == 0
 
@@ -126,9 +127,9 @@ async def test_dynamic_policy_and_regulator_selection_hysteresis(grid):
     assert p.optimum_targets[t] == 40
     for soc, mode in [
         (42, "FAST_DISCHARGE"),
-        (40, "PV_BALANCE"),
-        (45, "PV_BALANCE"),
-        (46, "FAST_DISCHARGE"),
+        (40, "STOP"),
+        (41, "PV_BALANCE"),
+        (42, "FAST_DISCHARGE"),
     ]:
         measurements(p, t, soc=soc)
         p.pv_request(t)
@@ -142,7 +143,7 @@ async def test_target_and_reentry_independent_of_ev_power_or_connection(grid):
     p.hass.states.async_remove("sensor.selected")
     p.optimum_refresh(now)
     assert p.optimum_targets[t] == 40
-    assert p.optimum_modes[t] == "PV_BALANCE"
+    assert p.optimum_modes[t] == "STOP"
     p.hass.states.async_set(
         p.references["soc_speicher_aktuell"], 60, {"unit_of_measurement": "%"}
     )
@@ -208,7 +209,7 @@ async def test_discrete_solver_and_zero_pause_preserve_permission(grid):
     assert c.runtime.enabled(t) is True
     measurements(p, t, pv=0, load=5000, actual=3000, soc=30)
     result = p.pv_edit(t)
-    assert result.point.charging and p.status[t] == "optimum_pause_pending"
+    assert not result.point.charging and p.status[t] == "stopped_battery_soc"
     clock[0] = p.setting(t)["regulation_interval"]
     result = p.pv_edit(t)
     assert result.point.offered_power_w == 0
@@ -282,14 +283,14 @@ async def test_balance_reuses_regulator_and_never_uses_surplus_upper_approximati
     grid,
 ):
     p, t, _ = grid
-    now = setup_optimum(p, t, soc=50, pv=1, load=0, actual=0)
+    now = setup_optimum(p, t, soc=81, pv=1, load=0, actual=0)
     p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "FINISHED")
     p.setting(t).update(soll_soc_speicher=10, approximation="up", pv_stop_delay=3600)
     with patch(
-        "custom_components.wallbox_manager.pv_surplus.pv_balance", return_value=1
+        "custom_components.wallbox_manager.pv_surplus.pv_balance", wraps=pv_balance
     ) as balance:
         power, direction, _, result = p.pv_plan(t)
-        balance.assert_called_once_with(1, 0, 0)
+        assert balance.call_args_list == [call(0, 0, 0), call(1, 0, 0)]
     assert direction == Direction.DOWN
     assert power == 0 and not result.point.charging
 

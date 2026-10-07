@@ -120,7 +120,7 @@ async def test_voltage_remains_raw_with_power_smoothing_enabled(grid):
     voltage(c, t, 200)
     await tick()
     # SoC above target keeps the existing UP approximation: ceil(2070 / 200).
-    assert c.confirmed_point(t).current_a == 11
+    assert c.confirmed_point(t).current_a == 10
     assert c.confirmed_point(t).phase_voltages_v == (200,)
 
 

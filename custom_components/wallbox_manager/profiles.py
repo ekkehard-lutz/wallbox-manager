@@ -30,6 +30,7 @@ from .pv_optimum import (
     OPTIMUM_REFERENCES,
     PVOptimum,
 )
+from .pv_soc import TARGET_FIELDS, clamp_settings, target_bounds
 from .pv_surplus import PV_DEFAULTS, PVSurplus
 from .regulation import DEFAULTS, migrate_regulation
 
@@ -106,23 +107,47 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
 
     async def load(self):
         self.optimum_plans.clear()
+        self.optimum_modes.clear()
         stored = await self.store.async_load() or {}
+        migrated = migrate_regulation(self.entry.options, stored)
+        self.references.update(migrated)
         for key, value in stored.items():
             try:
-                if value.get("profile") not in ("NETZ", "PV_SURPLUS", "PV_OPTIMUM"):
+                if value.get("profile") not in (
+                    "NETZ",
+                    "PV_SURPLUS",
+                    "PV_OPTIMUM",
+                    "PV_MAXIMUM",
+                ):
                     continue
                 power, reserve = scalar(value["power_kw"]), scalar(value["min_soc"])
                 if power <= 100 and reserve <= 100:
-                    self.validate_pv({**PV_DEFAULTS, **OPTIMUM_DEFAULTS, **value})
-                    self.settings[key] = {**PV_DEFAULTS, **OPTIMUM_DEFAULTS, **value}
+                    settings = {
+                        **PV_DEFAULTS,
+                        **OPTIMUM_DEFAULTS,
+                        **value,
+                        "soc_hysterese": migrated["soc_hysterese"],
+                    }
+                    # Preserve legacy values for audit; clamp deterministically even
+                    # before reserve evidence arrives, then again against live R.
+                    settings.setdefault(
+                        "legacy_soc_targets", {k: settings[k] for k in TARGET_FIELDS}
+                    )
+                    try:
+                        settings = clamp_settings(settings, 0)
+                    except ValueError:
+                        pass  # Impossible legacy H remains visible and blocks policy.
+                    if scalar(settings["soc_hysterese"]) > 99:
+                        raise ValueError("invalid legacy hysteresis")
+                    validation = clamp_settings({**settings, "soc_hysterese": 0}, 0)
+                    self.validate_pv(validation)
+                    self.settings[key] = settings
                     # beta.15's activation belonged to a recurring schedule.
                     # Keep its configured values pending; never resume that clock.
                     self.settings[key].pop("grid_activated_at", None)
             except ValueError, TypeError, KeyError:
                 continue
 
-        migrated = migrate_regulation(self.entry.options, stored)
-        self.references.update(migrated)
         if migrated != dict(self.entry.options) and hasattr(
             self.entry, "async_on_unload"
         ):
@@ -131,7 +156,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         if self.optimum_unsubscribe:
             self.optimum_unsubscribe()
             self.optimum_unsubscribe = None
-        if all(self.references.get(key) for key in OPTIMUM_REFERENCES):
+        if self.references.get("soc_speicher_aktuell"):
             from datetime import timedelta
 
             from homeassistant.helpers.event import async_track_time_interval
@@ -185,6 +210,16 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         for key in DEFAULTS:
             if key in self.entry.options:
                 settings[key] = self.entry.options[key]
+        try:
+            bounded = clamp_settings(settings, self.pv_reserve())
+        except ValueError, TypeError, OverflowError:
+            pass  # Missing/impossible reserve is blocked by the execution policy.
+        else:
+            if any(settings[k] != bounded[k] for k in TARGET_FIELDS):
+                settings.setdefault(
+                    "legacy_soc_targets", {k: settings[k] for k in TARGET_FIELDS}
+                )
+                settings.update(bounded)
         return settings
 
     def available_profiles(self, target):
@@ -200,6 +235,19 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
 
         if all(self.references.get(key) for key in OPTIMUM_REFERENCES):
             profiles.append("PV_OPTIMUM")
+        if all(
+            self.references.get(key)
+            for key in (
+                "min_soc_speicher",
+                "soc_speicher_aktuell",
+                "leistung_pv",
+                "leistung_verbraucher",
+                "storage_discharge_power",
+                "grid_import_power",
+                "grid_export_power",
+            )
+        ):
+            profiles.append("PV_MAXIMUM")
         return profiles
 
     def can_control(self, target):
@@ -251,11 +299,16 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if target in self.enable_requests
             else None,
             "optimum_mode": self.optimum_modes.get(target),
+            "soc_mode": self.optimum_modes.get(target, "STOP"),
+            "target_soc": float(self.optimum_targets[target])
+            if target in self.optimum_targets
+            else None,
             "pv_day_state": self.optimum_day_for(target).state,
             "profile_status": self.status.get(target, "idle"),
             "available_profiles": self.available_profiles(target),
             "battery_configured": bool(self.references.get("soc_speicher_aktuell"))
-            if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM")
+            if self.setting(target)["profile"]
+            in ("PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM")
             else self.battery.configured,
             "profile_actively_charging": self.pv_ongoing.get(target, False),
             "battery_reserve_configured": self.battery.configured
@@ -271,6 +324,12 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.pv_measurement_changed(event)
         self.pv_soc_changed(event)
         entity = event.data.get("entity_id")
+        if entity == self.references.get("min_soc_speicher"):
+            for target in tuple(self.control.intents):
+                if self.common_pv(target):
+                    self.setting(target)  # Reproject targets before the next command.
+                    self.optimum_wakes.setdefault(target, asyncio.Event()).set()
+                    self.control.publish(target)
         recovery = self.battery.record.get("entity") if self.battery.record else None
         if entity not in (self.battery.reserve, self.battery.soc, recovery):
             return
@@ -364,43 +423,47 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if not result or result.status != CommandStatus.APPLIED:
                 return
         self.control._edit(target, {"target_w": Fraction(0)})
-        self.control.intent(target).reachable_only = profile == "PV_OPTIMUM"
+        self.control.intent(target).reachable_only = profile in (
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        )
         if self.epochs[target] != epoch:
             return
         self.setting(target)["profile"] = profile
         profile_event(self, target, "profile_selected", profile_name=profile)
         self.optimum_plans.pop(target, None)
-        if profile == "PV_OPTIMUM":
+        if profile in ("PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"):
             self.optimum_refresh(datetime.now(UTC))
         await self.save()
         await self.reconcile_battery(exclude=target)
         self.control.publish(target)
 
     @staticmethod
-    def validate_pv(settings):
+    def validate_pv(settings, reserve=0):
         from .control.requests import Direction
 
         if settings["approximation"] not in (Direction.UP, Direction.DOWN):
             raise ValueError("invalid PV approximation")
         optimum = {**OPTIMUM_DEFAULTS, **settings}
+        minimum, maximum = target_bounds(reserve, settings["soc_hysterese"])
         if (
-            not 0
+            not minimum
             <= scalar(optimum["optimum_lower_soc"])
             <= scalar(optimum["optimum_upper_soc"])
-            <= 100
+            <= maximum
         ):
             raise ValueError("invalid Optimum SoC limits")
-        for key, maximum in (
+        for key, limit in (
             ("optimum_max_discharge_w", 100000),
             ("estimated_daily_house_consumption_kwh", 1000),
         ):
-            if not 0 <= scalar(optimum[key]) <= maximum:
+            if not 0 <= scalar(optimum[key]) <= limit:
                 raise ValueError("invalid Optimum power or energy limit")
         target = scalar(settings["soll_soc_speicher"])
         hysteresis = scalar(settings["soc_hysterese"])
         interval = scalar(settings["regulation_interval"])
         if (
-            target > 99
+            not minimum <= target <= maximum
             or hysteresis > 99
             or not 1 <= interval <= 300
             or any(
@@ -425,7 +488,15 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             return
         if field in DEFAULTS:
             settings = {**self.setting(target), field: float(scalar(value))}
-            self.validate_pv(settings)
+            if field == "soc_hysterese":
+                settings = clamp_settings(
+                    settings,
+                    self.pv_reserve() if self.references.get("min_soc_speicher") else 0,
+                )
+            self.validate_pv(
+                settings,
+                self.pv_reserve() if self.references.get("min_soc_speicher") else 0,
+            )
             if field == "power_smoothing_window" and not 0 <= settings[field] <= 300:
                 raise ValueError("invalid smoothing window")
             options = {**self.entry.options, field: settings[field]}
@@ -435,18 +506,35 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                 return
             self.entry.options = options
             self.references.update(options)
+            if field == "soc_hysterese":
+                self.settings[target_key(target)] = settings
             if field == "power_smoothing_window":
                 self.seed_power_history()
                 return
         if field in PV_DEFAULTS or field in OPTIMUM_DEFAULTS:
             value = str(value) if field == "approximation" else float(scalar(value))
             settings = {**self.setting(target), field: value}
-            self.validate_pv(settings)
+            if field == "soc_hysterese":
+                settings = clamp_settings(
+                    settings,
+                    self.pv_reserve() if self.references.get("min_soc_speicher") else 0,
+                )
+            self.validate_pv(
+                settings,
+                self.pv_reserve() if self.references.get("min_soc_speicher") else 0,
+            )
             self.settings[target_key(target)] = settings
             profile = self.setting(target)["profile"]
-            relevant = (profile == "PV_SURPLUS" and field in PV_DEFAULTS) or (
-                profile == "PV_OPTIMUM"
-                and (field in OPTIMUM_DEFAULTS or field in DEFAULTS)
+            relevant = (
+                (profile == "PV_SURPLUS" and field in PV_DEFAULTS)
+                or (
+                    profile == "PV_OPTIMUM"
+                    and (field in OPTIMUM_DEFAULTS or field in DEFAULTS)
+                )
+                or (
+                    profile in ("PV_SURPLUS", "PV_MAXIMUM")
+                    and (field == "optimum_max_discharge_w" or field in DEFAULTS)
+                )
             )
             if relevant:
                 ongoing = self.pv_ongoing.get(target, False)
@@ -471,7 +559,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         if field == "min_soc" and value.denominator != 1:
             raise ValueError("discharge reserve must be a whole percent")
         self.setting(target)[field] = float(value)
-        if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             self.sessions_changed()
             await self.save()
             self.control.publish(target)
@@ -524,7 +616,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
     @diagnostic_permission
     async def permission(self, target, enabled, *, _grid_expiry=False, _resume=False):
         """Coalesce one explicit PV activation through preparation and backoff."""
-        pv = self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM")
+        pv = self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        )
         if enabled and pv and self.can_control(target):
             if target in self.enable_requests:
                 return CommandResult(
@@ -586,7 +682,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             "enable_requested" if enabled else "disable_requested",
             epoch=epoch,
         )
-        if enabled and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if enabled and self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             self.enable_requests[target] = asyncio.current_task()
             session = self.control.runtime.sessions.get(target)
             self.enable_sessions[target] = (
@@ -620,22 +720,26 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         ):
             return await self.permission(target, False, _grid_expiry=True)
         self.control.intent(target).profile_modes = None
-        if self.setting(target)["profile"] != "PV_OPTIMUM":
+        if not self.shared_pv_execution(target):
             self.control._edit(
                 target,
                 {"target_w": self.grid_target(target) if enabled else Fraction(0)},
             )
-        if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             if enabled:
                 await self.control.wait_for_pending_point(target)
                 if self.epochs[target] != epoch:
                     return CommandResult(
                         CommandStatus.TEMPORARILY_REJECTED, reason=CommandReason.STALE
                     )
-                if self.setting(target)["profile"] == "PV_OPTIMUM":
+                if self.common_pv(target):
                     self.optimum_initialize(target)
                 plan = self.pv_edit(target)
-                if plan is None and self.setting(target)["profile"] == "PV_OPTIMUM":
+                if plan is None and self.shared_pv_execution(target):
                     # No policy is not OFF. Keep the activation pending without
                     # touching a possibly retained positive station profile.
                     waiting = self.control.preparation_wait(
@@ -647,7 +751,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                     return waiting
         generation = self.control.intent(target).generation + 1
         start_context = self.control.runtime.get(target.station)
-        if enabled and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if enabled and self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             result = await self.pv_enable_attempt(target, epoch)
         else:
             result = await self.control.request_enabled(
@@ -657,12 +765,17 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             return result
         if enabled and result and result.status == CommandStatus.APPLIED:
             profile_event(self, target, "enable_confirmed", epoch=epoch)
-            if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+            if self.setting(target)["profile"] in (
+                "PV_SURPLUS",
+                "PV_OPTIMUM",
+                "PV_MAXIMUM",
+            ):
                 self.pv_confirm(target)
             self.launch(target)
         elif (
             enabled
-            and self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM")
+            and self.setting(target)["profile"]
+            in ("PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM")
             and result
             and result.status == CommandStatus.TEMPORARILY_REJECTED
             and self.can_control(target)
@@ -708,7 +821,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         return result
 
     async def start(self, target):
-        if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             self.launch(target)
             return
         epoch = self.epochs.get(target, 0)
@@ -719,7 +836,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             self.launch(target)
 
     def launch(self, target, *, stop_first=False):
-        if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             if target not in self.tasks or self.tasks[target].done():
                 self.tasks[target] = self.hass.async_create_background_task(
                     self.pv_sequence(
@@ -864,7 +985,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
 
     def sessions_changed(self):
         for target in tuple(self.control.intents):
-            if self.setting(target)["profile"] == "PV_OPTIMUM":
+            if self.common_pv(target):
                 self.optimum_connection(target)
             session = self.control.runtime.sessions.get(target)
             if (
@@ -1016,7 +1137,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                 return
             inputs = self.control.inputs(target)
             if inputs and self.control.blocker(target) is None and enabled is not None:
-                if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+                if self.setting(target)["profile"] in (
+                    "PV_SURPLUS",
+                    "PV_OPTIMUM",
+                    "PV_MAXIMUM",
+                ):
                     try:
                         self.pv_measurements(target)
                     except ValueError, TypeError, ZeroDivisionError, OverflowError:
@@ -1051,7 +1176,18 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                     self.pv_battery[target] = (
                         continuing and record.get("battery_allowed") is True
                     )
-                    if self.setting(target)["profile"] in ("PV_SURPLUS", "PV_OPTIMUM"):
+                    saved_mode = record.get("soc_mode", "PV_BALANCE")
+                    self.optimum_modes[target] = (
+                        saved_mode
+                        if continuing and saved_mode in ("PV_BALANCE", "FAST_DISCHARGE")
+                        else "STOP"
+                    )
+                    self.optimum_initializations.discard(target)
+                    if self.setting(target)["profile"] in (
+                        "PV_SURPLUS",
+                        "PV_OPTIMUM",
+                        "PV_MAXIMUM",
+                    ):
                         self.pv_edit(target)
                         self.launch(target)
                     else:

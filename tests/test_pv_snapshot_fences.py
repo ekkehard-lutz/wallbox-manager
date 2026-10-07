@@ -103,9 +103,7 @@ async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, chan
     count = len(peer.requests)
     await tick()
     if change == "soc":
-        assert p.status[t] == "pv_stop_delay" and c.confirmed_point(t) == point
-        clock[0] = 90
-        await tick()
+        assert p.status[t] == "stopped_battery_soc"
         assert not c.confirmed_point(t).charging
     elif change in ("expiry", "activity"):
         assert c.confirmed_point(t) == point and len(peer.requests) == count
@@ -116,7 +114,7 @@ async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, chan
                 "pv": 8,
                 "load": 8,
                 "session_power": 12,
-                "voltage": 11,
+                "voltage": 10,
             }[change]
         )
         assert len(peer.requests) == count + 1
@@ -231,12 +229,13 @@ async def test_initial_enable_keeps_snapshot_through_permission_confirmation(gri
     assert c.runtime.enabled(t) is True
     assert c.confirmed_point(t).current_a == 9
     assert c.confirmed_point(t).phase_voltages_v == (230,)
-    assert p.pv_ongoing[t] and c.intent(t).fence_reason is None
+    assert not p.pv_ongoing[t] and c.intent(t).fence_reason is None
     assert not p.pv_startups and t not in p.pv_retry_until
+    await c.wait_for_pending_point(t)
     assert t not in c.pending_points
     await asyncio.sleep(0)
-    assert p.status[t] == "pv_stop_delay"
-    assert c.confirmed_point(t).current_a == 9
+    assert p.status[t] == "stopped_battery_soc"
+    assert not p.pv_edit(t).point.charging
 
 
 @pytest.mark.parametrize(
@@ -280,10 +279,15 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
         elif change == "load_up":
             measurements(p, t, pv=2530, load=460, actual=0, soc=96)
         elif change == "soc":
-            measurements(p, t, pv=2530, load=230, actual=0, soc=97)
+            measurements(p, t, pv=2530, load=230, actual=0, soc=96.5)
         else:
-            voltage(c, t, 231)
+            voltage(c, t, 229)
     result = await pending
+    if change in ("pv_down", "load_up"):
+        assert result.status == CommandStatus.TEMPORARILY_REJECTED
+        assert c.intent(t).fence_reason == "pre_dispatch_pv_policy"
+        assert len(peer.requests) == count
+        return
     assert result.status == CommandStatus.APPLIED, c.intent(t).fence_reason
     assert c.runtime.enabled(t) is True and c.confirmed_point(t) == point
     assert c.intent(t).fence_reason is None
@@ -306,7 +310,7 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
         ]
     )
     if change == "voltage":
-        assert c.confirmed_point(t).phase_voltages_v == (231,)
+        assert c.confirmed_point(t).phase_voltages_v == (229,)
     assert len(peer.requests) <= count + 2
     assert not p.pv_startups and t not in p.pv_retry_until
 
@@ -426,13 +430,18 @@ async def test_regulator_snapshot_survives_measurement_before_dispatch(
         elif change == "session_power":
             measurements(p, t, pv=amps * 230, load=0, actual=230, soc=96)
         elif change == "voltage":
-            voltage(c, t, 231)
+            voltage(c, t, 229)
         else:
-            measurements(p, t, pv=amps * 230, load=0, actual=0, soc=97)
+            measurements(p, t, pv=amps * 230, load=0, actual=0, soc=96.5)
         if change in ("pv", "load", "session_power"):
             assert p.pv_request(t) != request
         assert c.intent(t).generation == generation and p.epochs[t] == epoch
     await pending
+    if change == "load":
+        assert c.intent(t).command_result.status == CommandStatus.TEMPORARILY_REJECTED
+        assert c.intent(t).fence_reason == "pre_dispatch_pv_policy"
+        assert len(peer.requests) == count
+        return
     assert c.intent(t).command_result.status == CommandStatus.APPLIED, c.intent(
         t
     ).fence_reason
@@ -444,7 +453,7 @@ async def test_regulator_snapshot_survives_measurement_before_dispatch(
     expected = amps + {"pv": 1, "load": -1, "session_power": 1}.get(change, 0)
     assert c.confirmed_point(t).current_a == expected
     if change == "voltage":
-        assert c.confirmed_point(t).phase_voltages_v == (231,)
+        assert c.confirmed_point(t).phase_voltages_v == (229,)
     assert t not in p.pv_retry_until
     count = len(peer.requests)
     await tick()

@@ -56,13 +56,13 @@ _SEMANTIC = frozenset(
         "phase",
         "mode",
         "initialized",
+        "previous_mode",
+        "target_profile",
         "date",
         "decision",
         "reason",
         "result",
         "status",
-        "target_soc",
-        "optimum_target_soc",
         "optimum_mode",
         "pv_day_state",
         "enabled",
@@ -116,6 +116,10 @@ def event_record(entry, subsystem, fields, *, force=False):
         key: fields[key] for key in ("station", "evse", "connector") if key in fields
     }
     semantic = {key: value for key, value in fields.items() if key in _SEMANTIC}
+    if fields.get("event") == "target_soc":
+        # A scheduled planner target change is itself an event. Live targets in
+        # SoC-mode/cycle context must never create measurement-only events.
+        semantic["target_soc"] = fields.get("target_soc")
     semantic.update(
         {key: setpoint(value) for key, value in fields.items() if key in _POINTS}
     )
@@ -131,13 +135,18 @@ def event_record(entry, subsystem, fields, *, force=False):
 def cycle_event(entry, data):
     """Level 1/2 project full cycles onto stable control state and real commands."""
     explanatory = {
+        "target_soc",
+        "optimum_target_soc",
+        "lower_stop_threshold",
+        "pv_start_threshold",
+        "fast_start_threshold",
+        "pv_start_evidence",
         "raw_pv_power_w",
         "raw_consumption_power_w",
         "site_load_w",
         "surplus_w",
         "measured_power_w",
         "raw_regulator_target_w",
-        "optimum_target_soc",
         "optimum_mode",
         "pv_day_state",
         "external",

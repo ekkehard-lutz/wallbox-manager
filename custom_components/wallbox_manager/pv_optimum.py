@@ -11,6 +11,7 @@ from .control.requests import Direction
 from .diagnostics import profile_event
 from .freshness import freshness_for
 from .pv_regulators import FastDischargeRegulator
+from .pv_soc import clamp_target, soc_policy, target_bounds
 
 FAST_OBSERVATION_SECONDS = 1
 TARGET_PLANNING_SECONDS = 300
@@ -73,7 +74,84 @@ class PVDay:
 
 
 class PVOptimum:
-    """Policy adapter using the shared PV runtime and power regulators."""
+    """Daily target planner and shared SoC/regulator adapter for all PV profiles."""
+
+    def shared_pv_execution(self, target):
+        """Preserve Optimum's reachable-phase execution semantics for Maximum."""
+        return self.setting(target)["profile"] in ("PV_OPTIMUM", "PV_MAXIMUM")
+
+    def common_pv(self, target):
+        return self.setting(target)["profile"] in ("PV_OPTIMUM", "PV_MAXIMUM") or (
+            self.setting(target)["profile"] == "PV_SURPLUS"
+            and bool(self.references.get("soc_speicher_aktuell"))
+        )
+
+    def pv_reserve(self):
+        return Fraction(
+            str(self.battery.read(self.references.get("min_soc_speicher", "")))
+        )
+
+    def pv_target(self, target, now):
+        settings = self.setting(target)
+        reserve = self.pv_reserve()
+        lower, _ = target_bounds(reserve, settings["soc_hysterese"])
+        profile = settings["profile"]
+        desired = (
+            self.optimum_target(target, now)
+            if profile == "PV_OPTIMUM"
+            else lower
+            if profile == "PV_MAXIMUM"
+            else settings["soll_soc_speicher"]
+        )
+        desired = clamp_target(desired, reserve, settings["soc_hysterese"])
+        self.optimum_targets[target] = desired
+        return desired
+
+    def common_soc_policy(self, target, soc, desired, now):
+        settings = self.setting(target)
+        previous = self.optimum_modes.get(target, "STOP")
+        initializing = target in self.optimum_initializations
+        stopped = initializing or not self.pv_ongoing.get(target, False)
+        evidence = False
+        middle = desired + Fraction(str(settings["soc_hysterese"])) / 2
+        upper = desired + Fraction(str(settings["soc_hysterese"]))
+        if (stopped or previous == "STOP") and middle <= soc < upper:
+            pv, household = self.household_measurements(target, now)
+            evidence = pv > household
+        decision = soc_policy(
+            desired,
+            settings["soc_hysterese"],
+            soc,
+            previous,
+            stopped=stopped,
+            surplus=evidence,
+        )
+        self.optimum_initializations.discard(target)
+        context = dict(
+            target_soc=float(desired),
+            lower_stop_threshold=float(decision.lower_stop_threshold),
+            pv_start_threshold=float(decision.pv_start_threshold),
+            fast_start_threshold=float(decision.fast_start_threshold),
+            mode=decision.mode,
+            previous_mode=previous,
+            reason=decision.reason,
+            pv_start_evidence=evidence,
+            target_profile=settings["profile"],
+            soc=float(soc),
+        )
+        from .pv_diagnostics import active
+
+        if record := active(self, target):
+            record.data.update(
+                {k: v for k, v in context.items() if k != "previous_mode"}
+            )
+        if decision.mode != previous:
+            profile_event(self, target, "soc_mode", **context)
+            self.pv_stop_since.pop(target, None)
+            if asyncio.current_task() is not self.tasks.get(target):
+                self.optimum_wakes.setdefault(target, asyncio.Event()).set()
+        self.optimum_modes[target] = decision.mode
+        return decision.mode
 
     def optimum_initialize(self, target):
         """Mark an activation once; delayed evidence must not lose initialization."""
@@ -266,43 +344,41 @@ class PVOptimum:
 
         now = now or datetime.now(UTC)
         # Establish the independent target before checking execution evidence.
-        desired = self.optimum_target(target, now)
-        settings = self.setting(target)
+        desired = self.pv_target(target, now)
         soc = reading(
             self.hass.states.get(self.references.get("soc_speicher_aktuell", "")),
             now,
             soc=True,
             max_age=freshness_for("soc_speicher_aktuell"),
         )
-        mode = self.optimum_modes.get(target)
-        initializing = mode is None or target in self.optimum_initializations
-        if initializing:
-            mode = "FAST_DISCHARGE" if soc > desired else "PV_BALANCE"
-            self.optimum_initializations.discard(target)
-        elif soc <= desired:
-            mode = "PV_BALANCE"
-        elif soc > desired + Fraction(str(settings["soc_hysterese"])):
-            mode = "FAST_DISCHARGE"
-        mode_changed = mode != self.optimum_modes.get(target)
-        if mode_changed or initializing:
-            profile_event(
-                self,
-                target,
-                "soc_mode",
-                mode=mode,
-                initialized=initializing,
-                soc=float(soc),
-                target_soc=float(desired),
-                hysteresis=settings["soc_hysterese"],
-            )
-            self.pv_stop_since.pop(target, None)
-        if mode_changed and asyncio.current_task() is not self.tasks.get(target):
-            self.optimum_wakes.setdefault(target, asyncio.Event()).set()
-        self.optimum_modes[target] = mode
+        mode = self.common_soc_policy(target, soc, desired, now)
+        if mode == "STOP":
+            # A proven protection stop needs no positive power budget. Missing
+            # power inputs must not defeat the lower SoC boundary.
+            state = self.hass.states.get(self.references["soc_speicher_aktuell"])
+            return {}, mode, now + timedelta(seconds=power_valid_for(state, now))
         # Mode depends only on valid SoC and target. Command budgets additionally
         # require every original execution input, even in a fixed-upper phase.
         values, expiry = {}, []
-        for key in OPTIMUM_REFERENCES:
+        references = (
+            OPTIMUM_REFERENCES
+            if self.setting(target)["profile"] == "PV_OPTIMUM"
+            else (
+                "soc_speicher_aktuell",
+                "leistung_pv",
+                "leistung_verbraucher",
+                *(
+                    (
+                        "storage_discharge_power",
+                        "grid_import_power",
+                        "grid_export_power",
+                    )
+                    if mode == "FAST_DISCHARGE"
+                    else ()
+                ),
+            )
+        )
+        for key in references:
             state = self.hass.states.get(self.references.get(key, ""))
             values[key] = reading(
                 state,
@@ -319,13 +395,13 @@ class PVOptimum:
                     seconds=power_valid_for(state, now, max_age=freshness_for(key))
                 )
             )
-        if values["storage_capacity"] <= 0:
+        if "storage_capacity" in values and values["storage_capacity"] <= 0:
             raise ValueError("missing storage evidence")
         return values, mode, min(expiry)
 
     def optimum_fast(self, target):
         return (
-            self.setting(target)["profile"] == "PV_OPTIMUM"
+            self.common_pv(target)
             and self.optimum_modes.get(target) == "FAST_DISCHARGE"
         )
 
@@ -349,7 +425,7 @@ class PVOptimum:
             return
         self.optimum_observe_day(now)
         for target in tuple(self.control.intents):
-            if self.setting(target)["profile"] != "PV_OPTIMUM":
+            if not self.common_pv(target):
                 continue
             try:
                 policy = self.optimum_policy(target, now)
@@ -367,6 +443,10 @@ class PVOptimum:
 
     def optimum_request(self, target, *, policy=None):
         values, mode, expiry = policy or self.optimum_policy(target)
+        if mode == "STOP":
+            self.pv_expiry[target] = expiry
+            self.optimum_regulators.pop(target, None)
+            return Fraction(0), Direction.DOWN, "stopped_battery_soc"
         available, _, actual = self.pv_measurements(target, details=True)
         self.pv_expiry[target] = min(self.pv_expiry[target], expiry)
         settings = self.setting(target)
@@ -400,7 +480,8 @@ class PVOptimum:
                 observed_net_grid_import_w=number(
                     max(
                         0,
-                        values["grid_import_power"] - values["grid_export_power"],
+                        values.get("grid_import_power", 0)
+                        - values.get("grid_export_power", 0),
                     )
                 ),
             )

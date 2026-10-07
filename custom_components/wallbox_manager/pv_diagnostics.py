@@ -466,7 +466,11 @@ def diagnostic_plan(method):
 def diagnostic_permission(method):
     @wraps(method)
     async def wrapped(self, target, enabled, **kwargs):
-        if self.setting(target)["profile"] not in ("PV_SURPLUS", "PV_OPTIMUM"):
+        if self.setting(target)["profile"] not in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
             return await method(self, target, enabled, **kwargs)
         with cycle(self, target, "permission"):
             return await method(self, target, enabled, **kwargs)

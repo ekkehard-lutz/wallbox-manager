@@ -4,7 +4,7 @@ DEFAULTS = {
     "regulation_interval": 5,
     "pv_start_delay": 0,
     "pv_stop_delay": 90,
-    "soc_hysterese": 5,
+    "soc_hysterese": 2,
     "power_smoothing_window": 5,
 }
 

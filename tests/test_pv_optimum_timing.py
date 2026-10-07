@@ -56,8 +56,8 @@ async def test_soc_compares_against_cached_target_between_planning_cycles(grid):
     assert p.optimum_modes[t] == "FAST_DISCHARGE"
     deadline = p.optimum_plans[t][1]
     for tick, soc, mode in [
-        (1, 40, "PV_BALANCE"),
-        (2, 45, "PV_BALANCE"),
+        (1, 40, "STOP"),
+        (2, 41, "PV_BALANCE"),
         (3, 46, "FAST_DISCHARGE"),
     ]:
         clock[0] = tick
@@ -121,7 +121,7 @@ async def test_activation_and_reload_replan_immediately_and_observe_each_second(
         assert p.optimum_targets[t] == 40
         set_sensor(p, "soc_speicher_aktuell", 40, "%")
         track.call_args.args[1](datetime.now(UTC))
-        assert p.optimum_modes[t] == "PV_BALANCE"
+        assert p.optimum_modes[t] == "STOP"
 
 
 async def test_cached_target_never_authorizes_stale_forecast(grid):
@@ -172,7 +172,7 @@ async def test_soc_transition_wakes_balance_loop_without_new_authority(grid):
     active_policy(p, t)
     set_sensor(p, "soc_speicher_aktuell", 40, "%")
     p.optimum_policy(t)
-    p.optimum_wakes[t].clear()
+    p.optimum_wakes.setdefault(t, asyncio.Event()).clear()
     entered = asyncio.Event()
 
     async def wait(seconds):

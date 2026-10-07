@@ -214,7 +214,7 @@ async def test_waiting_start_is_explicit(grid, caplog, delay):
     p.pv_plan(t)
     (line,) = records(caplog)
     assert line["decision"] == ("START_PENDING" if delay else "PLANNED")
-    assert line["reason"] == ("pv_start_delay" if delay else "waiting_battery_soc")
+    assert line["reason"] == ("pv_start_delay" if delay else "stopped_battery_soc")
     if delay:
         assert 0 < line["delays"]["pv_start_delay"]["remaining_s"] <= 20
 
@@ -253,7 +253,12 @@ async def test_soc_safety_event_has_explicit_reason(grid, caplog):
     p.entry.options = {"pv_diagnostic_logging": True}
     p.setting(t)["profile"] = "PV_SURPLUS"
     p.references["soc_speicher_aktuell"] = "sensor.soc"
+    p.references["min_soc_speicher"] = "number.reserve"
+    p.hass.states.async_set("number.reserve", 5)
     p.hass.states.async_set("sensor.soc", "80", {"unit_of_measurement": "%"})
+    p.control.intent(t)
+    p.pv_ongoing[t] = True
+    p.optimum_modes[t] = "PV_BALANCE"
     caplog.set_level(logging.INFO)
     p.pv_soc_changed(
         Event(

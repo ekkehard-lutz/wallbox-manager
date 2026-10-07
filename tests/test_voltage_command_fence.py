@@ -56,9 +56,9 @@ def voltage(control, target, value, *, invalid=None):
 
 
 async def setup(grid):
-    p, t, context, clock = await prepare(grid, soc=96)
+    p, t, context, clock = await prepare(grid)
     p.setting(t)["approximation"] = "up"
-    measurements(p, t, pv=1300, load=0, actual=0, soc=96)
+    measurements(p, t, pv=1300, load=0, actual=0)
     voltage(context[0], t, PLANNED)
     return p, t, context, clock
 
@@ -87,7 +87,7 @@ async def test_regulation_accepts_same_discrete_point_at_new_voltage(grid):
     p, t, (c, _, peer, *_), _ = await setup(grid)
     await p.permission(t, True)
     previous = c.confirmed_point(t)
-    measurements(p, t, pv=1700, load=0, actual=0, soc=96)
+    measurements(p, t, pv=1700, load=0, actual=0)
 
     def response(_):
         voltage(c, t, DRIFTED)
@@ -155,7 +155,7 @@ async def test_voltage_drift_does_not_hide_other_fence_changes(grid, change):
 async def test_small_drift_across_current_step_belongs_to_next_cycle(grid):
     p, t, (c, _, peer, *_), _ = await setup(grid)
     # The next NOT_BELOW decision needs 7 A; the dispatched 6 A stays APPLIED.
-    measurements(p, t, pv=1379, load=0, actual=0, soc=96)
+    measurements(p, t, pv=1379, load=0, actual=0)
     assert p.pv_plan(t)[3].point.current_a == 6
 
     def response(_):

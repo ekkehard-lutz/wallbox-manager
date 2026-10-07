@@ -215,7 +215,7 @@ class ReferenceOptionsFlow(config_entries.OptionsFlowWithReload):
                         min=1 if key == "regulation_interval" else 0,
                         max=3600
                         if key in ("pv_start_delay", "pv_stop_delay")
-                        else 99
+                        else 50
                         if key == "soc_hysterese"
                         else 300,
                         step=1,

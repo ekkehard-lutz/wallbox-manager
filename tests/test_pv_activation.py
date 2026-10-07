@@ -85,7 +85,7 @@ async def test_pending_and_confirmed_enable_are_idempotent(grid, profile):
 
 
 @pytest.mark.parametrize(
-    "soc,expected", [(84, "FAST_DISCHARGE"), (80, "PV_BALANCE"), (79, "PV_BALANCE")]
+    "soc,expected", [(84, "FAST_DISCHARGE"), (81, "STOP"), (80, "STOP"), (79, "STOP")]
 )
 async def test_activation_boundary_and_input_recovery(grid, soc, expected):
     p, t, _ = grid
@@ -97,13 +97,13 @@ async def test_activation_boundary_and_input_recovery(grid, soc, expected):
     p.invalidate(t)
     measurements(p, t, soc=84, pv=0)
     p.optimum_policy(t)
-    assert p.optimum_modes[t] == "PV_BALANCE"
+    assert p.optimum_modes[t] == "FAST_DISCHARGE"
     p.hass.states.async_remove("sensor.pv")
     p.optimum_refresh(datetime.now(UTC))
-    assert p.optimum_modes[t] == "PV_BALANCE"
+    assert p.optimum_modes[t] == "FAST_DISCHARGE"
     measurements(p, t, soc=84, pv=0)
     p.optimum_policy(t)
-    assert p.optimum_modes[t] == "PV_BALANCE"
+    assert p.optimum_modes[t] == "FAST_DISCHARGE"
 
 
 async def test_genuine_vehicle_return_initializes_fast(grid):
@@ -236,7 +236,7 @@ async def test_enable_permission_can_coexist_with_night_pause(grid, profile, soc
     assert c.runtime.enabled(t) is True
     assert c.confirmed_point(t).charging is False
     if profile == "PV_OPTIMUM":
-        assert p.optimum_modes[t] == "PV_BALANCE"
+        assert p.optimum_modes[t] == "STOP"
 
 
 @pytest.mark.parametrize("profile", ["PV_OPTIMUM", "PV_SURPLUS"])
