@@ -123,6 +123,9 @@ async def test_offline_session_power_does_not_replace_live_reading(diagnostics):
     await hass.async_block_till_done()
     power = sessions(platforms)["power"]
     assert power.native_value == 1000
+    attrs = power.extra_state_attributes
+    assert attrs["observed_at"] == at.isoformat()
+    assert attrs["received_at"] is not None
     runtime.session_event(
         token,
         SessionEvent(scope, "tx", Kind.UPDATED, at + timedelta(seconds=1)),

@@ -12,6 +12,7 @@ from .core.capabilities import EvidenceState
 from .diagnostics import profile_event
 from .freshness import LIVE_FRESHNESS
 from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
+from .pv_input_diagnostics import diagnostic_reading, diagnostic_request
 from .pv_optimum import FAST_OBSERVATION_SECONDS
 from .pv_regulators import pv_balance
 from .pv_soc import UnsafeTargetRange
@@ -28,6 +29,7 @@ MAX_AGE_SECONDS = LIVE_FRESHNESS
 _LOGGER = logging.getLogger(__name__)
 
 
+@diagnostic_reading
 def reading(state, now, *, soc=False, energy=False, max_age=LIVE_FRESHNESS):
     """Reject missing units, non-finite values, old and future observations."""
     if state is None:
@@ -156,7 +158,10 @@ class PVSurplus:
             with cycle(self, target, "soc_event"):
                 try:
                     soc = reading(
-                        event.data.get("new_state"), datetime.now(UTC), soc=True
+                        event.data.get("new_state"),
+                        datetime.now(UTC),
+                        soc=True,
+                        diagnostic_key="soc_speicher_aktuell",
                     )
                     mode = self.common_soc_policy(
                         target,
@@ -221,13 +226,19 @@ class PVSurplus:
         """Raw household proof for the planner, independent of regulator smoothing."""
         from .core.telemetry import Channel, Quantity, State
 
-        pv = reading(self.hass.states.get(self.references.get("leistung_pv", "")), now)
+        pv = reading(
+            self.hass.states.get(self.references.get("leistung_pv", "")),
+            now,
+            diagnostic_key="leistung_pv",
+        )
         load = reading(
-            self.hass.states.get(self.references.get("leistung_verbraucher", "")), now
+            self.hass.states.get(self.references.get("leistung_verbraucher", "")),
+            now,
+            diagnostic_key="leistung_verbraucher",
         )
         candidates = self.selected_power_states(target)
         if len(candidates) == 1:
-            actual = reading(candidates[0], now)
+            actual = reading(candidates[0], now, diagnostic_key="selected_ev_power")
         elif candidates:
             raise ValueError("ambiguous selected EV power")
         else:
@@ -265,7 +276,10 @@ class PVSurplus:
         candidates = self.selected_power_states(target)
         if record := active(self, target):
             record.capture_inputs(candidates)
-        pv, load = reading(pv_state, now), reading(load_state, now)
+        pv, load = (
+            reading(pv_state, now, diagnostic_key="leistung_pv"),
+            reading(load_state, now, diagnostic_key="leistung_verbraucher"),
+        )
         raw_pv, raw_load = pv, load
         timestamp = self.monotonic()
         pv, pv_history = self.power_history["leistung_pv"].average(timestamp, pv)
@@ -287,13 +301,18 @@ class PVSurplus:
             )
         soc_entity = self.references.get("soc_speicher_aktuell")
         soc = (
-            reading(self.hass.states.get(soc_entity), now, soc=True)
+            reading(
+                self.hass.states.get(soc_entity),
+                now,
+                soc=True,
+                diagnostic_key="soc_speicher_aktuell",
+            )
             if soc_entity
             else None
         )
         if len(candidates) != 1:
             raise ValueError("selected connector power missing or ambiguous")
-        actual = reading(candidates[0], now)
+        actual = reading(candidates[0], now, diagnostic_key="selected_ev_power")
         if actual < 0:
             raise ValueError("negative charging power")
         states = [pv_state, load_state, candidates[0]]
@@ -346,6 +365,7 @@ class PVSurplus:
         self.pv_expiry.pop(target, None)
         self.status[target] = "measurements_unavailable"
 
+    @diagnostic_request
     def pv_request(self, target):
         self.pv_sync_session(target)
         try:

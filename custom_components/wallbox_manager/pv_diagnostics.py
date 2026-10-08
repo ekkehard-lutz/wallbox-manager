@@ -122,6 +122,9 @@ class Cycle:
 
     def _capture_inputs(self, selected=None):
         p, t, _ = self.owner
+        from .pv_input_diagnostics import passive_settings
+
+        settings = passive_settings(p, t) if diagnostic_level(p.entry) == 3 else None
         now = datetime.now(UTC)
         self.data["evaluated_at"] = now.isoformat()
         for key in (
@@ -138,35 +141,43 @@ class Cycle:
             "consumption_history_s",
         ):
             self.data.pop(key, None)
-        self.data["external"] = {
-            key: entity_sample(
-                p.hass.states.get(p.references[key]) if p.references.get(key) else None,
-                p.references.get(key),
-                now,
-                max_age=freshness_for(key),
-            )
-            for key in (
-                "min_soc_speicher",
-                "soc_speicher_aktuell",
-                "leistung_pv",
-                "leistung_verbraucher",
-                *(
-                    (
-                        "storage_discharge_power",
-                        "storage_capacity",
-                        "remaining_pv_energy",
-                        "grid_import_power",
-                        "grid_export_power",
-                    )
-                    if p.setting(t)["profile"] == "PV_OPTIMUM"
-                    else ()
-                ),
-            )
-        }
-        if selected is not None:
-            self.data["wallbox_power_sources"] = [
-                entity_sample(s, s.entity_id, now) for s in selected
-            ]
+        if diagnostic_level(p.entry) == 3:
+            # Consumed HA states are captured by the reading tap, never re-read.
+            from .pv_input_diagnostics import empty_inputs
+
+            self.data.setdefault("external", empty_inputs(p))
+        else:
+            self.data["external"] = {
+                key: entity_sample(
+                    p.hass.states.get(p.references[key])
+                    if p.references.get(key)
+                    else None,
+                    p.references.get(key),
+                    now,
+                    max_age=freshness_for(key),
+                )
+                for key in (
+                    "min_soc_speicher",
+                    "soc_speicher_aktuell",
+                    "leistung_pv",
+                    "leistung_verbraucher",
+                    *(
+                        (
+                            "storage_discharge_power",
+                            "storage_capacity",
+                            "remaining_pv_energy",
+                            "grid_import_power",
+                            "grid_export_power",
+                        )
+                        if p.setting(t)["profile"] == "PV_OPTIMUM"
+                        else ()
+                    ),
+                )
+            }
+            if selected is not None:
+                self.data["wallbox_power_sources"] = [
+                    entity_sample(s, s.entity_id, now) for s in selected
+                ]
         runtime = p.control.runtime
         state = runtime.get(t.station)
         telemetry = {}
@@ -195,7 +206,9 @@ class Cycle:
         charging = telemetry["charging_state"]
         connector = telemetry["connector_state"]
         self.data.update(
-            profile=p.setting(t)["profile"],
+            profile=settings.get("profile")
+            if settings is not None
+            else p.setting(t)["profile"],
             authority=runtime.authority(t.station).value,
             has_control=p.can_control(t),
             connected=bool(state and state.connected),
@@ -209,7 +222,7 @@ class Cycle:
             charging=p.active(t),
             pv_continuation=p.pv_ongoing.get(t, False),
             session_active=bool(session and session.active),
-            parameters=dict(p.setting(t)),
+            parameters=settings if settings is not None else dict(p.setting(t)),
         )
         self.data["physical_phases"] = (
             [
@@ -381,15 +394,38 @@ class Cycle:
             ("pv_stop_delay", p.pv_stop_since),
         ):
             elapsed = max(0, p.monotonic() - timers[t]) if t in timers else None
-            total = p.setting(t)[key]
+            if diagnostic_level(p.entry) == 3:
+                from .pv_input_diagnostics import passive_settings
+
+                total = passive_settings(p, t).get(key)
+            else:
+                total = p.setting(t)[key]
             self.data["delays"][key] = {
                 "configured_s": total,
                 "elapsed_s": elapsed,
-                "remaining_s": max(0, total - elapsed) if elapsed is not None else None,
+                "remaining_s": max(0, total - elapsed)
+                if elapsed is not None and total is not None
+                else None,
             }
         if diagnostic_level(p.entry) < 3:
             cycle_event(p.entry, self.data)
         else:
+            self.data.update(
+                applied_basis="acknowledged_or_reconciled_offer_not_measured_power",
+                control_generation=intent.generation,
+                phase_lockout_evidence={
+                    "recorded_station_rejection": t in p.control._phase_restrictions,
+                    "reason": "PhaseSwitchLockout"
+                    if t in p.control._phase_restrictions
+                    else None,
+                    "station_deadline": None,
+                },
+                reenable_lockout_evidence={
+                    "status": "unknown",
+                    "reason": "station_deadline_not_available",
+                    "station_deadline": None,
+                },
+            )
             _LOGGER.info(
                 "WBMGR subsystem=pv %s",
                 json.dumps(
