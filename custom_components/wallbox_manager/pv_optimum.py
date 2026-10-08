@@ -274,6 +274,7 @@ class PVOptimum:
                 now,
                 energy=True,
                 max_age=freshness_for("remaining_pv_energy"),
+                diagnostic_key="remaining_pv_energy",
             )
             if pv < 0:
                 raise ValueError("invalid planning energy")
@@ -303,6 +304,7 @@ class PVOptimum:
                     now,
                     energy=True,
                     max_age=freshness_for("storage_capacity"),
+                    diagnostic_key="storage_capacity",
                 )
                 if capacity <= 0:
                     raise ValueError("invalid planning energy")
@@ -350,6 +352,7 @@ class PVOptimum:
             now,
             soc=True,
             max_age=freshness_for("soc_speicher_aktuell"),
+            diagnostic_key="soc_speicher_aktuell",
         )
         mode = self.common_soc_policy(target, soc, desired, now)
         if mode == "STOP":
@@ -386,6 +389,7 @@ class PVOptimum:
                 soc=key == "soc_speicher_aktuell",
                 energy=key in ("storage_capacity", "remaining_pv_energy"),
                 max_age=freshness_for(key),
+                diagnostic_key=key,
             )
             if values[key] < 0:
                 raise ValueError("negative Optimum measurement")

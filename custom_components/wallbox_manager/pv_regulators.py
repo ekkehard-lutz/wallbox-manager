@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from fractions import Fraction
 
+from .pv_input_diagnostics import diagnostic_fast_request
+
 GRID_DEADBAND_W = 100
 IMPORT_GRACE_SECONDS = 3
 
@@ -80,6 +82,7 @@ class FastDischargeRegulator:
     updated_at: float | None = None
     import_since: float | None = None
 
+    @diagnostic_fast_request
     def request(self, wallbox, discharge, limit, imported, exported, *, now, interval):
         if interval <= 0:
             raise ValueError("invalid regulation interval")

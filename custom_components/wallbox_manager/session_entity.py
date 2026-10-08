@@ -112,6 +112,20 @@ class SessionEntity(StationEntity):
             "session_id": self.session.session_id,
             **scope_attributes(self.runtime, self.entry_id, self.scope),
             "session_active": self.session.active,
+            # Source timing from the already selected reading, not another poll.
+            # The existing PV freshness calculation still uses HA report time.
+            **(
+                {
+                    "observed_at": energy.observed_at.isoformat(),
+                    "received_at": energy.received_at.isoformat(),
+                }
+                if self.key == "power"
+                and self.session.active
+                and energy
+                and energy.observed_at == self.session.power_at
+                and energy.value == self.session.current_power_w
+                else {}
+            ),
             "valid_until": energy.valid_until.isoformat()
             if self.key in ("energy", "power")
             and energy
