@@ -38,20 +38,22 @@ async def grid(base_grid):  # noqa: F811
 
 
 @pytest.mark.parametrize(
-    "soc,ongoing,power,direction,status",
+    "soc,previous,expected",
     [
-        (96, False, 6000, Direction.UP, "actively_charging"),
-        (95, False, 0, Direction.DOWN, "waiting_battery_soc"),
-        (90, False, 0, Direction.DOWN, "waiting_battery_soc"),
-        (89, False, 0, Direction.DOWN, "stopped_battery_soc"),
-        (95, True, 6000, Direction.DOWN, "actively_charging"),
-        (90, True, 6000, Direction.DOWN, "actively_charging"),
-        (89, True, 0, Direction.DOWN, "stopped_battery_soc"),
-        (96, True, 6000, Direction.UP, "actively_charging"),
+        (96, "STOP", "PV_BALANCE"),
+        (95, "STOP", "STOP"),
+        (94, "PV_BALANCE", "STOP"),
+        (94.001, "PV_BALANCE", "PV_BALANCE"),
+        (95, "FAST_DISCHARGE", "PV_BALANCE"),
+        (96, "FAST_DISCHARGE", "FAST_DISCHARGE"),
+        (97, "STOP", "FAST_DISCHARGE"),
+        (97, "PV_BALANCE", "FAST_DISCHARGE"),
     ],
 )
-def test_soc_boundaries(soc, ongoing, power, direction, status):
-    assert decision(6000, soc, PV_DEFAULTS, ongoing) == (power, direction, status)
+def test_soc_boundaries(soc, previous, expected):
+    from custom_components.wallbox_manager.pv_soc import soc_policy
+
+    assert soc_policy(95, 2, soc, previous, surplus=True).mode == expected
 
 
 @pytest.mark.parametrize("approximation", ["up", "down"])
@@ -64,14 +66,16 @@ def test_without_battery(approximation, power):
 
 
 def test_hysteresis_clamp_and_pause_restart():
-    settings = {**PV_DEFAULTS, "soll_soc_speicher": 100, "soc_hysterese": 10}
-    assert decision(6000, 99, settings, False)[0] == 0
-    assert decision(6000, 100, settings, False)[0] == 6000
-    assert decision(6000, 89, settings, True)[0] == 6000
-    assert decision(6000, 88, settings, True)[0] == 0
-    assert decision(-1, 96, PV_DEFAULTS, True)[2] == "paused_insufficient_pv"
-    assert decision(6000, 95, PV_DEFAULTS, False)[0] == 0
-    assert decision(6000, 96, PV_DEFAULTS, False)[0] == 6000
+    from custom_components.wallbox_manager.pv_soc import clamp_target, soc_policy
+
+    target = clamp_target(100, 5, 10)
+    assert target == 90
+    assert soc_policy(target, 10, 99, surplus=True).mode == "PV_BALANCE"
+    assert soc_policy(target, 10, 100).mode == "FAST_DISCHARGE"
+    assert soc_policy(target, 10, 89, "PV_BALANCE").mode == "PV_BALANCE"
+    assert soc_policy(target, 10, 85, "PV_BALANCE").mode == "STOP"
+    assert soc_policy(target, 10, 94, stopped=True, surplus=True).mode == "STOP"
+    assert soc_policy(target, 10, 95, stopped=True, surplus=True).mode == "PV_BALANCE"
 
 
 @pytest.mark.parametrize(
@@ -144,6 +148,9 @@ def measurements(profile, target, *, pv=8000, load=5000, actual=3000, soc=None):
         "sensor.other", 99999, {**attrs, "connector_id": "other"}
     )
     if soc is not None:
+        profile.references.setdefault("min_soc_speicher", "number.reserve")
+        if profile.hass.states.get(profile.references["min_soc_speicher"]) is None:
+            profile.hass.states.async_set(profile.references["min_soc_speicher"], 5)
         profile.references["soc_speicher_aktuell"] = "sensor.soc"
         profile.hass.states.async_set("sensor.soc", soc, {"unit_of_measurement": "%"})
 
@@ -179,7 +186,7 @@ async def test_enable_below_threshold_and_repeat_no_commands(grid):
     count = len(peer.requests)
     await asyncio.sleep(0)
     assert len(peer.requests) == count
-    assert p.status[t] == "waiting_battery_soc"
+    assert p.status[t] == "stopped_battery_soc"
     assert not p.pv_ongoing[t]
 
 
@@ -450,10 +457,11 @@ async def test_reload_restores_profile_only(grid):
 
 async def test_new_session_requires_full_soc_start_rule(grid, monkeypatch):
     p, t, (c, _, _, *_) = grid
+    p.setting(t)["profile"] = "PV_SURPLUS"
     measurements(p, t, soc=96)
     p.pv_request(t)
     p.pv_ongoing[t] = True
-    measurements(p, t, soc=93)
+    measurements(p, t, soc=95)
     assert p.pv_request(t)[0] == 6000
     original = c.runtime.sessions.get
     session = original(t)

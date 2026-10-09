@@ -201,7 +201,7 @@
         "name": "Battery target SoC"
       },
       "soc_hysterese": {
-        "name": "SoC hysteresis"
+        "name": "SoC hysteresis and target safety margin"
       },
       "regulation_interval": {
         "name": "Regulation interval"
@@ -211,6 +211,18 @@
       },
       "pv_stop_delay": {
         "name": "PV stop delay"
+      },
+      "optimum_lower_soc": {
+        "name": "{scope} PV Optimum lower target SoC"
+      },
+      "optimum_upper_soc": {
+        "name": "{scope} PV Optimum upper target SoC"
+      },
+      "optimum_max_discharge_w": {
+        "name": "Maximum PV storage discharge"
+      },
+      "estimated_daily_house_consumption_kwh": {
+        "name": "{scope} PV Optimum daily household consumption without EV"
       }
     },
     "select": {
@@ -226,7 +238,9 @@
         "name": "Charging profile {scope}",
         "state": {
           "NETZ": "Grid",
-          "PV_SURPLUS": "PV Surplus"
+          "PV_SURPLUS": "PV Surplus",
+          "PV_OPTIMUM": "PV Optimum",
+          "PV_MAXIMUM": "PV Maximum"
         }
       },
       "active_wallbox": {
@@ -267,11 +281,21 @@
               "soc_speicher_aktuell": "Battery SoC",
               "leistung_pv": "PV power",
               "leistung_verbraucher": "Consumption power",
-              "pv_diagnostic_logging": "Diagnostic logging"
+              "storage_discharge_power": "Storage discharge power",
+              "storage_capacity": "Nominal storage capacity (WHRtg)",
+              "remaining_pv_energy": "Expected remaining PV energy today",
+              "grid_import_power": "Grid import power",
+              "grid_export_power": "Grid export power",
+              "diagnostic_level": "Diagnostic level"
             },
             "data_description": {
-              "pv_diagnostic_logging": "Enables detailed Wallbox Manager diagnostics for troubleshooting. Content depends on the active feature, profile and current activity. Disabled by default.",
-              "leistung_verbraucher": "Total consumption including the selected wallbox."
+              "leistung_verbraucher": "Total consumption including the selected wallbox.",
+              "storage_discharge_power": "Actual nonnegative discharge power; zero while charging.",
+              "storage_capacity": "Fronius nominal storage capacity: WHRtg / model_120_whrtg, in Wh or kWh.",
+              "remaining_pv_energy": "Expected remaining PV production today, in Wh or kWh.",
+              "grid_import_power": "Nonnegative power drawn from the grid.",
+              "grid_export_power": "Nonnegative power fed into the grid.",
+              "diagnostic_level": "Wallbox Manager diagnostics: 0 off, 1 events and errors, 2 with relevant data, 3 full trace. Normal warnings and errors remain active at Level 0. Disabled by default."
             }
           },
           "regulation": {
@@ -280,7 +304,7 @@
               "regulation_interval": "Regulation interval",
               "pv_start_delay": "PV start delay",
               "pv_stop_delay": "PV stop delay",
-              "soc_hysterese": "SoC hysteresis",
+              "soc_hysterese": "SoC hysteresis and target safety margin",
               "power_smoothing_window": "Power smoothing window"
             }
           }
@@ -319,6 +343,16 @@
         "discovered_automatically": "Wallboxes are added automatically through OCPP discovery."
       },
       "entry_type": "Wallbox"
+    }
+  },
+  "selector": {
+    "diagnostic_level": {
+      "options": {
+        "0": "Off",
+        "1": "Events and errors",
+        "2": "Events with relevant data",
+        "3": "Full diagnostic trace"
+      }
     }
   }
 }

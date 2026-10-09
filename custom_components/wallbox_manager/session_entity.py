@@ -89,6 +89,29 @@ class SessionEntity(StationEntity):
     def available(self):
         return self.session is not None
 
+    def power_status(self, now):
+        """Expose the exact availability guard without relaxing attribution."""
+        session = self.session
+        if not session.active:
+            return "completed", None
+        snapshot = self.runtime.get(session.station_id)
+        if snapshot is None or not snapshot.connected:
+            return "disconnected", None
+        observation = self.runtime.sessions.measurement(
+            session.scope, Quantity.POWER, now
+        )
+        if observation is None:
+            return "no_fresh_scoped_measurement", None
+        if observation.observed_at < session.started_at:
+            return "measurement_precedes_transaction", observation
+        if observation.observed_at != session.power_at:
+            return "ledger_timestamp_mismatch", observation
+        if observation.value != session.current_power_w:
+            return "ledger_value_conflict", observation
+        if session.current_power_w is None:
+            return "invalid_or_conflicting_measurement", observation
+        return "valid", observation
+
     @property
     def extra_state_attributes(self):
         energy = self.runtime.sessions.measurement(
@@ -112,6 +135,25 @@ class SessionEntity(StationEntity):
             "session_id": self.session.session_id,
             **scope_attributes(self.runtime, self.entry_id, self.scope),
             "session_active": self.session.active,
+            **(
+                {"power_availability_reason": self.power_status(now)[0]}
+                if self.key == "power"
+                else {}
+            ),
+            # Source timing from the already selected reading, not another poll.
+            # PV freshness validates both source acquisition and HA report time.
+            **(
+                {
+                    "observed_at": energy.observed_at.isoformat(),
+                    "received_at": energy.received_at.isoformat(),
+                }
+                if self.key == "power"
+                and self.session.active
+                and energy
+                and energy.observed_at == self.session.power_at
+                and energy.value == self.session.current_power_w
+                else {}
+            ),
             "valid_until": energy.valid_until.isoformat()
             if self.key in ("energy", "power")
             and energy
@@ -183,28 +225,12 @@ class SessionSensor(SessionEntity, SensorEntity):
             case "duration":
                 return session.duration(now)
             case "power":
-                if not session.active:
+                reason, _ = self.power_status(now)
+                if reason == "completed":
                     return 0
-                # Persistence does not turn old power into a live observation.
-                snapshot = self.runtime.get(session.station_id)
-                if snapshot is None or not snapshot.connected:
+                if reason != "valid":
                     return None
-                observation = self.runtime.sessions.measurement(
-                    session.scope, Quantity.POWER, now
-                )
-                if (
-                    observation is None
-                    or not observation.fresh(now)
-                    or observation.observed_at < session.started_at
-                    or observation.observed_at != session.power_at
-                    or observation.value != session.current_power_w
-                ):
-                    return None
-                return (
-                    float(session.current_power_w)
-                    if session.current_power_w is not None
-                    else None
-                )
+                return float(session.current_power_w)
             case _:
                 value = getattr(
                     session,

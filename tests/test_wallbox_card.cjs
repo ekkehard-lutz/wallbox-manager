@@ -657,14 +657,14 @@ test('technical regulation fields are absent from card markup',()=>{
   }
 });
 
-for(const value of [0,99]) {
+for(const value of [7,98]) {
   test(`target SoC buttons respect ${value} boundary`,async()=>{
     const data=states(true);data['select.anything'].state='PV_SURPLUS';
     data['select.anything'].attributes.battery_configured=true;
-    data['number.target']=state('soll_soc_speicher','A',String(value));
+    data['number.target']=state('soll_soc_speicher','A',String(value),{min:7,max:98});
     const {card:c,get,calls}=card(data);
-    assert.equal(get(`soll_soc_speicher-${value===0?'down':'up'}`).disabled,true);
-    await c.stepNumber('soll_soc_speicher',value===0?-1:1);
+    assert.equal(get(`soll_soc_speicher-${value===7?'down':'up'}`).disabled,true);
+    await c.stepNumber('soll_soc_speicher',value===7?-1:1);
     assert.equal(calls.length,0);
     get('soll_soc_speicher').value=`${value}.0`;
     await get('soll_soc_speicher').onchange();
@@ -748,3 +748,93 @@ test('countdown replaces pending inputs, disables edits and reconstructs on card
   first.card.hass={...first.card._hass,states:data};
   for(const id of ['grid_start_delay','grid_duration']) for(const part of ['hours','minutes']) assert.equal(first.get(`${id}-${part}`).value,'');
 });
+
+test('PV Optimum shows independent controls, current target and no Grid or Surplus controls', async()=>{
+  const data=states(true);
+  data['select.anything'].state='PV_OPTIMUM';
+  Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS','PV_OPTIMUM'],battery_configured:true,optimum_target_soc:42.25});
+  for(const [key,value] of Object.entries({optimum_lower_soc:20,optimum_upper_soc:80,optimum_max_discharge_w:3500,estimated_daily_house_consumption_kwh:12.5})) data[`number.${key}`]=state(key,'A',String(value));
+  const {get,calls}=card(data);
+  assert.equal(get('power-row').hidden,true);
+  assert.equal(get('reserve-row').hidden,true);
+  assert.equal(get('soll_soc_speicher-row').hidden,true);
+  assert.equal(get('grid_duration-row').hidden,true);
+  assert.equal(get('optimum-target').textContent,'42.3 %');
+  assert.equal(get('optimum_max_discharge_w-row').hidden,false);
+  const input=get('estimated_daily_house_consumption_kwh');
+  input.value='15.5'; input.checkValidity=()=>true;
+  input.onchange();
+  assert.equal(calls[0][0],'number');
+  assert.equal(calls[0][2].entity_id,'number.estimated_daily_house_consumption_kwh');
+  assert.equal(calls[0][2].value,15.5);
+});
+
+for (const language of ['en','de']) {
+  for (const [status,en,de] of [
+    ['optimum_minimum_hold', /grid import may remain/, /Netzbezug ist möglich/],
+    ['optimum_pause_pending', /checking sustained/, /prüft anhaltend/],
+    ['optimum_deliberate_pause', /deliberately pauses/, /pausiert bewusst/],
+    ['optimum_no_positive_point', /No safe positive/, /Kein sicherer positiver/],
+    ['hard_budget_pause', /available power/, /verfügbare Leistung/],
+    ['hard_budget_unavailable', /valid measurements/, /gültige Messwerte/],
+    ['grid_import_pause', /excessive grid import/, /Zu hoher Netzbezug/],
+    ['stop_delay_expired', /stop delay expired/, /Stoppverzögerung/],
+  ]) test(`Optimum policy status ${status} in ${language}`,()=>{
+    const data=states(true);
+    data['select.anything'].state='PV_OPTIMUM';
+    Object.assign(data['select.anything'].attributes,{profile_status:status,options:['PV_OPTIMUM']});
+    const {card:c,get}=card(data);
+    c.hass={...c._hass,language};
+    assert.equal(get('status').hidden,false);
+    assert.match(get('status').textContent,language==='de'?de:en);
+  });
+}
+
+test('one permission click and repeated busy rendering issue exactly one request',async()=>{
+  const {card:c,get}=card(states(true));
+  const calls=[];
+  let release;
+  c._hass.callService=(...args)=>{calls.push(args);return new Promise(resolve=>{release=resolve;});};
+  get('permission').onclick();
+  assert.equal(get('permission').disabled,true);
+  for(let n=0;n<5;n++) c.hass=c._hass;
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][1],'turn_on');
+  release();
+  await Promise.resolve();
+  assert.equal(calls.length,1);
+});
+
+for(const language of ['en','de']) test(`pending enable is visible and cancellable in ${language}`,async()=>{
+  const data=states(true);
+  data['select.anything'].attributes.enable_pending=true;
+  data['switch.another_name'].attributes.enable_pending=true;
+  const {card:c,calls,get}=card(data);
+  c.hass={...c._hass,language};
+  assert.match(get('permission').textContent,language==='de'?/abbrechen/:/Cancel/);
+  assert.match(get('status').textContent,language==='de'?/vorgemerkt/:/pending/);
+  get('permission').onclick();
+  await Promise.resolve();
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][1],'turn_off');
+});
+
+for (const language of ['en','de']) {
+  test(`PV Maximum exposes target and shared discharge limit in ${language}`, () => {
+    const data=states(true);
+    data['select.anything'].state='PV_MAXIMUM';
+    Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM'],battery_configured:true,optimum_target_soc:7});
+    data['number.limit']=state('optimum_max_discharge_w','A','3500');
+    const {card:c,get}=card(data);
+    c.hass={...c._hass,language};
+    assert.equal(get('power-row').hidden,true);
+    assert.equal(get('reserve-row').hidden,true);
+    assert.equal(get('soll_soc_speicher-row').hidden,true);
+    assert.equal(get('optimum_lower_soc-row').hidden,true);
+    assert.equal(get('optimum_upper_soc-row').hidden,true);
+    assert.equal(get('estimated_daily_house_consumption_kwh-row').hidden,true);
+    assert.equal(get('optimum_max_discharge_w-row').hidden,false);
+    assert.equal(get('optimum-target-row').hidden,false);
+    assert.equal(get('optimum-target').textContent,'7 %');
+  });
+}

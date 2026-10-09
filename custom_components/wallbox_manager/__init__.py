@@ -52,7 +52,12 @@ async def async_setup_entry(
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP
     from homeassistant.exceptions import ConfigEntryNotReady
 
+    from .diagnostics import migrate_diagnostics
     from .frontend import async_setup_assets
+
+    options = migrate_diagnostics(entry.options)
+    if options != dict(entry.options):
+        hass.config_entries.async_update_entry(entry, options=options)
 
     # Library/schema module imports may read files; keep them off the HA loop.
     transport = await hass.async_add_executor_job(

@@ -36,7 +36,7 @@ async def test_first_start_accepts_expected_phase_feedback_gap(grid):
 
     def response(profile):
         period = profile["charging_schedule"][0]["charging_schedule_period"][0]
-        assert period["number_phases"] == 1 and period["limit"] == 9
+        assert period["number_phases"] == 1 and period["limit"] == 8
         # Same effect as missing/expired phase feedback in CapabilityResolver:
         # current_mode is unknown and phase-operation eligibility vanishes.
         source.mode, source.proof = None, False
@@ -46,7 +46,7 @@ async def test_first_start_accepts_expected_phase_feedback_gap(grid):
     result = await p.permission(t, True)
     assert result.status == CommandStatus.APPLIED
     assert c.runtime.enabled(t) is True
-    assert c.confirmed_point(t).current_a == 9
+    assert c.confirmed_point(t).current_a == 8
     assert p.pv_ongoing[t], (p.status[t], c.runtime.sessions.get(t))
     source.mode, source.proof = PhaseMode.canonical(1), True
 
@@ -95,7 +95,7 @@ async def test_first_rejection_schedules_retry_without_command_storm(
     parked.clear()
     gate.set()
     await asyncio.wait_for(parked.wait(), 1)
-    assert c.confirmed_point(t).current_a == 9
+    assert c.confirmed_point(t).current_a == 8
     assert c.runtime.enabled(t) is True
     assert t not in p.pv_startups and t not in p.pv_retry_until
     assert len(peer.requests) == 1
@@ -132,7 +132,7 @@ async def test_uncertain_first_reply_reconciles_after_retry_deadline(grid):
     parked.clear()
     gate.set()
     await asyncio.wait_for(parked.wait(), 1)
-    assert c.confirmed_point(t).current_a == 9
+    assert c.confirmed_point(t).current_a == 8
     assert t not in c._unconfirmed_targets
     assert c.runtime.enabled(t) is True
 

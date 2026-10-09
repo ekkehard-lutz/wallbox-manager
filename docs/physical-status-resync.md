@@ -83,7 +83,7 @@ no new manager polling task.
 
 ## Diagnostics and verification
 
-The existing `pv_diagnostic_logging` option gates `physical_state` transition
+The `diagnostic_level` setting gates `physical_state` transition
 records (evidence source/time, freshness, permission and CP epoch) and
 `battery_reserve` confirmation transitions. Normal unchanged cycles stay quiet.
 Tests cover initial read/event ordering, transient unknown readback, real OFF →

@@ -60,6 +60,8 @@ def solve(
     limits: Iterable[CurrentLimit] = (),
     phase_switch_deviation_pct: Fraction = Fraction(0),
     charging_only: bool = False,
+    minimum_positive: bool = False,
+    hard_max_w: Fraction | None = None,
 ) -> SolverResult:
     """Select among verified modes within all supplied hard current intervals.
 
@@ -70,12 +72,16 @@ def solve(
     No measured EV consumption is inspected and no acceptance limit is inferred.
     Optional current-mode retention applies only after direction/hard constraints.
     Existing callers default to 0%; the manual runtime explicitly supplies 5%.
+    minimum_positive is an explicit feasibility query, not budget approximation:
+    it returns the smallest verified positive point, retaining hard constraints.
+    Ordinary DOWN/UP/NEAREST and explicit OFF semantics remain unchanged.
 
     Each mode's linear power grid needs only its endpoints and the two indices
     bracketing the target. This is equivalent to full enumeration without memory
     or runtime proportional to the number of current steps.
     """
     timestamp(now)
+    hard_max = None if hard_max_w is None else scalar(hard_max_w)
     tolerance = scalar(phase_switch_deviation_pct)
     if tolerance > 25:
         raise ValueError("phase retention tolerance must be between 0 and 25 percent")
@@ -97,7 +103,7 @@ def solve(
         if can_stop:
             return SolverResult(ResultStatus.OFF, Reason.CHARGING_PROHIBITED, off)
         return SolverResult(ResultStatus.UNREACHABLE, Reason.STOP_UNVERIFIED)
-    if request.target_w == 0 and can_stop:
+    if request.target_w == 0 and can_stop and not minimum_positive:
         return SolverResult(ResultStatus.OFF, Reason.OFF_SELECTED, off)
     if (
         voltage.scope != capabilities.scope
@@ -107,7 +113,9 @@ def solve(
 
     # A blocked phase transition may require a positive-current substitute.
     # Explicit zero requests above still retain immediate stop semantics.
-    candidates = [off] if can_stop and not charging_only else []
+    candidates = (
+        [off] if can_stop and not charging_only and not minimum_positive else []
+    )
     missing_voltage = False
     has_mode = False
     for envelope in capabilities.envelopes:
@@ -126,6 +134,8 @@ def solve(
         if first > last:
             continue
         voltage_sum = sum(volts, Fraction(0))
+        if hard_max is not None:
+            last = min(last, floor((hard_max / voltage_sum - origin) / step))
         target_index = (request.target_w / voltage_sum - origin) / step
         for index in {first, last, floor(target_index), ceil(target_index)}:
             if first <= index <= last:
@@ -140,6 +150,10 @@ def solve(
     # voltage or let an unavailable multi-phase mode suppress a valid 1p point.
     if missing_voltage and not any(point.charging for point in candidates):
         return SolverResult(ResultStatus.UNREACHABLE, Reason.VOLTAGE_UNAVAILABLE)
+    if not any(p.charging for p in candidates) and hard_max is not None:
+        if can_stop:
+            return SolverResult(ResultStatus.OFF, Reason.ELECTRICAL_LIMIT, off)
+        return SolverResult(ResultStatus.UNREACHABLE, Reason.STOP_UNVERIFIED)
     if not candidates:
         return SolverResult(
             ResultStatus.UNREACHABLE,
@@ -159,6 +173,10 @@ def solve(
             point.mode.phases if point.mode else (),
             point.current_a or Fraction(0),
         )
+
+    if minimum_positive:
+        chosen = min(candidates, key=lambda p: (p.offered_power_w, *tie_key(p)))
+        return SolverResult(ResultStatus.FEASIBLE, Reason.SELECTED, chosen)
 
     def nearest_key(point: OperatingPoint) -> tuple:
         return (abs(point.offered_power_w - request.target_w), *tie_key(point))

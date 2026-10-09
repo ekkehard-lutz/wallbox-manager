@@ -16,8 +16,9 @@ Configure Home Assistant entity references in the integration options under
 - `leistung_pv`: PV generation power (required).
 - `leistung_verbraucher`: total consumer power, **including** the selected
   wallbox (required).
-- `soc_speicher_aktuell`: battery SoC (optional). Its configuration alone enables
-  battery-aware PV operation; the Grid reserve reference is not required.
+- `soc_speicher_aktuell`: battery SoC (optional). Storage-aware policy additionally requires the live
+  `min_soc_speicher` reserve. FAST uses the mapped discharge and grid import/export
+  power measurements and the shared maximum storage discharge setting.
 
 Grid is always available. Backend profile options include PV Surplus only when
 both power references are configured, independently of battery/reserve mappings.
@@ -54,7 +55,7 @@ for an ongoing charge. Adding back actual charging power avoids repeatedly subtr
 ## Central regulation and time-window smoothing
 
 **Regulation parameters / Regelparameter** contains the regulation interval
-(default 5 s), PV start delay (0 s), PV stop delay (90 s), SoC hysteresis (5 percentage
+(default 5 s), PV start delay (0 s), PV stop delay (90 s), SoC hysteresis (2 percentage
 points), and power smoothing window (5 s, range 0–300 s). Existing stored values
 are retained during migration; these defaults apply only when absent. The card
 only exposes battery target SoC for this profile. Advanced approximation entities
@@ -97,31 +98,17 @@ No minimum-current or device/vehicle limits are bypassed.
 
 ## Battery state machine
 
-Settings are `soll_soc_speicher` (default 95%) and `soc_hysterese` (default 5
-percentage points). The stop threshold is target minus hysteresis. Target settings
-are restricted to 0–99%, hysteresis to 0–99 percentage points; policy calculations additionally
-clamp the upper threshold to 99%. Hysteresis may equal or exceed the target: the
-resulting zero or negative stop threshold cannot be crossed by a valid
-nonnegative SoC. This does not bypass the start threshold or other stop/control
-conditions.
+Surplus uses the [common SoC state machine](pv-soc-policy.md), also used by
+Optimum and Maximum. Its configured target is constrained by the live reserve
+and shared H: `R+H <= T <= 100-H`. L=T-H/2 stops immediately; M=T+H/2 permits a
+stopped/new BALANCE start only with raw PV>household; U=T+H starts FAST from any
+state. BALANCE may continue down to (but excluding) L. FAST returns to BALANCE
+below M. Surplus intentionally allows storage energy in FAST mode.
 
-| Situation | Action |
-| --- | --- |
-| Any start or restart, SoC ≤ target | OFF; waiting for SoC above target |
-| SoC > target | Charge with NOT_BELOW |
-| Already charging, stop threshold ≤ SoC ≤ target | Continue with NOT_ABOVE |
-| SoC < stop threshold | Latch battery stop; hold through stop delay, then OFF |
-| Insufficient available power | Hold confirmed phase/current through stop delay, then OFF |
-| Restart after any pause | Require SoC > target again |
+All storage-aware PV power requests use the shared regulators and DOWN
+approximation. The existing no-storage UP/DOWN setting remains available.
+`min_soc` still belongs only to Grid. PV never creates a temporary reserve override.
 
-Equality at target permits continuation only. Equality at the stop threshold does
-not stop an ongoing charge. Battery eligibility is a separate stateful latch:
-once the lower boundary is crossed it remains stopped until SoC exceeds the
-upper target, even while electrical charging is deliberately held by the stop
-delay. The entire hysteresis band lies below the target (41%/5 pp means a strict
-start above 41% and a stop below 36%). `min_soc` applies only to the Grid profile; PV Surplus ignores legacy reserve
-values and hides the discharge-reserve input. It never creates a temporary
-MinRsvPct override. Leaving Grid can still restore an already-owned Grid override.
 Runtime continuation uses a confirmed APPLIED charging
 point and explicit profile state, not a transient OCPP Charging status. An active
 transaction identity handover (including a superseded startup identity) preserves
@@ -139,9 +126,8 @@ restoration remains handled by the existing shared battery integration.
 `regulation_interval` defaults to 5 seconds (configurable 1–300 seconds). Every
 cycle reads current measurements and computes a fresh policy and solver result.
 Ordinary positive power adjustments during charging use the existing one-second
-debounce. Starts with zero start delay and OFF skip it. Battery-SoC policy stops
-use the same stop-delay state machine as insufficient PV. Event values update the
-battery latch; recovery above the upper threshold cancels a pending normal stop.
+debounce. Starts with zero start delay and OFF skip it. Battery-SoC policy stops bypass the economic stop delay. Event values update the
+common SoC policy; a stopped session must meet the shared start conditions again.
 Invalid measurements prevent new positive dispatch; they do not retrospectively
 invalidate a sent command, invalidate the regulator or synthesize OFF. Explicit control/safety invalidations still fence pending work immediately. With a configured zero stop delay, policy stops are immediate. Measurements are re-read after debounce and positive
 pre-dispatch fences reject invalid or stale policy inputs. The shared runtime
@@ -208,7 +194,9 @@ checked again at dispatch/acknowledgement against current policy and deadlines.
 ## Limitations and hardware validation
 
 This is the accepted first-order power balance: no DC/AC conversion or inverter
-loss correction, no PV Daily Optimum, PV Maximum or external Energy Manager.
+loss correction, no PV Maximum or external Energy Manager.
+[PV Optimum](pv-optimum-design.md) reuses the same power balance with its own
+independent target policy.
 Reference sensors must report at least every 90 seconds; delayed/asynchronous
 meter readings can temporarily distort the balance. No prediction or smoothing is
 included. Command execution time and a changed-target debounce can extend a cycle.
@@ -221,17 +209,14 @@ OCPP tests cannot replace these device checks.
 
 ## Opt-in Wallbox Manager diagnostics
 
-Open **Settings → Devices & services → Wallbox Manager → Configure** and enable
-**Diagnostic logging** (German: **Diagnoseprotokoll**).
-It defaults to disabled, is saved in the integration options, and needs no OCPP
-control authority. A diagnostic-only change takes effect for subsequent evaluations
-without integration reload, charging/OCPP commands or changes to profile settings.
-Changing entity references at the same time still uses their existing reload path.
-Disable this option after troubleshooting: records are detailed and may be frequent.
+Open **Settings → Devices & services → Wallbox Manager → Configure** and choose
+**Diagnostic level** (**Diagnosestufe**): 0 off, 1 events, 2 events with relevant
+data, 3 full trace. The saved choice updates live without control reload or writes.
+The former boolean migrates false to 0 and true to 3. See
+[levels, migration and recovery diagnostics](diagnostic-logging.md).
 
-The same switch also enables restart/reload recovery diagnostics in all profiles,
-including NETZ; see [recovery diagnostics](diagnostic-logging.md). Content depends
-on the active feature/profile and current activity.
+The following full-cycle field description applies to Level 3. Levels 1/2 emit
+centrally deduplicated semantic events; Level 2 adds relevant explanatory data.
 
 Each actual PV evaluation writes exactly one physical **INFO** record prefixed
 `WBMGR subsystem=pv`, followed by compact JSON with stable sorted keys. Normal HA logs suffice;
@@ -308,17 +293,24 @@ new-sample gate, smoothing, or Fronius fast polling is introduced here. See the
 
 ### First-start reconciliation
 
-An explicit ON first prepares the electrical point while ChargingEnabled is still
-false, then confirms permission independently. A temporary preparation/permission
-refusal now starts an in-memory startup worker with the existing 60-second retry
-interval, even when no prior applied point exists. It re-reads policy and fresh
-execution evidence for each attempt. Only successful preparation and permission
-confirmation hand over to normal PV regulation. OFF, changed intent, ownership or
-authority loss, disconnect/reboot and unload revoke this pending authorization;
-restart/reload never restores the queued command or retry deadline. Persisted
-explicit user intent is independently reconciled through the ownership recovery
-path. Phase feedback alone cannot prove the current
-setpoint, so an uncertain operation is retried rather than inferred as applied.
+An explicit ON first prepares the latest safe electrical point while permission
+is still false, then separately confirms ChargingEnabled=true by readback.
+Temporary preparation blockers, including a missing transaction, return structured
+retryable outcomes. One accepted request remains pending through the existing
+60-second startup backoff. Repeated pending requests coalesce; already confirmed
+ON is idempotent when the current point is confirmed. Unconfirmed state after
+reload still requires reconciliation. Missing Optimum policy never manufactures
+an OFF point over a retained station profile.
+
+OFF, profile supersession, authority loss and obsolete connection/session context
+fence pending work. Command generations and pre-dispatch checks remain active.
+Permanent failures/unsupported operations terminate the attempt. Restart recovery
+continues to use separately persisted ownership/permission intent and fresh proof;
+queued commands and retry deadlines are not restored. Permission-evidence expiry
+between retries does not revoke the user request; every new command still captures
+and validates fresh permission evidence. A historical ended session before the
+request does not count as a new departure. The card shows pending preparation and
+provides a Cancel action that sends explicit Disable.
 
 After dispatch, the original current/phase point and voltage basis remain fixed.
 The runtime still fences capabilities, hard limits, transaction, intent, ownership,
@@ -360,9 +352,36 @@ Live fences remain: intent/profile epochs and explicit cancellation, user OFF,
 ownership, permission revision, authority revision, connection/boot generation,
 adapter/transaction scope, capability proof and hard current limits. Any change
 to the capability/limit snapshot remains conservatively fenced. No independent
-hard battery-protection signal exists in normal PV SoC policy: its lower threshold
-uses the next cycle and configured stop delay, rather than cancelling a sent
-command. Explicit control actions still supersede it immediately.
+hard battery-protection signal exists outside PV SoC policy: its lower threshold
+requests STOP on the next safe evaluation, without the economic stop delay.
+An already dispatched command is still acknowledged as its original snapshot. Explicit control actions still supersede it immediately.
+
+Initial enable uses the profile epoch as its caller fence, including while queued
+before the first hardware write. It does not compare live `pv_request()` with the
+sample used to prepare the request: a normal PV/load update is not cancellation.
+The shared runtime still checks current PV policy, valid voltage, representability
+and phase evidence before dispatch, and all live lifecycle/safety fences through
+permission confirmation. Thus an invalid pre-dispatch sample can still reject a
+write; a changed but valid demand alone does not produce `caller_invalidated`.
+This matters especially after reconnect when ChargingEnabled is false and there
+is no confirmed point: an unnecessary STALE result otherwise enters the startup
+worker's 60-second retry path before normal regulation can begin.
+
+Ongoing regulation likewise uses only live controller validity as its caller
+fence. Once the iteration has prepared its request, a newer PV/load/session-power
+sample does not cancel it by exact demand comparison. The shared runtime retains
+pre-dispatch policy, voltage, electrical representability and phase-proof checks;
+all lifecycle/safety checks remain active through confirmation. The following
+ordinary regulation cycle consumes the newest samples without a spurious 60-second
+STALE retry. Storage-aware requests now use DOWN and the common SoC boundaries;
+electrical insufficiency retains its existing start/stop delays.
+
+Regression coverage holds the OCPP call lock before dispatch, starting from a
+confirmed 1p/12A and preparing 13A or 11A. It changes measurements while queued,
+then checks confirmation, next-cycle convergence and live safety invalidation.
+The older acknowledgement-race test changes samples only after the peer receives
+the frame, when the pre-dispatch caller fence has already passed; it cannot detect
+the queued-command equality bug and remains complementary coverage.
 
 The existing pending slot covers point preparation and permission confirmation.
 A restarted regulator waits for superseded point cleanup before sampling again.
@@ -385,8 +404,8 @@ fields expose elapsed and remaining seconds from the original monotonic deadline
 regulation uses `setdefault` and cannot extend it. Recovery cancels the timer and a
 later independent stop starts a fresh one. The held phase/current is revalidated
 using fresh voltage, without requiring unchanged voltage-derived watts.
-`battery_policy_allowed`, `battery_hysteresis_holding` and the two battery threshold
-fields distinguish latched continuation/waiting from an unrestricted policy result.
+The common mode, transition reason, target profile and T/L/M/U fields distinguish
+continuation, waiting and protective STOP; see [shared diagnostics](pv-soc-policy.md).
 `ownership_status` distinguishes explicit acquisition, restored ownership and
 rejected live identity/authority evidence.
 

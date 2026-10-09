@@ -201,7 +201,7 @@
         "name": "Speicher-Ziel-SoC"
       },
       "soc_hysterese": {
-        "name": "SoC-Hysterese"
+        "name": "SoC-Hysterese und Ziel-Sicherheitsabstand"
       },
       "regulation_interval": {
         "name": "Regelintervall"
@@ -211,6 +211,18 @@
       },
       "pv_stop_delay": {
         "name": "PV-Stoppverzögerung"
+      },
+      "optimum_lower_soc": {
+        "name": "{scope} PV Optimum unterer Ziel-SoC"
+      },
+      "optimum_upper_soc": {
+        "name": "{scope} PV Optimum oberer Ziel-SoC"
+      },
+      "optimum_max_discharge_w": {
+        "name": "Maximale PV-Speicherentladeleistung"
+      },
+      "estimated_daily_house_consumption_kwh": {
+        "name": "{scope} PV Optimum täglicher Hausverbrauch ohne EV"
       }
     },
     "select": {
@@ -226,7 +238,9 @@
         "name": "Ladeprofil {scope}",
         "state": {
           "NETZ": "Netz",
-          "PV_SURPLUS": "PV-Überschuss"
+          "PV_SURPLUS": "PV-Überschuss",
+          "PV_OPTIMUM": "PV Optimum",
+          "PV_MAXIMUM": "PV Maximum"
         }
       },
       "active_wallbox": {
@@ -267,11 +281,21 @@
               "soc_speicher_aktuell": "Ladezustand",
               "leistung_pv": "PV-Leistung",
               "leistung_verbraucher": "Verbrauchsleistung",
-              "pv_diagnostic_logging": "Diagnoseprotokoll"
+              "storage_discharge_power": "Speicher-Entladeleistung",
+              "storage_capacity": "Nennkapazität des Speichers (WHRtg)",
+              "remaining_pv_energy": "Erwartete verbleibende PV-Energie heute",
+              "grid_import_power": "Netzbezugsleistung",
+              "grid_export_power": "Netzeinspeiseleistung",
+              "diagnostic_level": "Diagnosestufe"
             },
             "data_description": {
-              "pv_diagnostic_logging": "Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert.",
-              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox."
+              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox.",
+              "storage_discharge_power": "Tatsächliche nichtnegative Entladeleistung; null beim Laden.",
+              "storage_capacity": "Fronius Nennkapazität des Speichers: WHRtg / model_120_whrtg, in Wh oder kWh.",
+              "remaining_pv_energy": "Erwartete verbleibende PV-Produktion heute, in Wh oder kWh.",
+              "grid_import_power": "Nichtnegative aus dem Netz bezogene Leistung.",
+              "grid_export_power": "Nichtnegative ins Netz eingespeiste Leistung.",
+              "diagnostic_level": "Wallbox-Manager-Diagnosen: 0 aus, 1 Ereignisse und Fehler, 2 mit relevanten Daten, 3 vollständige Diagnosespur. Normale Warnungen und Fehler bleiben auch bei Stufe 0 aktiv. Standardmäßig deaktiviert."
             }
           },
           "regulation": {
@@ -280,7 +304,7 @@
               "regulation_interval": "Regelintervall",
               "pv_start_delay": "PV-Startverzögerung",
               "pv_stop_delay": "PV-Stoppverzögerung",
-              "soc_hysterese": "SoC-Hysterese",
+              "soc_hysterese": "SoC-Hysterese und Ziel-Sicherheitsabstand",
               "power_smoothing_window": "Leistungsglättung Zeitfenster"
             }
           }
@@ -319,6 +343,16 @@
         "discovered_automatically": "Wallboxen werden automatisch über OCPP angelegt."
       },
       "entry_type": "Wallbox"
+    }
+  },
+  "selector": {
+    "diagnostic_level": {
+      "options": {
+        "0": "Aus",
+        "1": "Ereignisse und Fehler",
+        "2": "Ereignisse mit relevanten Daten",
+        "3": "Vollständige Diagnosespur"
+      }
     }
   }
 }

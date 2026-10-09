@@ -311,7 +311,15 @@ for the exact state model, guarded sequence, station-scoped capability subentrie
 battery lifecycle and failure behavior.
 
 PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
-PV_DAILY_OPTIMUM, PV_MAXIMUM and the external Energy Manager interface remain deferred.
+PV Optimum is described in [its profile documentation](docs/pv-optimum-design.md).
+All three PV profiles, including PV Maximum, use the [shared SoC policy](docs/pv-soc-policy.md).
+While FAST_DISCHARGE is active it holds the lowest reachable positive charging
+point instead of pausing on a low power calculation; this can leave grid import.
+The minimum depends on phase reachability and electrical limits. Near the target,
+PV_BALANCE can deliberately pause after sustained insufficient power using the
+configured stop delay. A zero-current pause can activate the wallbox's restart
+lockout; safety/control stops still take precedence.
+PV Maximum and the external Energy Manager interface remain deferred.
 
 ## Integration settings and profile timing
 
@@ -391,8 +399,8 @@ The implemented pure solver supports these target-power directions:
 - UP
 
 Standalone profiles handle simple current-day PV logic and energy-flow feedback.
-Advanced forecasts, prices, departure/vehicle targets, learned behavior and site-wide
-optimization belong to the future Energy Manager, which supplies current power
+Advanced forecasts beyond the configured PV/linear household estimate, prices,
+departure/vehicle targets, learned behavior and site-wide optimization belong to the future Energy Manager, which supplies current power
 intent through REMOTE. Wallbox Manager retains technical operating-point solving.
 
 Home Assistant entities remain available for user interaction, display and
@@ -402,7 +410,7 @@ automations.
 
 Version 0.1.0 establishes the stable read-only scope described above. Development
 now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
-The v0.3.x Grid and PV Surplus profiles build on these controls. PV Daily Optimum,
+The Grid, PV Surplus, PV Optimum and PV Maximum profiles build on these controls.
 PV Maximum and the planned Energy Manager interface remain future work.
 
 Immutable station/EVSE/connector identities, capability evidence and independent
@@ -480,8 +488,10 @@ Profile settings remain stored when hidden. See the
 [automatic card registration and verification](docs/frontend-registration.md),
 including migration of existing integration-path Lovelace resources.
 
-Wallbox Manager offers one integration-level **Diagnostic logging** option
-(German: **Diagnoseprotokoll**, disabled by default) for troubleshooting.
+Wallbox Manager offers one integration-level **Diagnostic level** setting
+(German: **Diagnosestufe**): 0 off (default), 1 events and errors, 2 events with
+relevant data, 3 full trace. Levels 1/2 deduplicate unchanged decisions. Legacy
+boolean diagnostics migrate to 0/3, and level changes do not restart control.
 Detailed records use `WBMGR subsystem=pv` for PV evaluations and
 `WBMGR subsystem=recovery` for restart/reload recovery in any charging profile.
 See [diagnostic logging and recovery evidence](docs/diagnostic-logging.md) and

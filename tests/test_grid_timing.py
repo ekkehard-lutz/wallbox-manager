@@ -238,14 +238,14 @@ async def test_duration_entity_configuration_round_trips_without_commands(
     assert ProfileDuration(c, p.entry_id, t, "grid_duration").native_value == value
 
 
-@pytest.mark.parametrize("value", [0, 40.0, 99, 40.5, -1, 100])
+@pytest.mark.parametrize("value", [2, 40.0, 98, 0, 99, 40.5, -1, 100])
 async def test_target_soc_entity_whole_percent_edits(grid, value):
     from custom_components.wallbox_manager.number import ProfileNumber
 
     p, t, (c, _, peer, *_) = grid
     entity = ProfileNumber(c, p.entry_id, t, "soll_soc_speicher")
     count = len(peer.operations)
-    if value in (0, 40, 99):
+    if value in (2, 40, 98):
         await entity.async_set_native_value(value)
         assert entity.native_value == value
     else:

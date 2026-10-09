@@ -216,6 +216,7 @@ class ProfileOwnership:
             **self.record,
             "continuation": profile.pv_ongoing.get(target, False),
             "battery_allowed": profile.pv_battery.get(target, False),
+            "soc_mode": profile.optimum_modes.get(target, "STOP"),
             "transaction": session.external_transaction_id
             if session and session.active
             else None,
@@ -236,6 +237,7 @@ class ProfileOwnership:
                     **self.record,
                     "continuation": profile.pv_ongoing.get(target, False),
                     "battery_allowed": profile.pv_battery.get(target, False),
+                    "soc_mode": profile.optimum_modes.get(target, "STOP"),
                     "transaction": session.external_transaction_id
                     if session and session.active
                     else None,
