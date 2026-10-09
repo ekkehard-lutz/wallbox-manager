@@ -86,6 +86,17 @@ the shared normalization path. Devices with inconsistent boundary/periodic
 register bases cannot provide trustworthy energy; reset/conflict handling is
 conservative but cannot detect every plausible-looking device reporting error.
 
+From beta.10, embedded TransactionEvent samples must match the event scope and
+have an acquisition timestamp at or before the enclosing event timestamp. The
+same eligible collection feeds both the session projection and its live event
+cache. A later sample is excluded from both, rather than becoming a selected
+live measurement that contradicts the ledger. The previously accepted reading
+retains its original validity deadline; a subsequent eligible transaction sample
+or ordinary MeterValues reading can update it. Historical start/end boundaries,
+energy accounting and OCPP 1.6 StartTransaction/StopTransaction semantics remain
+unchanged. Timestamp/value consistency guards and genuine unavailable states
+remain in force.
+
 Power uses only explicit total active-import power, with no phase summation.
 Fresh exact-scope normal MeterValues takes precedence over parent fallback. A
 one-off explicitly scoped TransactionEvent sample wins ties with parent metering,
