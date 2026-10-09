@@ -205,11 +205,12 @@ async def test_observer_tracks_grace_while_command_execution_is_pending(grid):
             p.optimum_refresh(datetime.now(UTC))
             regulator = p.optimum_regulators[t]
             assert regulator.import_since == 0
-            assert regulator.requested == (3000 if tick < 3 else 500)
+            assert regulator.requested <= regulator.hard_max
+            assert regulator.reason == "awaiting_physical_response"
     assert len(peer.requests) == count
 
 
-async def test_missing_actual_power_resets_grace_but_keeps_independent_target(grid):
+async def test_missing_actual_power_preserves_evidence_but_blocks_new_requests(grid):
     p, t, _ = grid
     _, clock = active_policy(p, t)
     set_sensor(p, "grid_import_power", 1000)
@@ -218,5 +219,6 @@ async def test_missing_actual_power_resets_grace_but_keeps_independent_target(gr
     p.hass.states.async_remove("sensor.selected")
     clock[0] = 1
     p.optimum_refresh(datetime.now(UTC))
-    assert t not in p.optimum_regulators
+    assert p.optimum_regulators[t].import_since == 0
+    assert p.pv_request(t)[0] == 0
     assert p.optimum_targets[t] == 40

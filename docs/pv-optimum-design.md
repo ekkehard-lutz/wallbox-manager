@@ -1,5 +1,10 @@
 # PV Optimum
 
+> **beta.9 update:** the historical FAST ramp, unlimited minimum hold and
+> gap-reset behavior described below are superseded by the
+> [beta.9 budget, measurement and grid policy](beta9-implementation-report.md).
+> SoC and daily-planner architecture remain as documented here.
+
 PV Optimum uses home-battery energy for EV charging while planning to recover its
 own upper target SoC when forecast surplus for the remaining local day is exhausted. It does not control the battery's
 reserve or maintain a nighttime SoC. PV Surplus's independent target remains

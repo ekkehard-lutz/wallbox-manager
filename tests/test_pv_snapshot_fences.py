@@ -117,7 +117,7 @@ async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, chan
                 "voltage": 10,
             }[change]
         )
-        assert len(peer.requests) == count + 1
+        assert len(peer.requests) == count + (change != "voltage")
 
 
 @pytest.mark.parametrize(
@@ -310,7 +310,9 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
         ]
     )
     if change == "voltage":
-        assert c.confirmed_point(t).phase_voltages_v == (229,)
+        assert c.confirmed_point(t).phase_voltages_v == (
+            230,
+        )  # Reused ACK keeps its voltage basis.
     assert len(peer.requests) <= count + 2
     assert not p.pv_startups and t not in p.pv_retry_until
 
@@ -453,7 +455,9 @@ async def test_regulator_snapshot_survives_measurement_before_dispatch(
     expected = amps + {"pv": 1, "load": -1, "session_power": 1}.get(change, 0)
     assert c.confirmed_point(t).current_a == expected
     if change == "voltage":
-        assert c.confirmed_point(t).phase_voltages_v == (229,)
+        assert c.confirmed_point(t).phase_voltages_v == (
+            230,
+        )  # Reused ACK keeps its voltage basis.
     assert t not in p.pv_retry_until
     count = len(peer.requests)
     await tick()

@@ -775,6 +775,10 @@ for (const language of ['en','de']) {
     ['optimum_pause_pending', /checking sustained/, /prüft anhaltend/],
     ['optimum_deliberate_pause', /deliberately pauses/, /pausiert bewusst/],
     ['optimum_no_positive_point', /No safe positive/, /Kein sicherer positiver/],
+    ['hard_budget_pause', /available power/, /verfügbare Leistung/],
+    ['hard_budget_unavailable', /valid measurements/, /gültige Messwerte/],
+    ['grid_import_pause', /excessive grid import/, /Zu hoher Netzbezug/],
+    ['stop_delay_expired', /stop delay expired/, /Stoppverzögerung/],
   ]) test(`Optimum policy status ${status} in ${language}`,()=>{
     const data=states(true);
     data['select.anything'].state='PV_OPTIMUM';

@@ -51,7 +51,8 @@ explicit power request runs the ordinary calculation again.
 Optimum additionally retains specific phase rejection as scoped runtime evidence.
 Energy-desired planning continues across verified modes using the fresh regulator
 budget. Only executable planning is constrained to the confirmed mode. Its
-minimum-positive policy can raise the executable budget to that mode's safe minimum;
+minimum-positive policy can raise the soft request to that mode's safe minimum;
+it cannot exceed beta.9's independent hard power ceiling or grid-import allowance;
 this does not relax DOWN approximation for manual controls or other profiles.
 A task-scoped probe at the existing retry cadence may try the preferred transition
 again. The restriction remains known during the probe and is not cleared merely

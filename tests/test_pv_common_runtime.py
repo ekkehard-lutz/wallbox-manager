@@ -209,6 +209,10 @@ async def test_maximum_uses_real_enable_and_zero_current_pause(grid):
     p, t, (control, _, peer, *_) = grid
     configure(p, t, "PV_MAXIMUM")
     measurements(p, t, soc=90, actual=0)
+    # This lifecycle test starts with sufficient conservative battery headroom.
+    p.hass.states.async_set(
+        "sensor.storage_discharge_power", 0, {"unit_of_measurement": "W"}
+    )
     p.wait = lambda _: asyncio.Event().wait()
     assert "PV_MAXIMUM" in p.available_profiles(t)
     result = await p.permission(t, True)

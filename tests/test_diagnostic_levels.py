@@ -105,6 +105,9 @@ async def test_cycles_deduplicate_raw_measurements_and_emit_mode_change(
 async def test_enable_lifecycle_and_real_commands_are_observable(grid, caplog, level):
     p, t, (c, *_rest) = grid
     setup_optimum(p, t, pv=0, soc=84, load=500, actual=0)
+    p.hass.states.async_set(
+        "sensor.storage_discharge_power", 500, {"unit_of_measurement": "W"}
+    )
     p.entry.options = {"diagnostic_level": level}
     p.wait = lambda _: asyncio.Event().wait()
     caplog.set_level(logging.INFO)
@@ -161,6 +164,9 @@ async def test_normal_errors_survive_level_zero(grid, caplog):
 async def test_serialization_failure_does_not_change_control(grid, monkeypatch):
     p, t, (c, *_rest) = grid
     setup_optimum(p, t, pv=0, soc=84, load=500, actual=0)
+    p.hass.states.async_set(
+        "sensor.storage_discharge_power", 500, {"unit_of_measurement": "W"}
+    )
     p.entry.options = {"diagnostic_level": 2}
     p.wait = lambda _: asyncio.Event().wait()
 

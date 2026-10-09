@@ -17,6 +17,10 @@ from custom_components.wallbox_manager.control.commands import CommandStatus
 async def test_explicit_enable_initializes_fast_at_night(grid):
     p, t, (c, *_rest) = grid
     setup_optimum(p, t, soc=84, pv=0, load=500, actual=0)
+    # Coherent idle household discharge leaves the measured start reserve.
+    p.hass.states.async_set(
+        "sensor.storage_discharge_power", 500, {"unit_of_measurement": "W"}
+    )
     p.optimum_modes[t] = "PV_BALANCE"
     p.wait = lambda _: asyncio.Event().wait()
     result = await p.permission(t, True)

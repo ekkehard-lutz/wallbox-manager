@@ -123,7 +123,19 @@ async def test_dynamic_policy_and_regulator_selection_hysteresis(grid):
         return_value=4000,
     ) as fast:
         assert p.pv_request(t) == (4000, Direction.DOWN, "actively_charging")
-        fast.assert_called_once_with(3000, 1000, 3500, 0, 0, now=ANY, interval=5)
+        fast.assert_called_once_with(
+            3000,
+            1000,
+            3500,
+            0,
+            0,
+            now=ANY,
+            interval=5,
+            evidence=ANY,
+            confirmed=None,
+            pending=False,
+            step=230,
+        )
     assert p.optimum_targets[t] == 40
     for soc, mode in [
         (42, "FAST_DISCHARGE"),
@@ -331,8 +343,8 @@ async def test_battery_supported_start_crosses_minimum_via_common_solver(grid):
     clock = [0]
     p.monotonic = lambda: clock[0]
     initial = p.pv_edit(t).point
-    assert initial.charging and initial.current_a == 6 and initial.mode.count == 1
+    assert initial.charging and initial.current_a == 7 and initial.mode.count == 1
     clock[0] = 5
     point = p.pv_edit(t).point
-    assert point.charging and point.current_a == 6 and point.mode.count == 1
+    assert point.charging and point.current_a == 7 and point.mode.count == 1
     assert point.offered_power_w <= 3500

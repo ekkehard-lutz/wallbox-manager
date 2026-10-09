@@ -42,6 +42,12 @@ def reading(state, now, *, soc=False, energy=False, max_age=LIVE_FRESHNESS):
     if unit not in units:
         raise ValueError("invalid unit")
     timestamp = getattr(state, "last_reported", state.last_updated)
+    if state.attributes.get("observed_at"):
+        from .pv_budget import source_time
+
+        source = source_time(state)
+        if not 0 <= (now - source).total_seconds() <= max_age:
+            raise ValueError("stale source measurement")
     if not 0 <= (now - timestamp).total_seconds() <= max_age:
         raise ValueError("stale measurement")
     expiry = state.attributes.get("valid_until")
@@ -60,6 +66,10 @@ def power_valid_for(state, now, *, max_age=LIVE_FRESHNESS):
     expiry = getattr(state, "last_reported", state.last_updated) + timedelta(
         seconds=max_age
     )
+    if state.attributes.get("observed_at"):
+        from .pv_budget import source_time
+
+        expiry = min(expiry, source_time(state) + timedelta(seconds=max_age))
     if explicit := state.attributes.get("valid_until"):
         expiry = min(expiry, datetime.fromisoformat(explicit))
     return max(0, (expiry - now).total_seconds())
@@ -110,6 +120,16 @@ class PVSurplus:
         )
         if plan is None:
             return False  # Holding hardware is not permission for a new write.
+        hard_max = self.control.intent(target).hard_max_w
+        if hard_max is not None:
+            inputs = self.control.inputs(target)
+            volts = (
+                inputs.voltage.active_voltages(point.mode, datetime.now(UTC))
+                if inputs
+                else None
+            )
+            if volts is None or point.current_a * sum(volts) > hard_max:
+                return False
         if self.shared_pv_execution(target) and not after_dispatch:
             inputs = self.control.inputs(target)
             desired = self.control.intent(target).energy_desired
@@ -320,12 +340,7 @@ class PVSurplus:
             states.append(self.hass.states.get(soc_entity))
         expiry = []
         for state in states:
-            expiry.append(
-                getattr(state, "last_reported", state.last_updated)
-                + timedelta(seconds=MAX_AGE_SECONDS)
-            )
-            if value := state.attributes.get("valid_until"):
-                expiry.append(datetime.fromisoformat(value))
+            expiry.append(now + timedelta(seconds=power_valid_for(state, now)))
         self.pv_expiry[target] = min(expiry)
         available = pv_balance(pv, load, actual)
         if record := active(self, target):
@@ -358,16 +373,15 @@ class PVSurplus:
         self.pv_sessions[target] = identity
 
     def pv_input_gap(self, target):
-        """Break continuous policy timers without editing desired/applied state."""
-        self.optimum_regulators.pop(target, None)
+        """Missing input cancels start evidence, never restarts a pending stop."""
         self.pv_start_since.pop(target, None)
-        self.pv_stop_since.pop(target, None)
         self.pv_expiry.pop(target, None)
         self.status[target] = "measurements_unavailable"
 
     @diagnostic_request
     def pv_request(self, target):
         self.pv_sync_session(target)
+        self.control.intent(target).hard_max_w = None
         try:
             if self.common_pv(target):
                 return self.optimum_request(target)
@@ -391,7 +405,11 @@ class PVSurplus:
             self.optimum_regulators.pop(target, None)
             return Fraction(0), Direction.DOWN, "stopped_battery_soc"
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
-            self.optimum_regulators.pop(target, None)
+            if self.optimum_fast(target) or self.references.get(
+                "storage_discharge_power"
+            ):
+                self.control.intent(target).hard_max_w = Fraction(0)
+                return Fraction(0), Direction.DOWN, "measurements_unavailable"
             return Fraction(0), Direction.DOWN, "measurements_unavailable"
 
     @diagnostic_plan
@@ -431,6 +449,15 @@ class PVSurplus:
                 executable_minimum_hold=executable[2]
                 in ("optimum_minimum_hold", "optimum_pause_pending"),
             )
+        if record := active(self, target):
+            regulator = self.optimum_regulators.get(target)
+            record.data.update(
+                hard_max_power_w=number(intent.hard_max_w),
+                grid_policy_reason=regulator.reason if regulator else None,
+                minimum_import_since=regulator.excess_since if regulator else None,
+                fast_state_revision=regulator.revision if regulator else None,
+                stop_delay_started_at=self.pv_stop_since.get(target),
+            )
         return executable
 
     def _pv_plan(
@@ -460,7 +487,39 @@ class PVSurplus:
                 else None,
             )[1]
 
+        hard_max = self.control.intent(target).hard_max_w
+        if hard_max is not None:
+            power = min(power, hard_max)
         result = resolve(power, direction)
+        since = self.pv_stop_since.get(target)
+        if status == "measurements_unavailable" and advance:
+            self.pv_start_since.pop(target, None)
+        if (
+            status == "measurements_unavailable"
+            and since is not None
+            and (now >= since + settings["pv_stop_delay"])
+        ):
+            return 0, Direction.DOWN, "stop_delay_expired", resolve(0, Direction.DOWN)
+        if (
+            status == "measurements_unavailable"
+            and hard_max == 0
+            and self.control.runtime.enabled(target) is not False
+        ):
+            return (
+                0,
+                Direction.DOWN,
+                "hard_budget_unavailable",
+                resolve(0, Direction.DOWN),
+            )
+        if (
+            hard_max is not None
+            and (result is None or result.point is None)
+            and (confirmed := self.control.confirmed_point(target)) is not None
+            and confirmed.offered_power_w > hard_max
+        ):
+            # Missing phase/voltage proof cannot freeze an already excessive
+            # offer. A verified OFF does not need a positive voltage basis.
+            return 0, Direction.DOWN, "hard_budget_pause", resolve(0, Direction.DOWN)
         # No decision is distinct from the solver's confirmed feasible OFF point.
         # Do not turn missing policy/electrical inputs into a desired zero or a
         # retryable command. Post-dispatch validation may use its dispatched mode.
@@ -473,7 +532,6 @@ class PVSurplus:
         ):
             if advance:
                 self.pv_start_since.pop(target, None)
-                self.pv_stop_since.pop(target, None)
             return (
                 power,
                 direction,
@@ -507,6 +565,15 @@ class PVSurplus:
             and not result.point.charging
         ):
             status = "paused_insufficient_pv"
+        if (
+            hard_max is not None
+            and result
+            and result.point
+            and not result.point.charging
+        ):
+            minimum = self.control.minimum_positive(target)
+            if minimum and minimum.point and not minimum.point.charging:
+                return 0, Direction.DOWN, "hard_budget_pause", minimum
         ongoing = self.pv_ongoing.get(target, False)
         if (
             status in ("paused_insufficient_pv",)
@@ -744,6 +811,8 @@ class PVSurplus:
 
     def pv_confirm(self, target):
         point = self.control.confirmed_point(target)
+        if (regulator := self.optimum_regulators.get(target)) is not None:
+            regulator.acknowledge(point, self.monotonic())
         session = self.control.runtime.sessions.get(target)
         self.pv_ongoing[target] = bool(
             (
@@ -946,16 +1015,26 @@ class PVSurplus:
                         and not holding
                         and not waiting_retry
                         and (
-                            point != self.control.confirmed_point(target)
+                            not point.same_setpoint(
+                                self.control.confirmed_point(target)
+                            )
                             or intent.phase_retry
                             or target in self.control._unconfirmed_targets
                             or intent.command_result is None
+                            or (intent.command_result.status != CommandStatus.APPLIED)
+                            or (
+                                (inputs := self.control.inputs(target)) is not None
+                                and self.control._confirmed_contexts.get(target)
+                                != self.control.setpoint_context(inputs)
+                            )
                         )
                     ):
                         if (
                             point
                             and point.charging
-                            and point != self.control.confirmed_point(target)
+                            and not point.same_setpoint(
+                                self.control.confirmed_point(target)
+                            )
                             and self.pv_ongoing.get(target, False)
                             and not self.optimum_fast(target)
                         ):
@@ -975,7 +1054,12 @@ class PVSurplus:
                         phase_superseded = bool(
                             intent.command_result
                             and intent.command_result.reason == CommandReason.STALE
-                            and intent.fence_reason == "pre_dispatch_desired_phase"
+                            and intent.fence_reason
+                            in (
+                                "pre_dispatch_desired_phase",
+                                "pre_dispatch_setpoint_changed",
+                                "pre_dispatch_pv_policy",
+                            )
                         )
                         if intent.phase_retry or (
                             intent.command_result

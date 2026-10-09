@@ -310,19 +310,29 @@ class Cycle:
             )
         elif intent.status not in ("applied", "idle", "pending") and after is None:
             decision, reason = "HOLD", intent.status
+        elif reason in (
+            "hard_budget_pause",
+            "hard_budget_unavailable",
+            "grid_import_pause",
+        ):
+            decision = "SAFETY_PAUSE"
         elif intent.phase_retry and self.data.get("phase_transition_blocked", True):
             decision, reason = "WAIT_PHASE_LOCKOUT", "phase_switch_lockout"
         elif reason == "optimum_minimum_hold":
             decision = "MINIMUM_HOLD"
         elif reason == "optimum_pause_pending":
             decision = "PAUSE_PENDING"
-        elif reason == "optimum_deliberate_pause":
+        elif reason in (
+            "optimum_deliberate_pause",
+            "grid_import_pause",
+            "stop_delay_expired",
+        ):
             decision = "DELIBERATE_PAUSE"
         elif reason == "pv_start_delay":
             decision = "START_PENDING"
         elif reason == "pv_stop_delay":
             decision = "STOP_PENDING"
-        elif reason == "measurements_unavailable":
+        elif reason in ("measurements_unavailable", "hard_budget_unavailable"):
             decision = "INPUT_UNAVAILABLE"
         elif self.plan is not None and self.plan.point is None:
             decision, reason = "HOLD", self.plan.reason.value
@@ -356,7 +366,14 @@ class Cycle:
             stop_delay_holding=reason in ("pv_stop_delay", "optimum_pause_pending"),
             minimum_positive_hold=self.data.get("executable_minimum_hold", False)
             or reason in ("optimum_minimum_hold", "optimum_pause_pending"),
-            deliberate_pause=reason == "optimum_deliberate_pause",
+            deliberate_pause=reason
+            in (
+                "optimum_deliberate_pause",
+                "grid_import_pause",
+                "hard_budget_pause",
+                "hard_budget_unavailable",
+                "stop_delay_expired",
+            ),
             ongoing_before=self.ongoing_before,
             ongoing_after=p.pv_ongoing.get(t, False),
             applied_before=point(self.before),

@@ -74,6 +74,7 @@ class ManualIntent:
     energy_desired: SolverResult | None = None
     reachable_only: bool = False
     policy_pause: bool = False
+    hard_max_w: Fraction | None = None
     status: str = "idle"
     fence_reason: str | None = None
     solver_result: SolverResult | None = None
@@ -108,6 +109,7 @@ class ControlRuntime:
         self._listeners = set()
         self._closed = False
         self._confirmed_points = {}
+        self._confirmed_contexts = {}
         self.recovery_status = {}
         self.pending_points = {}
         self._point_locks = {}
@@ -185,6 +187,7 @@ class ControlRuntime:
     def close(self):
         self._closed = True
         self._confirmed_points.clear()
+        self._confirmed_contexts.clear()
         self._unsubscribe_defaults()
         for intent in self.intents.values():
             intent.generation += 1
@@ -340,6 +343,7 @@ class ControlRuntime:
         minimum_positive=False,
         reachable=False,
         energy_desired=False,
+        hard_max_w=None,
     ):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
@@ -359,6 +363,13 @@ class ControlRuntime:
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
         request = request or intent.request
+        if hasattr(self, "profiles") and self.profiles.common_pv(target):
+            if intent.hard_max_w is not None:
+                hard_max_w = (
+                    intent.hard_max_w
+                    if hard_max_w is None
+                    else min(hard_max_w, intent.hard_max_w)
+                )
         if (
             request.target_w == 0
             and caps.stop.state != EvidenceState.VERIFIED
@@ -402,6 +413,7 @@ class ControlRuntime:
             and self.runtime.enabled(target) is True
             and target not in self._inactive,
             phase_switch_deviation_pct=intent.phase_switch_deviation_pct,
+            hard_max_w=hard_max_w,
         )
         return (
             inputs,
@@ -449,6 +461,11 @@ class ControlRuntime:
                 if e.mode.count in self.intent(target).current_limits
             ),
         )
+
+    @staticmethod
+    def setpoint_context(inputs):
+        """Transaction and electrical contract under which a setpoint was confirmed."""
+        return inputs.transaction_id, inputs.capabilities, inputs.limits
 
     def confirmed_point(self, target):
         """Read-only projection of an APPLIED result in its confirmed context.
@@ -879,6 +896,7 @@ class ControlRuntime:
             state.authority_revision,
             enabled.revision,
         )
+        self._confirmed_contexts[target] = self.setpoint_context(inputs)
         self._unconfirmed_targets.discard(target)
         self.recovery_status[target] = "point_adopted"
         recovery_snapshot(
@@ -1081,14 +1099,23 @@ class ControlRuntime:
             )
             prepared["fence"] = prepared_fence
         prior_point = self.confirmed_point(target)
+        retry_required = (
+            intent.command_result is not None
+            and intent.command_result.status != CommandStatus.APPLIED
+        )
         if (
             reuse_applied
+            and not retry_required
             and target not in self._unconfirmed_targets
-            and prior_point == resolved.point
+            and self._confirmed_contexts.get(target) == self.setpoint_context(inputs)
+            and resolved.point.same_setpoint(prior_point)
             and current()
         ):
             intent.command_result = CommandResult(CommandStatus.APPLIED)
             intent.status = "applied"
+            command_event(
+                self, target, "command_reused", operating_point=resolved.point
+            )
             self.publish(target)
             return intent.command_result
         self.pending_points[target] = resolved.point
@@ -1134,8 +1161,11 @@ class ControlRuntime:
                 intent.solver_result = resolved
                 if (
                     reuse_applied
+                    and not retry_required
                     and target not in self._unconfirmed_targets
-                    and prior_point == resolved.point
+                    and self._confirmed_contexts.get(target)
+                    == self.setpoint_context(inputs)
+                    and resolved.point.same_setpoint(prior_point)
                     and current()
                 ):
                     result = CommandResult(CommandStatus.APPLIED)
@@ -1174,6 +1204,7 @@ class ControlRuntime:
                     self._phase_restrictions.pop(target, None)
                     intent.phase_retry = False
                 self._unconfirmed_targets.discard(target)
+                self._confirmed_contexts[target] = self.setpoint_context(inputs)
                 self._confirmed_points[target] = (
                     resolved.point,
                     token,

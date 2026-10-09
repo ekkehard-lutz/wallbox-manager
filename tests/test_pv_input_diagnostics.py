@@ -44,8 +44,8 @@ async def test_fast_actual_inputs_all_profiles(grid, caplog, profile):
     assert fast["grid_import_power_w"] == 0
     assert fast["grid_export_power_w"] == 500
     assert fast["previous_request_w"] is None
-    assert fast["request_w"] == ev["request_w"] == 2750
-    assert fast["grid_deadband_w"] == 100 and fast["import_grace_s"] == 3
+    assert fast["request_w"] == ev["request_w"] == 3450
+    assert fast["grid_deadband_w"] == 100 and fast["import_grace_s"] == 10
     assert ev["grid_net_power_w"] == -500
     assert ev["battery_soc_pct"] == 83
     assert ev["battery_power_signed_w"] is None
@@ -118,7 +118,12 @@ def test_timestamps_keep_source_and_ha_clocks_distinct(age, expected, source):
     assert sample["last_updated"] == state.last_updated.isoformat()
     assert (
         sample["effective_valid_until"]
-        == (state.last_reported + timedelta(seconds=90)).isoformat()
+        == min(
+            state.last_reported + timedelta(seconds=90),
+            datetime.fromisoformat(source) + timedelta(seconds=90)
+            if source and "+00:00" in source
+            else state.last_reported + timedelta(seconds=90),
+        ).isoformat()
     )
     assert sample["source_observed_at"] == (
         source if source and "+00:00" in source else None
@@ -216,8 +221,8 @@ async def test_balance_exposes_uncorrected_smoothed_inputs(grid, caplog):
     assert calc["site_load_w"] == -1000  # Deliberately NOT fixed in beta.8.
     assert ev["request_w"] == calc["surplus_w"] == 5000
     assert ev["regulator"]["algorithm"] == "PV_BALANCE"
-    assert ev["grid_net_power_w"] is None
-    assert line["external"]["grid_import_power"]["freshness"] == "not_read"
+    assert ev["grid_net_power_w"] == 0
+    assert line["external"]["grid_import_power"]["freshness"] == "fresh"
 
 
 async def test_no_additional_ha_reads_or_regulator_updates(grid, caplog, monkeypatch):
@@ -251,7 +256,7 @@ async def test_identical_minimum_hold_pause_commands_and_soc(grid, caplog, level
     p.entry.options = {"diagnostic_level": level}
     caplog.set_level(logging.INFO)
     await p.permission(t, True)
-    assert c.confirmed_point(t).current_a == 6
+    assert c.confirmed_point(t).current_a == 7
     clock[0] = 1
     samples(p, t, soc=80, pv=0, load=0)
     await evaluate(p, t)
@@ -260,7 +265,7 @@ async def test_identical_minimum_hold_pause_commands_and_soc(grid, caplog, level
     clock[0] = 11
     await evaluate(p, t)
     assert not c.confirmed_point(t).charging
-    assert [period(r)["limit"] for r in peer.requests] == [6, 0]
+    assert [period(r)["limit"] for r in peer.requests] == [7, 6, 0]
     lines = records(caplog)
     assert any("regulator_evaluations" in line for line in lines) == (level == 3)
     if level < 3:
@@ -273,7 +278,7 @@ async def test_identical_phase_lockout_commands(grid, caplog, level):
     p.entry.options = {"diagnostic_level": level}
     caplog.set_level(logging.INFO)
     clock[0] = 1
-    samples(p, t, imported=6000)
+    samples(p, t, actual=4140, discharge=3200, imported=1800)
     before = len(peer.requests)
     await evaluate(p, t)
     assert len(peer.requests) == before + 2

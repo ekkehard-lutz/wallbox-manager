@@ -38,7 +38,8 @@ Surplus intentionally permits battery discharge in FAST mode at/above U.
 
 PV operation never writes a temporary storage reserve. Grid reserve restoration
 continues through its existing ownership mechanism. Missing or invalid live
-inputs block new decisions; a mathematically impossible target range produces
+inputs block new positive decisions; beta.9 pauses when the hard power budget
+cannot be established and preserves an active stop deadline across gaps; a mathematically impossible target range produces
 STOP. Zero-current pauses retain charging permission and do not bypass station
 re-enable or phase-switch lockouts.
 

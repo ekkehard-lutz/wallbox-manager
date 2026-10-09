@@ -92,6 +92,7 @@ def input_sample(state, entity_id, now, max_age, value, accepted):
             last_updated=updated.isoformat(),
             last_reported=reported.isoformat() if reported else None,
             effective_valid_until=deadline.isoformat() if deadline else None,
+            power_availability_reason=state.attributes.get("power_availability_reason"),
         )
         for attr, field in (
             ("observed_at", "source_observed_at"),
@@ -108,6 +109,12 @@ def input_sample(state, entity_id, now, max_age, value, accepted):
             if state.attributes.get("observed_at") is not None
             else "unavailable"
         )
+        if sample["source_observed_at"] is not None and deadline is not None:
+            acquired = datetime.fromisoformat(sample["source_observed_at"])
+            sample["source_age_s"] = (now - acquired).total_seconds()
+            sample["effective_valid_until"] = min(
+                deadline, acquired + timedelta(seconds=max_age)
+            ).isoformat()
     return sample
 
 
@@ -263,7 +270,16 @@ def diagnostic_request(method):
 def diagnostic_fast_request(method):
     @wraps(method)
     def wrapped(
-        regulator, wallbox, discharge, limit, imported, exported, *, now, interval
+        regulator,
+        wallbox,
+        discharge,
+        limit,
+        imported,
+        exported,
+        *,
+        now,
+        interval,
+        **kwargs,
     ):
         record = detailed_record()
         if record is None:
@@ -276,9 +292,11 @@ def diagnostic_fast_request(method):
                 exported,
                 now=now,
                 interval=interval,
+                **kwargs,
             )
         snapshot = None
         try:
+            from .pv_budget import IMPORT_CONFIRM_SECONDS, SETTLING_SECONDS
             from .pv_regulators import GRID_DEADBAND_W, IMPORT_GRACE_SECONDS
 
             snapshot = {
@@ -294,7 +312,10 @@ def diagnostic_fast_request(method):
                 "now_monotonic": now,
                 "interval_s": interval,
                 "grid_deadband_w": GRID_DEADBAND_W,
-                "import_grace_s": IMPORT_GRACE_SECONDS,
+                "import_grace_s": IMPORT_CONFIRM_SECONDS
+                if kwargs.get("evidence") is not None
+                else IMPORT_GRACE_SECONDS,
+                "response_settling_s": SETTLING_SECONDS,
             }
         except Exception:
             record.data["diagnostic_error"] = "regulator_snapshot_failed"
@@ -307,11 +328,18 @@ def diagnostic_fast_request(method):
             exported,
             now=now,
             interval=interval,
+            **kwargs,
         )
         try:
             if snapshot is not None:
                 snapshot.update(
                     request_w=number(result),
+                    hard_max_w=number(regulator.hard_max),
+                    measurement_generation=(
+                        regulator.evidence.generation if regulator.evidence else None
+                    ),
+                    state_revision=regulator.revision,
+                    evidence_decision=regulator.reason,
                     updated_at_monotonic=regulator.updated_at,
                     import_since_monotonic=regulator.import_since,
                 )

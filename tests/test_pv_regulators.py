@@ -76,7 +76,7 @@ def test_missing_invalid_input_never_becomes_zero(changes):
 
 
 def test_smoothed_request_reaches_usable_power_even_while_wallbox_is_paused():
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     regulator = FastDischargeRegulator()
     first = regulator.request(0, 0, 3500, 0, 0, now=0, interval=5)
@@ -95,7 +95,7 @@ def transient_request(
 
 
 def test_battery_takes_transient_load_during_grace_without_reduction():
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     regulator = FastDischargeRegulator()
     assert transient_request(regulator, 0) == 5000
@@ -106,7 +106,7 @@ def test_battery_takes_transient_load_during_grace_without_reduction():
 
 
 def test_persistent_import_reduces_at_three_seconds_not_an_extending_deadline():
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     regulator = FastDischargeRegulator()
     for seconds in (0, 1, 2, 2.999):
@@ -119,13 +119,13 @@ def test_persistent_import_reduces_at_three_seconds_not_an_extending_deadline():
 
 @pytest.mark.parametrize("discharge", [4700, 4800])
 def test_exhausted_or_noise_sized_headroom_never_delays_deficit(discharge):
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     assert transient_request(FastDischargeRegulator(), 0, discharge=discharge) == 2500
 
 
 def test_partial_headroom_only_defers_coverable_part():
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     regulator = FastDischargeRegulator()
     assert transient_request(regulator, 0, discharge=4000) == 3300
@@ -141,7 +141,7 @@ def test_partial_headroom_only_defers_coverable_part():
 
 
 def test_excess_discharge_bypasses_grace_and_noise_does_not_start_it():
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     regulator = FastDischargeRegulator()
     assert transient_request(regulator, 0, discharge=5000) == 2300
@@ -152,7 +152,7 @@ def test_excess_discharge_bypasses_grace_and_noise_does_not_start_it():
 
 
 def test_grace_loses_headroom_and_invalid_input_breaks_continuity():
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     regulator = FastDischargeRegulator()
     assert transient_request(regulator, 0) == 5000
@@ -163,7 +163,7 @@ def test_grace_loses_headroom_and_invalid_input_breaks_continuity():
 
 
 def test_one_second_observation_does_not_speed_up_upward_smoothing():
-    from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
+    from beta8_regulator_reference import Beta8Regulator as FastDischargeRegulator
 
     fast, slow = FastDischargeRegulator(), FastDischargeRegulator()
     for regulator in (fast, slow):

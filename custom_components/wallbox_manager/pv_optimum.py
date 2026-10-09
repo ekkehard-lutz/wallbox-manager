@@ -10,6 +10,7 @@ from homeassistant.util import dt as dt_util
 from .control.requests import Direction
 from .diagnostics import profile_event
 from .freshness import freshness_for
+from .pv_budget import PowerEvidence, source_time
 from .pv_regulators import FastDischargeRegulator
 from .pv_soc import clamp_target, soc_policy, target_bounds
 
@@ -466,6 +467,38 @@ class PVOptimum:
             regulator = self.optimum_regulators.setdefault(
                 target, FastDischargeRegulator()
             )
+            keys = (
+                "storage_discharge_power",
+                "grid_import_power",
+                "grid_export_power",
+                "leistung_pv",
+                "leistung_verbraucher",
+            )
+            states = [self.selected_power_states(target)[0]] + [
+                self.hass.states.get(self.references[key]) for key in keys
+            ]
+            evidence = PowerEvidence(
+                tuple(source_time(state) for state in states),
+                values["leistung_pv"],
+                values["leistung_verbraucher"],
+            )
+            inputs = self.control.inputs(target)
+            step = (
+                min(
+                    (
+                        e.current_step_a * sum(volts)
+                        for e in inputs.capabilities.envelopes
+                        if (
+                            volts := inputs.voltage.active_voltages(
+                                e.mode, datetime.now(UTC)
+                            )
+                        )
+                    ),
+                    default=Fraction(230),
+                )
+                if inputs
+                else Fraction(230)
+            )
             power = regulator.request(
                 actual,
                 values["storage_discharge_power"],
@@ -474,10 +507,54 @@ class PVOptimum:
                 values["grid_export_power"],
                 now=self.monotonic(),
                 interval=settings["regulation_interval"],
+                evidence=evidence,
+                confirmed=self.control.confirmed_point(target),
+                pending=target in self.control.pending_points,
+                step=step,
             )
+            self.control.intent(target).hard_max_w = regulator.hard_max
         else:
-            self.optimum_regulators.pop(target, None)
             power = max(Fraction(0), available)
+            # BALANCE still respects the configured battery ceiling whenever
+            # that measurement contract is configured (SURPLUS may omit it).
+            if self.references.get("storage_discharge_power"):
+                from .pv_surplus import power_valid_for, reading
+
+                now = datetime.now(UTC)
+                keys = (
+                    "storage_discharge_power",
+                    "grid_import_power",
+                    "grid_export_power",
+                    "leistung_pv",
+                    "leistung_verbraucher",
+                )
+                states = [self.selected_power_states(target)[0]] + [
+                    self.hass.states.get(self.references.get(key, "")) for key in keys
+                ]
+                watts = [reading(state, now) for state in states[1:]]
+                self.pv_expiry[target] = min(
+                    self.pv_expiry[target],
+                    *(now + timedelta(seconds=power_valid_for(s, now)) for s in states),
+                )
+                values.update(zip(keys, watts, strict=True))
+                evidence = PowerEvidence(
+                    tuple(source_time(state) for state in states), watts[3], watts[4]
+                )
+                regulator = self.optimum_regulators.setdefault(
+                    target, FastDischargeRegulator()
+                )
+                regulator.update_budget(
+                    actual,
+                    watts[0],
+                    settings["optimum_max_discharge_w"],
+                    watts[1],
+                    watts[2],
+                    evidence,
+                )
+                self.control.intent(target).hard_max_w = regulator.hard_max
+                # Site import above minimum remains a zero-import objective.
+                if regulator.net_import > 100:
+                    power = min(power, max(0, actual - regulator.net_import))
         if record := active(self, target):
             record.data.update(
                 raw_regulator_target_w=number(power),
@@ -507,12 +584,14 @@ class PVOptimum:
     ):
         """Separate an energy deficit from permission to enter expensive OFF.
 
-        FAST keeps a reachable positive floor indefinitely. BALANCE reuses the
+        FAST permits only a hard-budget-safe floor within the grid allowance.
+        BALANCE reuses the
         configured stop delay, holding that floor (not an obsolete high offer).
         At least one regulation interval is required even with stop delay zero:
         one transient sample must never pause an established Optimum charge.
         Unknown inputs are handled by pv_plan before entering this policy.
         """
+        from .control.runtime import PowerSettings
         from .pv_diagnostics import active, number
         from .solver.operating_point import Reason
 
@@ -528,6 +607,35 @@ class PVOptimum:
                 if minimum and minimum.point
                 else None,
             )
+        if (
+            minimum is not None
+            and minimum.point is not None
+            and not minimum.point.charging
+        ):
+            return 0, Direction.DOWN, "hard_budget_pause", minimum
+        regulator = self.optimum_regulators.get(target)
+        if regulator and regulator.evidence and minimum and minimum.point:
+            candidates = self.selected_power_states(target)
+            from .pv_surplus import reading
+
+            actual = reading(candidates[0], datetime.now(UTC))
+            if not regulator or not regulator.minimum_allowed(
+                minimum.point, now=self.monotonic(), actual=actual
+            ):
+                # An above-minimum request may still reduce import sufficiently;
+                # only apply the exception when the energy solve needs the floor.
+                if not result.point.charging or (
+                    result.point.offered_power_w <= minimum.point.offered_power_w
+                ):
+                    paused = self.control.resolve(
+                        target, request=PowerSettings(0, Direction.DOWN)
+                    )[1]
+                    status = (
+                        "hard_budget_pause"
+                        if regulator.reason == "minimum_response_budget"
+                        else "grid_import_pause"
+                    )
+                    return 0, Direction.DOWN, status, paused
         if result.point.charging:
             if advance:
                 self.pv_stop_since.pop(target, None)
@@ -536,8 +644,6 @@ class PVOptimum:
             # Known electrical infeasibility keeps existing safe OFF behavior;
             # lack of reachability evidence is a no-decision, never a new pause.
             if minimum is None or minimum.reason != Reason.ELECTRICAL_LIMIT:
-                if advance:
-                    self.pv_stop_since.pop(target, None)
                 return power, Direction.DOWN, "telemetry_unavailable", None
             return 0, Direction.DOWN, "optimum_no_positive_point", result
         confirmed = self.control.confirmed_point(target)

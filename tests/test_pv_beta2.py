@@ -225,7 +225,7 @@ async def test_explicit_safety_stops_but_measurement_gaps_hold(grid, safety):
         p.pv_confirm(t)
         assert c.confirmed_point(t) == confirmed and confirmed.charging
         assert len(peer.requests) == count
-        assert p.pv_ongoing[t] and t not in p.pv_stop_since
+        assert p.pv_ongoing[t] and p.pv_stop_since[t] == 0
         assert c.runtime.enabled(t) is True
         return
     assert not p.pv_ongoing.get(t, False)

@@ -3,13 +3,11 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 
 import pytest
 from ocpp.v21 import call_result
 from test_control_runtime import manual as manual
 from test_ocpp21_control import connected as connected
-from test_pv_diagnostics import records
 from test_pv_optimum import setup_optimum
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
@@ -36,6 +34,25 @@ def samples(p, t, *, actual=0, imported=0, discharge=0, soc=90, pv=4000, load=50
         ("grid_export_power", 0),
     ):
         p.hass.states.async_set(p.references[key], value, {"unit_of_measurement": "W"})
+
+    at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    for entity in (
+        "sensor.selected",
+        "sensor.pv",
+        "sensor.load",
+        *(
+            p.references[k]
+            for k in (
+                "storage_discharge_power",
+                "grid_import_power",
+                "grid_export_power",
+            )
+        ),
+    ):
+        state = p.hass.states.get(entity)
+        p.hass.states.async_set(
+            entity, state.state, {**state.attributes, "observed_at": at}
+        )
 
 
 def configure(grid):
@@ -68,42 +85,37 @@ async def evaluate(p, t):
     return result
 
 
-async def test_initial_floor_and_accepted_startup_settling_never_off(grid):
+async def test_initial_offer_does_not_ramp_without_new_physical_evidence(grid):
     p, t, (c, _, peer, *_), clock = configure(grid)
     assert (await p.permission(t, True)).status == CommandStatus.APPLIED
-    assert p.optimum_regulators[t].requested == 875  # Raw ramp is unchanged.
-    assert period(peer.requests[-1]) == {
-        "start_period": 0,
-        "limit": 6,
-        "number_phases": 1,
-    }
-    clock[0] = 5
+    assert p.optimum_regulators[t].requested == 1700
+    assert c.confirmed_point(t).current_a == 7
+    count = len(peer.requests)
+    for tick in (1, 5, 10, 15):
+        clock[0] = tick
+        await evaluate(p, t)
+    assert len(peer.requests) == count
+    assert p.optimum_regulators[t].requested == 1700
+    samples(p, t, actual=1610, discharge=1000, pv=4000, load=2110)
+    clock[0] = 20
     await evaluate(p, t)
-    assert p.optimum_regulators[t].requested == Fraction("1531.25")
-    clock[0] = 6
-    samples(p, t, imported=1000)  # Actual power still lags at zero.
-    await evaluate(p, t)
-    assert p.optimum_regulators[t].requested == 0
-    assert p.status[t] == "optimum_minimum_hold"
-    assert c.confirmed_point(t).current_a == 6
-    assert all(period(r)["limit"] > 0 for r in peer.requests)
-    assert c.runtime.enabled(t) is True
+    assert c.confirmed_point(t).current_a > 7
 
 
-async def test_one_phase_ten_amps_reduces_to_floor_and_stays_there(grid):
+async def test_one_phase_excess_import_reduces_then_pauses(grid):
     p, t, (c, _, peer, *_), clock = configure(grid)
-    samples(p, t, actual=2300, discharge=3500)
+    samples(p, t, actual=2300, discharge=3400)
     await p.permission(t, True)
     assert c.confirmed_point(t).current_a == 10
-    for seconds in range(1, 701, 10):
+    for seconds in (1, 11, 21, 31):
         clock[0] = seconds
-        samples(p, t, actual=2300, imported=5000, discharge=3500)
+        samples(p, t, actual=2300, imported=5000, discharge=3400)
         await evaluate(p, t)
-        assert c.confirmed_point(t).current_a == 6
-        assert p.optimum_modes[t] == "FAST_DISCHARGE"
-        assert t not in p.pv_stop_since
-    assert all(period(r)["limit"] > 0 for r in peer.requests)
-    assert len(peer.requests) == 2
+    assert not c.confirmed_point(t).charging
+    count = len(peer.requests)
+    clock[0] = 32
+    await evaluate(p, t)
+    assert len(peer.requests) == count
 
 
 async def phase_start(grid):
@@ -111,8 +123,11 @@ async def phase_start(grid):
     c, _, peer, _, source, _ = context
     source.mode = PhaseMode.canonical(3)
     c.restore(t, allowed_current_1p=16)
-    samples(p, t, actual=6900, discharge=3500)
+    samples(p, t, actual=6900, discharge=3400)
+    clock[0] = -30
     await p.permission(t, True)
+    p.pv_request(t)  # Observe the ACK; the following scenario starts 30 s later.
+    clock[0] = 0
     assert (c.confirmed_point(t).mode.count, c.confirmed_point(t).current_a) == (3, 10)
     locked = [True]
 
@@ -134,7 +149,7 @@ async def phase_start(grid):
 async def test_specific_phase_rejection_floors_same_phase_and_probe_recovers(grid):
     p, t, (c, _, peer, _, source, _), clock, locked = await phase_start(grid)
     clock[0] = 1
-    samples(p, t, imported=6000)
+    samples(p, t, actual=4140, discharge=3200, imported=1800)
     before = len(peer.requests)
     assert (await evaluate(p, t)).status == CommandStatus.APPLIED
     assert (
@@ -161,7 +176,7 @@ async def test_specific_phase_rejection_floors_same_phase_and_probe_recovers(gri
 
 async def test_phase_probe_is_task_local_and_rejection_retains_evidence(grid):
     p, t, (c, _, peer, *_), clock, _ = await phase_start(grid)
-    samples(p, t, imported=6000)
+    samples(p, t, actual=4140, discharge=3200, imported=1800)
     await evaluate(p, t)
     clock[0] = 60
     before = len(peer.requests)
@@ -206,7 +221,7 @@ async def test_unknown_transition_never_claims_supported_lower_phase_reachable(
         source.mode = None
     else:
         source.proof = False
-    samples(p, t, imported=6000)
+    samples(p, t, actual=4140, discharge=3200, imported=1800)
     before = len(peer.requests)
     result = await evaluate(p, t)
     if proof == "same_mode_only":
@@ -214,33 +229,28 @@ async def test_unknown_transition_never_claims_supported_lower_phase_reachable(
         assert period(peer.requests[-1])["number_phases"] == 3
         assert c.confirmed_point(t).current_a == 6
     else:
-        assert result is None and len(peer.requests) == before
+        # Missing phase proof cannot hold the old 6900 W offer above the
+        # independently established 4340 W ceiling; zero needs no phase guess.
+        assert result.status == CommandStatus.APPLIED
+        assert not c.confirmed_point(t).charging
+        assert len(peer.requests) == before + 1
     assert all(period(r).get("number_phases") != 1 for r in peer.requests)
 
 
-async def test_household_step_grace_then_floor_exposes_import(grid, caplog):
-    import logging
-
+async def test_household_step_uses_bounded_minimum_import_confirmation(grid, caplog):
     p, t, (c, _, peer, *_), clock = configure(grid)
-    p.entry.options = {"pv_diagnostic_logging": True}
-    caplog.set_level(logging.INFO)
-    p.setting(t)["optimum_max_discharge_w"] = 4800
-    samples(p, t, actual=3000, discharge=4800)
+    samples(p, t, actual=1380, discharge=3400)
     await p.permission(t, True)
-    for second in (0, 1, 2):
+    count = len(peer.requests)
+    for second in (0, 1, 9):
         clock[0] = second
-        samples(p, t, actual=3000, discharge=1000, imported=3000)
+        samples(p, t, actual=1380, discharge=3300, imported=700)
         await evaluate(p, t)
-        assert p.optimum_regulators[t].requested == 3000
-    clock[0] = 3
+        assert c.confirmed_point(t).current_a == 6
+    clock[0] = 10
     await evaluate(p, t)
-    assert p.optimum_regulators[t].requested == 0
-    assert c.confirmed_point(t).current_a == 6
-    report = [r for r in records(caplog) if r.get("minimum_positive_hold")][-1]
-    assert report["raw_regulator_target_w"] == 0
-    assert report["observed_net_grid_import_w"] == 3000
-    assert report["minimum_reachable_power_w"] == 1380
-    assert all(period(r)["limit"] > 0 for r in peer.requests)
+    assert not c.confirmed_point(t).charging
+    assert len(peer.requests) == count + 1
 
 
 @pytest.mark.parametrize("stop_delay,expiry", [(10, 10), (0, 5)])
@@ -291,11 +301,12 @@ async def test_existing_soc_hysteresis_controls_mode_and_cancels_pause(grid):
 
 
 @pytest.mark.parametrize("gap", ["missing", "stale"])
-async def test_input_gap_holds_and_breaks_pause_evidence(grid, gap):
+async def test_input_gap_preserves_deadline_and_hard_budget_pauses(grid, gap):
     p, t, (c, _, peer, *_), clock = configure(grid)
     await p.permission(t, True)
     samples(p, t, soc=80, pv=0, load=0)
     await evaluate(p, t)
+    assert p.pv_stop_since[t] == 0
     clock[0] = 9
     if gap == "missing":
         p.hass.states.async_remove("sensor.pv")
@@ -308,19 +319,20 @@ async def test_input_gap_holds_and_breaks_pause_evidence(grid, gap):
                 "valid_until": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
             },
         )
-    before, confirmed = len(peer.requests), c.confirmed_point(t)
-    assert await evaluate(p, t) is None
-    assert t not in p.pv_stop_since
-    assert len(peer.requests) == before and c.confirmed_point(t) == confirmed
+    before = len(peer.requests)
+    await evaluate(p, t)
+    assert p.pv_stop_since[t] == 0
+    assert not c.confirmed_point(t).charging
+    assert len(peer.requests) == before + 1
     clock[0] = 20
     samples(p, t, soc=80, pv=0, load=0)
     await evaluate(p, t)
-    assert p.pv_stop_since[t] == 20 and c.confirmed_point(t).charging
+    assert not c.confirmed_point(t).charging
 
 
 async def test_enable_with_retained_positive_never_prepares_zero(grid):
     p, t, (c, _, peer, *_), _ = configure(grid)
-    samples(p, t, actual=2300, discharge=3500)
+    samples(p, t, actual=2300, discharge=3400)
     await p.permission(t, True)
     await p.permission(t, False)
     before = len(peer.requests)
@@ -331,7 +343,7 @@ async def test_enable_with_retained_positive_never_prepares_zero(grid):
     samples(p, t)
     await p.permission(t, True)
     assert len(peer.requests) == before + 1
-    assert period(peer.requests[-1])["limit"] == 6
+    assert period(peer.requests[-1])["limit"] == 7
     assert c.runtime.enabled(t) is True
 
 
@@ -369,7 +381,7 @@ async def test_minimum_hold_never_overrides_hard_fences(grid, event):
         )
         await evaluate(p, t)
         assert not c.confirmed_point(t).charging
-        assert p.status[t] == "optimum_no_positive_point"
+        assert p.status[t] == "hard_budget_pause"
     elif event == "ownership":
         c.profile_permitted = lambda _: False
         await evaluate(p, t)
@@ -399,6 +411,7 @@ async def test_minimum_respects_device_grid_vehicle_limits_and_measured_voltage(
     source.permitted = (CurrentLimit(source.mode, 8, 12, "vehicle"),)
     c.restore(t, allowed_current_3p=10)
     voltage(c, t, 220)
+    samples(p, t, actual=6120, discharge=3400)
     await p.permission(t, True)
     point = c.confirmed_point(t)
     assert point.current_a == 9 and point.offered_power_w == 9 * (220 + 230 + 230)
@@ -431,6 +444,8 @@ async def test_restart_busy_retries_fresh_targets_without_rearming(
     await evaluate(p, t)
     assert state["until"] == 610
     samples(p, t)
+    p.pv_request(t)  # Rejoin the confirmed OFF context after the SoC transition.
+    samples(p, t)  # Fresh EV-zero evidence, not the acknowledgement itself.
     gate, parked = asyncio.Event(), asyncio.Queue()
 
     async def wait(_):
@@ -456,7 +471,9 @@ async def test_restart_busy_retries_fresh_targets_without_rearming(
         for second in range(70, 611, 60):
             await tick(second)
         assert c.confirmed_point(t).charging
-        assert len({amps for _, amps in attempts if amps}) > 1  # Fresh ramped targets.
+        assert (
+            len([amps for _, amps in attempts if amps]) >= 10
+        )  # Genuine BUSY retries.
         samples(p, t, imported=1000)  # Delayed actual power after successful restart.
         await tick(611)
         assert c.confirmed_point(t).charging
@@ -499,7 +516,7 @@ async def test_lost_confirmation_is_not_proof_that_balance_is_already_off(grid):
     assert all(period(r)["limit"] > 0 for r in peer.requests)
 
 
-async def test_observer_gap_between_balance_ticks_resets_pause_evidence(grid):
+async def test_observer_gap_between_balance_ticks_preserves_pause_evidence(grid):
     p, t, (c, _, _, *_), clock = configure(grid)
     await p.permission(t, True)
     samples(p, t, soc=80, pv=0, load=0)
@@ -508,13 +525,13 @@ async def test_observer_gap_between_balance_ticks_resets_pause_evidence(grid):
     clock[0] = 2
     p.hass.states.async_remove("sensor.remaining_pv_energy")
     p.optimum_refresh(datetime.now(UTC))
-    assert t not in p.pv_stop_since
+    assert p.pv_stop_since[t] == 0
     p.hass.states.async_set(
         "sensor.remaining_pv_energy", 4423.6, {"unit_of_measurement": "Wh"}
     )
     clock[0] = 5
     await evaluate(p, t)
-    assert p.pv_stop_since[t] == 5 and c.confirmed_point(t).charging
+    assert p.pv_stop_since[t] == 0 and c.confirmed_point(t).charging
 
 
 async def test_missing_voltage_during_zero_budget_is_no_decision(grid):
@@ -523,7 +540,7 @@ async def test_missing_voltage_during_zero_budget_is_no_decision(grid):
     p, t, (c, _, peer, *_), _ = configure(grid)
     await p.permission(t, True)
     before = len(peer.requests)
-    samples(p, t, imported=6000)
+    samples(p, t, actual=4140, discharge=3200, imported=1800)
     voltage(c, t, 230, invalid="expired")
     assert await evaluate(p, t) is None
     assert c.confirmed_point(t).charging and len(peer.requests) == before
@@ -565,7 +582,7 @@ async def test_loop_phase_probes_are_bounded_and_same_phase_busy_still_backs_off
         return response(profile)
 
     peer.profile_response = respond
-    samples(p, t, imported=6000)
+    samples(p, t, actual=4140, discharge=3200, imported=1800)
     gate, parked = asyncio.Event(), asyncio.Queue()
 
     async def wait(_):
@@ -589,17 +606,17 @@ async def test_loop_phase_probes_are_bounded_and_same_phase_busy_still_backs_off
         assert len(attempts) == 2
         # Known phase restriction still permits prompt same-phase regulation.
         busy[0] = True
-        samples(p, t, actual=6900)
-        await tick(20)
-        assert attempts[-1] == (20, 3)
+        samples(p, t, actual=4140, discharge=1900)
+        await tick(22)
+        assert attempts[-1] == (22, 3)
         count = len(attempts)
         samples(
             p, t, actual=6000
         )  # Changing desired watts must not erase BUSY backoff.
-        await tick(21)
+        await tick(23)
         assert len(attempts) == count
         busy[0] = False
-        samples(p, t, imported=6000)
+        samples(p, t, actual=4140, discharge=3200, imported=1800)
         await tick(60)
         assert attempts[-1] == (60, 1)
         assert c.phase_restricted(t)
@@ -640,5 +657,4 @@ async def test_pending_optimum_command_coalesces_settling_without_parallel_off(g
         await pending
     p.pv_confirm(t)
     await evaluate(p, t)
-    assert c.confirmed_point(t).current_a == 6
-    assert all(period(r)["limit"] > 0 for r in peer.requests)
+    assert c.confirmed_point(t).offered_power_w <= c.intent(t).hard_max_w

@@ -303,7 +303,7 @@ def profile_event(profile, target, event, **fields):
 
 
 def command_event(control, target, event, *, operating_point=None, result=None):
-    """Observe real operation attempts/outcomes, not reuse of confirmations."""
+    """Observe real attempts, outcomes and context-validated confirmation reuse."""
     try:
         if result is not None and result.status.value == "failed":
             _LOGGER.error(

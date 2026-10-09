@@ -61,6 +61,7 @@ def solve(
     phase_switch_deviation_pct: Fraction = Fraction(0),
     charging_only: bool = False,
     minimum_positive: bool = False,
+    hard_max_w: Fraction | None = None,
 ) -> SolverResult:
     """Select among verified modes within all supplied hard current intervals.
 
@@ -80,6 +81,7 @@ def solve(
     or runtime proportional to the number of current steps.
     """
     timestamp(now)
+    hard_max = None if hard_max_w is None else scalar(hard_max_w)
     tolerance = scalar(phase_switch_deviation_pct)
     if tolerance > 25:
         raise ValueError("phase retention tolerance must be between 0 and 25 percent")
@@ -132,6 +134,8 @@ def solve(
         if first > last:
             continue
         voltage_sum = sum(volts, Fraction(0))
+        if hard_max is not None:
+            last = min(last, floor((hard_max / voltage_sum - origin) / step))
         target_index = (request.target_w / voltage_sum - origin) / step
         for index in {first, last, floor(target_index), ceil(target_index)}:
             if first <= index <= last:
@@ -146,6 +150,10 @@ def solve(
     # voltage or let an unavailable multi-phase mode suppress a valid 1p point.
     if missing_voltage and not any(point.charging for point in candidates):
         return SolverResult(ResultStatus.UNREACHABLE, Reason.VOLTAGE_UNAVAILABLE)
+    if not any(p.charging for p in candidates) and hard_max is not None:
+        if can_stop:
+            return SolverResult(ResultStatus.OFF, Reason.ELECTRICAL_LIMIT, off)
+        return SolverResult(ResultStatus.UNREACHABLE, Reason.STOP_UNVERIFIED)
     if not candidates:
         return SolverResult(
             ResultStatus.UNREACHABLE,

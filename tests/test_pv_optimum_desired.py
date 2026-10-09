@@ -18,7 +18,7 @@ from custom_components.wallbox_manager.pv_diagnostics import cycle
 
 def set_budget(p, t, amps):
     # Real measured deficit calculation, no mocked regulator or solver.
-    samples(p, t, actual=4140, discharge=3500, imported=4140 - 230 * amps)
+    samples(p, t, actual=4140, discharge=3300, imported=4140 - 230 * amps)
 
 
 def selected(result):
@@ -30,14 +30,14 @@ async def test_blocked_desire_and_hold_are_distinct_and_diagnosed(grid, caplog):
     p.entry.options = {"pv_diagnostic_logging": True}
     caplog.set_level(logging.INFO)
     clock[0] = 1
-    set_budget(p, t, 8)
+    set_budget(p, t, 10)
     with cycle(p, t, "regulation"):
         await evaluate(p, t)
-    assert selected(c.intent(t).energy_desired) == (1, 8)
+    assert selected(c.intent(t).energy_desired) == (1, 10)
     assert selected(c.intent(t).solver_result) == (3, 6)
     assert c.phase_restricted(t)
     count = len(peer.requests)
-    for second, amps in ((2, 8), (3, 9), (4, 8)):
+    for second, amps in ((30, 10), (40, 11), (50, 10)):
         clock[0] = second
         set_budget(p, t, amps)
         p.optimum_refresh(datetime.now(UTC))
@@ -48,9 +48,9 @@ async def test_blocked_desire_and_hold_are_distinct_and_diagnosed(grid, caplog):
         assert selected(c.intent(t).solver_result) == (3, 6)
     assert len(peer.requests) == count
     line = records(caplog)[-1]
-    assert line["raw_regulator_target_w"] == 1840
+    assert line["raw_regulator_target_w"] == 2300
     assert line["desired"]["phases"] == 1
-    assert line["desired"]["current_a"] == 8
+    assert line["desired"]["current_a"] == 10
     assert line["executable"]["phases"] == 3
     assert line["executable"]["current_a"] == 6
     assert line["phase_transition_blocked"]
@@ -62,7 +62,7 @@ async def test_blocked_desire_and_hold_are_distinct_and_diagnosed(grid, caplog):
 @pytest.mark.parametrize("recover", [False, True])
 async def test_automatic_probe_uses_latest_desire_or_stays_three_phase(grid, recover):
     p, t, (c, _, peer, *_), clock, locked = await phase_start(grid)
-    set_budget(p, t, 8)
+    set_budget(p, t, 10)
     gate, parked = asyncio.Event(), asyncio.Queue()
 
     async def wait(_):
@@ -84,18 +84,18 @@ async def test_automatic_probe_uses_latest_desire_or_stays_three_phase(grid, rec
         assert [
             (period(r)["number_phases"], period(r)["limit"])
             for r in peer.requests[before:]
-        ] == [(1, 8), (3, 6)]
+        ] == [(1, 10), (3, 6)]
         assert p.pv_retry_until[t] == 60
-        for second in range(1, 8):
-            set_budget(p, t, 8 + second % 2)
+        for second in range(1, 10):
+            set_budget(p, t, 10)
             p.optimum_refresh(datetime.now(UTC))
             await tick(second)
-            assert selected(c.intent(t).energy_desired) == (1, 8 + second % 2)
+            assert selected(c.intent(t).energy_desired) == (1, 10)
             assert len(peer.requests) == before + 2
             assert p.pv_retry_until[t] == 60
         if recover:
-            samples(p, t, actual=4830, discharge=3500)
-            await tick(20)
+            samples(p, t, actual=4140, discharge=1900)
+            await tick(30)
             assert selected(c.intent(t).energy_desired) == (3, 7)
             assert c.confirmed_point(t).current_a == 7
             count = len(peer.requests)
@@ -107,14 +107,14 @@ async def test_automatic_probe_uses_latest_desire_or_stays_three_phase(grid, rec
                 period(r)["number_phases"] == 3 for r in peer.requests[before + 1 :]
             )
         else:
-            set_budget(p, t, 9)
+            set_budget(p, t, 11)
             await tick(59)
             assert len(peer.requests) == before + 2
             locked[0] = False
             await tick(60)
             assert period(peer.requests[-1])["number_phases"] == 1
-            assert period(peer.requests[-1])["limit"] == 9
-            assert c.confirmed_point(t).current_a == 9
+            assert period(peer.requests[-1])["limit"] == 11
+            assert c.confirmed_point(t).current_a == 11
             assert not c.phase_restricted(t)
         assert all(period(r)["limit"] > 0 for r in peer.requests)
     finally:
@@ -125,7 +125,7 @@ async def test_automatic_probe_uses_latest_desire_or_stays_three_phase(grid, rec
 @pytest.mark.parametrize("recover_phase", [False, True])
 async def test_probe_revalidates_desired_phase_at_transport_lock(grid, recover_phase):
     p, t, (c, adapter, peer, *_), clock, locked = await phase_start(grid)
-    set_budget(p, t, 8)
+    set_budget(p, t, 10)
     await evaluate(p, t)
     locked[0] = False
     clock[0] = 60
@@ -149,11 +149,11 @@ async def test_probe_revalidates_desired_phase_at_transport_lock(grid, recover_p
     task = asyncio.create_task(probe())
     try:
         await asyncio.wait_for(queued.wait(), 2)
-        assert selected(c.intent(t).energy_desired) == (1, 8)
+        assert selected(c.intent(t).energy_desired) == (1, 10)
         if recover_phase:
-            samples(p, t, actual=4830, discharge=3500)
+            samples(p, t, actual=4140, discharge=6000)
         else:
-            set_budget(p, t, 9)  # Same phase: safe lower current remains allowed.
+            set_budget(p, t, 11)  # Same phase: safe lower current remains allowed.
         p.optimum_refresh(datetime.now(UTC))
     finally:
         transport_lock.release()
@@ -161,20 +161,22 @@ async def test_probe_revalidates_desired_phase_at_transport_lock(grid, recover_p
     if recover_phase:
         assert result.status != CommandStatus.APPLIED
         assert len(peer.requests) == before  # Nothing reached the peer.
-        assert c.intent(t).fence_reason == "pre_dispatch_desired_phase"
-        assert selected(c.intent(t).energy_desired) == (3, 7)
+        assert c.intent(t).fence_reason in (
+            "pre_dispatch_setpoint_changed",
+            "pre_dispatch_pv_policy",
+        )
+        assert c.intent(t).hard_max_w < 2300
         await evaluate(p, t)
-        assert period(peer.requests[-1])["number_phases"] == 3
-        assert period(peer.requests[-1])["limit"] == 7
+        assert c.confirmed_point(t).offered_power_w <= c.intent(t).hard_max_w
     else:
         assert result.status == CommandStatus.APPLIED
         assert period(peer.requests[-1])["number_phases"] == 1
-        assert period(peer.requests[-1])["limit"] == 8
+        assert period(peer.requests[-1])["limit"] == 10
 
 
 async def test_cancelled_probe_replans_next_cycle_without_busy_delay(grid):
     p, t, (c, adapter, peer, *_), clock, locked = await phase_start(grid)
-    set_budget(p, t, 8)
+    set_budget(p, t, 10)
     gate, parked, queued = asyncio.Event(), asyncio.Queue(), asyncio.Event()
 
     async def wait(_):
@@ -202,14 +204,18 @@ async def test_cancelled_probe_replans_next_cycle_without_busy_delay(grid):
         gate.set()
         await asyncio.wait_for(queued.wait(), 2)
         before = len(peer.requests)
-        samples(p, t, actual=4830, discharge=3500)
+        samples(p, t, actual=4140, discharge=6000)
         p.optimum_refresh(datetime.now(UTC))
         transport_lock.release()
         await asyncio.wait_for(parked.get(), 2)
         assert len(peer.requests) == before
-        assert c.intent(t).fence_reason == "pre_dispatch_desired_phase"
+        assert c.intent(t).fence_reason in (
+            "pre_dispatch_setpoint_changed",
+            "pre_dispatch_pv_policy",
+        )
         assert p.pv_retry_until[t] == 120  # Phase probes remain bounded.
         clock[0] = 61
+        samples(p, t, actual=4140, discharge=1900)
         gate.set()
         await asyncio.wait_for(parked.get(), 2)
         assert len(peer.requests) == before + 1
