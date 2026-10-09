@@ -225,7 +225,7 @@ async def test_explicit_safety_stops_but_measurement_gaps_hold(grid, safety):
         p.pv_confirm(t)
         assert c.confirmed_point(t) == confirmed and confirmed.charging
         assert len(peer.requests) == count
-        assert p.pv_ongoing[t] and t not in p.pv_stop_since
+        assert p.pv_ongoing[t] and p.pv_stop_since[t] == 0
         assert c.runtime.enabled(t) is True
         return
     assert not p.pv_ongoing.get(t, False)
@@ -234,6 +234,7 @@ async def test_explicit_safety_stops_but_measurement_gaps_hold(grid, safety):
 async def test_removed_power_mapping_stops_before_fallback_and_keeps_settings(grid):
     p, t, (c, _, peer, *_), _ = await prepare(grid, soc=96)
     await p.set_value(t, "soc_hysterese", 7)
+    measurements(p, t, soc=97)
     await p.permission(t, True)
     p.references.pop("leistung_pv")
     assert not p.permits_point(t, c.confirmed_point(t))
@@ -325,13 +326,13 @@ async def test_phase_lockout_retry_never_extends_pv_stop_delay(grid):
     p, t, manual = grid
     c, _, peer, _, _, _ = await setup(manual)
     p.setting(t).update(PV_DEFAULTS, profile="PV_SURPLUS", approximation="up")
-    measurements(p, t, pv=1700, load=0, actual=0, soc=96)
+    measurements(p, t, pv=1700, load=0, actual=0)
     clock = [0.0]
     p.monotonic = lambda: clock[0]
     p.wait = lambda _: asyncio.Event().wait()
     await apply(p, t)
     assert c.intent(t).phase_retry
-    measurements(p, t, pv=0, load=0, actual=0, soc=96)
+    measurements(p, t, pv=0, load=0, actual=0)
     assert (await apply(p, t)).charging
     assert p.status[t] == "pv_stop_delay"
     clock[0] = 90

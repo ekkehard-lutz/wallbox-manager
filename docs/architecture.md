@@ -520,6 +520,11 @@ both must be revalidated before dispatch, including after restart/reconnect.
 
 ### Battery targets and simple PV_OPTIMUM forecast use
 
+> Historical design proposal: the sunset-based PV_OPTIMUM forecast below is
+> superseded by the implemented [remaining-day daily planner](pv-optimum-design.md).
+> Current phases are BEFORE_SURPLUS, DYNAMIC and FINISHED; no sunset input is used.
+
+
 PV_SURPLUS gives priority to keeping the battery approximately at its configured
 high SOC target. Below the target's hysteresis band, preserve energy for battery
 replenishment and reduce/pause vehicle charging as needed. Near/above the target,

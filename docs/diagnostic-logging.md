@@ -1,18 +1,35 @@
 # Wallbox Manager diagnostic logging
 
-Open **Settings → Devices & services → Wallbox Manager → Configure**.
-Enable **Diagnostic logging** (German: **Diagnoseprotokoll**) for troubleshooting.
-The single persistent option defaults to disabled. The internal key remains
-`pv_diagnostic_logging` so existing installations retain their saved choice.
-No migration or second switch is required. Diagnostic content depends on the
-active feature, profile and current activity. Disable it after troubleshooting.
-Normal warnings and errors are independent of this option.
+Open **Settings → Devices & services → Wallbox Manager → Configure** and choose
+**Diagnostic level** (German: **Diagnosestufe**).
 
-English help text:
-> Enables detailed Wallbox Manager diagnostics for troubleshooting. Content depends on the active feature, profile and current activity. Disabled by default.
+| Level | Output |
+| --- | --- |
+| 0 — Off / Aus | No dedicated trace. Normal operational warnings/errors remain active. |
+| 1 — Events and errors / Ereignisse und Fehler | Deduplicated decisions, lifecycle transitions and meaningful command events. |
+| 2 — Events with relevant data / Ereignisse mit relevanten Daten | The same events with explanatory measurements and context. |
+| 3 — Full diagnostic trace / Vollständige Diagnosespur | Complete cyclic PV records and detailed recovery stages, plus lifecycle events. |
 
-German help text:
-> Aktiviert detaillierte Wallbox-Manager-Diagnosen zur Fehlersuche. Der Inhalt hängt von der aktiven Funktion, dem Profil und der aktuellen Aktivität ab. Standardmäßig deaktiviert.
+The persisted integer `diagnostic_level` replaces the legacy boolean
+`pv_diagnostic_logging`. Legacy false/absent migrates to 0, true migrates to 3;
+an explicit new level wins. Options-only level changes take effect live without
+control reload, OCPP reconnect or commands. The default is 0; no card control is
+needed. The level applies to PV, recovery, physical state, ownership and battery
+reserve diagnostics.
+
+Deduplication is centralized per entry, connector and event family. Identity uses
+mode/phase/reason, discrete phase/current operating points, permission and control
+states. Raw watts, voltage drift, SoC drift, timestamps and countdowns are payload,
+not identity. Level 2 attaches relevant context only when a semantic event is new.
+Real command attempts/outcomes remain visible; reuse of a confirmed point does not
+create a fake command event. Changing levels clears the dedup baseline.
+
+`WBMGR subsystem=control` events expose explicit Enable requests, pending reasons,
+retries, confirmation, cancellation and failure, plus planner/SoC transitions.
+Level 2 adds request epoch, generation, fence reason and preparation context.
+`enable_pending` does not mean confirmed hardware ON. The charging switch always
+represents readback. Dedicated collection/serialization failures cannot change
+control behavior. Genuine command failures also have normal ERROR logging at 0.
 
 Records are INFO lines with a stable prefix followed by compact, sorted JSON:
 
@@ -22,7 +39,7 @@ WBMGR subsystem=recovery {"stage":...}
 WBMGR subsystem=reconnect {"connected":...,"ownership":...}
 ```
 
-PV records preserve the existing evaluation cadence and fields; see
+At Level 3, PV records preserve the existing evaluation cadence and fields; see
 [PV diagnostics](pv-surplus-profile.md#opt-in-wallbox-manager-diagnostics).
 Recovery records work with NETZ, PV_SURPLUS and profiles using the same recovery
 path. There is no raw OCPP frame logging, transaction identifier, credential or
@@ -91,7 +108,7 @@ itself; the existing subsequent profile reconciliation still runs unchanged.
 
 ## Next hardware test
 
-Enable **Diagnoseprotokoll**, select NETZ at 4 kW with charging enabled, and
+Select **Diagnosestufe 3**, select NETZ at 4 kW with charging enabled, and
 confirm 1 phase / 17 A before a full Home Assistant restart. Keep the station on
 its separate test commit supporting explicit Connector.PhaseRotation.Actual
 GetVariables. Collect `ha core logs | grep 'WBMGR subsystem=recovery'` after
@@ -100,6 +117,153 @@ final adoption/rejection sequence with the successful simulated peer path.
 
 These diagnostics do not change recovery criteria, parsing, evidence lifetimes,
 solver behavior, fencing, ownership, profile intent, charging commands or retries.
+
+## PV regulator input trace (v0.3.2-beta.8)
+
+This beta adds diagnostics only. It does **not** fix power oscillation, SoC target
+tracking, asynchronous power balances, minimum hold, or command deduplication.
+Levels 0–2 keep their existing event projection. The additional fields below are
+restricted to level 3; no metering, sensor polling or OCPP requests are added.
+
+### Existing mappings and coverage
+
+Mappings are existing integration options; no migration or new mandatory mapping
+is introduced. `external.<reference>.entity_id` identifies the configured entity
+at runtime. The repository does not contain the user's live HA configuration.
+
+| Measurement | Existing source | Consumption / level-3 coverage |
+| --- | --- | --- |
+| Battery SoC (%) | `soc_speicher_aktuell` | Shared policy for all three PV profiles; optional for PV_SURPLUS |
+| Minimum reserve (%) | `min_soc_speicher` | Existing battery policy reader; mapping is shown, but this separate reader is not a regulator power sample |
+| Battery discharge (W) | `storage_discharge_power` | FAST in all applicable profiles; also validated by PV_OPTIMUM in BALANCE |
+| Maximum discharge (W) | Profile setting `optimum_max_discharge_w` | Configured limit, not measured discharge or a dynamic BMS limit |
+| Battery charge / signed power | No existing mapping | Explicit null; cannot infer charge from nonnegative discharge |
+| Dynamic battery discharge limit | No existing provider | Explicit null |
+| Grid import / export (W) | `grid_import_power`, `grid_export_power` | FAST in all applicable profiles; also validated by PV_OPTIMUM in BALANCE |
+| Signed grid power (W) | Derived from both consumed inputs | Import minus export; null if either input is unavailable or unused |
+| PV power (W) | `leistung_pv` | Existing raw and smoothed inputs for all PV power paths |
+| Total consumption (W) | `leistung_verbraucher` | Includes selected EV; existing raw and smoothed inputs |
+| Selected EV power (W) | Scoped `session_power` sensor | Existing entry/station/EVSE/connector/runtime identity selection |
+| Non-EV load / surplus (W) | Existing calculation | `site_load_w = smoothed consumption - measured EV`; `surplus_w = smoothed PV - site_load_w` |
+| Capacity / remaining forecast | `storage_capacity`, `remaining_pv_energy` | Existing Optimum planner and validation; normalized Wh |
+
+In particular, FAST under PV_MAXIMUM now exposes its actual battery and grid
+inputs. PV_SURPLUS without SoC still works without battery/grid mappings.
+Unused optional mappings are **not read just for logging**: `not_read` means
+configured but not consumed in this evaluation, not that the sensor is broken.
+`not_configured`, `missing`, `unknown`, `unavailable`, `stale`, `future`, and
+`expired` remain distinguishable. A valid zero stays numeric zero.
+
+### Per-evaluation records
+
+The existing `WBMGR subsystem=pv` JSON event contains `regulator_evaluations`, an
+ordered list of actual `pv_request` evaluations within the cycle. Dispatch fences
+can evaluate again before writing: each evaluation gets its own `evaluation_id`
+(cycle start timestamp plus local index), consumed `input_reads`, calculations,
+mode, target, L/M/U thresholds, request, direction and reason. No persistent ID
+counter is needed. The top-level `evaluation_id` identifies the latest evaluation.
+
+Each `input_reads` entry includes its `reference`, entity identity, raw value/unit,
+normalized value/unit, and timing. Repeated reads are retained in order because
+the policy validator and power calculation may consume the same entity separately.
+The top-level `external` and `wallbox_power_sources` expose the latest consumed
+states for compatibility; they are not refreshed from HA after the calculation.
+An unsuccessful later evaluation does not inherit earlier calculation values.
+
+| Field | Meaning |
+| --- | --- |
+| `calculations.raw_pv_power_w`, `smoothed_pv_power_w` | Actual raw and averaged PV input |
+| `calculations.raw_consumption_power_w`, `smoothed_consumption_power_w` | Actual raw and averaged total consumption |
+| `calculations.measured_power_w` | Selected EV measurement; not a setpoint |
+| `calculations.site_load_w`, `surplus_w` | Existing calculated non-EV load and surplus, including negative/inconsistent results |
+| `request_w` | Returned regulator/policy request before discrete selection and minimum hold |
+| `regulator.previous_request_w` | FAST internal request before this exact call; null when absent/unused |
+| `regulator.previous_updated_at_monotonic`, `now_monotonic`, `updated_at_monotonic` | FAST ramp timing in process-local seconds |
+| `regulator.previous_import_since_monotonic`, `import_since_monotonic` | FAST import-grace state before/after the call |
+| `regulator.interval_s`, `grid_deadband_w`, `import_grace_s` | Existing FAST tuning: configured interval, 100 W, 3 s |
+| `regulator.wallbox_power_w`, `battery_discharge_power_w`, `battery_max_discharge_power_w`, `grid_import_power_w`, `grid_export_power_w` | Exact normalized FAST call arguments |
+| `battery_soc_pct`, `battery_discharge_power_w` | Validated consumed measurements; null if not consumed/invalid |
+| `battery_max_discharge_power_w` | Existing configured maximum, separately named from actual power |
+| `battery_charge_power_w`, `battery_power_signed_w`, `battery_dynamic_discharge_limit_w` | Null with explicit unsupported-mapping/provider reason |
+| `grid_net_power_w`, `grid_net_basis` | Signed import minus export and derivation status; this does not claim synchronized measurements |
+
+The reserved signed battery convention is positive discharge, negative charge.
+Beta.8 cannot populate signed battery power: the existing discharge input is zero
+while charging, so negating or treating it as signed would be misleading.
+The existing top-level `observed_net_grid_import_w` is retained for compatibility;
+it is clipped and historically defaults absent inputs to zero. Use the new
+nullable `grid_net_power_w` for signed-grid analysis.
+
+The existing `desired`, `executable`, `selected`, `commanded` and `applied` remain
+separate. `applied_basis` explicitly describes an acknowledged or reconciled offer,
+**not physically measured power**. Compare it with `measured_power_w` and telemetry.
+`control_generation`, scope and timestamps help correlate control command events.
+The latest PV evaluation is not necessarily the original sample that caused a
+command: inspect the ordered evaluation list when fences re-plan.
+
+`phase_lockout_evidence` reports retained specific station-rejection evidence;
+`phase_lockout` and the existing retry countdown remain separate. A retry deadline
+is not the end of the station's phase lockout. `reenable_lockout_evidence` reports
+unknown, with a null station deadline: no new 300/600-second timer is implemented.
+
+### Timestamp semantics
+
+All wall-clock times are timezone-aware ISO 8601. Each consumed input reports:
+
+- `source_observed_at` / `source_received_at`: explicitly supplied `observed_at` /
+  `received_at` attributes only. Missing or invalid source times stay null;
+  `source_timestamp_status` explains availability. No HA timestamp is relabeled
+  as a device timestamp.
+- `last_updated` / `last_reported`: HA state-change and report times. Older state
+  objects without `last_reported` report null for that field.
+- `timestamp` / `age_basis`: the exact HA time used by the existing freshness
+  check. No freshness rule is changed.
+- `evaluated_at` / `age_s`: the original reader's evaluation time and report age.
+- `valid_until`: the source's explicit validity, if present.
+- `effective_valid_until`: the earlier of report-time freshness expiry and
+  explicit validity. Live inputs use 90 s; remaining PV forecast uses 900 s.
+- `reading_accepted`: whether the existing reader accepted units/value/time;
+  `normalized_value` is null on rejection. Further policy checks can still reject
+  a numerically readable negative value; consult the evaluation reason.
+
+The selected session-power sensor now exposes source times from its already
+selected matching observation, without a new observation lookup or poll. External
+integrations may not expose source timestamps; that limitation remains visible.
+`started_at` / top-level `evaluated_at` describe diagnostic cycle/context timing;
+use the individual input's time for measurement-age comparisons.
+
+### Next PV_MAXIMUM hardware test
+
+1. Install beta.8, restart HA, and confirm integration version `0.3.2-beta.8`.
+2. In Wallbox Manager Configure, select diagnostic level **3**. Ensure INFO logs
+   for `custom_components.wallbox_manager` are retained. Do not enable raw OCPP
+   payload logging merely for this test.
+3. Verify existing PV, total-consumption, SoC, reserve, discharge, grid-import and
+   grid-export mappings. Record the configured discharge limit and smoothing /
+   regulation intervals. Do not add a substitute zero sensor for a missing input.
+4. Reproduce PV_MAXIMUM with reserve 78%, H=2%, target 80%, L/M/U=79/81/82% and
+   an initial SoC above 82%, if those are the intended test conditions. Keep the
+   existing wallbox/vehicle limits and safety configuration.
+5. Start capture before enabling charging. Retain complete `WBMGR` lines through
+   startup, FAST, the transition below 81%, and at least 15 minutes of BALANCE,
+   including an interval after any phase lockout ends. Note real household-load
+   changes and whether the device follows the commanded phase/current.
+6. On HA OS, collect the available logs with `ha core logs | grep 'WBMGR'` and
+   save them outside the integration repository. For longer tests, ensure the HA
+   log file/retention covers the whole test; the CLI output is not an unlimited
+   historical recording. Do not filter out control/physical-state events.
+7. Verify that FAST records contain `regulator_evaluations`, battery/grid call
+   arguments and per-input timestamps. Preserve full JSON lines without wrapping
+   or truncation. Restore the normal diagnostic level after capture.
+
+The local `.analysis/pv_maximum_test.log` is excluded and must not be committed.
+
+### Deferred regulation requirement
+
+For the next optimization phase, a **hard charging-power limit takes precedence
+over minimum-positive hold**. If no positive point is permissible, a deliberate
+zero-current pause is acceptable even if it triggers the existing 600-second
+reenable lockout. This is agreed future behavior, **not implemented in beta.8**.
 
 ## Reconnect and physical-state transitions
 

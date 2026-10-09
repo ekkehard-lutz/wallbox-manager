@@ -7,6 +7,8 @@ from homeassistant.helpers.entity import EntityCategory
 
 from .control_entity import ControlEntity, setup_control_entities
 from .core.values import scalar
+from .pv_optimum import OPTIMUM_DEFAULTS
+from .pv_soc import TARGET_FIELDS, target_bounds
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -32,6 +34,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     *[
                         ProfileNumber(c, e, t, key)
                         for key in (
+                            *OPTIMUM_DEFAULTS,
                             "soll_soc_speicher",
                             "soc_hysterese",
                             "regulation_interval",
@@ -125,8 +128,20 @@ class ProfileNumber(ControlEntity, NumberEntity):
             self._attr_native_unit_of_measurement = "s"
             self._attr_native_min_value = 1 if key == "regulation_interval" else 0
 
+        if key == "optimum_max_discharge_w":
+            self._attr_native_unit_of_measurement = "W"
+            self._attr_native_step = 100
+        elif key == "estimated_daily_house_consumption_kwh":
+            self._attr_native_unit_of_measurement = "kWh"
+            self._attr_native_step = 0.1
+
     @property
     def available(self):
+        if self.field in TARGET_FIELDS:
+            try:
+                self.soc_bounds()
+            except ValueError, TypeError, OverflowError:
+                return False
         if self.field == "min_soc":
             return self.control.profiles.battery.configured
         return self.field in (
@@ -140,8 +155,32 @@ class ProfileNumber(ControlEntity, NumberEntity):
     def native_value(self):
         return self.control.profiles.setting(self.target)[self.field]
 
+    def soc_bounds(self):
+        p = self.control.profiles
+        settings = p.setting(self.target)
+        minimum, maximum = target_bounds(p.pv_reserve(), settings["soc_hysterese"])
+        if self.field == "optimum_lower_soc":
+            maximum = min(maximum, settings["optimum_upper_soc"])
+        elif self.field == "optimum_upper_soc":
+            minimum = max(minimum, settings["optimum_lower_soc"])
+        return float(minimum), float(maximum)
+
+    @property
+    def native_min_value(self):
+        if self.field in TARGET_FIELDS:
+            try:
+                return self.soc_bounds()[0]
+            except ValueError, TypeError, OverflowError:
+                return 0
+        return self._attr_native_min_value
+
     @property
     def native_max_value(self):
+        if self.field in TARGET_FIELDS:
+            try:
+                return self.soc_bounds()[1]
+            except ValueError, TypeError, OverflowError:
+                return 100
         if self.field == "power_kw":
             maximum = self.control.power_ceiling(self.target)
             if maximum is not None:
@@ -149,8 +188,10 @@ class ProfileNumber(ControlEntity, NumberEntity):
         # HA requires a numeric input range; this is storage validation only.
         # Consumers must use technical_max_kw, not this fallback, as capability.
         return {
+            "optimum_max_discharge_w": 100000,
+            "estimated_daily_house_consumption_kwh": 1000,
             "soll_soc_speicher": 99,
-            "soc_hysterese": 99,
+            "soc_hysterese": 50,
             "regulation_interval": 300,
             "pv_start_delay": 3600,
             "pv_stop_delay": 3600,

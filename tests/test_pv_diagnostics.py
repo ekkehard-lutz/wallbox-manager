@@ -104,7 +104,8 @@ def test_age_uses_report_not_last_change_and_exposes_stale():
     assert entity_sample(None, "sensor.missing", now)["freshness"] == "missing"
 
 
-async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+async def test_options_toggle_persists_without_authority_reload_or_writes(grid, level):
     from homeassistant.config_entries import ConfigEntries
     from test_ha_lifecycle import entry
 
@@ -128,22 +129,19 @@ async def test_options_toggle_persists_without_authority_reload_or_writes(grid):
     flow = ReferenceOptionsFlow()
     flow.hass, flow.handler = p.hass, config.entry_id
     count = len(peer.requests)
-    result = await flow.async_step_init({"pv_diagnostic_logging": True})
+    result = await flow.async_step_init({"diagnostic_level": str(level)})
     assert not flow.automatic_reload
     # Exercise HA's actual options persistence boundary.
     await p.hass.config_entries.options.async_finish_flow(flow, result)
-    assert config.options["pv_diagnostic_logging"] is True
+    assert config.options["diagnostic_level"] == level
     assert len(peer.requests) == count
     assert not p.tasks
     again = ReferenceOptionsFlow()
     again.hass, again.handler = p.hass, config.entry_id
     form = await again.async_step_init()
-    assert (
-        form["data_schema"]({"general": {}, "regulation": {}})["general"][
-            "pv_diagnostic_logging"
-        ]
-        is True
-    )
+    assert form["data_schema"]({"general": {}, "regulation": {}})["general"][
+        "diagnostic_level"
+    ] == str(level)
 
 
 async def test_diagnostic_collector_failure_does_not_change_plan(
@@ -216,7 +214,7 @@ async def test_waiting_start_is_explicit(grid, caplog, delay):
     p.pv_plan(t)
     (line,) = records(caplog)
     assert line["decision"] == ("START_PENDING" if delay else "PLANNED")
-    assert line["reason"] == ("pv_start_delay" if delay else "waiting_battery_soc")
+    assert line["reason"] == ("pv_start_delay" if delay else "stopped_battery_soc")
     if delay:
         assert 0 < line["delays"]["pv_start_delay"]["remaining_s"] <= 20
 
@@ -255,7 +253,12 @@ async def test_soc_safety_event_has_explicit_reason(grid, caplog):
     p.entry.options = {"pv_diagnostic_logging": True}
     p.setting(t)["profile"] = "PV_SURPLUS"
     p.references["soc_speicher_aktuell"] = "sensor.soc"
+    p.references["min_soc_speicher"] = "number.reserve"
+    p.hass.states.async_set("number.reserve", 5)
     p.hass.states.async_set("sensor.soc", "80", {"unit_of_measurement": "%"})
+    p.control.intent(t)
+    p.pv_ongoing[t] = True
+    p.optimum_modes[t] = "PV_BALANCE"
     caplog.set_level(logging.INFO)
     p.pv_soc_changed(
         Event(
@@ -305,9 +308,9 @@ async def test_diagnostics_default_disabled(grid):
     form = await flow.async_step_init()
     assert (
         form["data_schema"]({"general": {}, "regulation": {}})["general"][
-            "pv_diagnostic_logging"
+            "diagnostic_level"
         ]
-        is False
+        == "0"
     )
 
 
@@ -316,15 +319,15 @@ def test_diagnostic_translations_are_generic():
 
     root = Path(__file__).parents[1] / "custom_components/wallbox_manager"
     for filename, label in [
-        ("strings.json", "Diagnostic logging"),
-        ("translations/en.json", "Diagnostic logging"),
-        ("translations/de.json", "Diagnoseprotokoll"),
+        ("strings.json", "Diagnostic level"),
+        ("translations/en.json", "Diagnostic level"),
+        ("translations/de.json", "Diagnosestufe"),
     ]:
         step = json.loads((root / filename).read_text())["options"]["step"]["init"][
             "sections"
         ]["general"]
-        assert step["data"]["pv_diagnostic_logging"] == label
-        help_text = step["data_description"]["pv_diagnostic_logging"]
+        assert step["data"]["diagnostic_level"] == label
+        help_text = step["data_description"]["diagnostic_level"]
         assert "PV" not in help_text
         assert "Wallbox" in help_text
         assert "deaktiviert" in help_text or "Disabled by default" in help_text

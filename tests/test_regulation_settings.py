@@ -47,7 +47,7 @@ def test_defaults(profiles):
         "regulation_interval": 5,
         "pv_start_delay": 0,
         "pv_stop_delay": 90,
-        "soc_hysterese": 5,
+        "soc_hysterese": 2,
         "power_smoothing_window": 5,
     }
     migrated = migrate_regulation({}, profiles)
@@ -141,7 +141,8 @@ async def test_hysteresis_options_entity_and_backend_ranges_agree(tmp_path, hyst
     )
     from custom_components.wallbox_manager.number import ProfileNumber
     from custom_components.wallbox_manager.profiles import GridProfiles
-    from custom_components.wallbox_manager.pv_surplus import PV_DEFAULTS, decision
+    from custom_components.wallbox_manager.pv_optimum import OPTIMUM_DEFAULTS
+    from custom_components.wallbox_manager.pv_surplus import PV_DEFAULTS
 
     hass = HomeAssistant(str(tmp_path))
     hass.config_entries = ConfigEntries(hass, {})
@@ -167,17 +168,16 @@ async def test_hysteresis_options_entity_and_backend_ranges_agree(tmp_path, hyst
             SimpleNamespace(), config.entry_id, target, "soc_hysterese"
         )
         assert selector["min"] == entity.native_min_value == 0
-        assert selector["max"] == entity.native_max_value == 99
+        assert selector["max"] == entity.native_max_value == 50
         settings = {**PV_DEFAULTS, "soll_soc_speicher": 40, "soc_hysterese": hysteresis}
         submitted = {"general": {}, "regulation": {"soc_hysterese": hysteresis}}
-        if 0 <= hysteresis <= 99:
+        if 0 <= hysteresis <= 50:
             assert schema(submitted)["regulation"]["soc_hysterese"] == hysteresis
-            GridProfiles.validate_pv(settings)
-            if hysteresis >= 40:
-                # Zero/negative thresholds cannot be crossed by valid SoC;
-                # the independent strict start threshold still prevents a start.
-                assert decision(2000, 0, settings, True)[0] == 2000
-                assert decision(2000, 0, settings, False)[0] == 0
+            from custom_components.wallbox_manager.pv_soc import clamp_settings
+
+            GridProfiles.validate_pv(
+                clamp_settings({**OPTIMUM_DEFAULTS, **settings}, 0)
+            )
         else:
             with pytest.raises(vol.Invalid):
                 schema(submitted)

@@ -70,7 +70,7 @@ async def test_common_runtime_off_cannot_leave_continuation_latched(grid):
 
 async def test_normal_soc_dip_recovered_before_dispatch_does_not_cancel_command(grid):
     p, t, (c, bound, peer, *_) = await started(grid)
-    measurements(p, t, soc=93)
+    measurements(p, t, soc=95)
     p.pv_edit(t)
     expected = p.pv_request(t)
     count = len(peer.requests)
@@ -81,7 +81,7 @@ async def test_normal_soc_dip_recovered_before_dispatch_does_not_cancel_command(
         await asyncio.sleep(0)
         # Both events can arrive before the event loop dispatches either callback.
         measurements(p, t, soc=89)
-        measurements(p, t, soc=93)
+        measurements(p, t, soc=95)
         await asyncio.sleep(0)
     assert (await pending).status.value == "applied"
     assert c.confirmed_point(t).charging
@@ -93,7 +93,7 @@ async def test_normal_soc_dip_recovered_before_dispatch_does_not_cancel_command(
     assert c.intent(t).request.direction == Direction.DOWN
 
 
-@pytest.mark.parametrize("soc", [90, 93, 95])
+@pytest.mark.parametrize("soc", [94.001, 94.5, 95])
 async def test_active_charge_continues_at_inclusive_soc_boundaries(grid, soc):
     p, t, (c, _, _, *_) = await started(grid)
     measurements(p, t, soc=soc)
@@ -280,7 +280,7 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
     assert c.runtime.sessions.get(t).active
 
 
-@pytest.mark.parametrize("soc", [90, 95])
+@pytest.mark.parametrize("soc", [94.001, 95])
 async def test_normal_soc_fall_during_dispatch_is_handled_on_next_cycle(grid, soc):
     p, t, (c, _, peer, *_) = await started(grid)
     measurements(p, t, pv=0, soc=96)
