@@ -220,7 +220,14 @@ class SessionLedger:
                 event.at,
                 start_known=event.kind == SessionEventKind.STARTED,
             )
-        observations = tuple(observations)
+        # Embedded samples describe this event's scope and acquisition boundary.
+        # Use the same eligible collection for accounting and the live cache:
+        # caching a sample rejected below can contradict the session projection.
+        observations = tuple(
+            o
+            for o in observations
+            if o.channel.scope == event.scope and o.observed_at <= event.at
+        )
         endpoint = None
         if event.kind in (SessionEventKind.STARTED, SessionEventKind.ENDED):
             explicit = [
