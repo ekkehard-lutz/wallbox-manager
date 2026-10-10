@@ -149,6 +149,10 @@ class PVSurplus:
                 return False
         if status == "pv_stop_delay":
             return point.same_setpoint(self.control.confirmed_point(target))
+        if status == "optimum_minimum_hold":
+            # The exact solver floor carries its own DOWN continuation policy;
+            # SURPLUS's ordinary UP setting must not veto this same-phase point.
+            return point.same_setpoint(plan.point)
         return (
             power > 0
             and self.control.intent(target).request.direction == direction
@@ -542,6 +546,36 @@ class PVSurplus:
                 ),
                 None,
             )
+        if not energy_desired and status in (
+            "actively_charging",
+            "paused_insufficient_pv",
+        ):
+            confirmed = self.control.confirmed_point(target)
+            desired = self.control.intent(target).energy_desired
+            probing = self.control._phase_probes.get(target) is asyncio.current_task()
+            blocked = self.phase_lockout_continuing(target) and (
+                transition_mode is not None
+                or not desired
+                or not desired.point
+                or not desired.point.charging
+                or (desired.point.mode != inputs.current_mode and not probing)
+            )
+            regulator = self.optimum_regulators.get(target)
+            settling = bool(
+                regulator
+                and regulator.response_settling(now)
+                and confirmed
+                and confirmed.charging
+                and confirmed.mode == inputs.current_mode
+                and (
+                    not result.point.charging
+                    or result.point.mode != inputs.current_mode
+                )
+            )
+            if blocked or settling:
+                continuation = self.pv_continuation_plan(target)
+                if continuation is not None:
+                    return continuation
         if (
             self.shared_pv_execution(target) or self.optimum_fast(target)
         ) and status in (
@@ -686,7 +720,9 @@ class PVSurplus:
             if result is None or result.point is None:
                 return None
         intent.profile_modes = (
-            (result.point.mode.count,) if status == "pv_stop_delay" else None
+            (result.point.mode.count,)
+            if status in ("pv_stop_delay", "optimum_minimum_hold")
+            else None
         )
         if intent.request.target_w != power or intent.request.direction != direction:
             self.control._edit(target, {"target_w": power, "direction": direction})

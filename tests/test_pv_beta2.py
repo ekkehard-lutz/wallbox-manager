@@ -320,22 +320,26 @@ async def test_stop_delay_fences_queued_minimum_after_expiry(grid):
     assert not (await apply(p, t)).charging
 
 
-async def test_phase_lockout_retry_never_extends_pv_stop_delay(grid):
+async def test_phase_lockout_continues_past_pv_stop_delay_until_soc_target(grid):
     from test_phase_lockout import setup
+    from test_pv_surplus import grid_measurements
 
     p, t, manual = grid
     c, _, peer, _, _, _ = await setup(manual)
     p.setting(t).update(PV_DEFAULTS, profile="PV_SURPLUS", approximation="up")
-    measurements(p, t, pv=1700, load=0, actual=0)
+    measurements(p, t, pv=1700, load=0, actual=0, soc=96)
+    grid_measurements(p)
     clock = [0.0]
     p.monotonic = lambda: clock[0]
     p.wait = lambda _: asyncio.Event().wait()
     await apply(p, t)
     assert c.intent(t).phase_retry
-    measurements(p, t, pv=0, load=0, actual=0)
+    measurements(p, t, pv=0, load=0, actual=0, soc=96)
     assert (await apply(p, t)).charging
-    assert p.status[t] == "pv_stop_delay"
+    assert p.status[t] == "optimum_minimum_hold"
     clock[0] = 90
+    assert (await apply(p, t)).charging
+    measurements(p, t, pv=0, load=0, actual=0, soc=94.999)
     assert not (await apply(p, t)).charging
     measurements(p, t, soc=95)
     assert not p.pv_edit(t).point.charging

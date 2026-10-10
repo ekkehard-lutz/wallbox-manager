@@ -1,7 +1,7 @@
 """Independent Optimum SoC policy and PV-day observation, never device control."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
@@ -11,7 +11,7 @@ from .control.requests import Direction
 from .diagnostics import profile_event
 from .freshness import freshness_for
 from .pv_budget import PowerEvidence, source_time
-from .pv_regulators import FastDischargeRegulator
+from .pv_regulators import GRID_DEADBAND_W, FastDischargeRegulator
 from .pv_soc import clamp_target, soc_policy, target_bounds
 
 FAST_OBSERVATION_SECONDS = 1
@@ -79,7 +79,20 @@ class PVOptimum:
 
     def shared_pv_execution(self, target):
         """Preserve Optimum's reachable-phase execution semantics for Maximum."""
-        return self.setting(target)["profile"] in ("PV_OPTIMUM", "PV_MAXIMUM")
+        return self.setting(target)["profile"] in ("PV_OPTIMUM", "PV_MAXIMUM") or (
+            self.setting(target)["profile"] == "PV_SURPLUS"
+            and self.phase_lockout_continuing(target)
+        )
+
+    def phase_lockout_continuing(self, target):
+        """A station lockout cannot grant permission to start a stopped charge."""
+        confirmed = self.control.confirmed_point(target)
+        return bool(
+            self.control.phase_restricted(target)
+            and self.control.runtime.enabled(target) is True
+            and confirmed
+            and confirmed.charging
+        )
 
     def common_pv(self, target):
         return self.setting(target)["profile"] in ("PV_OPTIMUM", "PV_MAXIMUM") or (
@@ -127,6 +140,19 @@ class PVOptimum:
             stopped=stopped,
             surplus=evidence,
         )
+        if self.phase_lockout_continuing(target):
+            # This continuation ends at the configured target, without the
+            # ordinary mode hysteresis below it. Equality still permits charging.
+            decision = replace(
+                decision,
+                mode="STOP"
+                if soc < desired
+                else "PV_BALANCE"
+                if decision.mode == "STOP"
+                else decision.mode,
+                reason="phase_lockout_target_soc",
+                lower_stop_threshold=desired,
+            )
         self.optimum_initializations.discard(target)
         context = dict(
             target_soc=float(desired),
@@ -614,6 +640,10 @@ class PVOptimum:
         ):
             return 0, Direction.DOWN, "hard_budget_pause", minimum
         regulator = self.optimum_regulators.get(target)
+        if energy_desired and regulator is not None:
+            # An all-mode preference must not start/rearm the executable mode's
+            # grid-import grace with a different minimum power and allowance.
+            regulator = replace(regulator)
         if regulator and regulator.evidence and minimum and minimum.point:
             candidates = self.selected_power_states(target)
             from .pv_surplus import reading
@@ -672,3 +702,99 @@ class PVOptimum:
         if record := active(self, target):
             record.data["policy_reason"] = status
         return minimum.point.offered_power_w, Direction.DOWN, status, minimum
+
+    def pv_continuation_plan(self, target):
+        """Hold the physical minimum during lockout or ACK response settling.
+
+        A positive confirmed offer and live permission establish continuation.
+        Only the startup response reserve is inapplicable; the independent hard
+        battery budget, electrical solver and total-site import boundary remain.
+        """
+        from .control.runtime import PowerSettings
+        from .pv_diagnostics import active, number
+        from .pv_surplus import power_valid_for, reading
+
+        inputs = self.control.inputs(target)
+        confirmed = self.control.confirmed_point(target)
+        if not (
+            inputs
+            and inputs.current_mode is not None
+            and inputs.current_mode in inputs.eligible_modes
+            and confirmed
+            and confirmed.charging
+            and confirmed.mode == inputs.current_mode
+            and self.control.runtime.enabled(target) is True
+        ):
+            return None
+        minimum = self.control.minimum_positive(
+            target, dispatch_modes=(inputs.current_mode,)
+        )
+        if minimum is None or minimum.point is None:
+            return None
+        if not minimum.point.charging:
+            return 0, Direction.DOWN, "hard_budget_pause", minimum
+        now = datetime.now(UTC)
+        try:
+            states = [
+                self.hass.states.get(self.references.get(key, ""))
+                for key in ("grid_import_power", "grid_export_power")
+            ]
+            imported, exported = (reading(state, now) for state in states)
+            candidates = self.selected_power_states(target)
+            if len(candidates) != 1 or min(imported, exported) < 0:
+                raise ValueError("unavailable continuation measurements")
+            if imported > GRID_DEADBAND_W and exported > GRID_DEADBAND_W:
+                raise ValueError("conflicting grid direction measurements")
+            actual = reading(candidates[0], now)
+            if actual < 0:
+                raise ValueError("negative EV power")
+        except ValueError, TypeError, ZeroDivisionError, OverflowError:
+            return (
+                0,
+                Direction.DOWN,
+                "measurements_unavailable",
+                self.control.resolve(target, request=PowerSettings(0, Direction.DOWN))[
+                    1
+                ],
+            )
+        expiry = min(now + timedelta(seconds=power_valid_for(s, now)) for s in states)
+        self.pv_expiry[target] = min(self.pv_expiry.get(target, expiry), expiry)
+        regulator = self.optimum_regulators.setdefault(target, FastDischargeRegulator())
+        regulator.net_import = imported - exported
+        hard_max = self.control.intent(target).hard_max_w
+        permitted = (
+            regulator.minimum_allowed(
+                minimum.point, now=self.monotonic(), actual=actual, continuing=True
+            )
+            if hard_max is not None
+            else regulator.minimum_import_allowed(
+                minimum.point.offered_power_w, now=self.monotonic(), actual=actual
+            )
+        )
+        if record := active(self, target):
+            record.data.update(
+                continuation_reason="phase_switch_lockout"
+                if self.control.phase_restricted(target)
+                else "phase_response_settling",
+                minimum_reachable_power_w=number(minimum.point.offered_power_w),
+                minimum_grid_import_allowance_w=number(
+                    minimum.point.offered_power_w / 2
+                ),
+                observed_net_grid_import_w=number(max(0, regulator.net_import)),
+            )
+        if not permitted:
+            return (
+                0,
+                Direction.DOWN,
+                "grid_import_pause",
+                self.control.resolve(target, request=PowerSettings(0, Direction.DOWN))[
+                    1
+                ],
+            )
+        self.pv_stop_since.pop(target, None)
+        return (
+            minimum.point.offered_power_w,
+            Direction.DOWN,
+            "optimum_minimum_hold",
+            minimum,
+        )

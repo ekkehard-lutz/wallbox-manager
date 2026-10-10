@@ -298,7 +298,9 @@ class ControlRuntime:
         return tuple(
             m
             for m in modes
-            if intent.profile_modes is None or m.count in intent.profile_modes
+            if energy_desired
+            or intent.profile_modes is None
+            or m.count in intent.profile_modes
         )
 
     def _current_limits(self, target, inputs):
@@ -1143,9 +1145,10 @@ class ControlRuntime:
             # One synchronous recalculation within this explicit command only.
             # Keep all original fences, including confirmed physical phase state.
             substitute_mode = inputs.current_mode
-            if intent.reachable_only and hasattr(self, "profiles"):
+            if hasattr(self, "profiles") and self.profiles.shared_pv_execution(target):
                 # The profile owns permission to exceed a raw energy budget at
                 # its positive floor; the common runtime still chooses the point.
+                intent.reachable_only = True
                 power, direction, _, plan = self.profiles.pv_plan(
                     target,
                     advance=False,
