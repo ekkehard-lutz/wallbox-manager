@@ -155,6 +155,18 @@ def measurements(profile, target, *, pv=8000, load=5000, actual=3000, soc=None):
         profile.hass.states.async_set("sensor.soc", soc, {"unit_of_measurement": "%"})
 
 
+def grid_measurements(profile, *, imported=0, exported=0):
+    """Lockout continuation needs authoritative site-import evidence."""
+    for key, value in (
+        ("grid_import_power", imported),
+        ("grid_export_power", exported),
+    ):
+        profile.references[key] = f"sensor.{key}"
+        profile.hass.states.async_set(
+            profile.references[key], value, {"unit_of_measurement": "W"}
+        )
+
+
 async def test_scoped_actual_measurement(grid):
     p, t, _ = grid
     measurements(p, t)
@@ -391,6 +403,7 @@ async def test_pv_phase_lockout_keeps_retry_deadline_and_fallback(grid):
     c, _, peer, _, locked, _ = await setup(manual)
     p.setting(t).update(profile="PV_SURPLUS", approximation="up")
     measurements(p, t, pv=1700, load=0, actual=0)
+    grid_measurements(p)
     cycles = []
     gate, reached = asyncio.Event(), asyncio.Event()
     p.monotonic = lambda: 100

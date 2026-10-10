@@ -178,12 +178,14 @@ async def test_cancelled_cycle_emits_once(grid, caplog):
 
 async def test_phase_lockout_reports_fallback_and_retry(grid, caplog):
     from test_phase_lockout import setup
+    from test_pv_surplus import grid_measurements
 
     p, t, manual = grid
     c, _, _, _, _, _ = await setup(manual)
     p.entry.options = {"pv_diagnostic_logging": True}
     p.setting(t).update(profile="PV_SURPLUS", approximation="up")
     measurements(p, t, pv=1700, load=0, actual=0)
+    grid_measurements(p)
     p.monotonic = lambda: 100
     reached = asyncio.Event()
 

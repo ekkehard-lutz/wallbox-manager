@@ -102,17 +102,36 @@ class FastDischargeRegulator:
     net_import: Fraction = Fraction(0)
     restart_blocked: bool = False
     response_observed: bool = False
+    phase_change_pending: bool = False
 
     def acknowledge(self, point, now):
         """Start response observation at confirmation, never at a later tick."""
+        if (
+            self.command_since is not None
+            and now - self.command_since >= SETTLING_SECONDS
+        ):
+            self.phase_change_pending = False
         key = None if point is None else (point.charging, point.mode, point.current_a)
         if key != self.command_key:
+            if key is None or not key[0]:
+                self.phase_change_pending = False
+            elif self.command_key and self.command_key[0]:
+                self.phase_change_pending |= key[1] != self.command_key[1]
             self.command_key = key
             self.command_since = now
             self.command_evidence = self.evidence.times if self.evidence else None
             self.response_observed = False
             if point is not None and not point.charging:
                 self.requested = Fraction(0)
+
+    def response_settling(self, now):
+        """Use the existing ACK observation window for phase selection too."""
+        return (
+            self.phase_change_pending
+            and self.command_since is not None
+            and not self.response_observed
+            and now - self.command_since < SETTLING_SECONDS
+        )
 
     def update_budget(self, wallbox, discharge, limit, imported, exported, evidence):
         """Same hard-budget evidence tracking for FAST and BALANCE."""
@@ -184,6 +203,8 @@ class FastDischargeRegulator:
         )
         observed = post_command and abs(wallbox - offered) <= max(100, step / 2)
         self.response_observed = observed
+        if observed:
+            self.phase_change_pending = False
         settling = (
             self.command_since is not None
             and not observed
@@ -241,7 +262,7 @@ class FastDischargeRegulator:
         self.requested = Fraction(int(min(requested, self.hard_max) * 1000), 1000)
         return self.requested
 
-    def minimum_allowed(self, minimum, *, now, actual):
+    def minimum_allowed(self, minimum, *, now, actual, continuing=False):
         """Bounded site-import exception, never an additional battery allowance."""
         watts = minimum.offered_power_w
         if (
@@ -254,12 +275,20 @@ class FastDischargeRegulator:
         if self.hard_max is None or watts > self.hard_max:
             self.reason = "minimum_exceeds_hard_budget"
             return False
-        if actual < watts and watts > actual + (self.hard_max - actual) / 2:
+        if (
+            not continuing
+            and actual < watts
+            and watts > actual + (self.hard_max - actual) / 2
+        ):
             # A floor must not bypass the response reserve used by the upward
             # regulator. Otherwise a start below twice the minimum can produce
             # start/stop cycles as site power arrives before the first EV sample.
             self.reason = "minimum_response_budget"
             return False
+        return self.minimum_import_allowed(watts, now=now, actual=actual)
+
+    def minimum_import_allowed(self, watts, *, now, actual):
+        """Authoritative site import bounds the floor, including continuation."""
         # The exception is measured total site import, never EV-only import.
         # After a pause require enough projected headroom to avoid immediate
         # pause/restart cycling when removing EV load alone cleared the import.
@@ -267,7 +296,7 @@ class FastDischargeRegulator:
         if self.restart_blocked:
             projected += max(0, watts - actual)
         threshold = watts / 2
-        generation = self.evidence.generation[2:4]
+        generation = self.evidence.generation[2:4] if self.evidence else None
         if projected > threshold:
             if self.excess_since is None:
                 self.excess_since, self.excess_generation = now, generation
