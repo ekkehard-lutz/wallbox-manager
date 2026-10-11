@@ -106,8 +106,8 @@ class PVSurplus:
                 _, _, _, plan = self.pv_plan(target, advance=False)
                 if plan is None or plan.point is None or plan.point.charging:
                     return False
-            # OFF ends continuation even when another primitive control requested it.
-            self.pv_ongoing[target] = False
+            # Planning/validation is not an acknowledgement. Only confirmed OFF
+            # ends an economic continuation; rejected or superseded OFF retains it.
             return True
         if self.closed or self.setting(target)[
             "profile"
@@ -153,6 +153,10 @@ class PVSurplus:
             # The exact solver floor carries its own DOWN continuation policy;
             # SURPLUS's ordinary UP setting must not veto this same-phase point.
             return point.same_setpoint(plan.point)
+        from .solver.operating_point import Reason
+
+        if plan.reason == Reason.CONFIRMED_RETAINED and point.same_setpoint(plan.point):
+            return True
         return (
             power > 0
             and self.control.intent(target).request.direction == direction
@@ -360,6 +364,13 @@ class PVSurplus:
         session = self.control.runtime.sessions.get(target)
         previous = self.pv_sessions.get(target)
         identity = session.session_id if session and session.active else None
+        if target in self.pv_pause_transactions and (
+            session is None
+            or not session.active
+            or session.external_transaction_id != self.pv_pause_transactions[target]
+        ):
+            self.pv_pause_reasons.pop(target, None)
+            self.pv_pause_transactions.pop(target, None)
         ended = bool(session and not session.active) or (
             previous is not None
             and identity != previous
@@ -381,6 +392,7 @@ class PVSurplus:
         self.pv_start_since.pop(target, None)
         self.pv_expiry.pop(target, None)
         self.status[target] = "measurements_unavailable"
+        self.pv_measurement_status[target] = "measurements_unavailable"
 
     @diagnostic_request
     def pv_request(self, target):
@@ -388,9 +400,12 @@ class PVSurplus:
         self.control.intent(target).hard_max_w = None
         try:
             if self.common_pv(target):
-                return self.optimum_request(target)
-            available, soc = self.pv_measurements(target)
-            return decision(available, soc, self.setting(target), False)
+                result = self.optimum_request(target)
+            else:
+                available, soc = self.pv_measurements(target)
+                result = decision(available, soc, self.setting(target), False)
+            self.pv_measurement_status.pop(target, None)
+            return result
         except UnsafeTargetRange:
             from .diagnostics import profile_event
 
@@ -409,6 +424,7 @@ class PVSurplus:
             self.optimum_regulators.pop(target, None)
             return Fraction(0), Direction.DOWN, "stopped_battery_soc"
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
+            self.pv_measurement_status[target] = "measurements_unavailable"
             if self.optimum_fast(target) or self.references.get(
                 "storage_discharge_power"
             ):
@@ -692,6 +708,14 @@ class PVSurplus:
         return Fraction(0), Direction.DOWN, status, resolve(Fraction(0), Direction.DOWN)
 
     def pv_edit(self, target):
+        if self.pv_phase_retry.get(target) and not self.control.phase_restricted(
+            target
+        ):
+            # An expired authority/connection/physical context is not generic
+            # station BUSY. Its technical deadline must not block a fresh point.
+            self.pv_retry_until.pop(target, None)
+            self.pv_retry_request.pop(target, None)
+            self.pv_phase_retry.pop(target, None)
         pending = target in self.control.pending_points
         if not pending:
             self.control.intent(target).profile_modes = None
@@ -733,6 +757,7 @@ class PVSurplus:
             "pv_stop_delay",
             "optimum_minimum_hold",
             "optimum_pause_pending",
+            "optimum_deliberate_pause",
         ):
             self.pv_ongoing[target] = False
         return result
@@ -845,6 +870,38 @@ class PVSurplus:
                     if self.valid(target, self.epochs[target]):
                         self.launch(target)
 
+    def pv_point_confirmed(self, target, point, previous):
+        """Record causes only after the shared command lifecycle confirms OFF."""
+        if point.charging:
+            if self.control.runtime.enabled(target) is True:
+                self.pv_pause_reasons.pop(target, None)
+                self.pv_pause_transactions.pop(target, None)
+            return
+        if previous is not None and previous.charging:
+            status = self.status.get(target)
+            reason = (
+                "optimum_deliberate_pause"
+                if self.control.intent(target).policy_pause
+                else status
+                if status
+                in (
+                    "stopped_battery_soc",
+                    "hard_budget_pause",
+                    "grid_import_pause",
+                    "stop_delay_expired",
+                    "measurements_unavailable",
+                    "hard_budget_unavailable",
+                    "paused_insufficient_pv",
+                )
+                else "off"
+            )
+            self.pv_pause_reasons[target] = reason
+            session = self.control.runtime.sessions.get(target)
+            self.pv_pause_transactions[target] = (
+                session.external_transaction_id if session and session.active else None
+            )
+        self.pv_ongoing[target] = False
+
     def pv_confirm(self, target):
         point = self.control.confirmed_point(target)
         if (regulator := self.optimum_regulators.get(target)) is not None:
@@ -866,6 +923,7 @@ class PVSurplus:
                         "measurements_unavailable",
                         "telemetry_unavailable",
                         "safe_stop_unavailable",
+                        "optimum_deliberate_pause",
                     )
                 )
             )
@@ -876,6 +934,8 @@ class PVSurplus:
         self.pv_sync_session(target)
         if self.pv_ongoing[target]:
             self.pv_start_since.pop(target, None)
+            self.pv_pause_reasons.pop(target, None)
+            self.pv_pause_transactions.pop(target, None)
         if (
             self.status.get(target) == "actively_charging"
             and not self.pv_ongoing[target]

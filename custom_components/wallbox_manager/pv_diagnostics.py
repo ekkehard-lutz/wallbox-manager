@@ -354,12 +354,20 @@ class Cycle:
         self.data.update(
             decision=decision,
             reason=reason,
-            profile_status=p.status.get(t),
+            profile_status=p.pv_display_status(t),
+            pv_pause_reason=p.pv_pause_reasons.get(t),
+            pv_restart_reason=p.pv_restart_reasons.get(t),
+            pv_measurement_status=p.pv_measurement_status.get(t),
             control_status=intent.status,
             command_fence_reason=intent.fence_reason,
             startup_pending=t in p.pv_startups,
             policy_allows_charging=self.data.get("policy_reason")
-            == "actively_charging",
+            in (
+                "actively_charging",
+                "optimum_minimum_hold",
+                "optimum_pause_pending",
+                "pv_stop_delay",
+            ),
             ownership_status=getattr(
                 getattr(p.control, "ownership", None), "status", None
             ),

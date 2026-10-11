@@ -198,7 +198,7 @@ async def test_enable_below_threshold_and_repeat_no_commands(grid):
     count = len(peer.requests)
     await asyncio.sleep(0)
     assert len(peer.requests) == count
-    assert p.status[t] == "stopped_battery_soc"
+    assert p.status[t] == "waiting_battery_soc"
     assert not p.pv_ongoing[t]
 
 

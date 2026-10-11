@@ -62,6 +62,8 @@ def solve(
     charging_only: bool = False,
     minimum_positive: bool = False,
     hard_max_w: Fraction | None = None,
+    retained_point: OperatingPoint | None = None,
+    soft_retention_w: Fraction = Fraction(0),
 ) -> SolverResult:
     """Select among verified modes within all supplied hard current intervals.
 
@@ -74,7 +76,9 @@ def solve(
     Existing callers default to 0%; the manual runtime explicitly supplies 5%.
     minimum_positive is an explicit feasibility query, not budget approximation:
     it returns the smallest verified positive point, retaining hard constraints.
-    Ordinary DOWN/UP/NEAREST and explicit OFF semantics remain unchanged.
+    Normal DOWN/UP/NEAREST and explicit OFF semantics remain unchanged. An
+    explicitly supplied confirmed setpoint may be retained within a bounded
+    soft-target deadband, after proving fresh voltage and all hard limits.
 
     Each mode's linear power grid needs only its endpoints and the two indices
     bracketing the target. This is equivalent to full enumeration without memory
@@ -82,6 +86,8 @@ def solve(
     """
     timestamp(now)
     hard_max = None if hard_max_w is None else scalar(hard_max_w)
+    retention = scalar(soft_retention_w)
+    confirmed_mode = current_mode
     tolerance = scalar(phase_switch_deviation_pct)
     if tolerance > 25:
         raise ValueError("phase retention tolerance must be between 0 and 25 percent")
@@ -118,6 +124,7 @@ def solve(
     )
     missing_voltage = False
     has_mode = False
+    retained = None
     for envelope in capabilities.envelopes:
         if (
             envelope.mode not in eligible
@@ -136,6 +143,28 @@ def solve(
         voltage_sum = sum(volts, Fraction(0))
         if hard_max is not None:
             last = min(last, floor((hard_max / voltage_sum - origin) / step))
+        if (
+            retention > 0
+            and request.direction == Direction.DOWN
+            and request.target_w > 0
+            and not minimum_positive
+            and retained_point is not None
+            and retained_point.charging
+            and retained_point.mode == envelope.mode == confirmed_mode
+        ):
+            index = (retained_point.current_a - origin) / step
+            watts = retained_point.current_a * voltage_sum
+            if (
+                index.denominator == 1
+                and first <= index <= last
+                and abs(watts - request.target_w) <= retention
+            ):
+                # Only an already acknowledged setpoint may cross the soft DOWN
+                # boundary. Rebuild its voltage basis and prove every hard limit.
+                retained = OperatingPoint(
+                    True, envelope.mode, retained_point.current_a, watts, volts
+                )
+                candidates.append(retained)
         target_index = (request.target_w / voltage_sum - origin) / step
         for index in {first, last, floor(target_index), ceil(target_index)}:
             if first <= index <= last:
@@ -197,6 +226,10 @@ def solve(
         )
     ]
     if not directional:
+        if retained is not None:
+            return SolverResult(
+                ResultStatus.FEASIBLE, Reason.CONFIRMED_RETAINED, retained
+            )
         return SolverResult(
             ResultStatus.UNREACHABLE,
             Reason.DIRECTION_UNREACHABLE,
@@ -206,16 +239,24 @@ def solve(
         )
     chosen = min(directional, key=nearest_key)
     if request.target_w > 0 and current_mode is not None:
-        retained = [p for p in directional if p.charging and p.mode == current_mode]
-        if retained:
-            candidate = min(retained, key=nearest_key)
+        same_mode_candidates = [
+            p for p in directional if p.charging and p.mode == current_mode
+        ]
+        if same_mode_candidates:
+            candidate = min(same_mode_candidates, key=nearest_key)
             if abs(candidate.offered_power_w - request.target_w) * 100 <= (
                 request.target_w * tolerance
             ):
                 chosen = candidate
+    reason = Reason.SELECTED if chosen.charging else Reason.OFF_SELECTED
+    if retained is not None and (
+        not retained.same_setpoint(chosen)
+        or retained.offered_power_w > request.target_w
+    ):
+        chosen, reason = retained, Reason.CONFIRMED_RETAINED
     return SolverResult(
         ResultStatus.FEASIBLE if chosen.charging else ResultStatus.OFF,
-        Reason.SELECTED if chosen.charging else Reason.OFF_SELECTED,
+        reason,
         chosen,
         minimum,
         maximum,

@@ -89,6 +89,8 @@ class Adapter(InventoryAdapter, ChargePoint):
         guard = _dispatch_guard.get()
         if guard is not None:
             guard()
+            if observed := getattr(guard, "on_dispatch", None):
+                observed()
         await super()._send(message)
 
 
@@ -107,6 +109,8 @@ class EvseControlAdapter:
     No conductor selection is inferred from the phase count, and no phase_to_use
     is emitted. More complex mappings need a separately verified execution path.
     """
+
+    reports_dispatch = True
 
     def __init__(self, adapter, target, capabilities, phase_operation_evidence):
         evse = target.evse if isinstance(target, ConnectorId) else target
@@ -281,6 +285,7 @@ class EvseControlAdapter:
             if refusal is not None:
                 raise _DispatchRefused(refusal)
 
+        guard.on_dispatch = getattr(is_current, "on_dispatch", None)
         context = _dispatch_guard.set(guard)
         try:
             guard()

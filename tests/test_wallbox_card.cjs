@@ -779,6 +779,12 @@ for (const language of ['en','de']) {
     ['hard_budget_unavailable', /valid measurements/, /gültige Messwerte/],
     ['grid_import_pause', /excessive grid import/, /Zu hoher Netzbezug/],
     ['stop_delay_expired', /stop delay expired/, /Stoppverzögerung/],
+    ['no_authority', /no control authority/, /keine Steuerungsberechtigung/],
+    ['authority_unknown', /authority is unknown/, /Steuerungsberechtigung ist unbekannt/],
+    ['disconnected', /connection is disconnected/, /OCPP-Verbindung unterbrochen/],
+    ['inactive_wallbox', /not controlled/, /nicht vom Wallbox Manager gesteuert/],
+    ['waiting_battery_soc', /PV start threshold/, /PV-Startschwelle/],
+    ['measurements_unavailable', /readings are missing, invalid or stale/, /Messwerte fehlen, sind ungültig oder veraltet/],
   ]) test(`Optimum policy status ${status} in ${language}`,()=>{
     const data=states(true);
     data['select.anything'].state='PV_OPTIMUM';
@@ -836,5 +842,30 @@ for (const language of ['en','de']) {
     assert.equal(get('optimum_max_discharge_w-row').hidden,false);
     assert.equal(get('optimum-target-row').hidden,false);
     assert.equal(get('optimum-target').textContent,'7 %');
+  });
+}
+
+for (const language of ['de','en']) {
+  test(`authority status outranks subordinate telemetry and cached command errors in ${language}`,()=>{
+    const data=states(true);
+    data['select.anything'].state='PV_OPTIMUM';
+    Object.assign(data['select.anything'].attributes,{profile_status:'no_authority',pv_measurement_status:'measurements_unavailable',command_status:'temporarily_rejected'});
+    const {card:c,get}=card(data);
+    let calls=0;
+    c._hass.callService=()=>{calls++;};
+    c.hass={...c._hass,language};
+    assert.match(get('status').textContent, language==='de'?/keine Steuerungsberechtigung/:/no control authority/);
+    assert.doesNotMatch(get('status').textContent,/Messwerte fehlen|readings are missing|not applied|nicht angewendet/);
+    assert.equal(calls,0);
+  });
+  test(`confirmed economic pause and restart eligibility stay distinct in ${language}`,()=>{
+    const data=states(true);
+    data['select.anything'].state='PV_OPTIMUM';
+    Object.assign(data['select.anything'].attributes,{profile_status:'optimum_deliberate_pause',pv_pause_reason:'optimum_deliberate_pause',pv_restart_reason:'below_pv_start'});
+    const {card:c,get}=card(data);
+    c.hass={...c._hass,language};
+    assert.match(get('status').textContent, language==='de'?/pausiert bewusst/:/deliberately pauses/);
+    assert.match(get('status').textContent, language==='de'?/Neustart wartet/:/Restart is waiting/);
+    assert.doesNotMatch(get('status').textContent,/niedrigem Speicher|low battery/);
   });
 }

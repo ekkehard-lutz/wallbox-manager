@@ -66,6 +66,7 @@ class ResultStatus(StrEnum):
 
 class Reason(StrEnum):
     SELECTED = "selected"
+    CONFIRMED_RETAINED = "confirmed_current_retained"
     OFF_SELECTED = "off_selected"
     CHARGING_PROHIBITED = "charging_prohibited"
     STOP_UNVERIFIED = "stop_unverified"
