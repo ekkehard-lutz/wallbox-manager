@@ -112,6 +112,7 @@ class ControlRuntime:
         self._confirmed_contexts = {}
         self.recovery_status = {}
         self.pending_points = {}
+        self._unsent_economic_off = set()
         self._point_locks = {}
         self._phase_restrictions = {}
         self._phase_probes = {}
@@ -416,6 +417,16 @@ class ControlRuntime:
             and target not in self._inactive,
             phase_switch_deviation_pct=intent.phase_switch_deviation_pct,
             hard_max_w=hard_max_w,
+            retained_point=self.confirmed_point(target)
+            if (
+                hasattr(self, "profiles")
+                and self.profiles.optimum_fast(target)
+                and target not in self._unconfirmed_targets
+            )
+            else None,
+            soft_retention_w=self.profiles.pv_current_retention_w(target)
+            if hasattr(self, "profiles")
+            else 0,
         )
         return (
             inputs,
@@ -933,10 +944,12 @@ class ControlRuntime:
             try:
                 return await self._apply_stored(target, **kwargs)
             except BaseException:
-                self._confirmed_points.pop(target, None)
+                if target not in self._unsent_economic_off:
+                    self._confirmed_points.pop(target, None)
                 raise
             finally:
                 self.pending_points.pop(target, None)
+                self._unsent_economic_off.discard(target)
 
     async def _apply_stored(
         self,
@@ -989,6 +1002,9 @@ class ControlRuntime:
 
         substitute_mode = None
         command_request = intent.request
+        economic_off = intent.policy_pause and not resolved.point.charging
+        if economic_off and getattr(adapter, "reports_dispatch", False) is True:
+            self._unsent_economic_off.add(target)
         intent.phase_retry = intent.reachable_only and self.phase_restricted(target)
         intent.fence_reason = None
 
@@ -1090,6 +1106,7 @@ class ControlRuntime:
                 )
 
         current.after_dispatch = lambda: current(after_dispatch=True)
+        current.on_dispatch = lambda: self._unsent_economic_off.discard(target)
 
         if prepared is not None:
 
@@ -1179,15 +1196,27 @@ class ControlRuntime:
         # Record the actual invalidating context even when the adapter already
         # rejected an obsolete connection/authority before returning its result.
         still_current = current(after_dispatch=True)
+        rejected_economic_off = (
+            economic_off
+            and result.status == CommandStatus.TEMPORARILY_REJECTED
+            and (
+                result.reason == CommandReason.BUSY
+                or (
+                    result.reason == CommandReason.STALE
+                    and target in self._unsent_economic_off
+                )
+            )
+        )
         if generation != intent.generation or (
             result.status == CommandStatus.APPLIED and not still_current
         ):
-            if generation != intent.generation:
+            if generation != intent.generation and not rejected_economic_off:
                 self._confirmed_points.pop(target, None)
             # The adapter accepted a write whose final fence no longer matches.
             # Retain historical confirmation, but require reconciliation even if
             # the next desired target equals that old point.
-            self._unconfirmed_targets.add(target)
+            if not rejected_economic_off:
+                self._unconfirmed_targets.add(target)
             result = stale_command_result()
         if result.status in (CommandStatus.FAILED, CommandStatus.UNSUPPORTED):
             self._confirmed_points.pop(target, None)
@@ -1218,6 +1247,10 @@ class ControlRuntime:
                     self._inactive.discard(target)
                 else:
                     self._inactive.add(target)
+                if hasattr(self, "profiles"):
+                    self.profiles.pv_point_confirmed(
+                        target, resolved.point, prior_point
+                    )
             intent.command_result = result
             intent.status = result.status.value
             self.publish(target)

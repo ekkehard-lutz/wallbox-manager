@@ -69,6 +69,12 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             hass, 1, f"wallbox_manager.{entry.entry_id}.pv_day"
         )
         self.pv_ongoing = {}
+        self.pv_pause_reasons = {}
+        self.pv_pause_transactions = {}
+        self.pv_restart_reasons = {}
+        self.pv_soc_protection = set()
+        self.pv_measurement_status = {}
+        self.pv_authority_contexts = {}
         self.pv_battery = {}
         self.pv_sessions = {}
         self.pv_start_since = {}
@@ -304,7 +310,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if target in self.optimum_targets
             else None,
             "pv_day_state": self.optimum_day_for(target).state,
-            "profile_status": self.status.get(target, "idle"),
+            "profile_status": self.pv_display_status(target),
+            "pv_pause_reason": self.pv_pause_reasons.get(target),
+            "pv_restart_reason": self.pv_restart_reasons.get(target),
+            "pv_measurement_status": self.pv_measurement_status.get(target),
             "available_profiles": self.available_profiles(target),
             "battery_configured": bool(self.references.get("soc_speicher_aktuell"))
             if self.setting(target)["profile"]
@@ -318,6 +327,25 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             "actual_charging": self.active(target),
             "profile_control_ready": self.control.profile_permitted(target),
         }
+
+    def pv_display_status(self, target):
+        """Control readiness precedes subordinate passive measurement failures."""
+        if self.settings.get(target_key(target), {}).get("profile", "NETZ") in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
+            state = self.control.runtime.get(target.station)
+            if state is None or not state.connected:
+                return "disconnected"
+            authority = self.control.runtime.authority(target.station)
+            if authority == ControlAuthority.UNKNOWN:
+                return "authority_unknown"
+            if authority != ControlAuthority.REMOTE:
+                return "no_authority"
+            if not self.control.profile_permitted(target):
+                return "inactive_wallbox"
+        return self.status.get(target, "idle")
 
     @callback
     def battery_changed(self, event):
@@ -374,7 +402,18 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             )
         return actively_charging(state, target)
 
-    def invalidate(self, target):
+    def invalidate(self, target, *, preserve_phase_retry=False):
+        phase_retry = None
+        if (
+            preserve_phase_retry
+            and self.pv_phase_retry.get(target, False)
+            and self.control.phase_restricted(target)
+            and self.can_control(target)
+        ):
+            phase_retry = (
+                self.pv_retry_until.get(target),
+                self.pv_retry_request.get(target),
+            )
         if target in self.enable_requests:
             profile_event(
                 self, target, "enable_cancelled", reason="lifecycle_invalidated"
@@ -404,12 +443,21 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.pv_start_since.pop(target, None)
         self.pv_stop_since.pop(target, None)
         self.pv_expiry.pop(target, None)
+        if phase_retry is not None:
+            deadline, request = phase_retry
+            if deadline is not None:
+                self.pv_retry_until[target] = deadline
+            if request is not None:
+                self.pv_retry_request[target] = request
+            self.pv_phase_retry[target] = True
 
     async def select(self, target, profile):
         if profile not in self.available_profiles(target):
             raise ValueError("unsupported profile")
         # Reselecting is an explicit safe stop too; future profiles use this boundary.
         self.invalidate(target)
+        self.pv_pause_reasons.pop(target, None)
+        self.pv_pause_transactions.pop(target, None)
         self.suppressed.add(target)
         epoch = self.epochs[target]
         self.grid_consume(target, "cancelled")
@@ -539,7 +587,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             if relevant:
                 ongoing = self.pv_ongoing.get(target, False)
                 session = self.pv_sessions.get(target)
-                self.invalidate(target)
+                self.invalidate(target, preserve_phase_retry=True)
                 self.pv_ongoing[target] = ongoing
                 self.pv_sessions[target] = session
                 if self.valid(target, self.epochs[target]):
@@ -981,6 +1029,13 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                 != ControlAuthority.REMOTE
             ):
                 self.invalidate(target)
+        for target in tuple(self.control.intents):
+            if target.station != snapshot.token.station:
+                continue
+            context = (snapshot.token, snapshot.authority_revision, snapshot.connected)
+            if self.pv_authority_contexts.get(target) != context:
+                self.pv_authority_contexts[target] = context
+                self.control.publish(target)
         self.sessions_changed()
 
     def sessions_changed(self):
@@ -1164,6 +1219,17 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                     return
                 if point is not None:
                     session = runtime.sessions.get(target)
+                    if (
+                        not point.charging
+                        and record.get("pause_reason") == "optimum_deliberate_pause"
+                        and session
+                        and session.active
+                        and record.get("transaction") == session.external_transaction_id
+                    ):
+                        self.pv_pause_reasons[target] = record["pause_reason"]
+                        self.pv_pause_transactions[target] = (
+                            session.external_transaction_id
+                        )
                     continuing = bool(
                         point.charging
                         and session

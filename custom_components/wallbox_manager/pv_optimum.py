@@ -153,6 +153,18 @@ class PVOptimum:
                 reason="phase_lockout_target_soc",
                 lower_stop_threshold=desired,
             )
+        protection = decision.mode == "STOP" and (
+            decision.reason == "lower_soc_protection"
+            or (self.phase_lockout_continuing(target) and soc < desired)
+        )
+        if protection:
+            self.pv_soc_protection.add(target)
+        else:
+            self.pv_soc_protection.discard(target)
+        if decision.mode == "STOP":
+            self.pv_restart_reasons[target] = decision.reason
+        else:
+            self.pv_restart_reasons.pop(target, None)
         self.optimum_initializations.discard(target)
         context = dict(
             target_soc=float(desired),
@@ -436,6 +448,10 @@ class PVOptimum:
             and self.optimum_modes.get(target) == "FAST_DISCHARGE"
         )
 
+    def pv_current_retention_w(self, target):
+        """Existing deadband stabilizes confirmed FAST points, never BALANCE OFF."""
+        return GRID_DEADBAND_W if self.optimum_fast(target) else 0
+
     async def optimum_wait(self, target, seconds):
         """Wake an existing balance loop on a responsive SoC mode transition."""
         event = self.optimum_wakes.setdefault(target, asyncio.Event())
@@ -470,6 +486,13 @@ class PVOptimum:
                         self.optimum_request(target, policy=policy)
                     except ValueError, TypeError, ZeroDivisionError, OverflowError:
                         self.pv_input_gap(target)
+                        self.control.publish(target)
+                        continue
+                self.pv_measurement_status.pop(target, None)
+                if self.status.get(target) == "measurements_unavailable":
+                    self.status[target] = (
+                        "actively_charging" if self.pv_ongoing.get(target) else "idle"
+                    )
             self.control.publish(target)
 
     def optimum_request(self, target, *, policy=None):
@@ -477,7 +500,14 @@ class PVOptimum:
         if mode == "STOP":
             self.pv_expiry[target] = expiry
             self.optimum_regulators.pop(target, None)
-            return Fraction(0), Direction.DOWN, "stopped_battery_soc"
+            status = (
+                "stopped_battery_soc"
+                if target in self.pv_soc_protection
+                else "optimum_deliberate_pause"
+                if self.pv_pause_reasons.get(target) == "optimum_deliberate_pause"
+                else "waiting_battery_soc"
+            )
+            return Fraction(0), Direction.DOWN, status
         available, _, actual = self.pv_measurements(target, details=True)
         self.pv_expiry[target] = min(self.pv_expiry[target], expiry)
         settings = self.setting(target)
@@ -749,6 +779,7 @@ class PVOptimum:
             if actual < 0:
                 raise ValueError("negative EV power")
         except ValueError, TypeError, ZeroDivisionError, OverflowError:
+            self.pv_measurement_status[target] = "measurements_unavailable"
             return (
                 0,
                 Direction.DOWN,

@@ -216,7 +216,7 @@ async def test_waiting_start_is_explicit(grid, caplog, delay):
     p.pv_plan(t)
     (line,) = records(caplog)
     assert line["decision"] == ("START_PENDING" if delay else "PLANNED")
-    assert line["reason"] == ("pv_start_delay" if delay else "stopped_battery_soc")
+    assert line["reason"] == ("pv_start_delay" if delay else "waiting_battery_soc")
     if delay:
         assert 0 < line["delays"]["pv_start_delay"]["remaining_s"] <= 20
 

@@ -90,6 +90,10 @@ class ControlAdapter(Protocol):
     the calculated point is then fixed, while intent, authority, permission,
     transaction and prepared-target safety fences remain active. Volatile
     regulation samples must not retrospectively re-solve an already sent point.
+    An adapter declaring reports_dispatch=True must invoke the optional
+    is_current.on_dispatch() immediately before its first device write, after
+    validating the fence. This observation distinguishes cancellation before
+    dispatch from an unknown outcome after dispatch; it grants no permission.
 
     Check is_current after queue/lock waits and immediately before each device
     side effect, with no intervening await before dispatch. Keep device-specific
