@@ -75,6 +75,8 @@ class ManualIntent:
     reachable_only: bool = False
     policy_pause: bool = False
     hard_max_w: Fraction | None = None
+    # A PV policy witness for the exact technical floor, never a general ceiling.
+    minimum_exception: object = None
     status: str = "idle"
     fence_reason: str | None = None
     solver_result: SolverResult | None = None
@@ -223,6 +225,7 @@ class ControlRuntime:
         intent.current_limits = limits
         intent.request = request
         intent.policy_pause = False
+        intent.minimum_exception = None
         intent.phase_switch_deviation_pct = tolerance
         intent.generation += 1
         intent.solver_result = intent.command_result = None
@@ -314,7 +317,36 @@ class ControlRuntime:
             if e.mode.count in intent.current_limits
         )
 
-    def minimum_positive(self, target, *, dispatch_modes=None, energy_desired=False):
+    def technical_minimum(self, target, *, dispatch_modes=None, energy_desired=False):
+        """Query the executable floor with every physical limit, excluding PV H."""
+        return self.minimum_positive(
+            target,
+            dispatch_modes=dispatch_modes,
+            energy_desired=energy_desired,
+            _technical=True,
+        )
+
+    def minimum_exception_valid(self, target, point, *, dispatch_modes=None):
+        return (
+            self.minimum_exception_point(target, point, dispatch_modes=dispatch_modes)
+            is not None
+        )
+
+    def minimum_exception_point(self, target, point, *, dispatch_modes=None):
+        """Refresh the floor's watt cost without changing its wire setpoint."""
+        witness = self.intent(target).minimum_exception
+        if witness is None or point is None or not point.same_setpoint(witness):
+            return None
+        minimum = self.technical_minimum(target, dispatch_modes=dispatch_modes)
+        return (
+            minimum.point
+            if minimum and minimum.point and point.same_setpoint(minimum.point)
+            else None
+        )
+
+    def minimum_positive(
+        self, target, *, dispatch_modes=None, energy_desired=False, _technical=False
+    ):
         """Resolve an actual reachable positive point through the common grid.
 
         Disabled permission may prepare a point for an explicitly authorized ON;
@@ -333,6 +365,7 @@ class ControlRuntime:
             dispatch_modes=dispatch_modes,
             minimum_positive=True,
             energy_desired=energy_desired,
+            _technical_minimum=_technical,
         )
         return result
 
@@ -347,6 +380,8 @@ class ControlRuntime:
         reachable=False,
         energy_desired=False,
         hard_max_w=None,
+        _technical_minimum=False,
+        _minimum_witness=None,
     ):
         state = self.runtime.get(target.station)
         if self._closed or state is None or not state.connected:
@@ -366,12 +401,34 @@ class ControlRuntime:
             return None, None, "capabilities_unavailable"
         intent = self.intent(target)
         request = request or intent.request
-        if hasattr(self, "profiles") and self.profiles.common_pv(target):
+        if _technical_minimum and not minimum_positive:
+            raise ValueError("technical budget exclusion is only a floor query")
+        if (
+            not _technical_minimum
+            and hasattr(self, "profiles")
+            and self.profiles.common_pv(target)
+        ):
             if intent.hard_max_w is not None:
+                economic_max = intent.hard_max_w
+                witness = _minimum_witness or intent.minimum_exception
+                if (
+                    witness is not None
+                    and not energy_desired
+                    and request.target_w > 0
+                    and request.target_w == witness.offered_power_w
+                    and (
+                        fresh_floor := self.minimum_exception_point(
+                            target, witness, dispatch_modes=dispatch_modes
+                        )
+                    )
+                    is not None
+                ):
+                    economic_max = max(economic_max, fresh_floor.offered_power_w)
+                    request = PowerSettings(fresh_floor.offered_power_w, Direction.DOWN)
                 hard_max_w = (
-                    intent.hard_max_w
+                    economic_max
                     if hard_max_w is None
-                    else min(hard_max_w, intent.hard_max_w)
+                    else min(hard_max_w, economic_max)
                 )
         if (
             request.target_w == 0
@@ -990,22 +1047,30 @@ class ControlRuntime:
             return self.preparation_wait(target, intent.status) if prepare else None
         enabled_revision = self.runtime.enabled_observation(target).revision
         inputs, resolved, blocked = self.resolve(target)
+        minimum_witness = intent.minimum_exception
         intent.solver_result = resolved
         adapter = self.adapter(target) if blocked is None else None
         if blocked is not None or adapter is None:
             intent.status = blocked or "adapter_unavailable"
             self.publish(target)
             return self.preparation_wait(target, intent.status) if prepare else None
-        state = self.runtime.get(target.station)
         token = state.token
         authority_revision = state.authority_revision
+        if hook := getattr(
+            getattr(self, "profiles", None), "economic_before_apply", None
+        ):
+            await hook(target, resolved.point)
 
         substitute_mode = None
         command_request = intent.request
         economic_off = intent.policy_pause and not resolved.point.charging
         if economic_off and getattr(adapter, "reports_dispatch", False) is True:
             self._unsent_economic_off.add(target)
-        intent.phase_retry = intent.reachable_only and self.phase_restricted(target)
+        intent.phase_retry = (
+            resolved.point.charging
+            and intent.reachable_only
+            and self.phase_restricted(target)
+        )
         intent.fence_reason = None
 
         def control_valid(*, after_dispatch=False, permission_confirmed=False):
@@ -1066,7 +1131,10 @@ class ControlRuntime:
             # Queue/lock waits still require a fresh, representable snapshot and
             # current phase-operation proof immediately before a hardware write.
             _, result, reason = self.resolve(
-                target, substitute_mode=substitute_mode, request=command_request
+                target,
+                substitute_mode=substitute_mode,
+                request=command_request,
+                _minimum_witness=minimum_witness,
             )
             if (
                 resolved.point.charging
@@ -1106,7 +1174,15 @@ class ControlRuntime:
                 )
 
         current.after_dispatch = lambda: current(after_dispatch=True)
-        current.on_dispatch = lambda: self._unsent_economic_off.discard(target)
+
+        def on_dispatch():
+            self._unsent_economic_off.discard(target)
+            if hook := getattr(
+                getattr(self, "profiles", None), "economic_point_dispatched", None
+            ):
+                hook(target, resolved.point)
+
+        current.on_dispatch = on_dispatch
 
         if prepared is not None:
 
@@ -1132,6 +1208,14 @@ class ControlRuntime:
         ):
             intent.command_result = CommandResult(CommandStatus.APPLIED)
             intent.status = "applied"
+            if hook := getattr(
+                getattr(self, "profiles", None), "economic_point_confirmed", None
+            ):
+                hook(target, resolved.point)
+            if hook := getattr(
+                getattr(self, "profiles", None), "economic_after_apply", None
+            ):
+                await hook(target, resolved.point)
             command_event(
                 self, target, "command_reused", operating_point=resolved.point
             )
@@ -1141,6 +1225,12 @@ class ControlRuntime:
         intent.status = "pending"
         self.publish(target)
         command_event(self, target, "command_attempt", operating_point=resolved.point)
+        if getattr(adapter, "reports_dispatch", False) is not True:
+            # Without an exact wire signal, conservatively preserve uncertainty.
+            if hook := getattr(
+                getattr(self, "profiles", None), "economic_point_dispatched", None
+            ):
+                hook(target, resolved.point)
         result = await apply_operating_point(
             adapter, resolved.point, is_current=current
         )
@@ -1173,6 +1263,7 @@ class ControlRuntime:
                 )
                 if plan is not None and plan.point is not None and plan.point.charging:
                     command_request = PowerSettings(power, direction)
+                    minimum_witness = intent.minimum_exception
             _, substitute, blocked = self.resolve(
                 target, substitute_mode=substitute_mode, request=command_request
             )
@@ -1196,6 +1287,17 @@ class ControlRuntime:
         # Record the actual invalidating context even when the adapter already
         # rejected an obsolete connection/authority before returning its result.
         still_current = current(after_dispatch=True)
+        if result.status == CommandStatus.TEMPORARILY_REJECTED and (
+            result.reason == CommandReason.BUSY
+            or (
+                result.reason == CommandReason.STALE
+                and target in self._unsent_economic_off
+            )
+        ):
+            if hook := getattr(
+                getattr(self, "profiles", None), "economic_point_not_applied", None
+            ):
+                hook(target, resolved.point)
         rejected_economic_off = (
             economic_off
             and result.status == CommandStatus.TEMPORARILY_REJECTED
@@ -1251,6 +1353,10 @@ class ControlRuntime:
                     self.profiles.pv_point_confirmed(
                         target, resolved.point, prior_point
                     )
+                    if hook := getattr(self.profiles, "economic_point_confirmed", None):
+                        hook(target, resolved.point)
+                    if hook := getattr(self.profiles, "economic_after_apply", None):
+                        await hook(target, resolved.point)
             intent.command_result = result
             intent.status = result.status.value
             self.publish(target)

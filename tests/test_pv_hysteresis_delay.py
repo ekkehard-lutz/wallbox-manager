@@ -22,7 +22,7 @@ async def started(grid):
     return p, t, context, clock
 
 
-async def test_target_jitter_and_voltage_drift_do_not_bypass_stop_delay(grid):
+async def test_target_jitter_and_voltage_drift_do_not_invent_an_economic_timer(grid):
     p, t, (c, _, _, *_), clock = await started(grid)
     for seconds, soc in ((0, 41.1), (5, 41), (30, 41), (60, 40.9), (89, 41)):
         clock[0] = seconds
@@ -35,9 +35,10 @@ async def test_target_jitter_and_voltage_drift_do_not_bypass_stop_delay(grid):
         clock[0] = seconds
         measurements(p, t, pv=0, load=0, actual=0, soc=41)
         assert p.pv_edit(t).point.charging
-        assert p.pv_stop_since[t] == 100
+        assert t not in p.pv_stop_since
     clock[0] = 190
-    assert not (await apply(p, t)).charging
+    assert (await apply(p, t)).charging
+    assert p.economic_policies[t].energy_ws == 0
     assert c.runtime.enabled(t) is True
 
 

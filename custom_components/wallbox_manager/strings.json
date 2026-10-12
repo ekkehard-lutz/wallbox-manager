@@ -272,7 +272,7 @@
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "PV Surplus requires both power references. Without battery SoC it operates without battery logic; the discharge-reserve reference is independent.",
+        "description": "All PV profiles require measured grid import and export power. Without a battery, PV Surplus uses these meters and wallbox power; separate PV generation and consumption references are not required. Battery profiles also need their battery and power references; PV Optimum additionally needs the remaining-day forecast.",
         "sections": {
           "general": {
             "name": "General parameters",
@@ -306,6 +306,9 @@
               "pv_stop_delay": "PV stop delay",
               "soc_hysterese": "SoC hysteresis and target safety margin",
               "power_smoothing_window": "Power smoothing window"
+            },
+            "data_description": {
+              "pv_stop_delay": "Legacy value retained for compatibility. PV economic STOP now uses the measured 50 Wh grid-import budget; this delay does not control it."
             }
           }
         }

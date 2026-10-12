@@ -24,6 +24,7 @@ from .diagnostics import (
 from .grid_timing import GridTiming, duration_seconds
 from .power_history import PowerHistory
 from .pv_diagnostics import diagnostic_permission
+from .pv_economy_control import PVEconomicControl
 from .pv_optimum import (
     FAST_OBSERVATION_SECONDS,
     OPTIMUM_DEFAULTS,
@@ -41,7 +42,7 @@ def target_key(target):
     return json.dumps([target.station.value, target.evse.value, target.value])
 
 
-class GridProfiles(GridTiming, PVSurplus, PVOptimum):
+class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
     """Own profile settings and bounded detection tasks, never acquire authority."""
 
     def __init__(self, hass, entry, control, battery):
@@ -100,18 +101,20 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.status = {}
         self.closed = False
         self.wait = asyncio.sleep
+        self.battery_task = None
+        self.battery_dirty = False
+        self.suppressed = set()
+        self.economic_initialize()
         self.unsubscribe = control.runtime.subscribe(self.changed)
         self.session_unsubscribe = control.runtime.sessions.subscribe(
             self.sessions_changed
         )
-        self.battery_task = None
-        self.battery_dirty = False
-        self.suppressed = set()
         self.unsubscribe_battery = hass.bus.async_listen(
             "state_changed", self.battery_changed
         )
 
     async def load(self):
+        await self.economic_load()
         self.optimum_plans.clear()
         self.optimum_modes.clear()
         stored = await self.store.async_load() or {}
@@ -230,16 +233,19 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
 
     def available_profiles(self, target):
         # Entity options are scoped to this connector's owning integration entry.
-        profiles = (
-            ["NETZ", "PV_SURPLUS"]
-            if all(
-                self.references.get(key)
-                for key in ("leistung_pv", "leistung_verbraucher")
+        profiles = ["NETZ"]
+        if any(
+            all(self.references.get(key) for key in keys)
+            for keys in (
+                ("leistung_pv", "leistung_verbraucher"),
+                ("grid_import_power", "grid_export_power"),
             )
-            else ["NETZ"]
-        )
+        ):
+            profiles.append("PV_SURPLUS")
 
-        if all(self.references.get(key) for key in OPTIMUM_REFERENCES):
+        if self.references.get("min_soc_speicher") and all(
+            self.references.get(key) for key in OPTIMUM_REFERENCES
+        ):
             profiles.append("PV_OPTIMUM")
         if all(
             self.references.get(key)
@@ -297,6 +303,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
     def attributes(self, target):
         return {
             **self.grid_attributes(target),
+            **self.economic_attributes(target),
             "optimum_target_soc": float(self.optimum_targets[target])
             if target in self.optimum_targets
             else None,
@@ -403,6 +410,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         return actively_charging(state, target)
 
     def invalidate(self, target, *, preserve_phase_retry=False):
+        self.economic_invalidate(target)
         phase_retry = None
         if (
             preserve_phase_retry
@@ -456,6 +464,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             raise ValueError("unsupported profile")
         # Reselecting is an explicit safe stop too; future profiles use this boundary.
         self.invalidate(target)
+        if profile == "NETZ":
+            await self.economic_end_scope(target)
         self.pv_pause_reasons.pop(target, None)
         self.pv_pause_transactions.pop(target, None)
         self.suppressed.add(target)
@@ -664,6 +674,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
     @diagnostic_permission
     async def permission(self, target, enabled, *, _grid_expiry=False, _resume=False):
         """Coalesce one explicit PV activation through preparation and backoff."""
+        if not enabled:
+            # Revoke queued work before any persistence await can yield to ACK.
+            self.invalidate(target)
+            await self.economic_end_scope(target)
         pv = self.setting(target)["profile"] in (
             "PV_SURPLUS",
             "PV_OPTIMUM",
@@ -746,6 +760,26 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
             )
         if self.epochs[target] != epoch:
             return None
+        if enabled and self.setting(target)["profile"] in (
+            "PV_SURPLUS",
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+        ):
+            prepared = await self.economic_prepare(target, resume=_resume)
+            if self.epochs[target] != epoch:
+                return None
+            if not prepared:
+                reason = self.economic_reason(target)
+                waiting = self.control.preparation_wait(target, reason)
+                if reason == "economic_recovery_transaction":
+                    self.economic_activation_pending[target] = _resume
+                    self.pv_schedule_startup(target, epoch)
+                elif (
+                    reason == "grid_import_energy_limit"
+                    and self.control.runtime.enabled(target) is False
+                ):
+                    self.economic_defer_resume(target)
+                return waiting
         if enabled:
             self.suppressed.discard(target)
         else:
@@ -1032,6 +1066,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         for target in tuple(self.control.intents):
             if target.station != snapshot.token.station:
                 continue
+            self.economic_refresh(target)
             context = (snapshot.token, snapshot.authority_revision, snapshot.connected)
             if self.pv_authority_contexts.get(target) != context:
                 self.pv_authority_contexts[target] = context
@@ -1039,6 +1074,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         self.sessions_changed()
 
     def sessions_changed(self):
+        self.economic_sessions_changed()
         for target in tuple(self.control.intents):
             if self.common_pv(target):
                 self.optimum_connection(target)
@@ -1207,6 +1243,20 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
                         )
                         await self.wait(self.setting(target)["regulation_interval"])
                         continue
+                    prepared = await self.economic_prepare(target, resume=True)
+                    if not current():
+                        recovery_record(
+                            "fence", reason="profile_recovery_context_changed"
+                        )
+                        return
+                    if not prepared:
+                        reason = self.economic_reason(target)
+                        self.status[target] = reason
+                        self.control.preparation_wait(target, reason)
+                        recovery_record("waiting", reason=reason, pending=True)
+                        if reason == "grid_import_energy_limit" and enabled is False:
+                            self.economic_defer_resume(target)
+                        return
                 if enabled is False:
                     # This continues persisted explicit user intent, not Remote
                     # authority alone. Normal startup fences/delays still apply.
@@ -1326,6 +1376,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum):
         await asyncio.gather(*tasks, return_exceptions=True)
         if self.battery_task:
             await self.battery_task
+        await self.economic_close()
         owner = getattr(self.control, "ownership", None)
         if not (
             owner

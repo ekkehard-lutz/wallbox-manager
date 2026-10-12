@@ -41,11 +41,12 @@ class PowerEvidence:
 
 
 def battery_budget(ev, discharge, limit, imported, exported, *, evidence, ev_floor):
-    """Independent incremental discharge and site-balance bounds, with reserve.
+    """Ordinary economic discharge allocation, with an evidence reserve.
 
-    G=import-export; household=site_load-EV. Existing import is held constant
-    for the battery bound, never increased by the minimum-import exception.
-    Taking the lower estimate accounts for inconsistent power-flow inputs.
+    G=import-export; household=site_load-EV. Taking the lower estimate accounts
+    for inconsistent power-flow inputs. This configured economic allocation is
+    not an electrical protection limit; it cannot alone veto an independently
+    proved, exact technical-minimum continuation.
     The EV floor prevents a newer EV response spending older battery headroom.
     """
     ev, discharge, limit, imported, exported, ev_floor = (
@@ -53,7 +54,7 @@ def battery_budget(ev, discharge, limit, imported, exported, *, evidence, ev_flo
         for value in (ev, discharge, limit, imported, exported, ev_floor)
     )
     if min(ev, discharge, limit, imported, exported, ev_floor) < 0 or ev_floor > ev:
-        raise ValueError("invalid hard-budget measurement")
+        raise ValueError("invalid economic-allocation measurement")
     grid = imported - exported
     incremental = ev_floor + limit - discharge + max(0, -grid)
     flow = ev_floor + limit + evidence.pv - evidence.load + max(0, grid)

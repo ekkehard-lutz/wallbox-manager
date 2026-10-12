@@ -12,6 +12,7 @@ from test_control_runtime import manual as manual
 from test_ocpp21_control import connected as connected
 from test_pv_common_runtime import configure
 from test_pv_diagnostics import records
+from test_pv_economy_control import cohort
 from test_pv_optimum_hold import configure as hold_configure
 from test_pv_optimum_hold import evaluate, period, phase_start, samples
 from test_pv_surplus import base_grid as base_grid
@@ -85,9 +86,11 @@ async def test_missing_and_zero_grid_values(grid, caplog, missing):
         assert ev["reason"] == "measurements_unavailable"
 
 
-async def test_surplus_without_optional_mappings(grid, caplog):
+async def test_surplus_without_battery_uses_measured_grid_inputs(grid, caplog):
     p, t, _ = grid
     measurements(p, t, pv=3000, load=500, actual=0)
+    p.references.pop("leistung_pv")
+    p.references.pop("leistung_verbraucher")
     p.setting(t)["profile"] = "PV_SURPLUS"
     p.entry.options = {"diagnostic_level": 3}
     caplog.set_level(logging.INFO)
@@ -95,8 +98,10 @@ async def test_surplus_without_optional_mappings(grid, caplog):
     (line,) = records(caplog)
     ev = line["regulator_evaluations"][0]
     assert ev["request_w"] == 2500
-    assert ev["battery_soc_pct"] is None and ev["grid_net_power_w"] is None
-    assert line["external"]["grid_import_power"]["freshness"] == "not_configured"
+    assert ev["battery_soc_pct"] is None and ev["grid_net_power_w"] == -2500
+    assert line["external"]["grid_import_power"]["normalized_value"] == 0
+    assert line["external"]["grid_export_power"]["normalized_value"] == 2500
+    assert line["external"]["grid_import_power"]["freshness"] == "fresh"
 
 
 @pytest.mark.parametrize("age,expected", [(2, "fresh"), (91, "stale"), (-1, "future")])
@@ -258,16 +263,54 @@ async def test_identical_minimum_hold_pause_commands_and_soc(grid, caplog, level
     await p.permission(t, True)
     assert c.confirmed_point(t).current_a == 7
     clock[0] = 1
-    samples(p, t, soc=80, pv=0, load=0)
+    p.hass.states.async_set("sensor.soc", 80, {"unit_of_measurement": "%"})
+    cohort(
+        p,
+        t,
+        clock,
+        1,
+        source=datetime.now(UTC),
+        actual=1380,
+        imported=3600,
+        discharge=0,
+        pv=0,
+        load=3600,
+    )
     await evaluate(p, t)
     assert p.optimum_modes[t] == "PV_BALANCE"
     assert c.confirmed_point(t).current_a == 6
-    clock[0] = 11
-    await evaluate(p, t)
+    for second in (11, 21, 31, 41, 51):
+        clock[0] = second
+        cohort(
+            p,
+            t,
+            clock,
+            second,
+            source=datetime.now(UTC),
+            actual=1380,
+            imported=3600,
+            discharge=0,
+            pv=0,
+            load=3600,
+        )
+        await evaluate(p, t)
+        assert p.economic_policies[t].energy_ws == 3600 * (second - 1), (
+            p.economic_policies[t].snapshot
+        )
+        if second < 51:
+            assert c.confirmed_point(t).current_a == 6
     assert not c.confirmed_point(t).charging
+    assert p.economic_policies[t].energy_ws == 180000
+    assert p.status[t] == "grid_import_energy_limit"
     assert [period(r)["limit"] for r in peer.requests] == [7, 6, 0]
     lines = records(caplog)
     assert any("regulator_evaluations" in line for line in lines) == (level == 3)
+    if level == 3:
+        assert lines[-1]["decision"] == "ECONOMIC_PAUSE"
+        assert lines[-1]["economic_policy"]["pv_grid_import_energy_wh"] == 50
+    elif level:
+        # Compact logs intentionally use the stable policy reason.
+        assert lines[-1]["decision"] == "grid_import_energy_limit"
     if level < 3:
         assert all("input_reads" not in line for line in lines)
 
@@ -303,7 +346,8 @@ async def test_tap_failure_cannot_change_decision(grid, monkeypatch):
 
 async def test_malformed_source_timestamp_does_not_leak_attributes(grid, caplog):
     p, t, _ = grid
-    measurements(p, t)
+    measurements(p, t, soc=96)
+    p.setting(t)["profile"] = "PV_SURPLUS"
     p.entry.options = {"diagnostic_level": 3}
     p.hass.states.async_set(
         "sensor.pv",

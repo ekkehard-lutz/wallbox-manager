@@ -34,15 +34,17 @@ async def test_one_record_per_cycle_and_identical_command_behavior(
     measurements(p, t, soc=96)
     await p.select(t, "PV_SURPLUS")
     seen = []
+    third_cycle = asyncio.Event()
 
     async def wait(_):
         seen.append(len(peer.requests))
         if len(seen) == 3:
+            third_cycle.set()
             await asyncio.Event().wait()
 
     p.wait = wait
     await p.permission(t, True)
-    await asyncio.sleep(0)
+    await asyncio.wait_for(third_cycle.wait(), 1)
     assert len(seen) == 3 and len(set(seen)) == 1
     assert c.confirmed_point(t).charging
     lines = records(caplog)
@@ -78,7 +80,7 @@ async def test_one_record_per_cycle_and_identical_command_behavior(
 @pytest.mark.parametrize("value", ["unavailable", "unknown", "not a number", "nan"])
 async def test_invalid_values_are_safe_and_do_not_change_policy(grid, caplog, value):
     p, t, _ = grid
-    measurements(p, t, pv=value)
+    measurements(p, t, pv=value, soc=96)
     p.setting(t)["profile"] = "PV_SURPLUS"
     baseline = p.pv_plan(t)
     p.entry.options = {"pv_diagnostic_logging": True}
@@ -185,7 +187,7 @@ async def test_phase_lockout_reports_fallback_and_retry(grid, caplog):
     p.entry.options = {"pv_diagnostic_logging": True}
     p.setting(t).update(profile="PV_SURPLUS", approximation="up")
     measurements(p, t, pv=1700, load=0, actual=0)
-    grid_measurements(p)
+    grid_measurements(p, exported=1700)
     p.monotonic = lambda: 100
     reached = asyncio.Event()
 

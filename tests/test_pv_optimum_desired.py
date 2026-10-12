@@ -167,7 +167,10 @@ async def test_probe_revalidates_desired_phase_at_transport_lock(grid, recover_p
         )
         assert c.intent(t).hard_max_w < 2300
         await evaluate(p, t)
-        assert c.confirmed_point(t).offered_power_w <= c.intent(t).hard_max_w
+        assert c.confirmed_point(t).current_a == 6
+        assert c.confirmed_point(t).mode.count == 3
+        assert c.minimum_exception_valid(t, c.confirmed_point(t))
+        assert c.confirmed_point(t).offered_power_w > c.intent(t).hard_max_w
     else:
         assert result.status == CommandStatus.APPLIED
         assert period(peer.requests[-1])["number_phases"] == 1

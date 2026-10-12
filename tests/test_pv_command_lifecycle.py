@@ -19,7 +19,9 @@ from custom_components.wallbox_manager.control.commands import (
 
 
 @pytest.mark.parametrize("reason", [CommandReason.STALE, CommandReason.BUSY])
-async def test_refusal_retains_one_phase_and_stop_timer(grid, monkeypatch, reason):
+async def test_refusal_retains_continuation_then_uses_only_the_exact_floor(
+    grid, monkeypatch, reason
+):
     p, t, (c, _, _, *_), clock = await prepare(grid)
     measurements(p, t, pv=4140, load=0, actual=0)
     await p.permission(t, True)
@@ -42,27 +44,34 @@ async def test_refusal_retains_one_phase_and_stop_timer(grid, monkeypatch, reaso
     assert p.pv_ongoing[t]
     p.setting(t)["pv_stop_delay"] = 90
     measurements(p, t, pv=100, load=0, actual=0)
-    assert await apply(p, t) == confirmed
-    assert p.pv_stop_since[t] == 0
+    floor = await apply(p, t)
+    assert floor.mode.count == 1 and floor.current_a == 6
+    assert t not in p.pv_stop_since
     clock[0] = 89
-    assert await apply(p, t) == confirmed
+    assert await apply(p, t) == floor
     measurements(p, t, pv=4140, load=0, actual=0)
     await apply(p, t)
     assert t not in p.pv_stop_since
     measurements(p, t, pv=100, load=0, actual=0)
     await apply(p, t)
-    assert p.pv_stop_since[t] == 89
+    assert t not in p.pv_stop_since
     clock[0] = 179
-    assert not (await apply(p, t)).charging
+    assert (await apply(p, t)).current_a == 6
+    assert p.economic_policies[t].energy_ws == 0
     assert c.runtime.enabled(t) is True
 
 
 async def test_pending_phase_target_coalesces_measurements_without_overtaking(grid):
-    p, t, (c, _, peer, *_), _ = await prepare(grid)
+    p, t, (c, _, peer, _, source, _), _ = await prepare(grid)
     c.restore(t, allowed_current_1p=18)
     measurements(p, t, pv=4140, load=0, actual=0)
     await p.permission(t, True)
     await asyncio.sleep(0)
+    # Drive this serialization test explicitly. The existing automatic loop
+    # must not race the test's own next-cycle command after acknowledgement.
+    background = p.tasks.pop(t)
+    background.cancel()
+    await asyncio.gather(background, return_exceptions=True)
     confirmed = c.confirmed_point(t)
     measurements(p, t, pv=6210, load=0, actual=0)
     p.pv_edit(t)
@@ -85,6 +94,9 @@ async def test_pending_phase_target_coalesces_measurements_without_overtaking(gr
         peer.release.set()
         await pending
     assert t not in c.pending_points
+    from custom_components.wallbox_manager.core.models import PhaseMode
+
+    source.mode = PhaseMode.canonical(3)  # Fresh physical response to the phase ACK.
     # Fresh measurements are coalesced through the next normal regulation tick.
     assert (await apply(p, t)).offered_power_w == 7590
 

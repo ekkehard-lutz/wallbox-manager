@@ -1,6 +1,7 @@
 """OFF/start invariants across asynchronous PV profile and control boundaries."""
 
 import asyncio
+from fractions import Fraction
 from unittest.mock import AsyncMock
 
 import pytest
@@ -46,6 +47,27 @@ async def applied(control, target, charging):
         await asyncio.wait_for(done.wait(), 1)
     finally:
         unsubscribe()
+
+
+async def economic_pause(profile, target, control):
+    """Prove a real 50 Wh OFF, then its supported reset with improved site capacity."""
+    base = Fraction(str(profile.monotonic()))
+    clock = [base]
+    profile.monotonic = lambda: clock[0]
+    for seconds in (0, 10, 20, 30, 36):
+        clock[0] = base + seconds
+        measurements(profile, target, pv=0, load=5000, actual=1380, soc=96)
+        profile.pv_edit(target)
+        await control.apply_stored(target, reuse_applied=True)
+        profile.pv_confirm(target)
+    assert profile.economic_policies[target].energy_wh == 50
+    assert not control.confirmed_point(target).charging
+    for seconds in (36, 46, 51, 52):
+        clock[0] = base + seconds
+        measurements(profile, target, pv=3000, load=620, actual=0, soc=96)
+        profile.economic_observe(target)
+    assert profile.economic_policies[target].energy_ws == 0
+    return clock
 
 
 async def test_soc_stop_wakes_parked_regulator_without_revoking_permission(grid):
@@ -116,13 +138,15 @@ async def test_every_resume_from_off_uses_start_threshold(grid, soc, pause):
     elif pause == "below_minimum":
         measurements(p, t, pv=1, load=0, actual=0, soc=93)
     else:
-        measurements(p, t, pv=0, soc=96)
-    result = p.pv_edit(t)
-    assert not result.point.charging
-    assert (await c.apply_stored(t)).status.value == "applied"
-    p.pv_confirm(t)
+        await economic_pause(p, t, c)
+    if pause != "negative_pv":
+        result = p.pv_edit(t)
+        assert not result.point.charging
+        assert (await c.apply_stored(t)).status.value == "applied"
+        p.pv_confirm(t)
+    assert not c.confirmed_point(t).charging
     assert not p.pv_ongoing[t]
-    measurements(p, t, soc=soc)
+    measurements(p, t, pv=3000, load=620, actual=0, soc=soc)
     result = p.pv_edit(t)
     assert result.point.charging is (soc > 95)
     assert c.runtime.enabled(t) is True
@@ -145,7 +169,7 @@ async def test_shared_primitive_cannot_restart_after_off(grid, soc):
 @pytest.mark.parametrize("soc", [90, 93, 95])
 async def test_soc_fall_during_positive_restart_delay_prevents_dispatch(grid, soc):
     p, t, (c, _, peer, *_) = await started(grid)
-    measurements(p, t, pv=0, soc=96)
+    measurements(p, t, soc=89)
     p.pv_edit(t)
     await c.apply_stored(t)
     p.pv_confirm(t)
@@ -246,6 +270,7 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
     from test_phase_lockout import setup
 
     p, t, manual = grid
+    p.monotonic = lambda: 100
     c, _, peer, _, locked, _ = await setup(manual)
     p.setting(t).update(profile="PV_SURPLUS", approximation="up")
     measurements(p, t, pv=1700, load=0, actual=0, soc=96)
@@ -263,14 +288,13 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
     assert p.pv_retry_until[t] == 160
     assert c.confirmed_point(t).charging
     # Pause without terminating permission or the transaction, then expire lockout.
-    measurements(p, t, pv=0, soc=96)
-    p.pv_edit(t)
-    await c.apply_stored(t)
-    p.pv_confirm(t)
+    await economic_pause(p, t, c)
     assert not c.confirmed_point(t).charging
     locked[0] = False
     p.monotonic = lambda: 200
-    measurements(p, t, pv=1700, load=0, actual=0, soc=soc)
+    # The normal allocation supports the known 3p domain too; an expired
+    # controller deadline alone never proves a physically unlocked 1p point.
+    measurements(p, t, pv=5000, load=0, actual=0, soc=soc)
     parked.clear()
     # Wake the same loop as its next periodic cycle (settings edit uses this path).
     await p.set_value(t, "regulation_interval", 6)
@@ -283,7 +307,7 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
 @pytest.mark.parametrize("soc", [94.001, 95])
 async def test_normal_soc_fall_during_dispatch_is_handled_on_next_cycle(grid, soc):
     p, t, (c, _, peer, *_) = await started(grid)
-    measurements(p, t, pv=0, soc=96)
+    measurements(p, t, soc=89)
     p.pv_edit(t)
     await c.apply_stored(t)
     p.pv_confirm(t)

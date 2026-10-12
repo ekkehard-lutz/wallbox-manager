@@ -272,7 +272,7 @@
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "PV-Überschuss benötigt beide Leistungsreferenzen. Ohne Speicher-SoC arbeitet es ohne Speicher; die Entladereserve ist davon unabhängig.",
+        "description": "Alle PV-Profile benötigen die gemessene Netzbezugs- und Netzeinspeiseleistung. Ohne Speicher nutzt PV-Überschuss diese Zähler und die Wallbox-Leistung; separate PV-Erzeugungs- und Verbrauchsreferenzen sind nicht erforderlich. Speicherprofile benötigen zusätzlich ihre Speicher- und Leistungsreferenzen; PV Optimum außerdem die Prognose für den verbleibenden Tag.",
         "sections": {
           "general": {
             "name": "Allgemeine Parameter",
@@ -306,6 +306,9 @@
               "pv_stop_delay": "PV-Stoppverzögerung",
               "soc_hysterese": "SoC-Hysterese und Ziel-Sicherheitsabstand",
               "power_smoothing_window": "Leistungsglättung Zeitfenster"
+            },
+            "data_description": {
+              "pv_stop_delay": "Altwert für die Kompatibilität. Der wirtschaftliche PV-Stopp nutzt jetzt das gemessene 50-Wh-Netzbezugsbudget; diese Verzögerung steuert ihn nicht."
             }
           }
         }

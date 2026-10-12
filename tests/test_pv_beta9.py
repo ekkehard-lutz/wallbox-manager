@@ -157,7 +157,7 @@ def test_new_ev_with_old_site_cannot_spend_headroom_twice():
 
 
 @pytest.mark.parametrize("phases", [1, 3])
-def test_minimum_exception_uses_site_import_and_bounded_confirmation(phases):
+def test_minimum_response_gate_does_not_duplicate_economic_import_stop(phases):
     r = FastDischargeRegulator()
     minimum = point(6, phases)
     watts = minimum.offered_power_w
@@ -170,32 +170,36 @@ def test_minimum_exception_uses_site_import_and_bounded_confirmation(phases):
     assert r.minimum_allowed(minimum, now=61, actual=watts)
     for t in range(62, 71):
         assert r.minimum_allowed(minimum, now=t, actual=watts)
-    # Reused evidence cannot extend the bounded grace deadline.
-    assert not r.minimum_allowed(minimum, now=71, actual=watts)
+    # Repeated processing cannot start an independent economic STOP timer.
+    assert r.minimum_allowed(minimum, now=71, actual=watts)
     r.net_import = watts / 2 - 50
-    assert not r.minimum_allowed(minimum, now=72, actual=watts)
+    assert r.minimum_allowed(minimum, now=72, actual=watts)
     r.net_import = watts / 2 - 100
     assert r.minimum_allowed(minimum, now=73, actual=watts)
     r.hard_max = watts - 1
-    assert not r.minimum_allowed(minimum, now=74, actual=watts)
+    assert r.minimum_allowed(minimum, now=74, actual=watts, continuing=True)
+    assert r.excess_since is None and not r.restart_blocked
 
 
 @pytest.mark.parametrize("gaps", [[20], [20, 40, 80], [89], [89, 91, 110]])
-async def test_stop_deadline_survives_gaps_and_expires_without_fresh_sample(grid, gaps):
+async def test_critical_grid_gaps_stop_without_erasing_verified_energy(grid, gaps):
     p, target, (c, _, peer, *_), clock, tick = await running(grid)
     measurements(p, target, pv=0, load=0, actual=0, soc=96)
     await tick()
-    assert p.pv_stop_since[target] == 0
+    policy = p.economic_policies[target]
+    policy.energy_ws = Fraction(10000)
+    assert target not in p.pv_stop_since
     count = len(peer.requests)
     for t in gaps:
         clock[0] = t
-        p.hass.states.async_set("sensor.pv", "unknown")
+        p.hass.states.async_set(p.references["grid_import_power"], "unknown")
         await tick()
-        if t < 90:
-            assert p.pv_stop_since[target] == 0
-            assert c.confirmed_point(target).charging
-        else:
-            assert not c.confirmed_point(target).charging
+        assert target not in p.pv_stop_since
+        assert not c.confirmed_point(target).charging
+        assert policy.energy_ws == 10000
+        assert p.status[target] in ("measurements_unavailable", "waiting_battery_soc")
+        assert p.economic_reasons[target] == "measurements_unavailable"
+        assert not policy.exhausted and not policy.off_pending
     clock[0] = max(90, gaps[-1])
     await tick()
     assert not c.confirmed_point(target).charging
@@ -239,7 +243,10 @@ async def test_wire_dedup_voltage_then_transaction_and_rejection(manual):
 
 
 @pytest.mark.parametrize("violation", ["import", "battery"])
-async def test_locked_three_phase_floor_pauses_on_excess(grid, violation):
+async def test_locked_floor_uses_wh_stop_and_allocation_only_for_ordinary_power(
+    grid, violation
+):
+    from test_pv_economy_control import cohort
     from test_pv_optimum_hold import evaluate, phase_start, samples
 
     p, t, (c, _, peer, *_), clock, _ = await phase_start(grid)
@@ -248,21 +255,52 @@ async def test_locked_three_phase_floor_pauses_on_excess(grid, violation):
     assert c.phase_restricted(t)
     assert c.confirmed_point(t).mode.count == 3
     assert c.confirmed_point(t).current_a == 6
+    await p.hass.async_block_till_done()
     before = len(peer.requests)
-    clock[0] = 30
-    samples(
+    cohort(
         p,
         t,
+        clock,
+        30,
+        source=datetime.now(UTC),
         actual=4140,
         discharge=4000 if violation == "battery" else 3200,
         imported=2100 if violation == "import" else 1800,
     )
     await evaluate(p, t)
-    if violation == "import":
-        assert c.confirmed_point(t).charging
-        clock[0] = 40
+    assert c.confirmed_point(t).charging
+    if violation == "battery":
+        assert c.confirmed_point(t).offered_power_w > c.intent(t).hard_max_w
+        assert c.minimum_exception_valid(t, c.confirmed_point(t))
+        assert len(peer.requests) == before
+        assert p.economic_policies[t].energy_ws == 0
+        return
+    for second in range(40, 111, 10):
+        cohort(
+            p,
+            t,
+            clock,
+            second,
+            source=datetime.now(UTC),
+            actual=4140,
+            discharge=3200,
+            imported=2100,
+        )
         await evaluate(p, t)
+        assert c.confirmed_point(t).charging
+    cohort(
+        p,
+        t,
+        clock,
+        30 + Fraction(180000, 2100),
+        source=datetime.now(UTC),
+        actual=4140,
+        discharge=3200,
+        imported=2100,
+    )
+    await evaluate(p, t)
     assert not c.confirmed_point(t).charging
+    assert p.economic_policies[t].energy_wh == 50
     assert len(peer.requests) == before + 1
     await evaluate(p, t)
     assert len(peer.requests) == before + 1
@@ -351,18 +389,21 @@ def test_import_correction_does_not_wait_for_long_upward_interval():
     assert power == 1800
 
 
-async def test_voltage_gap_cannot_hold_offer_above_hard_budget(grid):
+async def test_voltage_gap_inhibits_new_commands_without_an_invented_minimum(grid):
     from test_pv_optimum_hold import configure, evaluate, samples
     from test_voltage_command_fence import voltage
 
-    p, t, (c, _, _, *_), _ = configure(grid)
+    p, t, (c, _, peer, *_), _ = configure(grid)
     samples(p, t, actual=2300, discharge=3400)
     await p.permission(t, True)
     assert c.confirmed_point(t).current_a == 10
+    confirmed, count = c.confirmed_point(t), len(peer.requests)
     samples(p, t, actual=2300, discharge=5000)
     voltage(c, t, 230, invalid="expired")
-    await evaluate(p, t)
-    assert not c.confirmed_point(t).charging
+    assert await evaluate(p, t) is None
+    assert c.confirmed_point(t) == confirmed
+    assert len(peer.requests) == count
+    assert c.technical_minimum(t).point is None
 
 
 def test_minimum_start_cannot_bypass_unobserved_response_reserve():
@@ -372,7 +413,7 @@ def test_minimum_start_cannot_bypass_unobserved_response_reserve():
     r.net_import = 0
     for second in (0, 10, 30, 90):
         assert not r.minimum_allowed(point(6), now=second, actual=0)
-        assert r.reason == "minimum_response_budget"
+        assert r.reason == "startup_response_reserve"
     # An actually measured continuing minimum remains permissible.
     assert r.minimum_allowed(point(6), now=100, actual=1380)
     r.hard_max = 2760

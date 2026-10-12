@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 
 import pytest
 from ocpp.v21 import call_result
@@ -55,8 +56,10 @@ def samples(p, t, *, actual=0, imported=0, discharge=0, soc=90, pv=4000, load=50
         )
 
 
-def configure(grid):
+def configure(grid, *, initial_time=0):
     p, t, context = grid
+    clock = [initial_time]
+    p.monotonic = lambda: clock[0]
     setup_optimum(p, t, actual=0)
     samples(p, t)
     from homeassistant.util import dt as dt_util
@@ -66,8 +69,6 @@ def configure(grid):
     p.optimum_days[t] = PVDay(
         dt_util.as_local(datetime.now(UTC)).date().isoformat(), "FINISHED"
     )
-    clock = [0]
-    p.monotonic = lambda: clock[0]
     p.setting(t)["pv_stop_delay"] = 10
     # Most cases explicitly drive policy/dispatch, avoiding uncontrolled background
     # ticks. The restart test below drives the real serialized regulation loop.
@@ -103,23 +104,50 @@ async def test_initial_offer_does_not_ramp_without_new_physical_evidence(grid):
 
 
 async def test_one_phase_excess_import_reduces_then_pauses(grid):
+    from test_pv_economy_control import cohort
+
     p, t, (c, _, peer, *_), clock = configure(grid)
     samples(p, t, actual=2300, discharge=3400)
     await p.permission(t, True)
     assert c.confirmed_point(t).current_a == 10
+    await p.hass.async_block_till_done()
     for seconds in (1, 11, 21, 31):
-        clock[0] = seconds
-        samples(p, t, actual=2300, imported=5000, discharge=3400)
+        cohort(
+            p,
+            t,
+            clock,
+            seconds,
+            source=datetime.now(UTC),
+            actual=2300,
+            imported=5000,
+            discharge=3400,
+            pv=1600,
+            load=10000,
+        )
         await evaluate(p, t)
+        assert c.confirmed_point(t).charging
+    cohort(
+        p,
+        t,
+        clock,
+        37,
+        source=datetime.now(UTC),
+        actual=2300,
+        imported=5000,
+        discharge=3400,
+        pv=1600,
+        load=10000,
+    )
+    await evaluate(p, t)
     assert not c.confirmed_point(t).charging
     count = len(peer.requests)
-    clock[0] = 32
+    clock[0] = 38
     await evaluate(p, t)
     assert len(peer.requests) == count
 
 
 async def phase_start(grid):
-    p, t, context, clock = configure(grid)
+    p, t, context, clock = configure(grid, initial_time=-30)
     c, _, peer, _, source, _ = context
     source.mode = PhaseMode.canonical(3)
     c.restore(t, allowed_current_1p=16)
@@ -229,32 +257,57 @@ async def test_unknown_transition_never_claims_supported_lower_phase_reachable(
         assert period(peer.requests[-1])["number_phases"] == 3
         assert c.confirmed_point(t).current_a == 6
     else:
-        # Missing phase proof cannot hold the old 6900 W offer above the
-        # independently established 4340 W ceiling; zero needs no phase guess.
-        assert result.status == CommandStatus.APPLIED
-        assert not c.confirmed_point(t).charging
-        assert len(peer.requests) == before + 1
+        # An economic allocation is not permission to manufacture a positive
+        # floor or an OFF from unknown phase-operation proof.
+        assert result is None
+        assert c.confirmed_point(t).charging
+        assert len(peer.requests) == before
     assert all(period(r).get("number_phases") != 1 for r in peer.requests)
 
 
-async def test_household_step_uses_bounded_minimum_import_confirmation(grid, caplog):
+async def test_household_step_uses_verified_fifty_wh_without_confirmation_timer(grid):
+    from test_pv_economy_control import cohort
+
     p, t, (c, _, peer, *_), clock = configure(grid)
     samples(p, t, actual=1380, discharge=3400)
     await p.permission(t, True)
+    await p.hass.async_block_till_done()
     count = len(peer.requests)
-    for second in (0, 1, 9):
-        clock[0] = second
-        samples(p, t, actual=1380, discharge=3300, imported=700)
+    for second in range(0, 251, 10):
+        cohort(
+            p,
+            t,
+            clock,
+            second,
+            source=datetime.now(UTC),
+            actual=1380,
+            discharge=3300,
+            imported=700,
+            pv=1000,
+            load=5000,
+        )
         await evaluate(p, t)
         assert c.confirmed_point(t).current_a == 6
-    clock[0] = 10
+    cohort(
+        p,
+        t,
+        clock,
+        Fraction(180000, 700),
+        source=datetime.now(UTC),
+        actual=1380,
+        discharge=3300,
+        imported=700,
+        pv=1000,
+        load=5000,
+    )
     await evaluate(p, t)
     assert not c.confirmed_point(t).charging
     assert len(peer.requests) == count + 1
+    assert p.economic_policies[t].energy_wh == 50
 
 
 @pytest.mark.parametrize("stop_delay,expiry", [(10, 10), (0, 5)])
-async def test_balance_transient_recovers_then_sustained_deficit_deliberately_pauses(
+async def test_balance_deficit_without_excess_import_has_no_legacy_economic_timer(
     grid, stop_delay, expiry
 ):
     p, t, (c, _, peer, *_), clock = configure(grid)
@@ -263,7 +316,7 @@ async def test_balance_transient_recovers_then_sustained_deficit_deliberately_pa
     samples(p, t, soc=80, pv=0, load=0)
     await evaluate(p, t)
     assert p.optimum_modes[t] == "PV_BALANCE"
-    assert p.status[t] == "optimum_pause_pending"
+    assert p.status[t] == "optimum_minimum_hold"
     clock[0] = expiry - 0.01
     samples(p, t, soc=80, pv=2000, load=0)
     await evaluate(p, t)
@@ -276,10 +329,11 @@ async def test_balance_transient_recovers_then_sustained_deficit_deliberately_pa
     assert c.confirmed_point(t).charging
     clock[0] = 20 + expiry
     await evaluate(p, t)
-    assert p.status[t] == "optimum_deliberate_pause"
-    assert not c.confirmed_point(t).charging
+    assert p.status[t] == "optimum_minimum_hold"
+    assert c.confirmed_point(t).charging
     assert c.runtime.enabled(t) is True
-    assert sum(period(r)["limit"] == 0 for r in peer.requests) == 1
+    assert sum(period(r)["limit"] == 0 for r in peer.requests) == 0
+    assert p.economic_policies[t].energy_ws == 0 and t not in p.pv_stop_since
 
 
 async def test_existing_soc_hysteresis_controls_mode_and_cancels_pause(grid):
@@ -301,12 +355,16 @@ async def test_existing_soc_hysteresis_controls_mode_and_cancels_pause(grid):
 
 
 @pytest.mark.parametrize("gap", ["missing", "stale"])
-async def test_input_gap_preserves_deadline_and_hard_budget_pauses(grid, gap):
+async def test_critical_input_gap_stops_and_preserves_verified_economic_energy(
+    grid, gap
+):
     p, t, (c, _, peer, *_), clock = configure(grid)
     await p.permission(t, True)
     samples(p, t, soc=80, pv=0, load=0)
     await evaluate(p, t)
-    assert p.pv_stop_since[t] == 0
+    assert t not in p.pv_stop_since
+    policy = p.economic_policies[t]
+    policy.energy_ws = Fraction(10000)
     clock[0] = 9
     if gap == "missing":
         p.hass.states.async_remove("sensor.pv")
@@ -321,7 +379,7 @@ async def test_input_gap_preserves_deadline_and_hard_budget_pauses(grid, gap):
         )
     before = len(peer.requests)
     await evaluate(p, t)
-    assert p.pv_stop_since[t] == 0
+    assert t not in p.pv_stop_since and policy.energy_ws == 10000
     assert not c.confirmed_point(t).charging
     assert len(peer.requests) == before + 1
     clock[0] = 20
@@ -381,7 +439,10 @@ async def test_minimum_hold_never_overrides_hard_fences(grid, event):
         )
         await evaluate(p, t)
         assert not c.confirmed_point(t).charging
-        assert p.status[t] == "hard_budget_pause"
+        assert p.status[t] in (
+            "technical_minimum_unavailable",
+            "optimum_no_positive_point",
+        )
     elif event == "ownership":
         c.profile_permitted = lambda _: False
         await evaluate(p, t)
@@ -421,8 +482,9 @@ async def test_minimum_respects_device_grid_vehicle_limits_and_measured_voltage(
 async def test_restart_busy_retries_fresh_targets_without_rearming(
     grid,
 ):
-    p, t, (c, _, peer, *_), clock = configure(grid)
-    await p.permission(t, True)
+    from test_pv_economy_control import cohort, exhausted
+
+    p, t, (c, _, peer, *_), clock = await exhausted(grid)
     state = {"amps": 6, "until": None, "pauses": 0}
     attempts = []
 
@@ -438,14 +500,27 @@ async def test_restart_busy_retries_fresh_targets_without_rearming(
         return call_result.SetChargingProfile(status="Accepted")
 
     peer.profile_response = station
-    samples(p, t, soc=80, pv=0, load=0)
-    await evaluate(p, t)
     clock[0] = 10
     await evaluate(p, t)
     assert state["until"] == 610
-    samples(p, t)
-    p.pv_request(t)  # Rejoin the confirmed OFF context after the SoC transition.
-    samples(p, t)  # Fresh EV-zero evidence, not the acknowledgement itself.
+    for second in (11, 21, 27):
+        cohort(
+            p,
+            t,
+            clock,
+            second,
+            source=datetime.now(UTC),
+            actual=0,
+            imported=0,
+            exported=1000,
+            discharge=0,
+            pv=4000,
+            load=500,
+        )
+        p.pv_request(t)  # Fresh physical OFF response and battery-aware recovery.
+        p.economic_observe(t)
+    assert p.economic_policies[t].energy_ws == 0
+    await p.hass.async_block_till_done()
     gate, parked = asyncio.Event(), asyncio.Queue()
 
     async def wait(_):
@@ -454,28 +529,49 @@ async def test_restart_busy_retries_fresh_targets_without_rearming(
         gate.clear()
 
     async def tick(seconds):
+        while not parked.empty():
+            parked.get_nowait()
         clock[0] = seconds
         gate.set()
         await asyncio.wait_for(parked.get(), 2)
 
     p.wait = wait
-    task = asyncio.create_task(p.pv_sequence(t, p.epochs[t]))
+    task = asyncio.create_task(p.pv_sequence(t, p.epochs.get(t, 0)))
     p.tasks[t] = task
     try:
         await asyncio.wait_for(parked.get(), 2)
         assert not c.phase_restricted(t)
         count = len(attempts)
-        for second in (11, 30, 69):
+        for second in (28, 60, 86):
             await tick(second)
             assert len(attempts) == count
-        for second in range(70, 611, 60):
+        for second in range(87, 628, 60):
             await tick(second)
-        assert c.confirmed_point(t).charging
+        assert c.confirmed_point(t).charging, (
+            p.status.get(t),
+            p.economic_reasons.get(t),
+            p.optimum_regulators[t].reason,
+            p.optimum_regulators[t].requested,
+            attempts,
+            p.pv_retry_until.get(t),
+            p.economic_policies[t].snapshot,
+        )
         assert (
             len([amps for _, amps in attempts if amps]) >= 10
         )  # Genuine BUSY retries.
-        samples(p, t, imported=1000)  # Delayed actual power after successful restart.
-        await tick(611)
+        cohort(
+            p,
+            t,
+            clock,
+            628,
+            source=datetime.now(UTC),
+            actual=0,
+            imported=1000,
+            discharge=0,
+            pv=4000,
+            load=500,
+        )  # Delayed EV response after successful restart does not invent OFF.
+        await tick(628)
         assert c.confirmed_point(t).charging
         assert state["pauses"] == 1 and state["until"] == 610
         assert sum(amps == 0 for _, amps in attempts) == 1
@@ -485,11 +581,9 @@ async def test_restart_busy_retries_fresh_targets_without_rearming(
 
 
 async def test_economic_off_is_revalidated_but_explicit_off_still_wins(grid):
-    p, t, (c, _, peer, *_), clock = configure(grid)
-    await p.permission(t, True)
-    samples(p, t, soc=80, pv=0, load=0)
-    await evaluate(p, t)
-    clock[0] = 10
+    from test_pv_economy_control import cohort, exhausted
+
+    p, t, (c, _, peer, *_), clock = await exhausted(grid)
     assert not p.pv_edit(t).point.charging
     assert c.intent(t).policy_pause
     before = len(peer.requests)
@@ -497,7 +591,22 @@ async def test_economic_off_is_revalidated_but_explicit_off_still_wins(grid):
     await lock.acquire()
     task = asyncio.create_task(c.apply_stored(t))
     await asyncio.sleep(0)
-    samples(p, t, soc=90)  # A recovery before dispatch revokes an economic pause.
+    for second in (1, 11, 17):
+        cohort(
+            p,
+            t,
+            clock,
+            second,
+            source=datetime.now(UTC),
+            actual=2300,
+            imported=0,
+            discharge=0,
+            pv=5000,
+            load=2800,
+        )
+        p.economic_observe(t)
+    # Only supported >15 s reset proof revokes a queued exhausted-budget OFF.
+    assert p.economic_policies[t].energy_ws == 0
     lock.release()
     assert (await task).status == CommandStatus.TEMPORARILY_REJECTED
     assert len(peer.requests) == before and c.confirmed_point(t).charging
@@ -509,29 +618,34 @@ async def test_lost_confirmation_is_not_proof_that_balance_is_already_off(grid):
     p, t, (c, _, peer, *_), _ = configure(grid)
     await p.permission(t, True)
     c._confirmed_points.pop(t)  # Same uncertainty as a failed control readback.
+    before = len(peer.requests)
     samples(p, t, soc=80, pv=0, load=0)
-    await evaluate(p, t)
-    assert p.status[t] == "optimum_pause_pending"
-    assert c.confirmed_point(t).charging
+    assert await evaluate(p, t) is None
+    assert p.status[t] == "awaiting_physical_response"
+    assert c.confirmed_point(t) is None
+    assert c.runtime.enabled(t) is True and len(peer.requests) == before
     assert all(period(r)["limit"] > 0 for r in peer.requests)
 
 
-async def test_observer_gap_between_balance_ticks_preserves_pause_evidence(grid):
+async def test_observer_gap_preserves_verified_budget_without_an_economic_timer(grid):
     p, t, (c, _, _, *_), clock = configure(grid)
     await p.permission(t, True)
     samples(p, t, soc=80, pv=0, load=0)
     await evaluate(p, t)
-    assert p.pv_stop_since[t] == 0
+    policy = p.economic_policies[t]
+    policy.energy_ws = Fraction(10000)
+    assert t not in p.pv_stop_since
     clock[0] = 2
     p.hass.states.async_remove("sensor.remaining_pv_energy")
     p.optimum_refresh(datetime.now(UTC))
-    assert p.pv_stop_since[t] == 0
+    assert t not in p.pv_stop_since and policy.energy_ws == 10000
     p.hass.states.async_set(
         "sensor.remaining_pv_energy", 4423.6, {"unit_of_measurement": "Wh"}
     )
     clock[0] = 5
     await evaluate(p, t)
-    assert p.pv_stop_since[t] == 0 and c.confirmed_point(t).charging
+    assert t not in p.pv_stop_since and c.confirmed_point(t).charging
+    assert policy.energy_ws == 10000
 
 
 async def test_missing_voltage_during_zero_budget_is_no_decision(grid):

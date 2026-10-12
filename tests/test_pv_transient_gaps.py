@@ -22,7 +22,7 @@ from custom_components.wallbox_manager.control.commands import CommandStatus
 async def running(grid):
     p, t, context, clock = await prepare(grid, soc=96)
     p.setting(t)["pv_stop_delay"] = 90
-    measurements(p, t, pv=2070, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2170, load=0, actual=0, soc=96)
     gate, parked = asyncio.Event(), asyncio.Queue()
 
     async def wait(_):
@@ -42,12 +42,11 @@ async def running(grid):
     return p, t, context, clock, tick
 
 
-async def test_applied_start_transaction_handover_with_missing_phases(
-    grid, monkeypatch
-):
+async def test_new_external_transaction_never_inherits_old_pv_budget(grid, monkeypatch):
     p, t, (c, _, peer, *_), _, tick = await running(grid)
     confirmed = c.confirmed_point(t)
-    request, generation = c.intent(t).request, c.intent(t).generation
+    policy = p.economic_policies[t]
+    energy = policy.energy_ws
     count = len(peer.requests)
     old_session = c.runtime.sessions.get(t).session_id
     inputs = c.inputs
@@ -62,14 +61,17 @@ async def test_applied_start_transaction_handover_with_missing_phases(
         await transaction(peer, identity="started-after-applied", connector=1)
         assert c.runtime.sessions.get(t).session_id != old_session
         await tick()
-        assert c.confirmed_point(t) == confirmed and p.pv_ongoing[t]
-        assert c.intent(t).request == request
-        assert c.intent(t).generation == generation
+        assert c.confirmed_point(t) == confirmed
+        assert p.economic_policies[t] is policy and policy.energy_ws == energy
         assert len(peer.requests) == count and t not in p.pv_retry_until
-    measurements(p, t, pv=2300, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     await tick()
+    assert not c.confirmed_point(t).charging
+    await p.permission(t, False)
+    assert t not in p.economic_policies
+    await p.permission(t, True)
     assert c.confirmed_point(t).current_a == 10
-    assert len(peer.requests) == count + 1
+    assert p.economic_identities[t].transaction_id == "started-after-applied"
 
 
 @pytest.mark.parametrize("gap", ["phase", "voltage", "capabilities"])
@@ -90,7 +92,7 @@ async def test_electrical_evidence_gap_holds_then_resumes(grid, monkeypatch, gap
         assert len(peer.requests) == count and t not in p.pv_retry_until
     if gap == "voltage":
         voltage(c, t, 230)
-    measurements(p, t, pv=2300, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     await tick()
     assert c.confirmed_point(t).current_a == 10
 
@@ -99,14 +101,16 @@ async def test_electrical_evidence_gap_holds_then_resumes(grid, monkeypatch, gap
     "entity", ["sensor.pv", "sensor.load", "sensor.soc", "sensor.selected"]
 )
 @pytest.mark.parametrize("gap", ["unavailable", "stale"])
-async def test_measurement_events_hold_confirmed_offer_without_invalidating_task(
+async def test_critical_measurement_events_stop_without_losing_verified_energy(
     grid, entity, gap
 ):
     p, t, (c, _, peer, *_), clock, tick = await running(grid)
-    confirmed, request = c.confirmed_point(t), c.intent(t).request
-    count, generation, task = len(peer.requests), c.intent(t).generation, p.tasks[t]
+    confirmed = c.confirmed_point(t)
     for seconds in (5, 15, 25):
         clock[0] = seconds
+        task = p.tasks[t]
+        count = len(peer.requests)
+        energy = p.economic_policies[t].energy_ws
         state = p.hass.states.get(entity)
         attributes = dict(state.attributes)
         if gap == "stale":
@@ -118,22 +122,24 @@ async def test_measurement_events_hold_confirmed_offer_without_invalidating_task
         )
         await asyncio.sleep(0)  # Run both real measurement and SoC listeners.
         await tick()
-        assert c.confirmed_point(t) == confirmed and p.pv_ongoing[t]
-        assert c.intent(t).request == request and c.intent(t).generation == generation
-        assert p.tasks[t] is task and len(peer.requests) == count
+        assert not c.confirmed_point(t).charging and not p.pv_ongoing[t]
+        assert p.economic_policies[t].energy_ws == energy
+        assert p.tasks[t] is task and len(peer.requests) == count + 1
         assert t not in p.pv_retry_until and t not in p.pv_stop_since
-        measurements(p, t, pv=2070, load=0, actual=0, soc=96)
+        measurements(p, t, pv=2170, load=0, actual=0, soc=96)
         await tick()
-        assert c.confirmed_point(t) == confirmed and len(peer.requests) == count
-    measurements(p, t, pv=2300, load=0, actual=0, soc=96)
+        assert c.confirmed_point(t) == confirmed and len(peer.requests) == count + 2
+    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     await tick()
     assert c.confirmed_point(t).current_a == 10
 
 
 @pytest.mark.parametrize("reason", ["surplus", "soc"])
-async def test_real_stop_deadline_survives_measurement_gap(grid, reason):
+async def test_allocation_shortfall_holds_until_soc_stop_or_critical_input_loss(
+    grid, reason
+):
     p, t, (c, _, peer, *_), clock, tick = await running(grid)
-    confirmed, count = c.confirmed_point(t), len(peer.requests)
+    count = len(peer.requests)
 
     def low():
         measurements(
@@ -152,16 +158,19 @@ async def test_real_stop_deadline_survives_measurement_gap(grid, reason):
         assert t not in p.pv_stop_since
         assert c.runtime.enabled(t) is True
         return
-    assert p.pv_stop_since[t] == 0
+    assert c.confirmed_point(t).charging and c.confirmed_point(t).current_a == 6
+    assert p.economic_policies[t].energy_ws == 0
+    assert t not in p.pv_stop_since
     clock[0] = 80
     p.hass.states.async_set("sensor.pv", "unavailable")
     await asyncio.sleep(0)
     await tick()
-    assert c.confirmed_point(t) == confirmed and p.pv_stop_since[t] == 0
+    assert not c.confirmed_point(t).charging
+    assert p.economic_policies[t].energy_ws == 0
     clock[0] = 90
     await tick()
     assert not c.confirmed_point(t).charging
-    assert len(peer.requests) == count + 1
+    assert len(peer.requests) == count + 2  # Exact minimum reduction, then safety OFF.
     assert c.runtime.enabled(t) is True
 
 
@@ -172,7 +181,7 @@ async def test_low_soc_with_phase_gap_stops_as_soon_as_execution_is_safe(
     count = len(peer.requests)
     with monkeypatch.context() as patch:
         patch.setattr(source, "proof", False)
-        measurements(p, t, pv=2070, load=0, actual=0, soc=89)
+        measurements(p, t, pv=2170, load=0, actual=0, soc=89)
         await asyncio.sleep(0)
         await tick()
         assert not c.confirmed_point(t).charging and len(peer.requests) == count + 1
@@ -182,22 +191,27 @@ async def test_low_soc_with_phase_gap_stops_as_soon_as_execution_is_safe(
     assert not c.confirmed_point(t).charging
 
 
-async def test_recovery_before_deadline_resets_timer(grid):
+async def test_allocation_recovery_and_shortfall_do_not_create_economic_stop_timer(
+    grid,
+):
     p, t, (c, _, peer, *_), clock, tick = await running(grid)
-    confirmed, count = c.confirmed_point(t), len(peer.requests)
+    count = len(peer.requests)
     measurements(p, t, pv=0, load=0, actual=0, soc=96)
     await tick()
+    assert c.confirmed_point(t).current_a == 6
     clock[0] = 89
-    measurements(p, t, pv=2070, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2170, load=0, actual=0, soc=96)
     await tick()
     assert t not in p.pv_stop_since
     clock[0] = 100
     measurements(p, t, pv=0, load=0, actual=0, soc=96)
     await tick()
-    assert p.pv_stop_since[t] == 100
+    assert t not in p.pv_stop_since
     clock[0] = 189
     await tick()
-    assert len(peer.requests) == count and c.confirmed_point(t) == confirmed
+    assert c.confirmed_point(t).charging and c.confirmed_point(t).current_a == 6
+    assert len(peer.requests) == count + 3
+    assert p.economic_policies[t].energy_ws == 0
 
 
 async def test_real_ended_session_resets_soc_hysteresis_even_between_ticks(grid):
@@ -206,7 +220,7 @@ async def test_real_ended_session_resets_soc_hysteresis_even_between_ticks(grid)
     await transaction(peer, identity=identity, connector=1, kind="Ended")
     assert not p.pv_ongoing[t]
     await transaction(peer, identity="genuinely-new-session", connector=1)
-    measurements(p, t, pv=2070, load=0, actual=0, soc=93)
+    measurements(p, t, pv=2170, load=0, actual=0, soc=93)
     await tick()
     assert not p.pv_ongoing[t]
     assert not c.confirmed_point(t).charging
