@@ -153,6 +153,7 @@ async def prepared(site, *, enabled=True, profile="PV_SURPLUS"):
 @pytest.mark.parametrize("reload", [False, True])
 async def test_repeated_restart_restores_owner_on_profile_without_off_on(site, reload):
     owner, c, bound, peer, p, hass = await prepared(site)
+    initial = c.confirmed_point(bound.target)
     permissions = len(peer.permissions)
     commands = len(peer.requests)
     takeovers = len(peer.authority_requests)
@@ -171,7 +172,7 @@ async def test_repeated_restart_restores_owner_on_profile_without_off_on(site, r
             assert c.profile_permitted(bound.target)
             assert p.setting(bound.target)["profile"] == "PV_SURPLUS"
             assert c.runtime.enabled(bound.target) is True
-            assert c.confirmed_point(bound.target).current_a == 10
+            assert c.confirmed_point(bound.target) == initial
             assert p.pv_ongoing[bound.target]
             assert len(peer.permissions) == permissions
             assert len(peer.requests) == commands
@@ -571,6 +572,7 @@ async def reconnect(
     local=False,
     unplugged=False,
     voltage=True,
+    phase_event=False,
 ):
     """Same live HA objects; fresh protocol generation after station outage."""
     from ocpp.v21 import call
@@ -603,6 +605,8 @@ async def reconnect(
         connectors=(target,),
         electrical=live.electrical_inventory(token, rows),
     )
+    if phase_event:
+        await physical_report(peer, getattr(peer, "phase_read_value", "Rxx"))
     live.inventory_completed(token, rows, datetime.now(UTC))
     if live.enabled_poll_task:
         live.enabled_poll_task.cancel()
@@ -831,10 +835,15 @@ async def test_reconnect_reconciles_retained_on_intent_when_station_reset_to_off
     owner, c, bound, peer, p, _ = await prepared(site)
     peer.enabled = False
     counts = len(peer.permissions), len(peer.authority_requests)
-    await reconnect(owner, c, bound, peer, p)
+    await reconnect(owner, c, bound, peer, p, phase_event=True)
     await asyncio.wait_for(asyncio.shield(p.recoveries[bound.target]), 2)
     assert owner.ready and owner.record["enabled_intent"]
-    assert c.runtime.enabled(bound.target) is True
+    assert c.runtime.enabled(bound.target) is True, (
+        p.status.get(bound.target),
+        p.economic_reasons.get(bound.target),
+        c.intent(bound.target).status,
+        c.intent(bound.target).command_result,
+    )
     assert p.setting(bound.target)["profile"] == "PV_SURPLUS"
     assert len(peer.permissions) == counts[0] + 1
     assert len(peer.authority_requests) == counts[1]

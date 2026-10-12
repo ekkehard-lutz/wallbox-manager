@@ -17,7 +17,7 @@ IMPORT_GRACE_SECONDS = 3
 def pv_balance(pv_power, consumer_power, wallbox_power):
     """Available watts; consumer measurement includes the controlled wallbox.
 
-    Preserve negative balance for the caller's existing pause/delay policy.
+    Preserve negative balance for ordinary reduction and the shared floor policy.
     Approximation and electrical operating points belong to the common solver.
     """
     return pv_power - consumer_power + wallbox_power
@@ -80,7 +80,8 @@ class FastDischargeRegulator:
     """One evidence-driven power controller; the caller retains SoC and phase policy.
 
     Source generation and physical response are separate from an acknowledgement.
-    Hard budgets are independent of soft targets and the minimum-import allowance.
+    Ordinary economic ceilings are independent of soft targets. The caller owns
+    the exact technical-minimum exception and measured grid-import STOP policy.
     """
 
     requested: Fraction | None = None
@@ -134,7 +135,7 @@ class FastDischargeRegulator:
         )
 
     def update_budget(self, wallbox, discharge, limit, imported, exported, evidence):
-        """Same hard-budget evidence tracking for FAST and BALANCE."""
+        """Same economic-budget evidence tracking for FAST and BALANCE."""
         self.net_import = imported - exported
         if self.evidence is None or evidence.times[0] != self.evidence.times[0]:
             self.ev_floor = min(
@@ -263,7 +264,12 @@ class FastDischargeRegulator:
         return self.requested
 
     def minimum_allowed(self, minimum, *, now, actual, continuing=False):
-        """Bounded site-import exception, never an additional battery allowance."""
+        """Keep physical-response/startup reserves separate from economic STOP.
+
+        The caller must supply the proved exact technical floor. Only an
+        ongoing continuation can exceed its ordinary discharge allocation;
+        the original startup response reserve and OFF response proof remain.
+        """
         watts = minimum.offered_power_w
         if (
             self.command_key is not None
@@ -272,8 +278,8 @@ class FastDischargeRegulator:
         ):
             self.reason = "awaiting_pause_response"
             return False
-        if self.hard_max is None or watts > self.hard_max:
-            self.reason = "minimum_exceeds_hard_budget"
+        if self.hard_max is None:
+            self.reason = "minimum_response_unavailable"
             return False
         if (
             not continuing
@@ -283,33 +289,11 @@ class FastDischargeRegulator:
             # A floor must not bypass the response reserve used by the upward
             # regulator. Otherwise a start below twice the minimum can produce
             # start/stop cycles as site power arrives before the first EV sample.
-            self.reason = "minimum_response_budget"
+            self.reason = "startup_response_reserve"
             return False
         return self.minimum_import_allowed(watts, now=now, actual=actual)
 
     def minimum_import_allowed(self, watts, *, now, actual):
-        """Authoritative site import bounds the floor, including continuation."""
-        # The exception is measured total site import, never EV-only import.
-        # After a pause require enough projected headroom to avoid immediate
-        # pause/restart cycling when removing EV load alone cleared the import.
-        projected = self.net_import
-        if self.restart_blocked:
-            projected += max(0, watts - actual)
-        threshold = watts / 2
-        generation = self.evidence.generation[2:4] if self.evidence else None
-        if projected > threshold:
-            if self.excess_since is None:
-                self.excess_since, self.excess_generation = now, generation
-            if now - self.excess_since >= IMPORT_CONFIRM_SECONDS:
-                self.restart_blocked = True
-                self.reason = "minimum_import_exceeded"
-                return False
-        elif projected <= threshold - GRID_DEADBAND_W:
-            self.excess_since = None
-            self.excess_generation = None
-            self.restart_blocked = False
-        if self.restart_blocked:
-            self.reason = "minimum_restart_hysteresis"
-            return False
-        self.reason = "minimum_import_allowance"
+        """Only the shared verified-energy policy may impose an import STOP."""
+        self.reason = "shared_grid_import_policy"
         return True

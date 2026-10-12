@@ -13,6 +13,7 @@ from test_ocpp21_control import connected as connected
 
 from custom_components.wallbox_manager.control.requests import Direction
 from custom_components.wallbox_manager.core.capabilities import EvidenceState
+from custom_components.wallbox_manager.core.models import PhaseMode
 from custom_components.wallbox_manager.profiles import GridProfiles
 from custom_components.wallbox_manager.pv_surplus import PV_DEFAULTS, decision, reading
 
@@ -24,6 +25,7 @@ async def grid(base_grid):  # noqa: F811
         source.snapshot,
         stop=replace(source.snapshot.stop, state=EvidenceState.VERIFIED),
     )
+    source.mode = PhaseMode.canonical(1)
     profile, target, _ = base_grid
     # Legacy state-machine regressions exercise the raw-input (disabled) mode.
     profile.references["power_smoothing_window"] = 0
@@ -129,11 +131,13 @@ def test_invalid_measurements(value, unit, age):
 
 
 def measurements(profile, target, *, pv=8000, load=5000, actual=3000, soc=None):
+    observed_at = datetime.now(UTC).isoformat()
     profile.references.update(
         leistung_pv="sensor.pv", leistung_verbraucher="sensor.load"
     )
-    profile.hass.states.async_set("sensor.pv", pv, {"unit_of_measurement": "W"})
-    profile.hass.states.async_set("sensor.load", load, {"unit_of_measurement": "W"})
+    meter_attrs = {"unit_of_measurement": "W", "observed_at": observed_at}
+    profile.hass.states.async_set("sensor.pv", pv, meter_attrs)
+    profile.hass.states.async_set("sensor.load", load, meter_attrs)
     attrs = {
         "unit_of_measurement": "W",
         "wallbox_manager_role": "session_power",
@@ -142,29 +146,57 @@ def measurements(profile, target, *, pv=8000, load=5000, actual=3000, soc=None):
         "evse_id": target.evse.value,
         "connector_id": target.value,
         "runtime_incarnation": profile.control.runtime.runtime_id,
+        "observed_at": observed_at,
     }
     profile.hass.states.async_set("sensor.selected", actual, attrs)
     profile.hass.states.async_set(
         "sensor.other", 99999, {**attrs, "connector_id": "other"}
     )
+    # This helper models coherent synthetic site readings. Tests with explicit
+    # measured import/export or battery flows override these meter reports later.
+    try:
+        synthetic_grid = Fraction(str(load)) - Fraction(str(pv))
+    except ValueError, TypeError, ZeroDivisionError, OverflowError:
+        synthetic_grid = None  # Invalid input never invents an actual meter value.
     if soc is not None:
+        profile.references.setdefault(
+            "storage_discharge_power", "sensor.storage_discharge_power"
+        )
+        discharge = profile.hass.states.get(
+            profile.references["storage_discharge_power"]
+        )
+        profile.hass.states.async_set(
+            profile.references["storage_discharge_power"],
+            discharge.state if discharge is not None else 0,
+            meter_attrs,
+        )
         profile.references.setdefault("min_soc_speicher", "number.reserve")
         if profile.hass.states.get(profile.references["min_soc_speicher"]) is None:
             profile.hass.states.async_set(profile.references["min_soc_speicher"], 5)
         profile.references["soc_speicher_aktuell"] = "sensor.soc"
         profile.hass.states.async_set("sensor.soc", soc, {"unit_of_measurement": "%"})
+    # Import closes the energy segment, so publish it after the whole cohort
+    # needed to establish the stop-time model reference is available.
+    if synthetic_grid is not None:
+        grid_measurements(
+            profile,
+            imported=max(0, synthetic_grid),
+            exported=max(0, -synthetic_grid),
+            observed_at=observed_at,
+        )
 
 
-def grid_measurements(profile, *, imported=0, exported=0):
+def grid_measurements(profile, *, imported=0, exported=0, observed_at=None):
     """Lockout continuation needs authoritative site-import evidence."""
     for key, value in (
-        ("grid_import_power", imported),
         ("grid_export_power", exported),
+        ("grid_import_power", imported),
     ):
         profile.references[key] = f"sensor.{key}"
-        profile.hass.states.async_set(
-            profile.references[key], value, {"unit_of_measurement": "W"}
-        )
+        attrs = {"unit_of_measurement": "W"}
+        if observed_at is not None:
+            attrs["observed_at"] = observed_at
+        profile.hass.states.async_set(profile.references[key], value, attrs)
 
 
 async def test_scoped_actual_measurement(grid):
@@ -181,6 +213,7 @@ async def test_scoped_actual_measurement(grid):
 async def test_missing_configured_reference(grid, missing):
     p, t, _ = grid
     measurements(p, t, soc=96)
+    p.setting(t)["profile"] = "PV_SURPLUS"
     p.references[missing] = "sensor.missing"
     assert p.pv_request(t)[0] == 0
     assert p.pv_request(t)[2] == "measurements_unavailable"
@@ -204,6 +237,8 @@ async def test_enable_below_threshold_and_repeat_no_commands(grid):
 
 async def test_repeated_cycles_pause_and_restart(grid):
     p, t, (c, _, peer, *_) = grid
+    clock = [0]
+    p.monotonic = lambda: clock[0]
     measurements(p, t, soc=96)
     await p.select(t, "PV_SURPLUS")
     gate = asyncio.Event()
@@ -221,19 +256,40 @@ async def test_repeated_cycles_pause_and_restart(grid):
     p.wait, p.debounce_wait = wait, debounce
     await p.permission(t, True)
     await asyncio.sleep(0)
+    for _ in range(20):
+        if len(cycles) == 4:
+            break
+        await asyncio.sleep(0)
     assert len(cycles) == 4
     assert len(set(cycles)) == 1
     assert p.pv_ongoing[t]
     # Evaluate policy transitions through the same solver, retaining permission.
-    measurements(p, t, pv=0, soc=95)
+    measurements(p, t, pv=0, load=5000, actual=1380, soc=95)
     result = p.pv_edit(t)
-    assert not result.point.charging
-    assert not p.pv_ongoing[t]
+    assert result.point.charging and result.point.current_a == 6
+    assert p.pv_ongoing[t]
     await c.apply_stored(t)
-    measurements(p, t, soc=95)
+    for seconds in (10, 20, 30, 36):
+        clock[0] = seconds
+        measurements(p, t, pv=0, load=5000, actual=1380, soc=95)
+        p.pv_edit(t)
+        await c.apply_stored(t, reuse_applied=True)
+    assert p.economic_policies[t].energy_wh == 50
+    assert not c.confirmed_point(t).charging
+    for seconds in (36, 46, 51, 52):
+        clock[0] = seconds
+        measurements(p, t, pv=3000, load=620, actual=0, soc=95)
+        p.pv_edit(t)
+    assert p.economic_policies[t].energy_ws == 0
     assert not p.pv_edit(t).point.charging
-    measurements(p, t, soc=96)
-    assert p.pv_edit(t).point.charging
+    measurements(p, t, pv=3000, load=620, actual=0, soc=96)
+    restarted = p.pv_edit(t)
+    assert restarted.point.charging, (
+        p.status[t],
+        p.economic_reasons.get(t),
+        p.optimum_regulators.get(t),
+        p.optimum_modes.get(t),
+    )
     assert c.runtime.enabled(t) is True
 
 
@@ -381,7 +437,7 @@ async def test_safety_stop_skips_debounce_and_preserves_permission(grid):
 
     p.wait = wait
     await p.permission(t, True)
-    await first.wait()
+    await asyncio.wait_for(first.wait(), 2)
     first.clear()
 
     async def forbidden(_):
@@ -420,10 +476,12 @@ async def test_pv_phase_lockout_keeps_retry_deadline_and_fallback(grid):
     p.wait, p.debounce_wait = wait, debounce
     p.launch(t)
     await asyncio.wait_for(reached.wait(), 1)
-    assert len(set(cycles)) == 1
+    assert cycles[1:] == [cycles[-1]] * (len(cycles) - 1)
+    assert cycles[-1] - cycles[0] == 1  # One exact-minimum continuation reduction.
     assert c.intent(t).phase_retry
     assert p.pv_retry_until[t] == 160
     assert c.confirmed_point(t).mode.count == 3
+    assert c.confirmed_point(t).current_a == 6
     # Expiry may retry the phase change but not resend an identical fallback.
     p.monotonic = lambda: 161
     retried = asyncio.Event()

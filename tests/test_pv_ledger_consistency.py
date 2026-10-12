@@ -124,7 +124,7 @@ async def test_ledger_sensor_pv_continues_but_invalid_power_still_pauses(grid, p
         assert p.hass.states.get(sensor.entity_id).state == "unknown"
         clock[0] = 3
         await evaluate(p, t)
-        assert p.status[t] == "hard_budget_unavailable"
+        assert p.status[t] == "measurements_unavailable"
         assert not c.confirmed_point(t).charging
         assert period(peer.requests[-1])["limit"] == 0
     finally:

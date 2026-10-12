@@ -25,6 +25,9 @@ from custom_components.wallbox_manager.profiles import GridProfiles
 
 @pytest.fixture
 async def grid(tmp_path, manual):
+    from custom_components.wallbox_manager.pv_economy import GridImportPolicy
+    from custom_components.wallbox_manager.pv_economy_storage import EconomicIdentity
+
     hass = HomeAssistant(str(tmp_path))
     control, bound, *_ = manual
     entry = SimpleNamespace(entry_id="grid", options={})
@@ -32,6 +35,22 @@ async def grid(tmp_path, manual):
     profiles = GridProfiles(hass, entry, control, battery)
     await profiles.load()
     control.profiles = profiles
+    # Synthetic site meters and explicit fresh-scope proof allow low-level PV
+    # tests to drive planning directly without manufacturing recovery history.
+    for key in ("grid_import_power", "grid_export_power"):
+        profiles.references[key] = f"sensor.{key}"
+        hass.states.async_set(profiles.references[key], 0, {"unit_of_measurement": "W"})
+    state = control.runtime.get(bound.target.station)
+    session = control.runtime.sessions.get(bound.target)
+    identity = EconomicIdentity(
+        entry.entry_id, bound.target, state.identity, session.external_transaction_id
+    )
+    policy = GridImportPolicy()
+    assert await profiles.economic_store.begin_scope(
+        identity, policy, explicit_new_scope=True
+    )
+    profiles.economic_policies[bound.target] = policy
+    profiles.economic_identities[bound.target] = identity
     try:
         yield profiles, bound.target, manual
     finally:

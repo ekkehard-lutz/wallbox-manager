@@ -310,6 +310,10 @@ class Cycle:
             )
         elif intent.status not in ("applied", "idle", "pending") and after is None:
             decision, reason = "HOLD", intent.status
+        elif reason == "grid_import_energy_limit":
+            decision = "ECONOMIC_PAUSE"
+        elif reason == "economic_restart_inhibited":
+            decision = "RESTART_INHIBITED"
         elif reason in (
             "hard_budget_pause",
             "hard_budget_unavailable",
@@ -376,6 +380,7 @@ class Cycle:
             or reason in ("optimum_minimum_hold", "optimum_pause_pending"),
             deliberate_pause=reason
             in (
+                "grid_import_energy_limit",
                 "optimum_deliberate_pause",
                 "grid_import_pause",
                 "hard_budget_pause",
@@ -384,6 +389,7 @@ class Cycle:
             ),
             ongoing_before=self.ongoing_before,
             ongoing_after=p.pv_ongoing.get(t, False),
+            economic_policy=getattr(p, "economic_attributes", lambda _: {})(t),
             applied_before=point(self.before),
             applied=point(after),
             awaiting_confirmation=t in p.control.pending_points,

@@ -112,6 +112,66 @@ async def test_reference_options_form_serializes():
         await hass.async_stop()
 
 
+@pytest.mark.parametrize("mapped", ["both", "import_only", "export_only", "cleared"])
+async def test_options_flow_supports_measured_grid_only_surplus(tmp_path, mapped):
+    from homeassistant.config_entries import ConfigEntries
+    from homeassistant.core import HomeAssistant
+    from test_ha_lifecycle import entry
+
+    from custom_components.wallbox_manager.config_flow import ReferenceOptionsFlow
+    from custom_components.wallbox_manager.profiles import GridProfiles
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = ConfigEntries(hass, {})
+    config = entry()
+    hass.config_entries._entries[config.entry_id] = config
+    hass.config_entries.async_update_entry(
+        config,
+        options={
+            "grid_import_power": "sensor.old_import",
+            "grid_export_power": "sensor.old_export",
+        },
+    )
+    flow = ReferenceOptionsFlow()
+    flow.hass, flow.handler = hass, config.entry_id
+    try:
+        form = await flow.async_step_init()
+        payload = FlowManagerIndexView(None)._prepare_result_json(form)
+        general = next(f for f in payload["data_schema"] if f["name"] == "general")
+        fields = {f["name"]: f for f in general["schema"]}
+        for key in ("grid_import_power", "grid_export_power"):
+            assert fields[key]["selector"]["entity"]["domain"] == ["sensor"]
+            assert not fields[key].get("required", False)
+        selected = {}
+        if mapped in ("both", "import_only"):
+            selected["grid_import_power"] = "sensor.site_import"
+        if mapped in ("both", "export_only"):
+            selected["grid_export_power"] = "sensor.site_export"
+        submitted = form["data_schema"]({"general": selected, "regulation": {}})
+        saved = await flow.async_step_init(submitted)
+        assert saved["type"] == "create_entry"
+        assert {
+            key: value
+            for key, value in saved["data"].items()
+            if key in ("grid_import_power", "grid_export_power")
+        } == selected
+        assert not set(saved["data"]) & {
+            "soc_speicher_aktuell",
+            "min_soc_speicher",
+            "storage_discharge_power",
+            "leistung_pv",
+            "leistung_verbraucher",
+            "remaining_pv_energy",
+        }
+        profiles = GridProfiles.available_profiles(
+            SimpleNamespace(references=saved["data"]), None
+        )
+        assert profiles == (["NETZ", "PV_SURPLUS"] if mapped == "both" else ["NETZ"])
+        assert flow.automatic_reload
+    finally:
+        await hass.async_stop()
+
+
 @pytest.mark.parametrize(
     "change",
     [

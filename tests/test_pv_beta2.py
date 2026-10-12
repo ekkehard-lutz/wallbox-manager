@@ -100,11 +100,11 @@ async def test_explicit_takeover_keeps_offline_configuration_and_permission_off(
 
 async def prepare(grid, *, soc=None):
     p, t, manual = grid
+    clock = [0.0]
+    p.monotonic = lambda: clock[0]
     p.setting(t).update(PV_DEFAULTS)
     measurements(p, t, soc=soc)
     await p.select(t, "PV_SURPLUS")
-    clock = [0.0]
-    p.monotonic = lambda: clock[0]
     p.wait = lambda _: asyncio.Event().wait()
     p.debounce_wait = AsyncMock()
     return p, t, manual, clock
@@ -118,7 +118,7 @@ async def apply(p, t):
     return result.point
 
 
-async def test_default_zero_start_is_immediate_and_stop_default_is_ninety(grid):
+async def test_zero_start_and_exact_50wh_replace_old_ninety_second_stop(grid):
     p, t, (c, _, _, *_), clock = await prepare(grid)
     await p.permission(t, True)
     confirmed = c.confirmed_point(t)
@@ -126,14 +126,19 @@ async def test_default_zero_start_is_immediate_and_stop_default_is_ninety(grid):
     p.debounce_wait.assert_not_awaited()
     assert p.setting(t)["pv_start_delay"] == 0
     assert p.setting(t)["pv_stop_delay"] == 90
-    measurements(p, t, pv=0)
+    measurements(p, t, pv=0, load=5000, actual=1380)
     point = await apply(p, t)
-    assert point == confirmed
-    assert p.status[t] == "pv_stop_delay"
-    clock[0] = 89
-    assert (await apply(p, t)).charging
-    clock[0] = 90
+    assert point.charging and point.current_a == 6
+    assert p.status[t] == "optimum_minimum_hold"
+    for seconds in (10, 20, 30, 35.999):
+        clock[0] = seconds
+        measurements(p, t, pv=0, load=5000, actual=1380)
+        assert (await apply(p, t)).charging
+    assert p.economic_policies[t].energy_ws == 179995
+    clock[0] = 36
+    measurements(p, t, pv=0, load=5000, actual=1380)
     assert not (await apply(p, t)).charging
+    assert p.economic_policies[t].energy_wh == 50
     assert c.runtime.enabled(t) is True
 
 
@@ -155,38 +160,42 @@ async def test_start_delay_requires_continuous_eligible_surplus(grid):
     assert (await apply(p, t)).charging
 
 
-async def test_surplus_recovery_resets_stop_delay_and_no_duplicate_minimum_commands(
+async def test_supported_below_threshold_reset_has_no_duplicate_minimum_commands(
     grid,
 ):
     p, t, (c, _, peer, *_), clock = await prepare(grid)
     await p.permission(t, True)
-    measurements(p, t, pv=0)
+    measurements(p, t, pv=0, load=5000, actual=1380)
     await apply(p, t)
     count = len(peer.requests)
-    for seconds in (5, 10, 15):
+    for seconds in (5, 10):
         clock[0] = seconds
+        measurements(p, t, pv=0, load=5000, actual=1380)
         await apply(p, t)
     assert len(peer.requests) == count
-    measurements(p, t)
+    assert p.economic_policies[t].energy_ws == 50000
+    measurements(p, t, pv=5000, load=5000, actual=1380)
     await apply(p, t)
     assert t not in p.pv_stop_since
-    clock[0] = 30
-    measurements(p, t, pv=0)
+    for seconds in (15, 20, 25):
+        clock[0] = seconds
+        measurements(p, t, pv=5000, load=5000, actual=1380)
+        assert (await apply(p, t)).charging
+    assert p.economic_policies[t].energy_ws == 50000
+    clock[0] = 25.001
+    measurements(p, t, pv=5000, load=5000, actual=1380)
     await apply(p, t)
-    assert p.pv_stop_since[t] == 30
-    clock[0] = 119
-    assert (await apply(p, t)).charging
-    clock[0] = 120
-    assert not (await apply(p, t)).charging
+    assert p.economic_policies[t].energy_ws == 0
+    assert len(peer.requests) == count
 
 
 @pytest.mark.parametrize("safety", ["invalid", "stale", "explicit_off", "authority"])
-async def test_explicit_safety_stops_but_measurement_gaps_hold(grid, safety):
+async def test_explicit_safety_and_critical_measurement_failures_stop(grid, safety):
     p, t, (c, bound, peer, *_), clock = await prepare(grid, soc=96)
     await p.permission(t, True)
     measurements(p, t, pv=0, soc=96)
     await apply(p, t)
-    assert p.status[t] == "pv_stop_delay"
+    assert p.status[t] == "optimum_minimum_hold"
     if safety == "explicit_off":
         await p.permission(t, False)
         assert c.runtime.enabled(t) is False
@@ -220,12 +229,12 @@ async def test_explicit_safety_stops_but_measurement_gaps_hold(grid, safety):
             )
         confirmed = c.confirmed_point(t)
         count = len(peer.requests)
-        assert p.pv_edit(t) is None
-        await asyncio.sleep(0)
-        p.pv_confirm(t)
-        assert c.confirmed_point(t) == confirmed and confirmed.charging
-        assert len(peer.requests) == count
-        assert p.pv_ongoing[t] and p.pv_stop_since[t] == 0
+        energy = p.economic_policies[t].energy_ws
+        assert confirmed.charging
+        assert not (await apply(p, t)).charging
+        assert len(peer.requests) == count + 1
+        assert not p.pv_ongoing[t] and t not in p.pv_stop_since
+        assert p.economic_policies[t].energy_ws == energy
         assert c.runtime.enabled(t) is True
         return
     assert not p.pv_ongoing.get(t, False)
@@ -237,6 +246,7 @@ async def test_removed_power_mapping_stops_before_fallback_and_keeps_settings(gr
     measurements(p, t, soc=97)
     await p.permission(t, True)
     p.references.pop("leistung_pv")
+    p.references.pop("grid_import_power")
     assert not p.permits_point(t, c.confirmed_point(t))
     await p.reconcile_availability()
     assert c.runtime.enabled(t) is False
@@ -258,6 +268,7 @@ async def test_removed_mapping_waits_for_confirmed_off_without_authority(grid):
         ),
     )
     p.references.pop("leistung_verbraucher")
+    p.references.pop("grid_import_power")
     count = len(peer.operations)
     await p.reconcile_availability()
     assert len(peer.operations) == count
@@ -304,16 +315,21 @@ async def test_start_timer_fences_queued_command_and_minimum_stop_deadline(grid)
     assert not p.pv_ongoing[t]
 
 
-async def test_stop_delay_fences_queued_minimum_after_expiry(grid):
+async def test_50wh_fences_queued_positive_minimum_before_dispatch(grid):
     p, t, (c, bound, peer, *_), clock = await prepare(grid)
     await p.permission(t, True)
-    measurements(p, t, pv=0)
+    measurements(p, t, pv=0, load=5000, actual=1380)
     p.pv_edit(t)
     count = len(peer.requests)
     async with bound.adapter._call_lock:
         pending = asyncio.create_task(c.apply_stored(t))
         await asyncio.sleep(0)
-        clock[0] = 90
+        for seconds in (10, 20, 30, 36):
+            clock[0] = seconds
+            measurements(p, t, pv=0, load=5000, actual=1380)
+            p.economic_observe(t)
+            await asyncio.sleep(0)
+        assert p.economic_policies[t].energy_wh == 50
     result = await pending
     assert result.status.value != "applied"
     assert len(peer.requests) == count
@@ -332,7 +348,10 @@ async def test_phase_lockout_continues_past_pv_stop_delay_until_soc_target(grid)
     clock = [0.0]
     p.monotonic = lambda: clock[0]
     p.wait = lambda _: asyncio.Event().wait()
-    await apply(p, t)
+    p.pv_edit(t)
+    rejected = await c.apply_stored(t, reuse_applied=True)
+    p.pv_confirm(t)
+    assert rejected.status.value == "temporarily_rejected"
     assert c.intent(t).phase_retry
     measurements(p, t, pv=0, load=0, actual=0, soc=96)
     assert (await apply(p, t)).charging

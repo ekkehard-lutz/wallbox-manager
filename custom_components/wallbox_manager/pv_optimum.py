@@ -78,11 +78,12 @@ class PVOptimum:
     """Daily target planner and shared SoC/regulator adapter for all PV profiles."""
 
     def shared_pv_execution(self, target):
-        """Preserve Optimum's reachable-phase execution semantics for Maximum."""
-        return self.setting(target)["profile"] in ("PV_OPTIMUM", "PV_MAXIMUM") or (
-            self.setting(target)["profile"] == "PV_SURPLUS"
-            and self.phase_lockout_continuing(target)
-        )
+        """Every available PV profile shares reachable-phase execution."""
+        return self.setting(target)["profile"] in (
+            "PV_OPTIMUM",
+            "PV_MAXIMUM",
+            "PV_SURPLUS",
+        ) and self.setting(target)["profile"] in self.available_profiles(target)
 
     def phase_lockout_continuing(self, target):
         """A station lockout cannot grant permission to start a stopped charge."""
@@ -503,8 +504,8 @@ class PVOptimum:
             status = (
                 "stopped_battery_soc"
                 if target in self.pv_soc_protection
-                else "optimum_deliberate_pause"
-                if self.pv_pause_reasons.get(target) == "optimum_deliberate_pause"
+                else "economic_restart_inhibited"
+                if self.pv_pause_reasons.get(target) == "grid_import_energy_limit"
                 else "waiting_battery_soc"
             )
             return Fraction(0), Direction.DOWN, status
@@ -638,107 +639,96 @@ class PVOptimum:
         transition_mode=None,
         energy_desired=False,
     ):
-        """Separate an energy deficit from permission to enter expensive OFF.
+        """Continue a below-allocation request at its exact technical floor.
 
-        FAST permits only a hard-budget-safe floor within the grid allowance.
-        BALANCE reuses the
-        configured stop delay, holding that floor (not an obsolete high offer).
-        At least one regulation interval is required even with stop delay zero:
-        one transient sample must never pause an established Optimum charge.
-        Unknown inputs are handled by pv_plan before entering this policy.
+        Ordinary FAST/BALANCE allocation remains unchanged. The existing
+        startup response reserve and acknowledged-OFF physical response gate
+        remain binding. Only the shared verified-energy policy decides an
+        economic continuation STOP.
         """
         from .control.runtime import PowerSettings
         from .pv_diagnostics import active, number
         from .solver.operating_point import Reason
 
-        minimum = self.control.minimum_positive(
+        minimum = self.control.technical_minimum(
             target,
             dispatch_modes=(transition_mode,) if transition_mode else None,
             energy_desired=energy_desired,
         )
-
         if record := active(self, target):
-            record.data.update(
-                minimum_reachable_power_w=number(minimum.point.offered_power_w)
-                if minimum and minimum.point
-                else None,
+            record.data["minimum_reachable_power_w"] = (
+                number(minimum.point.offered_power_w)
+                if minimum and minimum.point and minimum.point.charging
+                else None
             )
-        if (
-            minimum is not None
-            and minimum.point is not None
-            and not minimum.point.charging
-        ):
-            return 0, Direction.DOWN, "hard_budget_pause", minimum
+        if minimum and minimum.point and not minimum.point.charging:
+            return 0, Direction.DOWN, "optimum_no_positive_point", minimum
+        confirmed = self.control.confirmed_point(target)
+        continuing = bool(
+            confirmed
+            and confirmed.charging
+            and self.control.runtime.enabled(target) is True
+        )
         regulator = self.optimum_regulators.get(target)
         if energy_desired and regulator is not None:
-            # An all-mode preference must not start/rearm the executable mode's
-            # grid-import grace with a different minimum power and allowance.
             regulator = replace(regulator)
         if regulator and regulator.evidence and minimum and minimum.point:
-            candidates = self.selected_power_states(target)
             from .pv_surplus import reading
 
+            candidates = self.selected_power_states(target)
+            if len(candidates) != 1:
+                return power, Direction.DOWN, "measurements_unavailable", None
             actual = reading(candidates[0], datetime.now(UTC))
-            if not regulator or not regulator.minimum_allowed(
-                minimum.point, now=self.monotonic(), actual=actual
+            if not regulator.minimum_allowed(
+                minimum.point,
+                now=self.monotonic(),
+                actual=actual,
+                continuing=continuing,
             ):
-                # An above-minimum request may still reduce import sufficiently;
-                # only apply the exception when the energy solve needs the floor.
                 if not result.point.charging or (
                     result.point.offered_power_w <= minimum.point.offered_power_w
                 ):
+                    status = (
+                        "startup_response_reserve"
+                        if regulator.reason == "startup_response_reserve"
+                        else "awaiting_physical_response"
+                    )
                     paused = self.control.resolve(
                         target, request=PowerSettings(0, Direction.DOWN)
                     )[1]
-                    status = (
-                        "hard_budget_pause"
-                        if regulator.reason == "minimum_response_budget"
-                        else "grid_import_pause"
-                    )
                     return 0, Direction.DOWN, status, paused
         if result.point.charging:
             if advance:
                 self.pv_stop_since.pop(target, None)
             return None
+        if confirmed is None and self.control.runtime.enabled(target) is True:
+            # Live permission without positive confirmation is uncertainty,
+            # not proof that an economic OFF or a floor restart is appropriate.
+            return power, Direction.DOWN, "awaiting_physical_response", None
         if minimum is None or minimum.point is None:
-            # Known electrical infeasibility keeps existing safe OFF behavior;
-            # lack of reachability evidence is a no-decision, never a new pause.
-            if minimum is None or minimum.reason != Reason.ELECTRICAL_LIMIT:
-                return power, Direction.DOWN, "telemetry_unavailable", None
-            return 0, Direction.DOWN, "optimum_no_positive_point", result
-        confirmed = self.control.confirmed_point(target)
-        continuing = bool(
-            confirmed.charging
-            if confirmed is not None
-            else self.control.runtime.enabled(target) is True
+            if minimum is not None and minimum.reason == Reason.ELECTRICAL_LIMIT:
+                return 0, Direction.DOWN, "optimum_no_positive_point", result
+            return power, Direction.DOWN, "telemetry_unavailable", None
+        if not continuing and not self.optimum_fast(target):
+            # An allocation-less battery-free/BALANCE startup remains OFF.
+            # Neither budget reset nor the minimum exception grants permission.
+            return 0, Direction.DOWN, "paused_insufficient_pv", result
+        self.control.intent(target).minimum_exception = minimum.point
+        if advance:
+            self.pv_stop_since.pop(target, None)
+        return (
+            minimum.point.offered_power_w,
+            Direction.DOWN,
+            "optimum_minimum_hold",
+            minimum,
         )
-        if self.optimum_fast(target):
-            if advance:
-                self.pv_stop_since.pop(target, None)
-            status = "optimum_minimum_hold"
-        elif continuing:
-            now = self.monotonic()
-            if advance:
-                self.pv_stop_since.setdefault(target, now)
-            since = self.pv_stop_since.get(target)
-            settings = self.setting(target)
-            delay = max(settings["pv_stop_delay"], settings["regulation_interval"])
-            if since is not None and now >= since + delay:
-                return 0, Direction.DOWN, "optimum_deliberate_pause", result
-            status = "optimum_pause_pending"
-        else:
-            # Already OFF (or first activation) needs no positive-to-zero debounce.
-            return 0, Direction.DOWN, "optimum_deliberate_pause", result
-        if record := active(self, target):
-            record.data["policy_reason"] = status
-        return minimum.point.offered_power_w, Direction.DOWN, status, minimum
 
     def pv_continuation_plan(self, target):
-        """Hold the physical minimum during lockout or ACK response settling.
+        """Hold the exact physical floor during lockout/response stabilization.
 
-        A positive confirmed offer and live permission establish continuation.
-        Only the startup response reserve is inapplicable; the independent hard
-        battery budget, electrical solver and total-site import boundary remain.
+        Fresh meter, EV, authority, permission and physical-phase proof remain
+        mandatory. The shared verified-energy policy owns economic STOP; this
+        helper neither invents a threshold nor starts an independent timer.
         """
         from .control.runtime import PowerSettings
         from .pv_diagnostics import active, number
@@ -756,13 +746,13 @@ class PVOptimum:
             and self.control.runtime.enabled(target) is True
         ):
             return None
-        minimum = self.control.minimum_positive(
+        minimum = self.control.technical_minimum(
             target, dispatch_modes=(inputs.current_mode,)
         )
         if minimum is None or minimum.point is None:
             return None
         if not minimum.point.charging:
-            return 0, Direction.DOWN, "hard_budget_pause", minimum
+            return 0, Direction.DOWN, "optimum_no_positive_point", minimum
         now = datetime.now(UTC)
         try:
             states = [
@@ -790,18 +780,16 @@ class PVOptimum:
             )
         expiry = min(now + timedelta(seconds=power_valid_for(s, now)) for s in states)
         self.pv_expiry[target] = min(self.pv_expiry.get(target, expiry), expiry)
-        regulator = self.optimum_regulators.setdefault(target, FastDischargeRegulator())
-        regulator.net_import = imported - exported
-        hard_max = self.control.intent(target).hard_max_w
-        permitted = (
-            regulator.minimum_allowed(
-                minimum.point, now=self.monotonic(), actual=actual, continuing=True
+        self.control.intent(target).minimum_exception = minimum.point
+        if not self.economic_restart_permits(target, minimum.point):
+            return (
+                0,
+                Direction.DOWN,
+                "economic_restart_inhibited",
+                self.control.resolve(target, request=PowerSettings(0, Direction.DOWN))[
+                    1
+                ],
             )
-            if hard_max is not None
-            else regulator.minimum_import_allowed(
-                minimum.point.offered_power_w, now=self.monotonic(), actual=actual
-            )
-        )
         if record := active(self, target):
             record.data.update(
                 continuation_reason="phase_switch_lockout"
@@ -811,16 +799,7 @@ class PVOptimum:
                 minimum_grid_import_allowance_w=number(
                     minimum.point.offered_power_w / 2
                 ),
-                observed_net_grid_import_w=number(max(0, regulator.net_import)),
-            )
-        if not permitted:
-            return (
-                0,
-                Direction.DOWN,
-                "grid_import_pause",
-                self.control.resolve(target, request=PowerSettings(0, Direction.DOWN))[
-                    1
-                ],
+                observed_grid_import_w=number(imported),
             )
         self.pv_stop_since.pop(target, None)
         return (

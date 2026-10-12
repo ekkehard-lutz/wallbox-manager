@@ -78,7 +78,7 @@ async def test_real_entry_migrates_store_and_keeps_regulation_out_of_profile_sto
     config = entry()
     hass.config_entries._entries[config.entry_id] = config
     runtime = Runtime()
-    control = SimpleNamespace(runtime=runtime)
+    control = SimpleNamespace(runtime=runtime, subscribe=lambda _: lambda: None)
     profiles = GridProfiles(hass, config, control, BatteryReserve(hass, config))
     stored = {
         "a": {
@@ -106,6 +106,7 @@ async def test_real_entry_migrates_store_and_keeps_regulation_out_of_profile_sto
         assert not set(saved) & DEFAULTS.keys()
         assert saved["power_kw"] == 7 and saved["min_soc"] == 25
     finally:
+        await profiles.economic_close()
         profiles.unsubscribe_battery()
         profiles.unsubscribe()
         profiles.session_unsubscribe()

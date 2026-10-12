@@ -15,6 +15,7 @@ from custom_components.wallbox_manager.power_history import PowerHistory
 
 async def test_independent_event_histories_raw_soc_and_unavailable(grid):
     p, t, _ = grid
+    p.setting(t)["profile"] = "PV_SURPLUS"
     now = [0]
     p.monotonic = lambda: now[0]
     p.references["power_smoothing_window"] = 5
@@ -46,6 +47,7 @@ async def test_independent_event_histories_raw_soc_and_unavailable(grid):
 
 async def test_disabled_raw_without_event_polling(grid):
     p, t, _ = grid
+    p.setting(t)["profile"] = "PV_SURPLUS"
     measurements(p, t, pv=1234, load=234, actual=0, soc=91)
     assert p.pv_measurements(t) == (1000, 91)
     measurements(p, t, pv=2234, load=234, actual=0, soc=92)
@@ -54,7 +56,8 @@ async def test_disabled_raw_without_event_polling(grid):
 
 async def test_history_alone_never_authorizes_invalid_current_measurement(grid):
     p, t, _ = grid
-    measurements(p, t)
+    p.setting(t)["profile"] = "PV_SURPLUS"
+    measurements(p, t, soc=96)
     p.power_history["leistung_pv"] = PowerHistory(5)
     p.power_history["leistung_pv"].add(p.monotonic() - 5, Fraction(10000))
     p.hass.states.async_set("sensor.pv", "unavailable")
@@ -72,9 +75,9 @@ async def test_smoothed_samples_during_dispatch_belong_to_next_snapshot(grid):
     p.power_history = {
         key: PowerHistory(5) for key in ("leistung_pv", "leistung_verbraucher")
     }
-    p.power_history["leistung_pv"].add(0, Fraction(2300))
+    p.power_history["leistung_pv"].add(0, Fraction(2400))
     p.power_history["leistung_verbraucher"].add(0, Fraction(0))
-    measurements(p, t, pv=2300, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     await asyncio.sleep(0)
     clock[0] = 5
     peer.received.clear()
@@ -85,10 +88,10 @@ async def test_smoothed_samples_during_dispatch_belong_to_next_snapshot(grid):
         point = c.pending_points[t]
         assert point.current_a == 10
         generation, epoch = c.intent(t).generation, p.epochs[t]
-        measurements(p, t, pv=1840, load=0, actual=0, soc=96)
+        measurements(p, t, pv=1940, load=0, actual=0, soc=96)
         await asyncio.sleep(0)
         clock[0] = 10
-        assert p.pv_measurements(t)[0] == 1840
+        assert p.pv_measurements(t)[0] == 1940
         assert c.intent(t).generation == generation and p.epochs[t] == epoch
     finally:
         peer.release.set()
@@ -101,8 +104,9 @@ async def test_smoothed_samples_during_dispatch_belong_to_next_snapshot(grid):
     p.hass.states.async_set("sensor.pv", "unavailable")
     await asyncio.sleep(0)
     await tick()
-    assert c.confirmed_point(t) == confirmed
-    assert len(peer.requests) == count
+    assert confirmed.charging and not c.confirmed_point(t).charging
+    assert len(peer.requests) == count + 1
+    assert p.status[t] == "measurements_unavailable"
 
 
 async def test_voltage_remains_raw_with_power_smoothing_enabled(grid):

@@ -32,12 +32,23 @@ from custom_components.wallbox_manager.core.telemetry import (
 )
 
 
+async def park_background_regulator(p, t):
+    """Direct command-fence cases own their single dispatched command.
+
+    Meter events now wake the shared regulator independently of tick(). Park
+    that unrelated producer before checking the direct command's live fence.
+    """
+    task = p.tasks.pop(t)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 @pytest.mark.parametrize(
     "change", ["pv", "load", "session_power", "voltage", "soc", "expiry", "activity"]
 )
 async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, change):
     p, t, (c, _, peer, *_), clock, tick = await running(grid)
-    measurements(p, t, pv=2300, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     peer.received.clear()
     peer.release.clear()
     pending = asyncio.create_task(tick())
@@ -47,15 +58,15 @@ async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, chan
         assert point.current_a == 10 and point.mode.count == 1
         generation, epoch = c.intent(t).generation, p.epochs[t]
         if change == "pv":
-            measurements(p, t, pv=1840, load=0, actual=0, soc=96)
+            measurements(p, t, pv=1940, load=0, actual=0, soc=96)
         elif change == "load":
-            measurements(p, t, pv=2300, load=460, actual=0, soc=96)
+            measurements(p, t, pv=2400, load=460, actual=0, soc=96)
         elif change == "session_power":
-            measurements(p, t, pv=2300, load=0, actual=460, soc=96)
+            measurements(p, t, pv=2400, load=0, actual=460, soc=96)
         elif change == "voltage":
             voltage(c, t, 220)
         elif change == "soc":
-            measurements(p, t, pv=2300, load=0, actual=0, soc=89)
+            measurements(p, t, pv=2400, load=0, actual=0, soc=89)
         elif change == "expiry":
             p.hass.states.async_set(
                 "sensor.pv",
@@ -105,7 +116,13 @@ async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, chan
     if change == "soc":
         assert p.status[t] == "stopped_battery_soc"
         assert not c.confirmed_point(t).charging
-    elif change in ("expiry", "activity"):
+    elif change == "expiry":
+        # The acknowledged snapshot stays confirmed above. Its next cycle now
+        # uses the shared battery model, where expired PV is a critical input.
+        assert not c.confirmed_point(t).charging
+        assert len(peer.requests) == count + 1
+        assert p.status[t] == "measurements_unavailable"
+    elif change == "activity":
         assert c.confirmed_point(t) == point and len(peer.requests) == count
     else:
         assert (
@@ -136,7 +153,8 @@ async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, chan
 )
 async def test_live_control_changes_still_fence_dispatched_command(grid, change):
     p, t, (c, bound, peer, _, source, _), _, _ = await running(grid)
-    measurements(p, t, pv=2300, load=0, actual=0, soc=96)
+    await park_background_regulator(p, t)
+    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     p.pv_edit(t)
     peer.received.clear()
     peer.release.clear()
@@ -193,7 +211,8 @@ async def test_invalidated_snapshot_before_wire_dispatch_is_still_rejected(
     grid, change
 ):
     p, t, (c, bound, peer, *_), _, _ = await running(grid)
-    measurements(p, t, pv=2300, load=0, actual=0, soc=96)
+    await park_background_regulator(p, t)
+    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     p.pv_edit(t)
     count = len(peer.requests)
     async with bound.adapter._call_lock:
@@ -205,7 +224,7 @@ async def test_invalidated_snapshot_before_wire_dispatch_is_still_rejected(
             voltage(c, t, 0, invalid="missing")
         else:
             p.setting(t)["pv_stop_delay"] = 0
-            measurements(p, t, pv=2300, load=0, actual=0, soc=89)
+            measurements(p, t, pv=2400, load=0, actual=0, soc=89)
         await asyncio.sleep(0)
     result = await pending
     assert result.reason == CommandReason.STALE
@@ -216,7 +235,7 @@ async def test_invalidated_snapshot_before_wire_dispatch_is_still_rejected(
 async def test_initial_enable_keeps_snapshot_through_permission_confirmation(grid):
     p, t, (c, _, peer, *_), _ = await prepare(grid, soc=96)
     p.setting(t)["pv_stop_delay"] = 90
-    measurements(p, t, pv=2070, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2170, load=0, actual=0, soc=96)
 
     def response(_):
         measurements(p, t, pv=0, load=0, actual=0, soc=89)
@@ -245,7 +264,7 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
     grid, monkeypatch, change
 ):
     p, t, (c, bound, peer, *_), _ = await prepare(grid, soc=96)
-    measurements(p, t, pv=2530, load=230, actual=0, soc=96)
+    measurements(p, t, pv=2630, load=230, actual=0, soc=96)
     assert p.setting(t)["profile"] == "PV_SURPLUS"
     assert c.runtime.enabled(t) is False and c.confirmed_point(t) is None
     assert c.runtime.authority(t.station) == ControlAuthority.REMOTE
@@ -271,15 +290,15 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
         assert (point.mode.count, point.current_a) == (1, 10)
         assert len(peer.requests) == count
         if change == "pv":
-            measurements(p, t, pv=2760, load=230, actual=0, soc=96)
+            measurements(p, t, pv=2860, load=230, actual=0, soc=96)
         elif change == "load":
-            measurements(p, t, pv=2530, load=0, actual=0, soc=96)
+            measurements(p, t, pv=2630, load=0, actual=0, soc=96)
         elif change == "pv_down":
-            measurements(p, t, pv=2300, load=230, actual=0, soc=96)
+            measurements(p, t, pv=2400, load=230, actual=0, soc=96)
         elif change == "load_up":
-            measurements(p, t, pv=2530, load=460, actual=0, soc=96)
+            measurements(p, t, pv=2630, load=460, actual=0, soc=96)
         elif change == "soc":
-            measurements(p, t, pv=2530, load=230, actual=0, soc=96.5)
+            measurements(p, t, pv=2630, load=230, actual=0, soc=96.5)
         else:
             voltage(c, t, 229)
     result = await pending
@@ -335,7 +354,7 @@ async def test_startup_live_fences_reject_before_wire_dispatch(
     grid, monkeypatch, change
 ):
     p, t, (c, bound, peer, _, source, _), _ = await prepare(grid, soc=96)
-    measurements(p, t, pv=2530, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2630, load=0, actual=0, soc=96)
     import custom_components.wallbox_manager.control.runtime as module
 
     prepared = asyncio.Event()
@@ -400,10 +419,10 @@ async def test_regulator_snapshot_survives_measurement_before_dispatch(
     grid, monkeypatch, amps, change
 ):
     p, t, (c, bound, peer, *_), _, tick = await running(grid)
-    measurements(p, t, pv=2760, load=0, actual=0, soc=96)
+    measurements(p, t, pv=2860, load=0, actual=0, soc=96)
     await tick()
     assert c.confirmed_point(t).current_a == 12
-    measurements(p, t, pv=amps * 230, load=0, actual=0, soc=96)
+    measurements(p, t, pv=amps * 230 + 100, load=0, actual=0, soc=96)
     import custom_components.wallbox_manager.control.runtime as module
 
     prepared = asyncio.Event()
@@ -426,22 +445,22 @@ async def test_regulator_snapshot_survives_measurement_before_dispatch(
         generation, epoch = c.intent(t).generation, p.epochs[t]
         assert len(peer.requests) == count
         if change == "pv":
-            measurements(p, t, pv=(amps + 1) * 230, load=0, actual=0, soc=96)
+            measurements(p, t, pv=(amps + 1) * 230 + 100, load=0, actual=0, soc=96)
         elif change == "load":
-            measurements(p, t, pv=amps * 230, load=230, actual=0, soc=96)
+            measurements(p, t, pv=amps * 230 + 100, load=230, actual=0, soc=96)
         elif change == "session_power":
-            measurements(p, t, pv=amps * 230, load=0, actual=230, soc=96)
+            measurements(p, t, pv=amps * 230 + 100, load=0, actual=230, soc=96)
         elif change == "voltage":
             voltage(c, t, 229)
         else:
-            measurements(p, t, pv=amps * 230, load=0, actual=0, soc=96.5)
+            measurements(p, t, pv=amps * 230 + 100, load=0, actual=0, soc=96.5)
         if change in ("pv", "load", "session_power"):
             assert p.pv_request(t) != request
         assert c.intent(t).generation == generation and p.epochs[t] == epoch
     await pending
     if change == "load":
         assert c.intent(t).command_result.status == CommandStatus.TEMPORARILY_REJECTED
-        assert c.intent(t).fence_reason == "pre_dispatch_pv_policy"
+        assert c.intent(t).fence_reason == "pre_dispatch_setpoint_changed"
         assert len(peer.requests) == count
         return
     assert c.intent(t).command_result.status == CommandStatus.APPLIED, c.intent(
@@ -484,7 +503,7 @@ async def test_regulator_snapshot_survives_measurement_before_dispatch(
 )
 async def test_regulator_live_changes_fence_before_dispatch(grid, monkeypatch, change):
     p, t, (c, bound, peer, _, source, _), _, tick = await running(grid)
-    measurements(p, t, pv=2990, load=0, actual=0, soc=96)
+    measurements(p, t, pv=3090, load=0, actual=0, soc=96)
     import custom_components.wallbox_manager.control.runtime as module
 
     prepared, completed = asyncio.Event(), asyncio.Event()

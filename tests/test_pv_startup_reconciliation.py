@@ -26,7 +26,7 @@ from custom_components.wallbox_manager.core.models import PhaseMode
 async def startup(grid):
     p, t, context, clock = await prepare(grid, soc=96)
     p.setting(t)["approximation"] = "up"
-    measurements(p, t, pv=2231, load=358, actual=0, soc=96)
+    measurements(p, t, pv=2331, load=358, actual=0, soc=96)
     return p, t, context, clock
 
 
@@ -126,7 +126,7 @@ async def test_uncertain_first_reply_reconciles_after_retry_deadline(grid):
     assert t in c._unconfirmed_targets
     assert c.confirmed_point(t) is None and p.pv_retry_until[t] == 60
     await asyncio.wait_for(parked.wait(), 1)
-    measurements(p, t, pv=2231, load=358, actual=0, soc=96)
+    measurements(p, t, pv=2331, load=358, actual=0, soc=96)
     peer.profile_response = lambda _: call_result.SetChargingProfile(status="Accepted")
     clock[0] = 60
     parked.clear()

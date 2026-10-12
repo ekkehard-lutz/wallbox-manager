@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 
 import pytest
 from ocpp.v21 import call_result
@@ -179,22 +180,50 @@ async def test_lockout_minimum_accepts_up_to_half_its_power(grid, profile, impor
 
 
 @pytest.mark.parametrize("profile", PROFILES)
-async def test_lockout_import_excess_is_transient_then_stops_once(grid, profile):
+async def test_lockout_import_excess_stops_once_at_verified_fifty_wh(grid, profile):
+    from test_pv_economy_control import cohort
+
     p, t, (c, _, peer, *_), clock, _ = await restricted(grid, profile)
+    await p.hass.async_block_till_done()
     before = len(peer.requests)
-    for second in (31, 40.99):
-        clock[0] = second
-        desired_one_phase(p, t, imported=2071)
+    for second in range(31, 112, 10):
+        cohort(
+            p,
+            t,
+            clock,
+            second,
+            source=datetime.now(UTC),
+            actual=4140,
+            imported=2071,
+            discharge=3300,
+            pv=2300,
+            load=4140,
+        )
         await evaluate(p, t)
         assert c.confirmed_point(t).charging
-    clock[0] = 41
-    desired_one_phase(p, t, imported=2071)
+    cohort(
+        p,
+        t,
+        clock,
+        31 + Fraction(180000, 2071),
+        source=datetime.now(UTC),
+        actual=4140,
+        imported=2071,
+        discharge=3300,
+        pv=2300,
+        load=4140,
+    )
     await evaluate(p, t)
+    assert p.economic_policies[t].energy_ws == 180000, (
+        p.economic_policies[t].snapshot,
+        p.economic_reasons.get(t),
+    )
     assert not c.confirmed_point(t).charging
     assert c.runtime.enabled(t) is True
     assert len(peer.requests) == before + 1
     assert period(peer.requests[-1])["limit"] == 0
-    clock[0] = 42
+    assert p.economic_policies[t].energy_wh == 50
+    clock[0] += 1
     await evaluate(p, t)
     assert len(peer.requests) == before + 1
 
@@ -252,15 +281,20 @@ async def test_lockout_does_not_extend_through_invalid_critical_measurements(
 
 
 @pytest.mark.parametrize("profile", PROFILES)
-async def test_lockout_keeps_independent_battery_budget_safety_fence(grid, profile):
+async def test_lockout_economic_allocation_shortfall_keeps_only_exact_floor(
+    grid, profile
+):
     p, t, (c, _, peer, *_), clock, _ = await restricted(grid, profile)
     clock[0] = 31
     samples(p, t, actual=4140, discharge=4000, imported=1800)
     before = len(peer.requests)
     await evaluate(p, t)
-    assert not c.confirmed_point(t).charging
-    assert len(peer.requests) == before + 1
-    assert p.status[t] == "hard_budget_pause"
+    assert c.confirmed_point(t).offered_power_w == 4140
+    assert c.confirmed_point(t).offered_power_w > c.intent(t).hard_max_w
+    assert c.minimum_exception_valid(t, c.confirmed_point(t))
+    assert len(peer.requests) == before
+    assert p.status[t] == "optimum_minimum_hold"
+    assert p.economic_policies[t].energy_ws == 0
 
 
 @pytest.mark.parametrize("fence", ["authority", "ownership", "transaction", "disable"])
@@ -463,10 +497,18 @@ async def test_phase_ack_without_physical_response_prevents_immediate_reverse(
     assert len(peer.requests) == before + 1
     assert all(period(r).get("number_phases") == 3 for r in peer.requests[before:])
     assert all(period(r)["limit"] > 0 for r in peer.requests)
-    # Physical settling never prevents an independently required safe reduction.
+    # A finite economic allocation shortfall cannot bypass the unified Wh gate.
     samples(p, t, actual=0, discharge=4000, pv=3355, load=351)
     await evaluate(p, t)
+    assert c.confirmed_point(t).charging
+    assert c.confirmed_point(t).current_a == 6
+    target = float(p.pv_target(t, datetime.now(UTC)))
+    lower_stop = target - p.setting(t)["soc_hysterese"] / 2
+    # Genuine SoC protection still overrides phase-response settling immediately.
+    samples(p, t, actual=0, discharge=4000, pv=3355, load=351, soc=lower_stop)
+    await evaluate(p, t)
     assert not c.confirmed_point(t).charging
+    assert p.status[t] == "stopped_battery_soc"
 
 
 @pytest.mark.parametrize("profile", PROFILES)
