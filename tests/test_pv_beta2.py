@@ -103,7 +103,9 @@ async def prepare(grid, *, soc=None):
     clock = [0.0]
     p.monotonic = lambda: clock[0]
     p.setting(t).update(PV_DEFAULTS)
-    measurements(p, t, soc=soc)
+    measurements(
+        p, t, soc=soc, **({"actual": 0, "load": 2000} if soc is not None else {})
+    )
     await p.select(t, "PV_SURPLUS")
     p.wait = lambda _: asyncio.Event().wait()
     p.debounce_wait = AsyncMock()
@@ -146,17 +148,23 @@ async def test_start_delay_requires_continuous_eligible_surplus(grid):
     p, t, (c, _, _, *_), clock = await prepare(grid, soc=96)
     await p.set_value(t, "pv_start_delay", 10)
     await p.permission(t, True)
+    measurements(p, t, actual=0, load=2000, soc=96)
+    p.pv_edit(t)  # Fresh physical OFF proof starts the configured delay.
     assert not c.confirmed_point(t).charging
     assert p.pv_start_since[t] == 0
     clock[0] = 9
+    measurements(p, t, actual=0, load=2000, soc=96)
     assert not (await apply(p, t)).charging
-    measurements(p, t, pv=0, soc=96)
+    measurements(p, t, pv=0, actual=0, load=2000, soc=96)
     await apply(p, t)
     assert t not in p.pv_start_since
     clock[0] = 10
-    measurements(p, t, soc=96)
+    measurements(p, t, actual=0, load=2000, soc=96)
+    p.pv_request(t)  # STOP discarded the former feedback state.
+    measurements(p, t, actual=0, load=2000, soc=96)
     assert not (await apply(p, t)).charging
     clock[0] = 20
+    measurements(p, t, actual=0, load=2000, soc=96)
     assert (await apply(p, t)).charging
 
 
@@ -298,7 +306,10 @@ async def test_start_timer_fences_queued_command_and_minimum_stop_deadline(grid)
     p, t, (c, bound, peer, *_), clock = await prepare(grid, soc=96)
     p.setting(t)["pv_start_delay"] = 10
     await p.permission(t, True)
+    measurements(p, t, actual=0, load=2000, soc=96)
+    p.pv_edit(t)
     clock[0] = 10
+    measurements(p, t, actual=0, load=2000, soc=96)
     assert p.pv_edit(t).point.charging
     count = len(peer.requests)
     async with bound.adapter._call_lock:
@@ -412,6 +423,8 @@ async def test_pending_start_timer_is_cancelled_by_lifecycle_action(grid, action
     p, t, (c, bound, peer, *_), clock = await prepare(grid, soc=96)
     p.setting(t)["pv_start_delay"] = 10
     await p.permission(t, True)
+    measurements(p, t, actual=0, load=2000, soc=96)
+    p.pv_edit(t)
     assert t in p.pv_start_since
     if action == "off":
         await p.permission(t, False)

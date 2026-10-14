@@ -203,7 +203,9 @@ async def test_failed_followup_does_not_reuse_fast_state_or_power(grid, caplog):
     assert "optimum_mode" not in line
 
 
-async def test_balance_exposes_uncorrected_smoothed_inputs(grid, caplog):
+async def test_balance_exposes_smoothed_inputs_and_conservative_raw_capacity(
+    grid, caplog
+):
     from custom_components.wallbox_manager.power_history import PowerHistory
 
     p, t, _ = grid
@@ -223,8 +225,12 @@ async def test_balance_exposes_uncorrected_smoothed_inputs(grid, caplog):
     calc = ev["calculations"]
     assert calc["raw_consumption_power_w"] == 4000
     assert calc["smoothed_consumption_power_w"] == 2500
-    assert calc["site_load_w"] == -1000  # Deliberately NOT fixed in beta.8.
-    assert ev["request_w"] == calc["surplus_w"] == 5000
+    assert calc["site_load_w"] == 500
+    # Raw grid/battery evidence provides 2500 W PV-only capacity; the mixed
+    # filter result is retained for diagnosis, never credited as extra power.
+    assert ev["request_w"] == calc["surplus_w"] == 2500
+    assert ev["regulator"]["smoothed_available_w"] == 5000
+    assert ev["regulator"]["raw_capacity_w"] == 2500
     assert ev["regulator"]["algorithm"] == "PV_BALANCE"
     assert ev["grid_net_power_w"] == 0
     assert line["external"]["grid_import_power"]["freshness"] == "fresh"

@@ -89,13 +89,21 @@ class FastDischargeRegulator:
     import_since: float | None = None
 
     hard_max: Fraction | None = None
+    balance_capacity: Fraction | None = None
     evidence: object = None
     consumed: tuple | None = None
     previous_ev: Fraction | None = None
     ev_floor: Fraction | None = None
     command_key: object = None
     command_evidence: tuple | None = None
+    command_ev_baseline: Fraction | None = None
+    command_offered: Fraction | None = None
+    command_delta: Fraction | None = None
     command_since: float | None = None
+    dispatch_key: object = None
+    dispatch_evidence: tuple | None = None
+    dispatch_ev: Fraction | None = None
+    dispatch_delta: Fraction | None = None
     excess_since: float | None = None
     excess_generation: object = None
     revision: int = 0
@@ -104,6 +112,19 @@ class FastDischargeRegulator:
     restart_blocked: bool = False
     response_observed: bool = False
     phase_change_pending: bool = False
+
+    def dispatched(self, point):
+        """Freeze physical evidence before the wire write, separately from ACK."""
+        self.dispatch_key = (point.charging, point.mode, point.current_a)
+        self.dispatch_evidence = self.evidence.times if self.evidence else None
+        self.dispatch_ev = self.previous_ev
+        self.dispatch_delta = (
+            point.offered_power_w - self.command_offered
+            if self.command_offered is not None
+            else point.offered_power_w - self.previous_ev
+            if self.previous_ev is not None
+            else None
+        )
 
     def acknowledge(self, point, now):
         """Start response observation at confirmation, never at a later tick."""
@@ -120,10 +141,67 @@ class FastDischargeRegulator:
                 self.phase_change_pending |= key[1] != self.command_key[1]
             self.command_key = key
             self.command_since = now
-            self.command_evidence = self.evidence.times if self.evidence else None
+            dispatched = key is not None and key == self.dispatch_key
+            self.command_evidence = (
+                self.dispatch_evidence
+                if dispatched
+                else self.evidence.times
+                if self.evidence
+                else None
+            )
+            self.command_ev_baseline = self.dispatch_ev if dispatched else None
+            self.command_delta = self.dispatch_delta if dispatched else None
+            self.command_offered = point.offered_power_w if point is not None else None
             self.response_observed = False
             if point is not None and not point.charging:
                 self.requested = Fraction(0)
+        if key == self.dispatch_key:
+            self.dispatch_key = None
+            self.dispatch_evidence = None
+            self.dispatch_ev = None
+            self.dispatch_delta = None
+
+    def observe_response(self, wallbox, confirmed, *, now, step):
+        """Prove fresh physical movement, including genuine power below an offer."""
+        self.acknowledge(confirmed, now)
+        wallbox = Fraction(str(wallbox))
+        offered = confirmed.offered_power_w if confirmed is not None else wallbox
+        tolerance = max(GRID_DEADBAND_W, Fraction(str(step)) / 2)
+        post_command = self.command_evidence is None or (
+            self.evidence is not None
+            and all(
+                a > b
+                for a, b in zip(self.evidence.times, self.command_evidence, strict=True)
+            )
+        )
+        baseline = self.command_ev_baseline
+        moved_toward_offer = (
+            confirmed is not None
+            and confirmed.charging
+            and baseline is not None
+            and self.command_delta is not None
+            and GRID_DEADBAND_W < wallbox <= offered + tolerance
+            and abs(wallbox - baseline) > GRID_DEADBAND_W
+            and (wallbox - baseline) * self.command_delta > 0
+            # Partial power movement is not proof that phase switching settled.
+            # Retain the existing phase observation window for this new proof.
+            and (
+                not self.phase_change_pending
+                or now - self.command_since >= SETTLING_SECONDS
+            )
+        )
+        observed = post_command and (
+            abs(wallbox - offered) <= tolerance or moved_toward_offer
+        )
+        # A proved positive response belongs to this command, even if a later
+        # under-consuming sample moves away from its offered watts. A new current
+        # or phase command resets this proof. OFF still requires fresh no-load.
+        if confirmed is not None and confirmed.charging:
+            observed |= self.response_observed
+        self.response_observed = observed
+        if observed:
+            self.phase_change_pending = False
+        return observed
 
     def response_settling(self, now):
         """Use the existing ACK observation window for phase selection too."""
@@ -194,18 +272,11 @@ class FastDischargeRegulator:
             raise ValueError("negative power measurement")
         self.update_budget(wallbox, discharge, limit, imported, exported, evidence)
         generation = evidence.times
-        self.acknowledge(confirmed, now)
+        observed = self.observe_response(wallbox, confirmed, now=now, step=step)
         offered = confirmed.offered_power_w if confirmed is not None else wallbox
         new = self.consumed is None or all(
             a > b for a, b in zip(generation, self.consumed, strict=True)
         )
-        post_command = self.command_evidence is None or all(
-            a > b for a, b in zip(generation, self.command_evidence, strict=True)
-        )
-        observed = post_command and abs(wallbox - offered) <= max(100, step / 2)
-        self.response_observed = observed
-        if observed:
-            self.phase_change_pending = False
         settling = (
             self.command_since is not None
             and not observed
@@ -261,6 +332,107 @@ class FastDischargeRegulator:
             requested = Fraction(0)
             self.reason = "awaiting_pause_response"
         self.requested = Fraction(int(min(requested, self.hard_max) * 1000), 1000)
+        return self.requested
+
+    def balance_request(
+        self,
+        available,
+        wallbox,
+        discharge,
+        limit,
+        imported,
+        exported,
+        *,
+        now,
+        interval,
+        evidence,
+        confirmed=None,
+        pending=False,
+        step=230,
+    ):
+        """Follow PV surplus with shared feedback, without spending battery headroom.
+
+        PV/total-load smoothing is an upward preference only. Raw flow bounds
+        correct real deficits immediately and cannot credit an EV increase ahead
+        of site measurements. Filter lag alone must not cause a downward command.
+        """
+        if interval <= 0:
+            raise ValueError("invalid regulation interval")
+        wallbox, discharge, limit, imported, exported = (
+            Fraction(str(v)) for v in (wallbox, discharge, limit, imported, exported)
+        )
+        if min(wallbox, discharge, limit, imported, exported) < 0:
+            raise ValueError("negative power measurement")
+        self.update_budget(wallbox, discharge, limit, imported, exported, evidence)
+        observed = self.observe_response(wallbox, confirmed, now=now, step=step)
+        generation = evidence.times
+        basis = min(wallbox, self.ev_floor)
+        self.balance_capacity = max(
+            Fraction(0),
+            min(
+                evidence.pv - evidence.load + min(basis, evidence.load),
+                basis - discharge - self.net_import,
+            ),
+        )
+        target = min(max(0, Fraction(str(available))), self.balance_capacity)
+        offered = confirmed.offered_power_w if confirmed is not None else wallbox
+        baseline = offered if self.requested is None else self.requested
+        requested = min(baseline, self.hard_max, self.balance_capacity)
+        self.reason = (
+            "hard_budget_reduction"
+            if offered > self.hard_max
+            else "balance_deficit_reduction"
+            if requested < baseline
+            else "reused_evidence"
+        )
+        new = self.consumed is None or all(
+            a > b for a, b in zip(generation, self.consumed, strict=True)
+        )
+        site_crossed_ev = min(generation[1:]) >= generation[0]
+        settling = (
+            self.command_since is not None
+            and not observed
+            and now - self.command_since < SETTLING_SECONDS
+        )
+        if (
+            target > baseline
+            and new
+            and site_crossed_ev
+            and self.net_import <= GRID_DEADBAND_W
+            and not pending
+            and not settling
+            and (
+                confirmed is None
+                or not confirmed.charging
+                or self.updated_at is None
+                or now - self.updated_at >= interval
+            )
+        ):
+            if observed or self.command_key is None:
+                # Reserve half of the as-yet unmeasured EV increment, using PV
+                # capacity rather than FAST's configured discharge allocation.
+                # Initial PV starts retain their existing allocation and common
+                # startup reserve; feedback controls subsequent positive changes.
+                increase = (
+                    wallbox + max(0, target - wallbox) / 2
+                    if confirmed is not None and confirmed.charging
+                    else target
+                )
+                requested = max(requested, min(target, increase))
+                self.reason = "new_balance_evidence_increase"
+            else:
+                self.reason = "unobserved_command_no_increase"
+            self.consumed = generation
+            self.updated_at = now
+            self.revision += 1
+        elif requested == baseline and (settling or pending):
+            self.reason = "awaiting_physical_response"
+        if confirmed is not None and not confirmed.charging and not observed:
+            requested = Fraction(0)
+            self.reason = "awaiting_pause_response"
+        self.requested = Fraction(
+            int(min(requested, self.hard_max, self.balance_capacity) * 1000), 1000
+        )
         return self.requested
 
     def minimum_allowed(self, minimum, *, now, actual, continuing=False):

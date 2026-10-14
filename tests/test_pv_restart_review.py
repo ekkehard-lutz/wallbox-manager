@@ -147,6 +147,8 @@ async def test_every_resume_from_off_uses_start_threshold(grid, soc, pause):
     assert not c.confirmed_point(t).charging
     assert not p.pv_ongoing[t]
     measurements(p, t, pv=3000, load=620, actual=0, soc=soc)
+    p.pv_edit(t)  # Observe confirmed OFF before the next fresh no-load cohort.
+    measurements(p, t, pv=3000, load=620, actual=0, soc=soc)
     result = p.pv_edit(t)
     assert result.point.charging is (soc > 95)
     assert c.runtime.enabled(t) is True
@@ -299,6 +301,11 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
     # Wake the same loop as its next periodic cycle (settings edit uses this path).
     await p.set_value(t, "regulation_interval", 6)
     await asyncio.wait_for(parked.wait(), 1)
+    if soc > 95:
+        parked.clear()
+        measurements(p, t, pv=5000, load=0, actual=0, soc=soc)
+        p.optimum_wakes.setdefault(t, asyncio.Event()).set()
+        await asyncio.wait_for(parked.wait(), 1)
     assert c.confirmed_point(t).charging is (soc > 95)
     assert c.runtime.enabled(t) is True
     assert c.runtime.sessions.get(t).active
@@ -312,7 +319,9 @@ async def test_normal_soc_fall_during_dispatch_is_handled_on_next_cycle(grid, so
     await c.apply_stored(t)
     p.pv_confirm(t)
     p.invalidate(t)
-    measurements(p, t, soc=96)
+    measurements(p, t, pv=8000, load=2000, actual=0, soc=96)
+    p.pv_request(t)  # Adopt OFF; a later cohort must prove its physical response.
+    measurements(p, t, pv=8000, load=2000, actual=0, soc=96)
     peer.received.clear()
     peer.release.clear()
     p.launch(t)

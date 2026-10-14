@@ -112,6 +112,7 @@ async def oscillation_start(grid):
     samples(p, t, actual=3970, discharge=2800, pv=2000, load=4470)
     # Restore the historical soft request held during the real six-voltage run.
     p.optimum_regulators[t].requested = SOFT
+    p.optimum_regulators[t].updated_at = clock[0]
     voltages(c, t, VOLTAGES[0])
     assert (await evaluate(p, t)).status == CommandStatus.APPLIED
     assert c.confirmed_point(t).current_a == 7
@@ -124,6 +125,8 @@ async def test_exact_six_voltage_sequence_keeps_confirmed_current(grid):
     for index, value in enumerate(VOLTAGES):
         clock[0] = 30 + index * 2
         samples(p, t, actual=3970, discharge=2800, pv=2000, load=4470)
+        # This sequence isolates voltage quantization from fresh FAST updates.
+        p.optimum_regulators[t].updated_at = clock[0]
         voltages(c, t, value)
         result = await evaluate(p, t)
         assert result.status == CommandStatus.APPLIED
@@ -321,7 +324,7 @@ def verified_balance_recovery(p, t, clock, *, soc=80.4, actual=1380):
             soc=soc,
             actual=actual,
             imported=0,
-            exported=1000,
+            exported=1000 if actual else 2500,
             pv=3000,
             load=1800 if actual else 500,
             discharge=0,

@@ -61,5 +61,8 @@ async def test_lower_soc_recovery_restarts_only_at_middle_with_surplus(grid):
     measurements(p, t, pv=5000, load=0, actual=0, soc=41.1)
     assert not (await apply(p, t)).charging
     measurements(p, t, pv=5000, load=0, actual=0, soc=42)
+    assert not p.pv_edit(t).point.charging  # Establish the adopted OFF boundary.
+    clock[0] = 35
+    measurements(p, t, pv=5000, load=0, actual=0, soc=42)
     assert (await apply(p, t)).charging
     assert p.optimum_modes[t] == "PV_BALANCE"
