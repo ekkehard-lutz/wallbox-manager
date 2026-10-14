@@ -207,6 +207,9 @@ async def test_phase_probe_is_task_local_and_rejection_retains_evidence(grid):
     samples(p, t, actual=4140, discharge=3200, imported=1800)
     await evaluate(p, t)
     clock[0] = 60
+    # The probe replans from fresh physical/source evidence after the accepted
+    # floor command; a clock deadline alone is not another power measurement.
+    samples(p, t, actual=4140, discharge=3200, imported=1800)
     before = len(peer.requests)
     with c.phase_probe(t, enabled=True):
 

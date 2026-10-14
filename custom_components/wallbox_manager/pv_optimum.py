@@ -520,6 +520,23 @@ class PVOptimum:
                 optimum_mode=mode,
                 pv_day_state=self.optimum_day_for(target).state,
             )
+        inputs = self.control.inputs(target)
+        step = (
+            min(
+                (
+                    e.current_step_a * sum(volts)
+                    for e in inputs.capabilities.envelopes
+                    if (
+                        volts := inputs.voltage.active_voltages(
+                            e.mode, datetime.now(UTC)
+                        )
+                    )
+                ),
+                default=Fraction(230),
+            )
+            if inputs
+            else Fraction(230)
+        )
         if mode == "FAST_DISCHARGE":
             regulator = self.optimum_regulators.setdefault(
                 target, FastDischargeRegulator()
@@ -538,23 +555,6 @@ class PVOptimum:
                 tuple(source_time(state) for state in states),
                 values["leistung_pv"],
                 values["leistung_verbraucher"],
-            )
-            inputs = self.control.inputs(target)
-            step = (
-                min(
-                    (
-                        e.current_step_a * sum(volts)
-                        for e in inputs.capabilities.envelopes
-                        if (
-                            volts := inputs.voltage.active_voltages(
-                                e.mode, datetime.now(UTC)
-                            )
-                        )
-                    ),
-                    default=Fraction(230),
-                )
-                if inputs
-                else Fraction(230)
             )
             power = regulator.request(
                 actual,
@@ -600,18 +600,46 @@ class PVOptimum:
                 regulator = self.optimum_regulators.setdefault(
                     target, FastDischargeRegulator()
                 )
-                regulator.update_budget(
+                previous_request = regulator.requested
+                power = regulator.balance_request(
+                    available,
                     actual,
                     watts[0],
                     settings["optimum_max_discharge_w"],
                     watts[1],
                     watts[2],
-                    evidence,
+                    now=self.monotonic(),
+                    interval=settings["regulation_interval"],
+                    evidence=evidence,
+                    confirmed=self.control.confirmed_point(target),
+                    pending=target in self.control.pending_points,
+                    step=step,
                 )
                 self.control.intent(target).hard_max_w = regulator.hard_max
-                # Site import above minimum remains a zero-import objective.
-                if regulator.net_import > 100:
-                    power = min(power, max(0, actual - regulator.net_import))
+                if record := active(self, target):
+                    record.data.update(
+                        site_load_w=number(
+                            max(0, evidence.load - min(actual, regulator.ev_floor))
+                        ),
+                        surplus_w=number(regulator.balance_capacity),
+                        regulator={
+                            "algorithm": "PV_BALANCE",
+                            "previous_request_w": number(previous_request),
+                            "request_w": number(power),
+                            "smoothed_available_w": number(available),
+                            "raw_capacity_w": number(regulator.balance_capacity),
+                            "hard_max_w": number(regulator.hard_max),
+                            "measurement_generation": evidence.generation,
+                            "state_revision": regulator.revision,
+                            "evidence_decision": regulator.reason,
+                            "response_observed": regulator.response_observed,
+                            "command_ev_baseline_w": number(
+                                regulator.command_ev_baseline
+                            ),
+                            "command_power_change_w": number(regulator.command_delta),
+                            "interval_s": settings["regulation_interval"],
+                        },
+                    )
         if record := active(self, target):
             record.data.update(
                 raw_regulator_target_w=number(power),

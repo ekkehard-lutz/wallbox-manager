@@ -340,6 +340,9 @@ def diagnostic_fast_request(method):
                     ),
                     state_revision=regulator.revision,
                     evidence_decision=regulator.reason,
+                    response_observed=regulator.response_observed,
+                    command_ev_baseline_w=number(regulator.command_ev_baseline),
+                    command_power_change_w=number(regulator.command_delta),
                     updated_at_monotonic=regulator.updated_at,
                     import_since_monotonic=regulator.import_since,
                 )

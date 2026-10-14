@@ -409,8 +409,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             )
         return actively_charging(state, target)
 
-    def invalidate(self, target, *, preserve_phase_retry=False):
-        self.economic_invalidate(target)
+    def invalidate(
+        self, target, *, preserve_phase_retry=False, preserve_economic_evidence=False
+    ):
+        self.economic_invalidate(target, preserve_evidence=preserve_economic_evidence)
         phase_retry = None
         if (
             preserve_phase_retry

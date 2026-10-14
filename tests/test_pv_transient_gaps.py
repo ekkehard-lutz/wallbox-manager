@@ -76,7 +76,7 @@ async def test_new_external_transaction_never_inherits_old_pv_budget(grid, monke
 
 @pytest.mark.parametrize("gap", ["phase", "voltage", "capabilities"])
 async def test_electrical_evidence_gap_holds_then_resumes(grid, monkeypatch, gap):
-    p, t, (c, _, peer, _, source, _), _, tick = await running(grid)
+    p, t, (c, _, peer, _, source, _), clock, tick = await running(grid)
     confirmed = c.confirmed_point(t)
     count, request = len(peer.requests), c.intent(t).request
     with monkeypatch.context() as patch:
@@ -92,7 +92,10 @@ async def test_electrical_evidence_gap_holds_then_resumes(grid, monkeypatch, gap
         assert len(peer.requests) == count and t not in p.pv_retry_until
     if gap == "voltage":
         voltage(c, t, 230)
-    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
+    # The initial 9 A offer has physically responded. A fresh complete cohort
+    # supports the next cautious increase after the normal regulation interval.
+    clock[0] = 5
+    measurements(p, t, pv=2700, load=2070, actual=2070, soc=96)
     await tick()
     assert c.confirmed_point(t).current_a == 10
 
@@ -126,10 +129,27 @@ async def test_critical_measurement_events_stop_without_losing_verified_energy(
         assert p.economic_policies[t].energy_ws == energy
         assert p.tasks[t] is task and len(peer.requests) == count + 1
         assert t not in p.pv_retry_until and t not in p.pv_stop_since
+        regulator = p.optimum_regulators[t]
+        assert regulator.command_key is not None and not regulator.command_key[0]
+        off_evidence = regulator.command_evidence
+        assert off_evidence is not None
         measurements(p, t, pv=2170, load=0, actual=0, soc=96)
+        # A complete genuine no-load cohort beyond the retained OFF boundary
+        # already proves physical response; meter recovery must not erase it.
+        assert p.pv_request(t)[0] > 0
+        assert regulator.response_observed and regulator.previous_ev == 0
+        assert all(
+            current > boundary
+            for current, boundary in zip(
+                regulator.evidence.times, off_evidence, strict=True
+            )
+        )
         await tick()
         assert c.confirmed_point(t) == confirmed and len(peer.requests) == count + 2
-    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
+        assert p.optimum_regulators[t] is regulator
+        assert p.economic_policies[t].energy_ws == energy
+    clock[0] = 31
+    measurements(p, t, pv=2700, load=2070, actual=2070, soc=96)
     await tick()
     assert c.confirmed_point(t).current_a == 10
 
@@ -200,7 +220,9 @@ async def test_allocation_recovery_and_shortfall_do_not_create_economic_stop_tim
     await tick()
     assert c.confirmed_point(t).current_a == 6
     clock[0] = 89
-    measurements(p, t, pv=2170, load=0, actual=0, soc=96)
+    # The accepted minimum is measured before the recovered allocation can
+    # authorize a new positive increase; ACK alone supplies no EV response.
+    measurements(p, t, pv=2170, load=1380, actual=1380, soc=96)
     await tick()
     assert t not in p.pv_stop_since
     clock[0] = 100

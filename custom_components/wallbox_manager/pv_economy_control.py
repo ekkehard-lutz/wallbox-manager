@@ -500,6 +500,8 @@ class PVEconomicControl:
             await self.economic_store.flush()
 
     def economic_point_dispatched(self, target, point):
+        if regulator := self.optimum_regulators.get(target):
+            regulator.dispatched(point)
         policy = self.economic_policies.get(target)
         if policy and point.charging:
             station = self.control.runtime.get(target.station)
@@ -557,11 +559,12 @@ class PVEconomicControl:
             if policy and policy.paused:
                 await self.economic_store.flush()
 
-    def economic_invalidate(self, target):
+    def economic_invalidate(self, target, *, preserve_evidence=False):
+        """Revoke command authorization; same-scope task replacement keeps meters."""
         self.economic_activation_pending.pop(target, None)
         self.economic_waits.discard(target)
         self.economic_positive_dispatches.pop(target, None)
-        if policy := self.economic_policies.get(target):
+        if not preserve_evidence and (policy := self.economic_policies.get(target)):
             policy.invalidate("lifecycle_invalidated")
 
     async def economic_end_scope(self, target, *, expected=None):

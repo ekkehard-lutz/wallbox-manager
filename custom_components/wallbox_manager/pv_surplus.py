@@ -883,7 +883,16 @@ class PVSurplus:
                     "pv_start_delay",
                 ) and planned != self.status.get(target):
                     start = self.pv_start_since.get(target)
-                    self.invalidate(target)
+                    regulator = self.optimum_regulators.get(target)
+                    session = self.pv_sessions.get(target)
+                    self.invalidate(target, preserve_economic_evidence=True)
+                    # This is a meter-driven relaunch in the same control scope.
+                    # Retain response/source proof just as the start clock is
+                    # retained; a new acquisition is not a lifecycle handover.
+                    if regulator is not None:
+                        self.optimum_regulators[target] = regulator
+                    if session is not None:
+                        self.pv_sessions[target] = session
                     if start is not None:
                         self.pv_start_since[target] = start
                     if self.valid(target, self.epochs[target]):

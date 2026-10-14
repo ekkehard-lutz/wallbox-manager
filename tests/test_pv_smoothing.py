@@ -75,9 +75,11 @@ async def test_smoothed_samples_during_dispatch_belong_to_next_snapshot(grid):
     p.power_history = {
         key: PowerHistory(5) for key in ("leistung_pv", "leistung_verbraucher")
     }
-    p.power_history["leistung_pv"].add(0, Fraction(2400))
-    p.power_history["leistung_verbraucher"].add(0, Fraction(0))
-    measurements(p, t, pv=2400, load=0, actual=0, soc=96)
+    # Measure the first 9 A offer and a coherent total site load. The 2530 W
+    # capacity supports a half-headroom increase to the pending 10 A point.
+    p.power_history["leistung_pv"].add(0, Fraction(2530))
+    p.power_history["leistung_verbraucher"].add(0, Fraction(2070))
+    measurements(p, t, pv=2530, load=2070, actual=2070, soc=96)
     await asyncio.sleep(0)
     clock[0] = 5
     peer.received.clear()
@@ -88,7 +90,7 @@ async def test_smoothed_samples_during_dispatch_belong_to_next_snapshot(grid):
         point = c.pending_points[t]
         assert point.current_a == 10
         generation, epoch = c.intent(t).generation, p.epochs[t]
-        measurements(p, t, pv=1940, load=0, actual=0, soc=96)
+        measurements(p, t, pv=1940, load=2070, actual=2070, soc=96)
         await asyncio.sleep(0)
         clock[0] = 10
         assert p.pv_measurements(t)[0] == 1940

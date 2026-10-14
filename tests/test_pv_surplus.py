@@ -283,6 +283,9 @@ async def test_repeated_cycles_pause_and_restart(grid):
     assert p.economic_policies[t].energy_ws == 0
     assert not p.pv_edit(t).point.charging
     measurements(p, t, pv=3000, load=620, actual=0, soc=96)
+    assert not p.pv_edit(t).point.charging  # A new BALANCE regulator observes OFF.
+    clock[0] = 57
+    measurements(p, t, pv=3000, load=620, actual=0, soc=96)
     restarted = p.pv_edit(t)
     assert restarted.point.charging, (
         p.status[t],
@@ -533,7 +536,7 @@ async def test_new_session_requires_full_soc_start_rule(grid, monkeypatch):
     p.pv_request(t)
     p.pv_ongoing[t] = True
     measurements(p, t, soc=95)
-    assert p.pv_request(t)[0] == 6000
+    assert p.pv_request(t)[0] == p.optimum_regulators[t].hard_max == 5900
     original = c.runtime.sessions.get
     session = original(t)
     monkeypatch.setattr(
