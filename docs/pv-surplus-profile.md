@@ -293,6 +293,17 @@ new-sample gate, smoothing, or Fronius fast polling is introduced here. See the
 
 ### First-start reconciliation
 
+**Historical implementation description:** The prepare-before-permission dependency
+in the following paragraphs is superseded by the approved 15 October 2026
+[PV-OCPP-04 decision](specifications/pv-regulation.md#pv-ocpp-04--charging-permission-connection-readiness-and-physical-cp-observability-approved).
+General user ON must be possible without a vehicle, transaction or prepared
+profile; permission still requires supported readback and existing authority.
+Missing transaction/measurements block applicable profile commands, not general
+permission solely through missing preparation. All command fences, explicit OFF,
+economic STOP/restart and physical-response protections remain. The paragraphs
+retain historical runtime/retry evidence and do not describe completed migration
+of that runtime to the new contract.
+
 An explicit ON first prepares the latest safe electrical point while permission
 is still false, then separately confirms ChargingEnabled=true by readback.
 Temporary preparation blockers, including a missing transaction, return structured
@@ -424,7 +435,11 @@ APPLIED proof while disconnected. Existing ownership recovery obtains fresh
 PhaseRotation/GetCompositeSchedule evidence after reconnect before resuming PV
 regulation. It does not issue an OFF/ON pair to reconstruct state. The existing
 60-second retry policy is unchanged; transient planning gaps do not enter it.
-If fresh permission evidence instead confirms that the station actually reset to
-OFF, the existing explicit ON/recovery path may prepare a verified zero-current
-point before enabling CP. That preparation still needs normal hardware confirmation;
-it is not inferred from an outage or used to interrupt an ongoing charge.
+Historically, if fresh permission evidence confirmed a station reset to OFF,
+the explicit ON/recovery path could prepare a verified zero-current point before
+permission ON. PV-OCPP-04 supersedes that preparation as a mandatory general
+permission prerequisite. Any transaction-bound point still requires normal
+hardware confirmation; it is not inferred from an outage or used to interrupt an
+ongoing charge. Physical CP remains station-owned, separate from permission.
+`GetCompositeSchedule` above applies only where an active transaction makes the
+operation valid; unsupported physical recovery remains an explicit interface question.

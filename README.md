@@ -310,7 +310,7 @@ See [Grid profile, ownership, migration and card installation](docs/grid-profile
 for the exact state model, guarded sequence, station-scoped capability subentries,
 battery lifecycle and failure behavior.
 
-**PV requirements (draft):** Before changing PV control behavior, read the [consolidated PV requirements and decision history](docs/lastenheft/README.md). These documents track accepted decisions, superseded rules and pending review; the V3 requirements remain a draft until explicitly approved.
+**PV requirements (draft):** Before changing PV control behavior, read the [consolidated PV requirements and decision history](docs/specifications/README.md). These documents track accepted decisions, superseded rules and pending review; the V3 requirements remain a draft until explicitly approved.
 
 PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
 PV Optimum is described in [its profile documentation](docs/pv-optimum-design.md).

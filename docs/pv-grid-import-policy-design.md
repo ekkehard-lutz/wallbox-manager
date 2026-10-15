@@ -159,6 +159,16 @@ checkpoint scheduling delay. Disk latency and event-loop interruption add time;
 without an actual site power cap there is no universal Wh crash-loss bound. A
 completely failed disk cannot durably record its own failure.
 
+**15 October 2026 target-contract clarification:**
+[PV-OCPP-04](specifications/pv-regulation.md#pv-ocpp-04--charging-permission-connection-readiness-and-physical-cp-observability-approved)
+supersedes the dependency that general permission waits for transaction-bound
+ON preparation. The recovery description below remains historical implementation
+evidence at that ordering boundary. Restored exhaustion and uncertainty still
+inhibit automatic positive operating points; permission without a real transaction
+creates no accounting scope or reset. Retained-current startup before transaction
+identity/manager-command evidence has an OPEN attribution question in PV-OCPP-04;
+no historical intervals are fabricated and no accounting policy is invented here.
+
 Recovery checks economic history before both disabled-station ON preparation and
 enabled-station readback. Restored exhaustion cannot dispatch a positive point.
 Missing, corrupt, mismatched or uncertain recovery inhibits automatic positives;

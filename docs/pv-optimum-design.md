@@ -246,9 +246,14 @@ approximately 60-second backoff. Generic BUSY never becomes phase-lockout eviden
 The policy raises an insufficient FAST budget to the common positive floor; it
 does not change DOWN rounding globally. Safety/control stops and hard electrical
 limits still take precedence. Missing inputs mean no decision, including during
-Optimum enable preparation: no unconditional zero profile is inserted before a
-valid positive start. FAST starts do not insert a start-delay OFF step. Balance
-start delay and command debounce retain their roles when not already charging.
+Optimum operating-point preparation: no unconditional zero profile is inserted
+before a valid positive start. FAST starts do not insert a start-delay OFF step.
+Balance start delay and command debounce retain their roles when not already charging.
+The approved 15 October 2026 [PV-OCPP-04 decision](specifications/pv-regulation.md#pv-ocpp-04--charging-permission-connection-readiness-and-physical-cp-observability-approved)
+separates general permission from this transaction-bound preparation: missing
+planning inputs delay manager profile control, rather than indefinitely blocking
+permission ON by themselves. Existing safety and economic restart gates remain.
+This is the revised target contract, not a claim that code already implements it.
 
 Diagnostics distinguish `optimum_minimum_hold`, `optimum_pause_pending`,
 `optimum_deliberate_pause` and `optimum_no_positive_point`. They include the raw
