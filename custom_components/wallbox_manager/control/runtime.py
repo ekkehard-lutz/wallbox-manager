@@ -967,6 +967,8 @@ class ControlRuntime:
         )
         self._confirmed_contexts[target] = self.setpoint_context(inputs)
         self._unconfirmed_targets.discard(target)
+        if not solved.point.charging:
+            self.runtime.observe_zero_point(state.token, target)
         self.recovery_status[target] = "point_adopted"
         recovery_snapshot(
             "adoption",
@@ -1344,6 +1346,8 @@ class ControlRuntime:
                     authority_revision,
                     self.runtime.enabled_observation(target).revision,
                 )
+                if not resolved.point.charging:
+                    self.runtime.observe_zero_point(token, target)
                 if resolved.point.charging:
                     self._inactive.discard(target)
                 else:

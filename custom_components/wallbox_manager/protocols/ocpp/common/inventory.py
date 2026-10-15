@@ -140,6 +140,10 @@ class InventoryAdapter(DiscoveryAdapter):
             elif scope != known.scope:
                 scope = None
         at = reported_time(timestamp, datetime.now(UTC))
+        if not hasattr(self, "_physical_sequences"):
+            self._physical_sequences = {}
+        physical_key = (self.token, transaction_info["transaction_id"])
+        accepted = False
         if scope is not None and at is not None:
             event = SessionEvent(
                 scope,
@@ -151,7 +155,7 @@ class InventoryAdapter(DiscoveryAdapter):
                 or (trigger_reason if event_type == "Ended" else None),
                 seq_no,
             )
-            self.runtime.session_event(
+            accepted = self.runtime.session_event(
                 self.token,
                 event,
                 meter_observations(
@@ -162,9 +166,14 @@ class InventoryAdapter(DiscoveryAdapter):
                 ),
                 live=not offline,
             )
-        if not offline and (
-            (evse and evse.get("id", 0) > 0) or (not evse and scope is not None)
+        if (
+            accepted
+            and not offline
+            and trigger_reason != "TxResumed"
+            and (known is None or known.sequence is None or seq_no > known.sequence)
+            and seq_no > self._physical_sequences.get(physical_key, -1)
         ):
+            self._physical_sequences[physical_key] = seq_no
             # A later event may omit EVSE entirely. The session already resolved
             # its explicit identity above; keep fresh state on that same channel.
             if evse:
@@ -173,7 +182,10 @@ class InventoryAdapter(DiscoveryAdapter):
                     scope = connector_identity(
                         self.token.station, evse["id"], evse["connector_id"]
                     )
-            source = f"ocpp{self._ocpp_version}:TransactionEvent"
+            source = (
+                f"ocpp{self._ocpp_version}:TransactionEvent:"
+                f"{event_type}:{trigger_reason}"
+            )
             # Embedded measurements belong to the session ledger, not to
             # ordinary metering capability/entity advertisement.
             observations = ()

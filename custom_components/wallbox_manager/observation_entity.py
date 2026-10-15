@@ -1,9 +1,7 @@
 """Thin projections of scoped, push-based runtime observations."""
 
-from dataclasses import replace
-
 from .core.models import ConnectorId, EvseId
-from .core.telemetry import STATE_OPTIONS, Quantity, State, station_of
+from .core.telemetry import STATE_OPTIONS, State, station_of
 from .entity import StationEntity, observation_unique_id, scope_attributes
 
 
@@ -47,32 +45,10 @@ class ObservationEntity(StationEntity):
         ):
             self._last_known = value
         self._last_live = value
-        target = self.runtime.cp_scope(self.channel.scope)
-        enabled = self.runtime.enabled_observation(target) if target else None
-        if (
-            self.channel.quantity == Quantity.CHARGING_STATE
-            and self._last_known
-            and self._last_known.value == State.CHARGING
-            and enabled
-            and self.runtime.enabled(target) is False
-        ):
-            # Permission readback proves charging stopped, but cannot prove
-            # departure. Keep the canonical enum and retain connector history.
-            self._last_known = replace(
-                self._last_known,
-                value=State.CONNECTED,
-                observed_at=enabled.observed_at,
-                received_at=enabled.observed_at,
-                valid_until=None,
-                source="runtime:charging_disabled",
-            )
         return self._last_known
 
     @property
     def state_fresh(self):
-        observation = self.observation
-        if observation and observation.source == "runtime:charging_disabled":
-            return False
         live = self.snapshot.observation(self.channel) if self.snapshot else None
         return bool(
             live
@@ -106,10 +82,13 @@ class ObservationEntity(StationEntity):
         if self.physical_state:
             attrs.update(
                 state_fresh=self.state_fresh,
-                state_represents="confirmed_charging_disabled"
-                if self.observation
-                and self.observation.source == "runtime:charging_disabled"
-                else "last_known_observation",
+                state_represents="last_known_observation",
+                physical_observability=self.runtime.physical_limitation(scope)
+                or ("reported" if self.state_fresh else "awaiting_observation"),
+                cp_observability="unverified",
+                physical_limit_since=at.isoformat()
+                if (at := self.runtime.physical_limit_since(scope))
+                else None,
             )
         if observation := self.observation:
             attrs.update(

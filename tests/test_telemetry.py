@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError, replace
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -145,13 +146,19 @@ def test_state_flags_are_three_valued(state, flag, expected):
     assert state_flag(state, flag) is expected
 
 
-def test_new_connector_status_reconciles_only_existing_same_scope_charging(now):
+def test_new_connector_status_reconciles_only_same_scope_charging(now, monkeypatch):
+    clock = [now]
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.runtime.datetime",
+        SimpleNamespace(now=lambda _: clock[0]),
+    )
     runtime = Runtime()
     token = runtime.connect(StationId("a"))
     evse = EvseId(token.station, "1")
     connector = ConnectorId(evse, "1")
 
     def state(scope, quantity, value, offset=0):
+        clock[0] = max(clock[0], now + timedelta(seconds=offset))
         return Observation(
             Channel(scope, quantity),
             value,
@@ -194,8 +201,15 @@ def test_new_connector_status_reconciles_only_existing_same_scope_charging(now):
         token, (state(sibling, Quantity.CONNECTOR_STATE, State.AVAILABLE, 3),)
     )
     assert (
-        runtime.get(token.station).observation(
-            Channel(sibling, Quantity.CHARGING_STATE)
-        )
-        is None
+        runtime.get(token.station)
+        .observation(Channel(sibling, Quantity.CHARGING_STATE))
+        .value
+        == State.IDLE
     )
+    assert (
+        runtime.get(token.station)
+        .observation(Channel(evse, Quantity.CHARGING_STATE))
+        .value
+        == State.CHARGING
+    )
+    assert not runtime.sessions.latest

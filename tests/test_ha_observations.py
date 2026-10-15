@@ -307,11 +307,11 @@ async def test_cp_off_retains_physical_states_and_reload_only_restores_display(
         ),
     )
     assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
-    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert states[Quantity.CHARGING_STATE].native_value == "charging"
     assert not states[Quantity.CONNECTOR_STATE].state_fresh
     assert not states[Quantity.CHARGING_STATE].state_fresh
     assert (
-        hass.states.get(states[Quantity.CHARGING_STATE].entity_id).state == "connected"
+        hass.states.get(states[Quantity.CHARGING_STATE].entity_id).state == "charging"
     )
     assert runtime.sessions.get(target).active
     assert runtime.enabled(target) is False
@@ -319,7 +319,7 @@ async def test_cp_off_retains_physical_states_and_reload_only_restores_display(
     runtime = await setup()
     states = {e.channel.quantity: e for e in operational(platforms)}
     assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
-    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert states[Quantity.CHARGING_STATE].native_value == "charging"
     assert all(e.available and not e.state_fresh for e in states.values())
     token = runtime.connect(target.station)
     at = datetime.now(UTC)
@@ -434,7 +434,7 @@ async def test_real_off_on_transition_still_requires_new_cp_evidence(diagnostics
             token, EnabledObservation(target, enabled, at, at + timedelta(seconds=60))
         )
     states = {e.channel.quantity: e for e in operational(platforms)}
-    assert states[Quantity.CHARGING_STATE].native_value == "connected"
+    assert states[Quantity.CHARGING_STATE].native_value == "charging"
     assert all(not e.state_fresh for e in states.values())
     runtime.observe(
         token, (observation(target, Quantity.CHARGING_STATE, State.CHARGING),)
@@ -475,7 +475,9 @@ async def test_unknown_permission_recovery_only_fences_confirmed_off(
     runtime.observe(token, evidence)
     await hass.async_block_till_done()
     if not read_first:
-        assert all(not e.state_fresh for e in operational(platforms))
+        assert all(
+            e.state_fresh == (initial is not False) for e in operational(platforms)
+        )
         permission(True)
     fresh = initial is not False or read_first
     assert all(e.state_fresh == fresh for e in operational(platforms))
@@ -491,7 +493,10 @@ async def test_unknown_permission_recovery_only_fences_confirmed_off(
             for o in evidence
         ),
     )
-    assert all(runtime.get(token.station).observation(o.channel) == o for o in evidence)
+    assert all(
+        runtime.get(token.station).observation(o.channel) == (o if fresh else None)
+        for o in evidence
+    )
     runtime.observe(token, samples())
     assert all(e.state_fresh for e in operational(platforms))
 
@@ -517,3 +522,280 @@ async def test_permission_recovery_cannot_extend_expired_physical_evidence(diagn
         token, (observation(target, Quantity.CHARGING_STATE, State.CHARGING),)
     )
     assert all(e.state_fresh for e in operational(platforms))
+
+
+@pytest.mark.parametrize("version", ["1.6", "2.0.1", "2.1"])
+@pytest.mark.parametrize("read_first", [False, True])
+async def test_cold_available_creates_idle_without_transaction_or_old_channel(
+    diagnostics, version, read_first
+):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(
+        StationId("cold"), protocol="ocpp", protocol_version=version
+    )
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+
+    def permission(value):
+        at = datetime.now(UTC)
+        runtime.observe_enabled(
+            token, EnabledObservation(target, value, at, at + timedelta(seconds=60))
+        )
+
+    permission(None)
+    if read_first:
+        permission(True)
+    assert runtime.get(token.station).supported_channels == ()
+    sample = replace(
+        observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),
+        source=f"ocpp{version}:StatusNotification",
+        valid_until=None,
+    )
+    runtime.observe(token, (sample,))
+    await hass.async_block_till_done()
+    states = {e.channel.quantity: e for e in operational(platforms)}
+    assert states[Quantity.CONNECTOR_STATE].native_value == "available"
+    assert states[Quantity.CHARGING_STATE].native_value == "idle"
+    assert all(e.state_fresh for e in states.values())
+    if not read_first:
+        permission(True)
+    assert all(e.state_fresh for e in states.values())
+    assert not runtime.sessions.latest
+    for e in states.values():
+        attrs = hass.states.get(e.entity_id).attributes
+        assert attrs["observed_at"] == sample.observed_at.isoformat()
+        assert attrs["source"] == sample.source
+        assert attrs["cp_observability"] == "unverified"  # No GPIO-origin claim.
+        assert attrs["state_fresh"] is True
+
+
+async def test_repeat_conflict_and_old_available_preserve_source_evidence(diagnostics):
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("ordered"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    first = observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE)
+    runtime.observe(token, (first,))
+    await hass.async_block_till_done()
+    newer = observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE)
+    runtime.observe(token, (newer,))
+    runtime.observe(token, (first, replace(newer, received_at=datetime.now(UTC))))
+    assert runtime.get(token.station).observation(first.channel) == newer
+    assert all(e.state_fresh for e in operational(platforms))
+    runtime.observe(token, (replace(newer, value=State.OCCUPIED),))
+    assert runtime.get(token.station).observation(first.channel).value is None
+    assert all(not e.state_fresh for e in operational(platforms))
+    # Equal-time replay cannot undo a contradictory observation.
+    runtime.observe(token, (newer,))
+    assert all(not e.state_fresh for e in operational(platforms))
+    runtime.observe(
+        token, (observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),)
+    )
+    assert all(e.state_fresh for e in operational(platforms))
+
+
+@pytest.mark.parametrize("reset", ["socket", "boot", "reload"])
+async def test_old_acquisition_on_new_generation_cannot_refresh_display(
+    diagnostics, reset
+):
+    from custom_components.wallbox_manager.core.events import StationIdentity
+
+    hass, _, runtime, platforms, setup, unload = diagnostics
+    token = runtime.connect(StationId("generation"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    sample = observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE)
+    runtime.observe(token, (sample,))
+    await hass.async_block_till_done()
+    if reset == "reload":
+        await unload()
+        runtime = await setup()
+        current = runtime.connect(token.station)
+    elif reset == "boot":
+        current = runtime.boot(token, StationIdentity())
+    else:
+        runtime.disconnect(token)
+        current = runtime.connect(token.station)
+    assert not runtime.observe(token, (sample,))
+    runtime.observe(current, (replace(sample, received_at=datetime.now(UTC)),))
+    assert runtime.get(token.station).observations == ()
+    assert all(not e.state_fresh for e in operational(platforms))
+    assert all(e.native_value in ("available", "idle") for e in operational(platforms))
+    runtime.observe(
+        current, (observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),)
+    )
+    assert all(e.state_fresh for e in operational(platforms))
+
+
+@pytest.mark.parametrize("offline", [False, True])
+async def test_pause_preserves_history_until_live_departure_and_new_available(
+    diagnostics, offline
+):
+    from custom_components.wallbox_manager.core.sessions import (
+        SessionEvent,
+        SessionEventKind,
+    )
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("pause"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    runtime.session_event(
+        token,
+        SessionEvent(target, "real", SessionEventKind.STARTED, datetime.now(UTC)),
+        live=True,
+    )
+    samples = (
+        observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+        observation(target, Quantity.CHARGING_STATE, State.CHARGING),
+    )
+    runtime.observe(token, samples)
+    await hass.async_block_till_done()
+    runtime.observe_zero_point(token, target)
+    runtime.observe(
+        token, (observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),)
+    )
+    states = {e.channel.quantity: e for e in operational(platforms)}
+    assert states[Quantity.CONNECTOR_STATE].native_value == "occupied"
+    assert states[Quantity.CHARGING_STATE].native_value == "charging"
+    assert all(not e.state_fresh for e in states.values())
+    assert all(
+        e.extra_state_attributes["physical_observability"] == "pause_cp_unverified"
+        for e in states.values()
+    )
+    assert all(e.observation in samples for e in states.values())
+    runtime.session_event(
+        token,
+        SessionEvent(
+            target,
+            "real",
+            SessionEventKind.ENDED,
+            datetime.now(UTC),
+            State.IDLE,
+            "EVDeparted",
+        ),
+        live=not offline,
+    )
+    runtime.observe(
+        token, (observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),)
+    )
+    assert all(e.state_fresh is (not offline) for e in states.values())
+    assert states[Quantity.CONNECTOR_STATE].native_value == (
+        "occupied" if offline else "available"
+    )
+    assert states[Quantity.CHARGING_STATE].native_value == (
+        "charging" if offline else "idle"
+    )
+
+
+@pytest.mark.parametrize("absent", [False, True])
+async def test_off_current_report_cannot_invent_independent_cp_evidence(
+    diagnostics, absent
+):
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("off"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    sample = observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED)
+    runtime.observe(token, (sample,))
+    await hass.async_block_till_done()
+    at = datetime.now(UTC)
+    runtime.observe_enabled(
+        token, EnabledObservation(target, False, at, at + timedelta(seconds=60))
+    )
+    epoch = runtime._cp_epoch[target]
+    if absent:
+        runtime.observe(
+            token, (observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),)
+        )
+    refreshed = datetime.now(UTC)
+    runtime.observe_enabled(
+        token,
+        EnabledObservation(target, False, refreshed, refreshed + timedelta(seconds=60)),
+    )
+    assert (
+        runtime._cp_epoch[target] == epoch
+    )  # Same OFF is not a new physical transition.
+    entity = operational(platforms)[0]
+    assert entity.native_value == "occupied" and not entity.state_fresh
+    assert entity.observation == sample
+    assert (
+        entity.extra_state_attributes["physical_observability"]
+        == "permission_cp_unverified"
+    )
+    assert runtime.enabled(target) is False
+
+
+async def test_authority_and_unknown_permission_do_not_invalidate_independent_state(
+    diagnostics,
+    monkeypatch,
+):
+    from custom_components.wallbox_manager.core.authority import (
+        AuthorityObservation,
+        ControlAuthority,
+    )
+    from custom_components.wallbox_manager.core.enabled import EnabledObservation
+
+    hass, _, runtime, platforms, _, _ = diagnostics
+    token = runtime.connect(StationId("independent"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    runtime.observe(
+        token, (observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),)
+    )
+    await hass.async_block_till_done()
+    for value in (ControlAuthority.LOCAL, ControlAuthority.REMOTE):
+        at = datetime.now(UTC)
+        runtime.observe_authority(
+            token, AuthorityObservation(token.station, value, at, "test")
+        )
+        runtime.observe_enabled(
+            token, EnabledObservation(target, None, at, at + timedelta(seconds=60))
+        )
+        assert all(e.state_fresh for e in operational(platforms))
+    # The physical evidence also outlives permission's validity, with no new timeout.
+    at = datetime.now(UTC)
+    runtime.observe_enabled(
+        token, EnabledObservation(target, True, at, at + timedelta(seconds=60))
+    )
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at + timedelta(seconds=61)
+
+    monkeypatch.setattr("custom_components.wallbox_manager.runtime.datetime", Clock)
+    assert runtime.enabled(target) is None
+    assert all(e.state_fresh for e in operational(platforms))
+
+
+async def test_reload_keeps_pause_inhibition_without_restoring_live_evidence(
+    diagnostics,
+):
+    hass, _, runtime, platforms, setup, unload = diagnostics
+    token = runtime.connect(StationId("paused-reload"))
+    target = ConnectorId(EvseId(token.station, "1"), "1")
+    runtime.observe(
+        token,
+        (
+            observation(target, Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            observation(target, Quantity.CHARGING_STATE, State.CHARGING),
+        ),
+    )
+    await hass.async_block_till_done()
+    runtime.observe_zero_point(token, target)
+    since = runtime.physical_limit_since(target)
+    runtime.disconnect(token)
+    await unload()
+    runtime = await setup()
+    current = runtime.connect(target.station)
+    runtime.observe(
+        current,
+        (
+            observation(target, Quantity.CONNECTOR_STATE, State.AVAILABLE),
+            observation(target, Quantity.CHARGING_STATE, State.CONNECTED),
+        ),
+    )
+    assert runtime.physical_limit_since(target) == since
+    assert runtime.physical_limitation(target) == "pause_cp_unverified"
+    assert runtime.get(target.station).observations == ()
+    assert all(not e.state_fresh for e in operational(platforms))
+    assert {e.native_value for e in operational(platforms)} == {"occupied", "charging"}

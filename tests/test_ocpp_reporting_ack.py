@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 from test_ocpp_bidirectional import paired
@@ -88,7 +89,10 @@ async def test_reporting_ack_during_discovery(protocol, kind):
         adapter = server.sessions[StationId("station-a")].adapter
         before = server.runtime.get(adapter.token.station)
         assert not adapter.discovery_task.done()
-        response = await station.call(reporting_call(station, kind), suppress=False)
+        message = reporting_call(station, kind)
+        if kind not in ("MeterValues", "NotifyEvent"):
+            message.timestamp = datetime.now(UTC).isoformat()
+        response = await station.call(message, suppress=False)
         expected_type = getattr(
             station._call_result,
             "TransactionEvent" if kind not in ("MeterValues", "NotifyEvent") else kind,
@@ -135,6 +139,21 @@ async def test_reporting_ack_during_discovery(protocol, kind):
         assert (
             complete.token.connection_generation == complete.token.boot_generation == 1
         )
+
+
+@pytest.mark.parametrize("protocol", ["ocpp2.0.1", "ocpp2.1"])
+@pytest.mark.parametrize("kind", ["Started", "Updated", "Ended"])
+async def test_historical_transaction_report_is_acked_without_live_physical_state(
+    protocol, kind
+):
+    async with paired(protocol) as (server, station):
+        await station.boot()
+        adapter = server.sessions[StationId("station-a")].adapter
+        response = await station.call(reporting_call(station, kind), suppress=False)
+        assert type(response) is station._call_result.TransactionEvent
+        assert server.runtime.get(adapter.token.station).observations == ()
+        # Historical lifecycle can be retained without publishing live presence.
+        assert server.runtime.sessions.latest
 
 
 @pytest.mark.parametrize("protocol", ["ocpp2.0.1", "ocpp2.1"])

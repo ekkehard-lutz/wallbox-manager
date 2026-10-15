@@ -166,6 +166,52 @@ async def test_zero_and_resume_preserve_permission_and_transaction(authority):
     assert not peer.permissions
 
 
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_only_validated_zero_completion_limits_physical_observability(
+    authority, accepted
+):
+    from custom_components.wallbox_manager.core.telemetry import (
+        Channel,
+        Observation,
+        State,
+    )
+
+    control, bound, peer, _ = authority
+    await acquire_for_test(control, bound, peer, start=True)
+    assert (
+        await control.change(bound.target, target_w=2300)
+    ).status == CommandStatus.APPLIED
+    runtime, token = bound.adapter.runtime, bound.adapter.token
+    at = datetime.now(UTC)
+    samples = tuple(
+        Observation(Channel(bound.target, quantity), value, at, at, None, "test")
+        for quantity, value in (
+            (Quantity.CONNECTOR_STATE, State.OCCUPIED),
+            (Quantity.CHARGING_STATE, State.CHARGING),
+        )
+    )
+    runtime.observe(token, samples)
+    assert all(runtime.physical_state_fresh(o) for o in samples)
+    peer.status = "Accepted" if accepted else "Rejected"
+    peer.received.clear()
+    peer.release.clear()
+    pending = asyncio.create_task(control.change(bound.target, target_w=0))
+    try:
+        await asyncio.wait_for(peer.received.wait(), 1)
+        assert runtime.physical_limitation(bound.target) is None
+        assert control.confirmed_point(bound.target).charging
+    finally:
+        peer.release.set()
+    result = await pending
+    assert (result.status == CommandStatus.APPLIED) is accepted
+    assert runtime.physical_limitation(bound.target) == (
+        "pause_cp_unverified" if accepted else None
+    )
+    assert all(runtime.physical_state_fresh(o) is (not accepted) for o in samples)
+    assert all(runtime.get(token.station).observation(o.channel) == o for o in samples)
+    assert runtime.enabled(bound.target) is True
+
+
 async def test_disabled_target_edits_do_not_enable_and_on_needs_no_point(authority):
     control, bound, peer, _ = authority
     await acquire_for_test(control, bound, peer, start=peer.enabled)

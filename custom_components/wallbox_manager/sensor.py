@@ -164,6 +164,12 @@ class StateObservationSensor(ObservationSensor, RestoreEntity):
                         None,
                         "ha:last_known_display",
                     )
+                    if limited_at := previous.attributes.get("physical_limit_since"):
+                        self.runtime.restore_physical_limit(
+                            self.channel.scope,
+                            previous.attributes.get("physical_observability"),
+                            datetime.fromisoformat(limited_at),
+                        )
                 except ValueError, TypeError, KeyError:
                     pass
 

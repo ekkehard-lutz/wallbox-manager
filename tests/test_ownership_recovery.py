@@ -935,16 +935,21 @@ async def test_reconnect_reconciles_retained_on_intent_when_station_reset_to_off
     assert len(peer.authority_requests) == counts[1]
 
 
-async def test_successful_ocpp_off_updates_canonical_sensor_without_cp_event(site):
+async def test_successful_ocpp_off_preserves_physical_history_without_cp_event(site):
     from ocpp.v21 import call
 
     from custom_components.wallbox_manager.core.telemetry import Channel, Quantity
     from custom_components.wallbox_manager.sensor import StateObservationSensor
 
     owner, c, bound, peer, p, _ = await prepared(site)
+    # The fixture's Started event is clock-tolerant (+1 s). This live Updated
+    # report must follow it, rather than replay an older lifecycle timestamp.
+    observed_at = max(
+        datetime.now(UTC), c.runtime.sessions.get(bound.target).updated_at
+    ) + timedelta(microseconds=1)
     await peer.call(
         call.StatusNotification(
-            timestamp=datetime.now(UTC).isoformat(),
+            timestamp=observed_at.isoformat(),
             evse_id=1,
             connector_id=1,
             connector_status="Occupied",
@@ -953,7 +958,7 @@ async def test_successful_ocpp_off_updates_canonical_sensor_without_cp_event(sit
     await peer.call(
         call.TransactionEvent(
             event_type="Updated",
-            timestamp=datetime.now(UTC).isoformat(),
+            timestamp=observed_at.isoformat(),
             trigger_reason="ChargingStateChanged",
             seq_no=2,
             transaction_info={"transaction_id": "active", "charging_state": "Charging"},
@@ -965,13 +970,16 @@ async def test_successful_ocpp_off_updates_canonical_sensor_without_cp_event(sit
         for q in (Quantity.CONNECTOR_STATE, Quantity.CHARGING_STATE)
     ]
     assert [e.native_value for e in sensors] == ["occupied", "charging"]
+    physical = [e.observation for e in sensors]
     remove = c.runtime.subscribe(
         lambda snapshot: [setattr(e, "snapshot", snapshot) for e in sensors]
     )
     try:
         result = await p.permission(bound.target, False)
         assert result.status.value == "applied"
-        assert [e.native_value for e in sensors] == ["occupied", "connected"]
+        assert [e.native_value for e in sensors] == ["occupied", "charging"]
+        assert [e.observation for e in sensors] == physical
+        assert c.runtime.enabled(bound.target) is False
         assert not sensors[0].state_fresh and not sensors[1].state_fresh
     finally:
         remove()

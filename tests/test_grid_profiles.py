@@ -30,6 +30,10 @@ async def grid(tmp_path, manual):
 
     hass = HomeAssistant(str(tmp_path))
     control, bound, *_ = manual
+    # These success-path orchestration tests do not assert protocol latency.
+    # Full-suite GC can exhaust the primitive fixture's 100 ms reply budget.
+    # Dedicated timeout tests keep that original budget via `connected`.
+    bound.adapter._response_timeout = 1.0
     entry = SimpleNamespace(entry_id="grid", options={})
     battery = BatteryReserve(hass, entry)
     profiles = GridProfiles(hass, entry, control, battery)

@@ -10,6 +10,7 @@ from .core.authority import AuthorityObservation, ControlAuthority
 from .core.capabilities import CapabilityEvidence, CapabilitySnapshot, EvidenceState
 from .core.events import SessionToken, StationIdentity, StationSnapshot
 from .core.models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
+from .core.sessions import SessionEventKind
 from .core.telemetry import Channel, Observation, Quantity, State, station_of
 from .diagnostics import diagnostic_event
 from .session_ledger import SessionLedger
@@ -28,6 +29,9 @@ class Runtime:
         self._phase_epoch = {}
         self._cp_epoch = {}
         self._cp_confirmed = {}
+        self._physical_limits = {}
+        self._departures = {}
+        self._departure_sequences = {}
         self._listeners: set[Callable[[StationSnapshot], None]] = set()
 
     @property
@@ -77,6 +81,16 @@ class Runtime:
             scope: value
             for scope, value in self._cp_confirmed.items()
             if scope.station != token.station
+        }
+        self._departures = {
+            scope: departure
+            for scope, departure in self._departures.items()
+            if scope.station != token.station
+        }
+        self._departure_sequences = {
+            key: sequence
+            for key, sequence in self._departure_sequences.items()
+            if station_of(key[0]) != token.station
         }
         unknown = CapabilityEvidence(EvidenceState.UNKNOWN, "runtime", now, reason)
         return StationSnapshot(
@@ -226,10 +240,17 @@ class Runtime:
         # The first ON read is discovery, not a CP transition. Status events
         # may already have arrived in this generation before inventory finishes.
         confirmed = self._cp_confirmed.get(observation.scope)
-        if observation.enabled is False or (
-            observation.enabled is True and confirmed is False
-        ):
+        if observation.enabled is False and confirmed is not False:
             self._cp_epoch[observation.scope] = observation.observed_at
+            self._physical_limits.setdefault(
+                observation.scope, (observation.observed_at, "permission_cp_unverified")
+            )
+        elif observation.enabled is True:
+            if confirmed is False:
+                self._cp_epoch[observation.scope] = observation.observed_at
+            limitation = self._physical_limits.get(observation.scope)
+            if limitation and limitation[1] == "permission_cp_unverified":
+                self._physical_limits.pop(observation.scope)
         if observation.enabled is not None:
             self._cp_confirmed[observation.scope] = observation.enabled
         observation = replace(observation, revision=revision)
@@ -333,7 +354,47 @@ class Runtime:
             return False
         if station_of(event.scope) != token.station:
             raise ValueError("session belongs to another station")
-        return self.sessions.apply(event, observations, live=live)
+        known = self.sessions.find(token.station, event.external_transaction_id)
+        previous = self.sessions.get(event.scope)
+        key = (event.scope, event.external_transaction_id)
+        sequences = [
+            sequence
+            for sequence in (
+                known.sequence if known else None,
+                self._departure_sequences.get(key),
+            )
+            if sequence is not None
+        ]
+        sequence_is_new = (
+            event.sequence is not None and event.sequence > max(sequences, default=-1)
+        ) or (event.sequence is None and not sequences)
+        accepted = self.sessions.apply(event, observations, live=live)
+        if accepted:
+            # Keep lifecycle/accounting ordering unchanged. Physical departure
+            # additionally requires increasing sequence evidence, even after a
+            # timestamp-accepted update has lowered the ledger's sequence.
+            if event.sequence is not None:
+                self._departure_sequences[key] = max(
+                    event.sequence, max(sequences, default=-1)
+                )
+            self._departures.pop(event.scope, None)
+        if (
+            accepted
+            and live
+            and known
+            and known.active
+            and known == previous
+            and known.scope == event.scope
+            and isinstance(event.scope, ConnectorId)
+            and sequence_is_new
+            and event.kind == SessionEventKind.ENDED
+            and event.end_reason in ("EVDeparted", "EVDisconnected")
+            and event.at >= self._phase_epoch[token.station]
+        ):
+            # Bind recovery to this exact ended ledger record. A different
+            # accepted transaction invalidates it before any Available arrives.
+            self._departures[event.scope] = self.sessions.get(event.scope)
+        return accepted
 
     def session_observations(self, token, observations, external_id=None):
         if self.current(token):
@@ -353,15 +414,63 @@ class Runtime:
         if observation is None:
             return False
         state = self.get(station_of(observation.channel.scope))
-        if not state or not state.connected or not observation.fresh(datetime.now(UTC)):
+        if (
+            not state
+            or not state.connected
+            or not observation.fresh(datetime.now(UTC))
+            or state.observation(observation.channel) is not observation
+            or observation.observed_at < self._phase_epoch[state.token.station]
+        ):
             return False
         scope = self.cp_scope(observation.channel.scope)
-        enabled = self.enabled_observation(scope) if scope else None
-        if enabled is not None and self.enabled(scope) is not True:
+        if scope in self._physical_limits:
             return False
-        return observation.observed_at >= self._cp_epoch.get(
-            scope, observation.observed_at
+        epoch = self._cp_epoch.get(scope)
+        return (
+            epoch is None
+            or min(observation.observed_at, observation.received_at) >= epoch
         )
+
+    def physical_limitation(self, scope):
+        """Evidence limitation, not CP feedback or permission state."""
+        target = self.cp_scope(scope)
+        limitation = self._physical_limits.get(target)
+        if limitation:
+            return limitation[1]
+        state = self.get(station_of(scope))
+        if not state or not state.connected:
+            return "disconnected"
+        return None
+
+    def physical_limit_since(self, scope):
+        limitation = self._physical_limits.get(self.cp_scope(scope))
+        return limitation[0] if limitation else None
+
+    def restore_physical_limit(self, scope, reason, at):
+        """Restore only an inhibition, never a physical fact or live observation."""
+        if (
+            isinstance(scope, ConnectorId)
+            and reason
+            in (
+                "pause_cp_unverified",
+                "permission_cp_unverified",
+            )
+            and at.utcoffset() is not None
+            and at <= datetime.now(UTC)
+        ):
+            self._physical_limits.setdefault(scope, (at, reason))
+
+    def observe_zero_point(self, token, target):
+        """A validated zero setpoint may interrupt CP; it proves no departure."""
+        if not self.current(token):
+            return
+        at = datetime.now(UTC)
+        self._physical_limits[target] = (at, "pause_cp_unverified")
+        self._cp_epoch[target] = at
+        self._departures.pop(target, None)
+        state = self.get(token.station)
+        # Publish the changed validity even when the reported enums are unchanged.
+        self._publish(replace(state))
 
     def observe(
         self,
@@ -385,25 +494,45 @@ class Runtime:
             for o in incoming
         ):
             raise ValueError("observation belongs to another station or is invalid")
-        # CP-off status reports cannot establish physical vehicle presence.
-        # Explicit transaction lifecycle events are handled separately.
-        incoming = tuple(
-            o
-            for o in incoming
-            if not (
-                o.channel.quantity
-                in (Quantity.CONNECTOR_STATE, Quantity.CHARGING_STATE)
-                and (target := self.cp_scope(o.channel.scope)) is not None
-                and self.enabled(target) is False
-            )
-        )
         old = self.get(token.station)
         values = {o.channel: o for o in old.observations}
         supported = dict.fromkeys(old.supported_channels)
         evses, connectors = set(old.evses), set(old.connectors)
         pending = list(incoming)
+        physical_changes = {}
         for observation in pending:
             channel = observation.channel
+            if channel.quantity in (Quantity.CONNECTOR_STATE, Quantity.CHARGING_STATE):
+                if observation.observed_at < self._phase_epoch[token.station]:
+                    # Historical reports may teach an explicit identity, but
+                    # cannot advertise a new live state or charging channel.
+                    if isinstance(channel.scope, ConnectorId):
+                        connectors.add(channel.scope)
+                        evses.add(channel.scope.evse)
+                    elif isinstance(channel.scope, EvseId):
+                        evses.add(channel.scope)
+                    continue
+                target = self.cp_scope(channel.scope) or (
+                    channel.scope if isinstance(channel.scope, ConnectorId) else None
+                )
+                limitation = self._physical_limits.get(target)
+                departure = self._departures.get(target)
+                if limitation:
+                    if (
+                        limitation[1] == "pause_cp_unverified"
+                        and self._cp_confirmed.get(target) is not False
+                        and channel.quantity == Quantity.CONNECTOR_STATE
+                        and observation.value == State.AVAILABLE
+                        and departure is not None
+                        and self.sessions.get(target) == departure
+                        and not departure.active
+                        and limitation[0]
+                        < departure.ended_at
+                        <= min(observation.observed_at, observation.received_at)
+                    ):
+                        self._physical_limits.pop(target)
+                    else:
+                        continue
             previous = values.get(channel)
             if previous is not None:
                 if observation.observed_at < previous.observed_at:
@@ -414,25 +543,12 @@ class Runtime:
                     observation = replace(previous, value=None)
             if observation.value is None and channel not in supported:
                 continue
-            if (
-                self.entry
-                and channel.quantity
-                in (Quantity.CONNECTOR_STATE, Quantity.CHARGING_STATE)
-                and (
-                    previous is None
-                    or previous.value != observation.value
-                    or self.physical_state_fresh(previous)
-                    != self.physical_state_fresh(observation)
-                )
+            if self.entry and channel.quantity in (
+                Quantity.CONNECTOR_STATE,
+                Quantity.CHARGING_STATE,
             ):
-                diagnostic_event(
-                    self.entry,
-                    "physical_state",
-                    stage="station_evidence",
-                    quantity=channel.quantity.value,
-                    source=observation.source,
-                    observed_at=observation.observed_at.isoformat(),
-                    fresh=self.physical_state_fresh(observation),
+                physical_changes.setdefault(
+                    channel, (previous, self.physical_state_fresh(previous))
                 )
             values[channel] = observation
             supported[channel] = None
@@ -443,7 +559,13 @@ class Runtime:
             if (
                 channel.quantity == Quantity.CONNECTOR_STATE
                 and observation.value != State.OCCUPIED
-                and charging in supported
+                and (
+                    charging in supported
+                    or (
+                        isinstance(channel.scope, ConnectorId)
+                        and observation.value == State.AVAILABLE
+                    )
+                )
             ):
                 pending.append(
                     replace(
@@ -471,4 +593,21 @@ class Runtime:
             self.sessions.observe(incoming, session_external_id)
         if updated != old:
             self._publish(updated)
+        for channel, (previous, was_fresh) in physical_changes.items():
+            observation = updated.observation(channel)
+            fresh = self.physical_state_fresh(observation)
+            if (
+                previous is None
+                or previous.value != observation.value
+                or was_fresh != fresh
+            ):
+                diagnostic_event(
+                    self.entry,
+                    "physical_state",
+                    stage="station_evidence",
+                    quantity=channel.quantity.value,
+                    source=observation.source,
+                    observed_at=observation.observed_at.isoformat(),
+                    fresh=fresh,
+                )
         return True
