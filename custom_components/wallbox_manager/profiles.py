@@ -307,9 +307,15 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             "optimum_target_soc": float(self.optimum_targets[target])
             if target in self.optimum_targets
             else None,
-            "enable_pending": target in self.enable_requests,
+            "enable_pending": target in self.enable_requests
+            and self.control.runtime.enabled(target) is not True,
+            "profile_start_pending": target in self.pv_startups,
+            "retained_current_accounting": "unsupported"
+            if self.setting(target)["profile"] != "NETZ"
+            else "not_applicable",
             "enable_wait_reason": self.control.intent(target).status
             if target in self.enable_requests
+            and self.control.runtime.enabled(target) is not True
             else None,
             "optimum_mode": self.optimum_modes.get(target),
             "soc_mode": self.optimum_modes.get(target, "STOP"),
@@ -426,7 +432,12 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             )
         if target in self.enable_requests:
             profile_event(
-                self, target, "enable_cancelled", reason="lifecycle_invalidated"
+                self,
+                target,
+                "profile_cancelled"
+                if self.control.runtime.enabled(target) is True
+                else "enable_cancelled",
+                reason="lifecycle_invalidated",
             )
         self.enable_requests.pop(target, None)
         self.enable_sessions.pop(target, None)
@@ -675,7 +686,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
 
     @diagnostic_permission
     async def permission(self, target, enabled, *, _grid_expiry=False, _resume=False):
-        """Coalesce one explicit PV activation through preparation and backoff."""
+        """Confirm user permission independently of profile preparation."""
         if not enabled:
             # Revoke queued work before any persistence await can yield to ACK.
             self.invalidate(target)
@@ -685,22 +696,51 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             "PV_OPTIMUM",
             "PV_MAXIMUM",
         )
-        if enabled and pv and self.can_control(target):
-            if target in self.enable_requests:
+        if (
+            enabled
+            and self.can_control(target)
+            and (self.setting(target)["profile"] in self.available_profiles(target))
+        ):
+            owner = getattr(self.control, "ownership", None)
+            if (
+                self.control.runtime.enabled(target) is True
+                and not _resume
+                and (owner is None or owner.record["enabled_intent"] is True)
+                and not (
+                    not pv
+                    and any(
+                        self.setting(target).get(field) is not None
+                        for field in ("grid_start_delay", "grid_duration")
+                    )
+                )
+            ):
+                epoch = self.epochs.get(target, 0)
+                generation = self.control.intent(target).generation
+                context = self.control.runtime.get(target.station)
+                if hasattr(self.control, "ownership"):
+                    await self.control.ownership.permission_intent(
+                        self.control, target, True
+                    )
+                if (
+                    self.epochs.get(target, 0) != epoch
+                    or self.control.intent(target).generation != generation
+                    or not self.control.runtime.current(context.token)
+                    or self.control.runtime.get(target.station).authority_revision
+                    != context.authority_revision
+                    or self.control.runtime.enabled(target) is not True
+                ):
+                    return CommandResult(
+                        CommandStatus.TEMPORARILY_REJECTED,
+                        ControlArea.CHARGING_PERMISSION,
+                        CommandReason.STALE,
+                    )
+                return await self.control.request_enabled(target, True)
+            if pv and target in self.enable_requests:
                 return CommandResult(
                     CommandStatus.TEMPORARILY_REJECTED,
                     ControlArea.CHARGING_PERMISSION,
                     CommandReason.BUSY,
                     "Enable already pending.",
-                )
-            if (
-                self.control.runtime.enabled(target) is True
-                and not _resume
-                and self.control.confirmed_point(target) is not None
-                and target not in self.control._unconfirmed_targets
-            ):
-                return CommandResult(
-                    CommandStatus.APPLIED, ControlArea.CHARGING_PERMISSION
                 )
         try:
             return await self._permission_request(
@@ -762,26 +802,6 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             )
         if self.epochs[target] != epoch:
             return None
-        if enabled and self.setting(target)["profile"] in (
-            "PV_SURPLUS",
-            "PV_OPTIMUM",
-            "PV_MAXIMUM",
-        ):
-            prepared = await self.economic_prepare(target, resume=_resume)
-            if self.epochs[target] != epoch:
-                return None
-            if not prepared:
-                reason = self.economic_reason(target)
-                waiting = self.control.preparation_wait(target, reason)
-                if reason == "economic_recovery_transaction":
-                    self.economic_activation_pending[target] = _resume
-                    self.pv_schedule_startup(target, epoch)
-                elif (
-                    reason == "grid_import_energy_limit"
-                    and self.control.runtime.enabled(target) is False
-                ):
-                    self.economic_defer_resume(target)
-                return waiting
         if enabled:
             self.suppressed.discard(target)
         else:
@@ -809,42 +829,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 target,
                 {"target_w": self.grid_target(target) if enabled else Fraction(0)},
             )
-        if self.setting(target)["profile"] in (
-            "PV_SURPLUS",
-            "PV_OPTIMUM",
-            "PV_MAXIMUM",
-        ):
-            if enabled:
-                await self.control.wait_for_pending_point(target)
-                if self.epochs[target] != epoch:
-                    return CommandResult(
-                        CommandStatus.TEMPORARILY_REJECTED, reason=CommandReason.STALE
-                    )
-                if self.common_pv(target):
-                    self.optimum_initialize(target)
-                plan = self.pv_edit(target)
-                if plan is None and self.shared_pv_execution(target):
-                    # No policy is not OFF. Keep the activation pending without
-                    # touching a possibly retained positive station profile.
-                    waiting = self.control.preparation_wait(
-                        target,
-                        self.control.blocker(target)
-                        or self.status.get(target, "policy_unavailable"),
-                    )
-                    self.pv_schedule_startup(target, epoch)
-                    return waiting
         generation = self.control.intent(target).generation + 1
         start_context = self.control.runtime.get(target.station)
-        if enabled and self.setting(target)["profile"] in (
-            "PV_SURPLUS",
-            "PV_OPTIMUM",
-            "PV_MAXIMUM",
-        ):
-            result = await self.pv_enable_attempt(target, epoch)
-        else:
-            result = await self.control.request_enabled(
-                target, enabled, fence=lambda: self.epochs[target] == epoch
-            )
+        result = await self.control.request_enabled(
+            target, enabled, fence=lambda: self.epochs[target] == epoch
+        )
         if self.epochs[target] != epoch:
             return result
         if enabled and result and result.status == CommandStatus.APPLIED:
@@ -854,8 +843,9 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 "PV_OPTIMUM",
                 "PV_MAXIMUM",
             ):
-                self.pv_confirm(target)
-            self.launch(target)
+                await self.pv_start_after_permission(target, epoch, resume=_resume)
+            else:
+                await self.start(target)
         elif (
             enabled
             and self.setting(target)["profile"]
@@ -869,6 +859,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             and self.control.runtime.get(target.station).authority_revision
             == start_context.authority_revision
         ):
+            self.economic_activation_pending[target] = _resume
             self.pv_schedule_startup(target, epoch)
         if (
             enabled
@@ -904,6 +895,52 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             await self.reconcile_battery(exclude=target)
         return result
 
+    async def pv_start_after_permission(self, target, epoch, *, resume):
+        """Prepare regulation after ON; readiness never changes permission success."""
+        prepared = await self.economic_prepare(target, resume=resume)
+        if self.epochs.get(target, 0) != epoch:
+            return
+        if not prepared:
+            reason = self.economic_reason(target)
+            self.control.preparation_wait(target, reason)
+            if reason == "economic_recovery_transaction":
+                self.economic_activation_pending[target] = resume
+                self.pv_schedule_startup(target, epoch)
+            return
+        await self.control.wait_for_pending_point(target)
+        if self.epochs.get(target, 0) != epoch:
+            return
+        if self.common_pv(target):
+            self.optimum_initialize(target)
+        plan = self.pv_edit(target)
+        if plan is None:
+            self.control.preparation_wait(
+                target,
+                self.control.blocker(target)
+                or self.status.get(target, "policy_unavailable"),
+            )
+            self.pv_schedule_startup(target, epoch)
+            return
+        generation = self.control.intent(target).generation
+        context = self.control.runtime.get(target.station)
+        result = await self.pv_apply_startup(target, epoch)
+        if self.epochs.get(target, 0) != epoch:
+            return
+        if result and result.status == CommandStatus.APPLIED:
+            self.pv_confirm(target)
+            self.launch(target)
+        elif (
+            result
+            and result.status == CommandStatus.TEMPORARILY_REJECTED
+            and self.can_control(target)
+            and self.control.intent(target).generation == generation
+            and context
+            and self.control.runtime.current(context.token)
+            and self.control.runtime.get(target.station).authority_revision
+            == context.authority_revision
+        ):
+            self.pv_schedule_startup(target, epoch)
+
     async def start(self, target):
         if self.setting(target)["profile"] in (
             "PV_SURPLUS",
@@ -938,13 +975,6 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             self.control.publish(target)
             return
         epoch = self.epochs.get(target, 0)
-        intent = self.control.intent(target)
-        if (
-            not intent.solver_result
-            or not intent.command_result
-            or intent.command_result.status != CommandStatus.APPLIED
-        ):
-            return
         self.tasks[target] = self.hass.async_create_background_task(
             self.sequence(target, epoch), "Grid observation"
         )
@@ -983,7 +1013,16 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                         return
                     continue
                 point = intent.solver_result.point if intent.solver_result else None
-                if not point or not point.charging:
+                if (
+                    not point
+                    or not intent.command_result
+                    or intent.command_result.status != CommandStatus.APPLIED
+                ):
+                    # Permission can precede point evidence or confirmation.
+                    # Never use an unconfirmed point for phase observation.
+                    await self.control.apply_stored(target)
+                    continue
+                if not point.charging:
                     break
                 count = point.mode.count
                 tried.add(count)
@@ -1082,7 +1121,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 self.optimum_connection(target)
             session = self.control.runtime.sessions.get(target)
             if (
-                target in self.enable_requests
+                target in self.pv_startups
+                and self.control.runtime.enabled(target) is True
                 and session
                 and self.enable_sessions.get(target) is not None
                 and not session.active
@@ -1228,6 +1268,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 recovery_record("rejected", reason="recovery_missing_profile")
                 self.status[target] = "recovery_missing_profile"
                 return
+            if enabled is False:
+                recovery_record("resume", reason="persisted_permission_on")
+                await self.permission(target, True, _resume=True)
+                return
             inputs = self.control.inputs(target)
             if inputs and self.control.blocker(target) is None and enabled is not None:
                 if self.setting(target)["profile"] in (
@@ -1256,15 +1300,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                         self.status[target] = reason
                         self.control.preparation_wait(target, reason)
                         recovery_record("waiting", reason=reason, pending=True)
-                        if reason == "grid_import_energy_limit" and enabled is False:
-                            self.economic_defer_resume(target)
                         return
-                if enabled is False:
-                    # This continues persisted explicit user intent, not Remote
-                    # authority alone. Normal startup fences/delays still apply.
-                    recovery_record("resume", reason="persisted_permission_on")
-                    await self.permission(target, True, _resume=True)
-                    return
                 point = await self.control.reconcile_applied(target, fence=current)
                 if not current():
                     recovery_record("fence", reason="profile_recovery_context_changed")

@@ -114,14 +114,14 @@ async def test_pending_edit_cancelled_on_invalidating_transitions(grid, event):
     assert target not in profile.debounce_tasks
 
 
-async def test_enable_applies_latest_without_wait_or_duplicate(grid):
+async def test_repeated_enable_preserves_pending_power_debounce(grid):
     profile, target, (control, _, peer, *_) = grid
     clock = await prepare(profile, target)
     await profile.set_value(target, "power_kw", 4.4)
     pending = profile.debounce_tasks[target]
     count = len(peer.requests)
     await profile.permission(target, True)
-    assert len(peer.requests) == count + 1
+    assert len(peer.requests) == count  # Repeated ON does not force regulation.
     assert control.intent(target).request.target_w == 4400
     await clock.advance(1000)
     await asyncio.gather(pending, return_exceptions=True)

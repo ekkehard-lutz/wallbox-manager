@@ -114,12 +114,12 @@ async def test_enable_lifecycle_and_real_commands_are_observable(grid, caplog, l
     blocker = c.blocker
     c.blocker = lambda _: "transaction_unavailable"
     await p.permission(t, True)
-    assert any(e.get("event") == "enable_pending" for e in events(caplog))
-    pending = next(e for e in events(caplog) if e.get("event") == "enable_pending")
+    assert any(e.get("event") == "profile_pending" for e in events(caplog))
+    pending = next(e for e in events(caplog) if e.get("event") == "profile_pending")
     assert pending["reason"] == "transaction_unavailable"
     assert ("epoch" in pending) is (level == 2)
     await p.permission(t, False)
-    assert any(e.get("event") == "enable_cancelled" for e in events(caplog))
+    assert any(e.get("event") == "profile_cancelled" for e in events(caplog))
     c.blocker = blocker
     await p.permission(t, True)
     assert any(e.get("event") == "enable_confirmed" for e in events(caplog))

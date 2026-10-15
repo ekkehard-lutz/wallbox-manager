@@ -123,13 +123,13 @@ async def test_power_permission_direction_and_retention_entities(controls):
     await direction.async_select_option("nearest")
     await enabled.async_turn_on()
     assert enabled.is_on and power.native_value == 4000
-    assert len(peer.requests) == 1
+    assert not peer.requests
     assert enabled.extra_state_attributes["command_status"] == "applied"
     await enabled.async_turn_off()
     assert not enabled.is_on and power.native_value == 4000
     assert enabled.extra_state_attributes["solver_reason"] is None
     assert enabled.extra_state_attributes["command_status"] == "applied"
-    assert len(peer.requests) == 1
+    assert not peer.requests
     await retention.async_set_native_value(10)
     assert control.intent(bound.target).phase_switch_deviation_pct == 10
     assert hass.states.get(power.entity_id).state == "4000.0"

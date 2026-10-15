@@ -324,10 +324,10 @@ async def test_reload_exhausted_budget_precedes_any_positive_preparation(grid, e
     await bound.read_enabled()
     before = len(peer.requests)
     result = await p.permission(t, True, _resume=True)
-    assert result.status == CommandStatus.TEMPORARILY_REJECTED
+    assert result.status == CommandStatus.APPLIED  # Permission is independent.
     assert p.economic_policies[t].exhausted
     assert all(period(request)["limit"] == 0 for request in peer.requests[before:])
-    assert c.runtime.enabled(t) is enabled
+    assert c.runtime.enabled(t) is True
 
 
 async def paused_reset(grid):

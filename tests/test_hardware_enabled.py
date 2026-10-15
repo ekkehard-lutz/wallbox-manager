@@ -87,9 +87,11 @@ async def test_rejected_enable_is_not_replayed(authority):
     result = await control.request_enabled(bound.target, True)
     assert result.status != CommandStatus.APPLIED
     assert bound.adapter.runtime.enabled(bound.target) is False
+    assert len(peer.permissions) == 1
     peer.status = "Accepted"
     await control.change(bound.target, target_w=2400)
-    assert not peer.permissions
+    assert len(peer.permissions) == 1  # The rejected ON is never replayed.
+    assert not peer.requests
     assert not hasattr(control.intent(bound.target).request, "allowed")
 
 
@@ -101,6 +103,42 @@ async def test_readback_mismatch_is_not_confirmation(authority):
     result = await control.request_enabled(bound.target, True)
     assert result.status == CommandStatus.FAILED
     assert bound.adapter.runtime.enabled(bound.target) is False
+
+
+@pytest.mark.parametrize("actual", ["true", "false", "unknown"])
+async def test_switch_waits_for_actual_permission_readback(
+    controls, monkeypatch, actual
+):
+    from custom_components.wallbox_manager.protocols.ocpp.v21.adapter import (
+        EvseControlAdapter,
+    )
+
+    hass, entities, (control, bound, peer, *_), _, _ = controls
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = EvseControlAdapter.read_enabled
+
+    async def delayed(self):
+        entered.set()
+        await release.wait()
+        return await original(self)
+
+    monkeypatch.setattr(EvseControlAdapter, "read_enabled", delayed)
+    peer.enabled_read_value = actual
+    switch = entities["charging_enabled"]
+    pending = asyncio.create_task(control.request_enabled(bound.target, True))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert peer.enabled is True  # The wire ACK alone is not HA confirmation.
+        assert switch.is_on is False
+        assert hass.states.get(switch.entity_id).state == "off"
+        assert not peer.requests and control.confirmed_point(bound.target) is None
+    finally:
+        release.set()
+    result = await pending
+    assert result.status == (
+        CommandStatus.APPLIED if actual == "true" else CommandStatus.FAILED
+    )
+    assert switch.is_on is {"true": True, "false": False, "unknown": None}[actual]
 
 
 async def test_zero_and_resume_preserve_permission_and_transaction(authority):
@@ -128,7 +166,7 @@ async def test_zero_and_resume_preserve_permission_and_transaction(authority):
     assert not peer.permissions
 
 
-async def test_disabled_target_edits_do_not_enable_and_on_prepares_zero(authority):
+async def test_disabled_target_edits_do_not_enable_and_on_needs_no_point(authority):
     control, bound, peer, _ = authority
     await acquire_for_test(control, bound, peer, start=peer.enabled)
     await control.change(bound.target, target_w=0)
@@ -138,10 +176,9 @@ async def test_disabled_target_edits_do_not_enable_and_on_prepares_zero(authorit
     assert (
         await control.request_enabled(bound.target, True)
     ).status == CommandStatus.APPLIED
-    assert peer.operations[-3:] == ["profile", "permission", "enabled_get"]
-    assert peer.requests[-1][1]["charging_schedule"][0]["charging_schedule_period"] == [
-        {"start_period": 0, "limit": 0}
-    ]
+    assert peer.operations == ["permission", "enabled_get"]
+    assert not peer.requests
+    assert control.confirmed_point(bound.target) is None
     assert bound.adapter.runtime.enabled(bound.target) is True
 
 
@@ -164,14 +201,14 @@ async def test_zero_needs_no_voltage_or_phase_feedback(authority):
 )
 async def test_profile_inflight_semantic_fences(authority, change):
     control, bound, peer, _ = authority
-    await acquire_for_test(control, bound, peer, start=peer.enabled)
+    await acquire_for_test(control, bound, peer, start=True)
     control.restore(bound.target, target_w=2300)
     peer.release.clear()
-    pending = asyncio.create_task(control.request_enabled(bound.target, True))
+    pending = asyncio.create_task(control.apply_stored(bound.target))
     await asyncio.wait_for(peer.received.wait(), 1)
     live = bound.adapter
     if change == "hardware":
-        observed(bound, True)
+        observed(bound, False)
     elif change == "capability":
         state = live.runtime.get(bound.target.station)
         live.runtime._publish(replace(state, electrical=()))
@@ -194,7 +231,7 @@ async def test_profile_inflight_semantic_fences(authority, change):
     result = await pending
     if change in ("refresh", "drift", "voltage"):
         assert result.status == CommandStatus.APPLIED
-        assert len(peer.permissions) == 1
+        assert not peer.permissions
         assert control.confirmed_point(bound.target).current_a == 10
         assert control.intent(bound.target).fence_reason is None
         assert live.runtime.enabled(bound.target) is True
@@ -266,7 +303,7 @@ async def test_unknown_and_expired_state_never_restore_desired_permission(contro
 @pytest.mark.parametrize(
     "change", ["refresh", "drift", "voltage", "expired", "hardware", "transaction"]
 )
-async def test_enable_queue_rechecks_prepared_target(authority, change):
+async def test_permission_completion_is_independent_of_point_inputs(authority, change):
     control, bound, peer, _ = authority
     await acquire_for_test(control, bound, peer, start=peer.enabled)
     control.restore(bound.target, target_w=2300)
@@ -338,17 +375,12 @@ async def test_enable_queue_rechecks_prepared_target(authority, change):
             )
     release.set()
     result = await pending
-    assert len(peer.requests) == 1
-    if change in ("refresh", "drift", "voltage", "expired"):
-        # The prepared point was already dispatched; permission completes the
-        # same decision, with live control fences but no voltage re-solving.
-        assert result.status == CommandStatus.APPLIED
-        assert control.confirmed_point(bound.target).current_a == 10
-        assert control.intent(bound.target).fence_reason is None
-        assert len(peer.permissions) == 1
-    else:
-        assert result.reason == CommandReason.STALE
-        assert not peer.permissions
+    # Permission was already dispatched; its readback is independent of
+    # transaction and electrical measurements, including missing/expired inputs.
+    assert result.status == CommandStatus.APPLIED
+    assert control.confirmed_point(bound.target) is None
+    assert not peer.requests and len(peer.permissions) == 1
+    assert live.runtime.enabled(bound.target) is True
 
 
 async def test_zero_support_is_never_inferred_from_other_capabilities(authority):

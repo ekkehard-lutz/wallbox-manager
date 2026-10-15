@@ -270,7 +270,8 @@ async def test_phase_retry_then_observation(grid):
         locked[0] = False
 
     profile.wait = wait
-    await profile.permission(target, True)
+    await profile.permission(target, True)  # Already ON: no profile reapplication.
+    await profile.start(target)
     await profile.tasks[target]
     assert waits == [(60, "phase_lockout"), (60, "observing")]
     assert control.intent(target).solver_result.point.mode.count == 1

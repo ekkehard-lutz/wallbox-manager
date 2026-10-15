@@ -188,7 +188,12 @@ async def test_missing_inputs_fail_closed(manual, missing):
     await control.change(bound.target, target_w=4000, allowed=True)
     assert control.intent(bound.target).status != "applied"
     assert not control.attributes(bound.target)["execution_ready"]
-    assert len(wire.sent) == before
+    assert not peer.requests  # Missing point inputs still prevent TxProfile.
+    if missing in ("caps", "unverified"):
+        assert len(wire.sent) == before and not peer.permissions
+    else:
+        assert len(wire.sent) == before + 2  # Permission + Actual readback only.
+        assert control.runtime.enabled(bound.target) is True
 
 
 @pytest.mark.parametrize(

@@ -231,7 +231,11 @@ async def test_reload_does_not_restore_continuation(grid, soc):
             assert len(peer.requests) == count
         clone.wait = lambda _: asyncio.Event().wait()
         await clone.permission(t, True)
-        assert c.confirmed_point(t).charging is (soc > 95)
+        # Repeated ON adopts no operating point or continuation by itself.
+        if soc <= 95:
+            assert c.confirmed_point(t) is None
+        assert not clone.pv_ongoing.get(t, False)
+        assert len(peer.requests) == count
         assert c.runtime.enabled(t) is True
     finally:
         await clone.close()

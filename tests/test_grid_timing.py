@@ -180,11 +180,11 @@ async def test_slow_initial_permission_reconciles_elapsed_deadline(grid, elapsed
 
     p.timer_wait = wait
     await p.permission(t, True)
-    assert await parked.get() == 0
+    # The first point is now calculated after permission confirmation, so an
+    # already elapsed start is handled immediately without an extra timer wake.
+    assert await parked.get() == (90 if elapsed == 90 else 0)
     await asyncio.sleep(0)
     assert c.intent(t).request.target_w == (11000 if elapsed == 90 else 0)
-    if elapsed == 90:
-        assert await parked.get() == 90
 
 
 async def test_ownership_loss_fences_scheduled_start(grid):

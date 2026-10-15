@@ -63,6 +63,7 @@ async def recreate(
     reload=False,
     wait_recovery=True,
     phase_event=True,
+    transaction_event=True,
 ):
     old = control.runtime.get(bound.target.station)
     session = control.runtime.sessions.get(bound.target)
@@ -98,7 +99,8 @@ async def recreate(
     if live.enabled_poll_task:
         live.enabled_poll_task.cancel()
     measured(runtime, token, bound.target)
-    await transaction(peer, connector=1, identity=transaction_id)
+    if transaction_event:
+        await transaction(peer, connector=1, identity=transaction_id)
     if phase_event:
         await physical_report(peer, getattr(peer, "phase_read_value", "Rxx"))
     new_control = create_control_runtime(
@@ -200,6 +202,90 @@ async def test_restored_off_intent_never_enables(site):
         await p.close()
         c.close()
         remove()
+
+
+@pytest.mark.parametrize(
+    "intent,actual", [(True, False), (True, True), (False, True), (False, False)]
+)
+async def test_cold_recovery_reconciles_permission_without_transaction_or_measurements(
+    site, intent, actual
+):
+    owner, c, bound, peer, p, hass = await prepared(site, enabled=False)
+    await owner.permission_intent(c, bound.target, intent)
+    peer.enabled = actual
+    for field in ("leistung_pv", "leistung_verbraucher"):
+        hass.states.async_set(p.references[field], "unavailable")
+    count = len(peer.permissions), len(peer.authority_requests)
+    owner, c, p, remove = await recreate(
+        owner,
+        c,
+        bound,
+        peer,
+        p,
+        hass,
+        transaction_event=False,
+        phase_event=False,
+        wait_recovery=not (intent and actual),
+    )
+    try:
+        if intent and actual:
+            await asyncio.wait_for(p.recovery_parked.wait(), 2)
+        assert owner.ready and owner.record["enabled_intent"] is intent
+        assert c.runtime.enabled(bound.target) is intent
+        assert c.blocker(bound.target) == "transaction_unavailable"
+        assert c.confirmed_point(bound.target) is None and not peer.requests
+        assert len(peer.permissions) == count[0] + (intent != actual)
+        assert len(peer.authority_requests) == count[1]
+        assert bound.target not in p.economic_policies
+        assert not p.attributes(bound.target)["enable_pending"]
+        assert not any(s.active for s in c.runtime.sessions.latest)
+    finally:
+        await p.close()
+        c.close()
+        remove()
+
+
+@pytest.mark.parametrize("intent", [False, True])
+async def test_reconnect_retained_intent_does_not_need_transaction(site, intent):
+    owner, c, bound, peer, p, _ = await prepared(site, enabled=False)
+    await transaction(peer, connector=1, kind="Ended")
+    await p.hass.async_block_till_done()
+    await owner.permission_intent(c, bound.target, intent)
+    counts = len(peer.permissions), len(peer.authority_requests)
+    await reconnect(owner, c, bound, peer, p, unplugged=True)
+    await asyncio.wait_for(asyncio.shield(p.recoveries[bound.target]), 2)
+    assert owner.ready and c.runtime.enabled(bound.target) is intent
+    assert c.blocker(bound.target) == "transaction_unavailable"
+    assert c.confirmed_point(bound.target) is None and not peer.requests
+    assert len(peer.permissions) == counts[0] + int(intent)
+    assert len(peer.authority_requests) == counts[1]
+
+
+async def test_repeated_on_persistence_cannot_outlive_newer_off(site, monkeypatch):
+    owner, c, bound, peer, p, _ = await prepared(site)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = owner.store.async_save
+
+    async def delayed(data):
+        result = await original(data)
+        if data["ownership"]["enabled_intent"]:
+            entered.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(owner.store, "async_save", delayed)
+    pending = asyncio.create_task(p.permission(bound.target, True))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        await p.permission(bound.target, False)
+    finally:
+        release.set()
+    result = await pending
+    assert result.reason.value == "stale"
+    assert c.runtime.enabled(bound.target) is False
+    assert owner.record["enabled_intent"] is False
+    assert (await owner.store.async_load())["ownership"]["enabled_intent"] is False
+    assert peer.permissions[-1]["attribute_value"] == "false"
 
 
 @pytest.mark.parametrize("case", ["local", "identity", "legacy", "corrupt", "missing"])

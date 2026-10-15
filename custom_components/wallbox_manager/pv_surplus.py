@@ -870,12 +870,24 @@ class PVSurplus:
                 continue
             if self.pv_ongoing.get(target, False) and target in self.pv_stop_since:
                 self.pv_plan(target)
-            if not self.pv_ongoing.get(target, False) and self.status.get(target) in (
-                "paused_insufficient_pv",
-                "waiting_battery_soc",
-                "stopped_battery_soc",
-                "measurements_unavailable",
-                "pv_start_delay",
+            command = self.control.intent(target).command_result
+            waiting_for_plan = (
+                target in self.pv_startups
+                and target not in self.economic_activation_pending
+                and command is not None
+                and command.detail is not None
+                and self.status.get(target) == "awaiting_applied"
+            )
+            if not self.pv_ongoing.get(target, False) and (
+                waiting_for_plan
+                or self.status.get(target)
+                in (
+                    "paused_insufficient_pv",
+                    "waiting_battery_soc",
+                    "stopped_battery_soc",
+                    "measurements_unavailable",
+                    "pv_start_delay",
+                )
             ):
                 _, _, planned, _ = self.pv_plan(target)
                 if planned in (
@@ -971,20 +983,14 @@ class PVSurplus:
         ):
             self.status[target] = "awaiting_applied"
 
-    async def pv_enable_attempt(self, target, epoch):
-        """Continue one explicitly authorized enable, never acquire authority."""
-        # The prepared request is this attempt's regulation snapshot. Normal
-        # measurement updates must not act as caller cancellation while queued.
-        # apply_stored retains live policy/electrical checks before dispatch and
-        # lifecycle/safety checks through point and permission confirmation.
-        result = await self.control.request_enabled(
-            target, True, fence=lambda: self.epochs.get(target, 0) == epoch
+    async def pv_apply_startup(self, target, epoch):
+        """Apply the prepared profile after independently confirmed permission."""
+        result = await self.control.apply_stored(
+            target, fence=lambda: self.epochs.get(target, 0) == epoch
         )
-        if result and result.status == CommandStatus.APPLIED:
-            point = self.control.confirmed_point(target)
-            if point and point.charging:
-                self.economic_point_confirmed(target, point)
-        return result
+        return result or self.control.preparation_wait(
+            target, self.control.intent(target).status
+        )
 
     def pv_startup_valid(self, target, epoch):
         context = self.pv_startups.get(target)
@@ -1010,7 +1016,7 @@ class PVSurplus:
         profile_event(
             self,
             target,
-            "enable_pending",
+            "profile_pending" if runtime.enabled(target) is True else "enable_pending",
             reason=self.control.intent(target).status,
             epoch=epoch,
             retry_seconds=60,
@@ -1046,8 +1052,60 @@ class PVSurplus:
                 if self.monotonic() < self.pv_retry_until[target]:
                     continue
                 with cycle(self, target, "startup_retry"):
-                    profile_event(self, target, "enable_retry", epoch=epoch)
+                    profile_event(
+                        self,
+                        target,
+                        "profile_retry"
+                        if self.control.runtime.enabled(target) is True
+                        else "enable_retry",
+                        epoch=epoch,
+                    )
+                    if self.control.runtime.enabled(target) is not True:
+                        context = self.pv_startups[target]
+                        self.pv_startups[target] = (
+                            *context[:2],
+                            self.control.intent(target).generation + 1,
+                        )
+                        result = await self.control.request_enabled(
+                            target,
+                            True,
+                            fence=lambda: self.epochs.get(target, 0) == epoch,
+                        )
+                        if not self.pv_startup_valid(target, epoch):
+                            return
+                        if not result or result.status != CommandStatus.APPLIED:
+                            if (
+                                result
+                                and result.status != CommandStatus.TEMPORARILY_REJECTED
+                            ):
+                                profile_event(
+                                    self,
+                                    target,
+                                    "enable_failed",
+                                    reason=result.reason,
+                                    detail=result.detail,
+                                )
+                                return
+                            self.pv_retry_until[target] = self.monotonic() + 60
+                            continue
+                        profile_event(self, target, "enable_confirmed", epoch=epoch)
+                        # The original explicit/recovered scope policy is retained.
                     if not await self.economic_startup_prepare(target):
+                        if self.epochs.get(target, 0) != epoch:
+                            return
+                        if (
+                            self.economic_reason(target) == "grid_import_energy_limit"
+                            and self.control.runtime.enabled(target) is True
+                        ):
+                            # Permission recovery has completed; the existing
+                            # paused regulator owns model-based economic restart.
+                            self.enable_requests.pop(target, None)
+                            self.enable_sessions.pop(target, None)
+                            self.pv_startups.pop(target, None)
+                            self.pv_retry_until.pop(target, None)
+                            self.tasks.pop(target, None)
+                            self.launch(target)
+                            return
                         self.pv_retry_until[target] = self.monotonic() + (
                             0 if target in self.economic_waits else 60
                         )
@@ -1062,13 +1120,13 @@ class PVSurplus:
                     context = self.pv_startups[target]
                     self.pv_startups[target] = (
                         *context[:2],
-                        self.control.intent(target).generation + 1,
+                        self.control.intent(target).generation,
                     )
-                    result = await self.pv_enable_attempt(target, epoch)
+                    result = await self.pv_apply_startup(target, epoch)
                     if self.epochs.get(target, 0) != epoch:
                         return
                     if result and result.status == CommandStatus.APPLIED:
-                        profile_event(self, target, "enable_confirmed", epoch=epoch)
+                        profile_event(self, target, "profile_ready", epoch=epoch)
                         self.enable_requests.pop(target, None)
                         self.enable_sessions.pop(target, None)
                         self.pv_startups.pop(target, None)
@@ -1081,7 +1139,7 @@ class PVSurplus:
                         profile_event(
                             self,
                             target,
-                            "enable_failed",
+                            "profile_failed",
                             reason=result.reason,
                             detail=result.detail,
                         )
@@ -1097,7 +1155,9 @@ class PVSurplus:
                     profile_event(
                         self,
                         target,
-                        "enable_cancelled",
+                        "profile_cancelled"
+                        if self.control.runtime.enabled(target) is True
+                        else "enable_cancelled",
                         reason="startup_context_invalidated",
                     )
                 self.tasks.pop(target, None)

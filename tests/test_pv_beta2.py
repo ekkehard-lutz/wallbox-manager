@@ -381,7 +381,8 @@ async def test_fresh_measurement_wakes_zero_delay_start_without_periodic_tick(gr
     measurements(p, t, pv=0)
     await p.permission(t, True)
     await asyncio.sleep(0)
-    assert not c.confirmed_point(t).charging
+    assert c.confirmed_point(t) is None  # ON requires no preliminary zero.
+    assert c.runtime.enabled(t) is True
     done = asyncio.Event()
 
     def changed(_):

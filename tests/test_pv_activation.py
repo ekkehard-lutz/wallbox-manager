@@ -48,17 +48,31 @@ async def test_transaction_blocker_retains_enable_and_reconciles(grid, profile):
     blocker = c.blocker
     c.blocker = lambda _: "transaction_unavailable"
     result = await p.permission(t, True)
-    assert result.status == CommandStatus.TEMPORARILY_REJECTED
-    assert c.runtime.enabled(t) is False
+    assert result.status == CommandStatus.APPLIED  # Permission precedes readiness.
+    assert c.runtime.enabled(t) is True
     assert t in p.pv_startups
     await asyncio.wait_for(waiting.wait(), 2)
     task = p.tasks[t]
     c.blocker = blocker
-    measurements(p, t, soc=96)
-    clock[0] = 60
-    gate.set()
-    await asyncio.wait_for(task, 2)
-    assert c.runtime.enabled(t) is True
+    confirmed = asyncio.Event()
+
+    def changed(_):
+        point = c.confirmed_point(t)
+        if point and point.charging:
+            confirmed.set()
+
+    unsubscribe = c.subscribe(changed)
+    try:
+        measurements(p, t, soc=96)
+        clock[0] = 60
+        gate.set()
+        # A valid meter cohort can replace the waiting startup worker with
+        # normal regulation; wait for real confirmation, not the retired task.
+        await asyncio.wait_for(confirmed.wait(), 2)
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2)
+    finally:
+        unsubscribe()
+    assert c.runtime.enabled(t) is True and c.confirmed_point(t).charging
 
 
 @pytest.mark.parametrize("profile", ["PV_OPTIMUM", "PV_SURPLUS"])
@@ -264,7 +278,8 @@ async def test_first_busy_retains_enable_without_phase_inference(grid, profile):
     p.wait = wait
     peer.profile_response = lambda _: call_result.SetChargingProfile(status="Rejected")
     result = await p.permission(t, True)
-    assert result.reason == CommandReason.BUSY
+    assert result.status == CommandStatus.APPLIED
+    assert c.intent(t).command_result.reason == CommandReason.BUSY
     assert not c.phase_restricted(t)
     task = p.tasks[t]
     await asyncio.wait_for(parked.wait(), 2)

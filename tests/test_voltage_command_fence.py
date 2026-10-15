@@ -146,10 +146,20 @@ async def test_voltage_drift_does_not_hide_other_fence_changes(grid, change):
             c._edit(t, {"target_w": 0})
         return call_result.SetChargingProfile(status="Accepted")
 
+    outcomes = []
+    original = c.apply_stored
+
+    async def apply(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        outcomes.append(result)
+        return result
+
+    c.apply_stored = apply
     peer.profile_response = response
     result = await p.permission(t, True)
-    assert result.reason == CommandReason.STALE
-    assert c.confirmed_point(t) is None and c.runtime.enabled(t) is False
+    assert result.status == CommandStatus.APPLIED  # Independently confirmed permission.
+    assert outcomes[-1].reason == CommandReason.STALE
+    assert c.confirmed_point(t) is None and c.runtime.enabled(t) is True
 
 
 async def test_small_drift_across_current_step_belongs_to_next_cycle(grid):

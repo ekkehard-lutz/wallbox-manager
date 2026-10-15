@@ -1,6 +1,7 @@
 """Profile mappings, target policy and common execution remain compatible."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from fractions import Fraction
 from itertools import product
@@ -376,6 +377,174 @@ async def test_fast_battery_floor_start_keeps_existing_house_import_eligibility(
     assert c.confirmed_point(t).mode.count == 1
     assert c.runtime.enabled(t) is True
     assert p.economic_policies[t].energy_ws == 0
+
+
+@pytest.mark.parametrize("profile", ["PV_MAXIMUM", "PV_SURPLUS", "PV_OPTIMUM"])
+async def test_permission_before_transaction_starts_floor_then_requires_ev_response(
+    grid, profile
+):
+    from test_ocpp21_control import transaction
+    from test_pv_economy_control import cohort
+
+    from custom_components.wallbox_manager.control.commands import CommandStatus
+
+    p, t, (c, _, peer, *_) = grid
+    clock = [0]
+    p.monotonic = lambda: clock[0]
+    setup_optimum(p, t, soc=90, pv=500, load=2000, actual=0)
+    p.setting(t).update(profile=profile, soll_soc_speicher=7)
+    p.optimum_days[t] = PVDay(
+        dt_util.as_local(datetime.now(UTC)).date().isoformat(), "BEFORE_SURPLUS"
+    )
+    await transaction(peer, connector=1, kind="Ended")
+    await p.hass.async_block_till_done()
+
+    startup_waits, regulation_waits = asyncio.Queue(), asyncio.Queue()
+    startup_release, regulation_release = asyncio.Event(), asyncio.Event()
+
+    async def startup_wait(seconds):
+        startup_waits.put_nowait(seconds)
+        await startup_release.wait()
+        startup_release.clear()
+
+    async def regulation_wait(target, seconds):
+        assert target == t
+        regulation_waits.put_nowait(seconds)
+        await regulation_release.wait()
+        regulation_release.clear()
+
+    p.wait, p.optimum_wait = startup_wait, regulation_wait
+    peer.operations.clear()
+    assert (await p.permission(t, True)).status == CommandStatus.APPLIED
+    assert await asyncio.wait_for(startup_waits.get(), 1) == 60
+    assert c.runtime.enabled(t) is True
+    assert c.blocker(t) == "transaction_unavailable"
+    assert c.confirmed_point(t) is None and not peer.requests
+    assert peer.operations == ["permission", "enabled_get"]
+    assert t not in p.economic_policies
+
+    await transaction(peer, identity="floor-start", connector=1)
+    cohort(
+        p,
+        t,
+        clock,
+        60,
+        source=datetime.now(UTC),
+        actual=0,
+        imported=1000,
+        discharge=500,
+        pv=500,
+        load=2000,
+    )
+    await p.hass.async_block_till_done()
+    startup_release.set()
+    await asyncio.wait_for(regulation_waits.get(), 1)
+    point = c.confirmed_point(t)
+    assert point.current_a == 6 and point.mode.count == 1
+    assert p.pv_ongoing[t] and t not in p.pv_startups
+    assert t not in p.enable_requests
+    assert peer.operations == ["permission", "enabled_get", "profile"]
+    assert peer.requests[-1][1]["transaction_id"] == "floor-start"
+    assert p.economic_identities[t].transaction_id == "floor-start"
+    regulator = p.optimum_regulators[t]
+    assert not regulator.response_observed  # Point confirmation is not EV response.
+    assert p.economic_policies[t].energy_ws == 0
+
+    # Fresh headroom with unchanged EV power cannot turn the ACK into an increase.
+    count = len(peer.requests)
+    cohort(
+        p,
+        t,
+        clock,
+        61,
+        source=datetime.now(UTC),
+        actual=0,
+        discharge=0,
+        pv=5000,
+        load=500,
+    )
+    await p.hass.async_block_till_done()
+    regulation_release.set()
+    await asyncio.wait_for(regulation_waits.get(), 1)
+    assert c.confirmed_point(t).same_setpoint(point)
+    assert len(peer.requests) == count and not regulator.response_observed
+
+    # A fresh measured response and the ordinary regulation interval allow a rise.
+    cohort(
+        p,
+        t,
+        clock,
+        66,
+        source=datetime.now(UTC),
+        actual=1380,
+        discharge=1000,
+        pv=5000,
+        load=1880,
+    )
+    await p.hass.async_block_till_done()
+    regulation_release.set()
+    await asyncio.wait_for(regulation_waits.get(), 1)
+    assert c.confirmed_point(t).offered_power_w > point.offered_power_w
+    assert len(peer.requests) == count + 1
+    assert not regulator.response_observed  # New offer needs its own response.
+
+    # F2: a real battery deficit still reduces the offer during response settling.
+    cohort(
+        p,
+        t,
+        clock,
+        67,
+        source=datetime.now(UTC),
+        actual=1380,
+        discharge=6000,
+        pv=5000,
+        load=1880,
+    )
+    await p.hass.async_block_till_done()
+    regulation_release.set()
+    await asyncio.wait_for(regulation_waits.get(), 1)
+    assert c.confirmed_point(t).current_a == 6
+    assert len(peer.requests) == count + 2
+    assert c.minimum_exception_valid(t, c.confirmed_point(t))
+    assert c.runtime.enabled(t) is True
+
+
+@pytest.mark.parametrize("profile", ["PV_MAXIMUM", "PV_SURPLUS", "PV_OPTIMUM"])
+async def test_floor_start_uncertain_ack_cannot_become_a_new_startup(grid, profile):
+    from custom_components.wallbox_manager.control.commands import CommandStatus
+
+    await test_fast_battery_floor_start_keeps_existing_house_import_eligibility(
+        grid, profile
+    )
+    p, t, (c, _, peer, _, source, _) = grid
+    await p.permission(t, False)
+    parked, release = asyncio.Queue(), asyncio.Event()
+
+    async def wait(seconds):
+        parked.put_nowait(seconds)
+        await release.wait()
+        release.clear()
+
+    p.wait = wait
+
+    def uncertain(_):
+        source.snapshot = replace(
+            source.snapshot, revision=source.snapshot.revision + 1
+        )
+        return call_result.SetChargingProfile(status="Accepted")
+
+    peer.profile_response = uncertain
+    before = len(peer.requests)
+    assert (await p.permission(t, True)).status == CommandStatus.APPLIED
+    assert await asyncio.wait_for(parked.get(), 1) == 60
+    assert len(peer.requests) == before + 1
+    assert c.runtime.enabled(t) is True and c.confirmed_point(t) is None
+    assert t in c._unconfirmed_targets and t in p.pv_startups
+    # A real accepted write with invalid final context requires reconciliation;
+    # the still-pending explicit activation cannot pass the first-start guard.
+    assert p.pv_edit(t) is None
+    assert p.status[t] == "awaiting_physical_response"
+    assert c.confirmed_point(t) is None and len(peer.requests) == before + 1
 
 
 @pytest.mark.parametrize("improvement", [100, 500])

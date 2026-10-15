@@ -644,7 +644,9 @@ class ControlRuntime:
                 self._inactive.add(target)
             self._edited.setdefault(target, set()).update(changes)
         if enabled is not None:
-            return await self.request_enabled(target, enabled)
+            result = await self.request_enabled(target, enabled)
+            if not enabled or not changes or result.status != CommandStatus.APPLIED:
+                return result
         return await self.apply_stored(target)
 
     def profile_permitted(self, target):
@@ -677,6 +679,22 @@ class ControlRuntime:
                 CommandReason.NO_AUTHORITY,
                 "inactive_wallbox",
             )
+        # A repeated ON uses the current Actual observation and permission
+        # capability only; it must not invalidate a regulator's pending point.
+        state = self.runtime.get(target.station)
+        adapter = self.adapter(target)
+        if (
+            enabled
+            and not self._closed
+            and state is not None
+            and state.connected
+            and self.runtime.authority(target.station) == ControlAuthority.REMOTE
+            and self.runtime.enabled(target) is True
+            and adapter is not None
+            and permission_available(adapter)
+            and fence()
+        ):
+            return CommandResult(CommandStatus.APPLIED, ControlArea.CHARGING_PERMISSION)
         intent = self.intent(target)
         if not enabled:
             self._inactive.add(target)
@@ -710,51 +728,7 @@ class ControlRuntime:
             intent.status = result.status.value
             self.publish(target)
             return result
-        prepared = {}
-        if enabled:
-            self._inactive.add(target)
-            observation = self.runtime.enabled_observation(target)
-            result = await self.apply_stored(
-                target, prepare=True, prepared=prepared, fence=fence
-            )
-            if result is None or result.status != CommandStatus.APPLIED:
-                return result
-            if (
-                intent.generation != generation
-                or self.runtime.enabled(target) is not observation.enabled
-                or self.runtime.enabled_observation(target).revision
-                != observation.revision
-            ):
-                return stale_command_result()
-        # Preparing the point and confirming ON are one regulation decision.
-        # Keep its existing pending slot through permission I/O so sensor events
-        # cannot cancel it between these two confirmed control operations.
-        pending = self._confirmed_points.get(target, (None,))[0]
-        if enabled:
-            self.pending_points[target] = pending
-        try:
-            result = await self._permission(
-                target,
-                intent,
-                generation,
-                enabled,
-                fence=prepared.get("fence", fence),
-            )
-        finally:
-            if enabled and self.pending_points.get(target) is pending:
-                self.pending_points.pop(target, None)
-        if enabled and generation == intent.generation:
-            record = self._confirmed_points.get(target)
-            if result.status == CommandStatus.APPLIED and record:
-                # The separately confirmed ON advances the permission revision.
-                self._confirmed_points[target] = (
-                    *record[:3],
-                    self.runtime.enabled_observation(target).revision,
-                )
-            else:
-                self._confirmed_points.pop(target, None)
-            self.publish(target)
-        return result
+        return await self._permission(target, intent, generation, enabled, fence=fence)
 
     @diagnostic_recovery
     async def reconcile_applied(self, target, *, fence):

@@ -729,10 +729,23 @@ class PVOptimum:
             if advance:
                 self.pv_stop_since.pop(target, None)
             return None
-        if confirmed is None and self.control.runtime.enabled(target) is True:
+        starting = (
+            self.optimum_fast(target)
+            and target in self.enable_requests
+            and target not in self.economic_activation_pending
+            and target not in self.control._unconfirmed_targets
+        )
+        if (
+            confirmed is None
+            and self.control.runtime.enabled(target) is True
+            and not starting
+        ):
             # Live permission without positive confirmation is uncertainty,
             # not proof that an economic OFF or a floor restart is appropriate.
             return power, Direction.DOWN, "awaiting_physical_response", None
+        # An authorized FAST startup prepares its first point after permission.
+        # It still needs the exact floor, response reserve and economic restart
+        # proof; an uncertain previous write cannot use this startup path.
         if minimum is None or minimum.point is None:
             if minimum is not None and minimum.reason == Reason.ELECTRICAL_LIMIT:
                 return 0, Direction.DOWN, "optimum_no_positive_point", result

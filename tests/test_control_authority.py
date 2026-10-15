@@ -346,13 +346,14 @@ async def test_local_event_fences_commands_waiting_for_transport(authority, oper
     )
 
 
-async def test_local_loss_during_profile_prevents_enable(authority):
+async def test_local_loss_during_profile_prevents_point_confirmation(authority):
     control, bound, peer, _ = authority
     control.restore(bound.target, target_w=2300, allowed=True)
     peer.enabled = True
     await control.take_control(bound.target.station)
+    await control.request_enabled(bound.target, True)
     peer.release.clear()
-    pending = asyncio.create_task(control.request_enabled(bound.target, True))
+    pending = asyncio.create_task(control.apply_stored(bound.target))
     await asyncio.wait_for(peer.received.wait(), 1)
     live = bound.adapter
     live.runtime.observe_authority(
@@ -366,6 +367,8 @@ async def test_local_loss_during_profile_prevents_enable(authority):
     assert peer.operations == [
         "authority_set",
         "authority_get",
+        "enabled_get",
+        "permission",
         "enabled_get",
         "permission",
         "enabled_get",
@@ -418,5 +421,6 @@ async def test_invalid_or_zero_phase_voltage_preserves_valid_one_phase(
     await control.take_control(bound.target.station)
     assert control.runtime.enabled(bound.target) is False
     await control.request_enabled(bound.target, True)
+    await control.apply_stored(bound.target)
     point = control.intent(bound.target).solver_result.point
     assert point.mode.count == 1 and point.current_a == 10

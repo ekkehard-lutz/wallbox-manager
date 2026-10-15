@@ -408,14 +408,16 @@ async def test_enable_with_retained_positive_never_prepares_zero(grid):
     assert c.runtime.enabled(t) is True
 
 
-async def test_no_initial_decision_does_not_zero_retained_station_profile(grid):
+async def test_missing_critical_input_uses_protective_zero_after_permission(grid):
     p, t, (c, _, peer, *_), _ = configure(grid)
     await p.permission(t, True)
     await p.permission(t, False)
     p.hass.states.async_remove("sensor.pv")
     before = len(peer.requests)
-    assert (await p.permission(t, True)).status == CommandStatus.TEMPORARILY_REJECTED
-    assert len(peer.requests) == before and c.runtime.enabled(t) is False
+    assert (await p.permission(t, True)).status == CommandStatus.APPLIED
+    assert len(peer.requests) == before + 1 and c.runtime.enabled(t) is True
+    assert period(peer.requests[-1])["limit"] == 0
+    assert peer.operations.index("permission") < peer.operations.index("profile")
 
 
 @pytest.mark.parametrize(
@@ -663,26 +665,21 @@ async def test_missing_voltage_during_zero_budget_is_no_decision(grid):
     assert c.confirmed_point(t).charging and len(peer.requests) == before
 
 
-async def test_no_decision_startup_retry_prepares_positive_after_inputs_recover(grid):
+async def test_critical_input_recovers_after_permission_and_protective_zero(grid):
     p, t, (c, _, peer, *_), clock = configure(grid)
     p.hass.states.async_remove("sensor.pv")
-    gate, parked = asyncio.Event(), asyncio.Event()
-
-    async def wait(_):
-        parked.set()
-        await gate.wait()
-
-    p.wait = wait
-    await p.permission(t, True)
-    task = p.tasks[t]
-    await asyncio.wait_for(parked.wait(), 2)
-    assert not peer.requests
-    samples(p, t)
+    assert (await p.permission(t, True)).status == CommandStatus.APPLIED
+    assert c.runtime.enabled(t) is True and not c.confirmed_point(t).charging
+    assert period(peer.requests[-1])["limit"] == 0
+    # Fresh post-zero EV/site evidence is still required before a positive point.
     clock[0] = 60
-    gate.set()
-    await asyncio.wait_for(task, 2)
-    assert c.runtime.enabled(t) is True and c.confirmed_point(t).charging
-    assert all(period(r)["limit"] > 0 for r in peer.requests)
+    measurements(p, t, pv=4000, load=500, actual=0, soc=90)
+    assert (await evaluate(p, t)).status == CommandStatus.APPLIED
+    assert not c.confirmed_point(t).charging  # First valid cohort anchors response.
+    clock[0] = 61
+    measurements(p, t, pv=4000, load=500, actual=0, soc=90)
+    assert (await evaluate(p, t)).status == CommandStatus.APPLIED
+    assert c.confirmed_point(t).charging
 
 
 async def test_loop_phase_probes_are_bounded_and_same_phase_busy_still_backs_off(grid):

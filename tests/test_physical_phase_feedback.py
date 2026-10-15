@@ -140,6 +140,7 @@ async def test_inactive_relay_does_not_retain(reference):
     assert control.intent(bound.target).request.target_w == 4000
     measured(bound.adapter.runtime, bound.adapter.token, bound.target)
     await control.change(bound.target, allowed=True)
+    await control.apply_stored(bound.target)  # Separate regulation operation.
     assert control.intent(bound.target).solver_result.point.mode.count == 1
 
 
@@ -206,4 +207,8 @@ async def test_zero_target_does_not_send_positive_profile(reference):
     await physical_report(peer, "Rxx")
     await control.change(bound.target, allowed=True, target_w=0)
     assert control.intent(bound.target).status == "zero_current_unverified"
-    assert not peer.requests and not peer.permissions
+    assert not peer.requests
+    assert (
+        len(peer.permissions) == 1
+    )  # Missing zero capability cannot block permission.
+    assert control.runtime.enabled(bound.target) is True

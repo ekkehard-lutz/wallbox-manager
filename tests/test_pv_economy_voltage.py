@@ -182,8 +182,11 @@ async def test_disabled_exhausted_recovery_resumes_on_verified_model_improvement
     p.launch = type(p).launch.__get__(p)
     before = len(peer.requests)
     result = await p.permission(t, True, _resume=True)
-    assert result.status == CommandStatus.TEMPORARILY_REJECTED
-    assert t in p.economic_waits and p.pv_retry_until[t] == clock[0]
+    assert result.status == CommandStatus.APPLIED  # Permission is already ON.
+    assert c.runtime.enabled(t) is True
+    assert (
+        t not in p.economic_activation_pending
+    )  # Normal paused regulator now owns restart.
     await asyncio.wait_for(parked.get(), 2)
     policy = p.economic_policies[t]
     reference = policy.restart_reference
@@ -368,7 +371,7 @@ async def test_explicit_off_during_initial_checkpoint_cannot_restore_ended_scope
         assert (await p.permission(t, False)).status == CommandStatus.APPLIED
         assert t not in p.economic_policies
         release.set()
-        assert await asyncio.wait_for(pending, 2) is None
+        assert (await asyncio.wait_for(pending, 2)).status == CommandStatus.APPLIED
         assert t not in p.economic_policies
         assert t not in p.economic_identities
         assert p.economic_store.identity_for_target(t) is None

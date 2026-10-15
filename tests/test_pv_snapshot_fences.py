@@ -278,11 +278,12 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
     assert c.runtime.get(t.station).connected and p.can_control(t)
     import custom_components.wallbox_manager.control.runtime as module
 
-    prepared = asyncio.Event()
+    prepared, dispatch_release = asyncio.Event(), asyncio.Event()
     real_apply = module.apply_operating_point
 
     async def apply(*args, **kwargs):
         prepared.set()
+        await dispatch_release.wait()
         return await real_apply(*args, **kwargs)
 
     monkeypatch.setattr(module, "apply_operating_point", apply)
@@ -290,7 +291,7 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
     launch = p.launch
     monkeypatch.setattr(p, "launch", lambda _: None)
     count = len(peer.requests)
-    async with bound.adapter._call_lock:
+    try:
         pending = asyncio.create_task(p.permission(t, True))
         await asyncio.wait_for(prepared.wait(), 1)
         point = c.pending_points[t]
@@ -308,9 +309,12 @@ async def test_startup_snapshot_survives_safe_measurement_before_dispatch(
             measurements(p, t, pv=2630, load=230, actual=0, soc=96.5)
         else:
             voltage(c, t, 229)
+    finally:
+        dispatch_release.set()
     result = await pending
     if change in ("pv_down", "load_up"):
-        assert result.status == CommandStatus.TEMPORARILY_REJECTED
+        assert result.status == CommandStatus.APPLIED  # Permission already confirmed.
+        assert c.intent(t).command_result.status == CommandStatus.TEMPORARILY_REJECTED
         assert c.intent(t).fence_reason == "pre_dispatch_pv_policy"
         assert len(peer.requests) == count
         return
@@ -381,17 +385,18 @@ async def test_startup_live_fences_reject_before_wire_dispatch(
     measurements(p, t, pv=2630, load=0, actual=0, soc=96)
     import custom_components.wallbox_manager.control.runtime as module
 
-    prepared = asyncio.Event()
+    prepared, dispatch_release = asyncio.Event(), asyncio.Event()
     real_apply = module.apply_operating_point
 
     async def apply(*args, **kwargs):
         prepared.set()
+        await dispatch_release.wait()
         return await real_apply(*args, **kwargs)
 
     monkeypatch.setattr(module, "apply_operating_point", apply)
     count = len(peer.requests)
     followup = None
-    async with bound.adapter._call_lock:
+    try:
         pending = asyncio.create_task(p.permission(t, True))
         await asyncio.wait_for(prepared.wait(), 1)
         point = c.pending_points[t]
@@ -428,12 +433,17 @@ async def test_startup_live_fences_reject_before_wire_dispatch(
                 "inputs",
                 lambda target: replace(inputs(target), transaction_id="new"),
             )
+    finally:
+        dispatch_release.set()
     result = await pending
     if followup:
         await followup
-    assert result.status != CommandStatus.APPLIED
+    assert result.status == CommandStatus.APPLIED  # Permission preceded this point.
     assert c.confirmed_point(t) is None
-    assert c.runtime.enabled(t) is not True
+    if change in ("off", "profile"):
+        assert c.runtime.enabled(t) is False
+    elif change != "connection":
+        assert c.runtime.enabled(t) is True
     assert len(peer.requests) == count
 
 
