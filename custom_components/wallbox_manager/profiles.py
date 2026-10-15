@@ -1117,6 +1117,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
     def sessions_changed(self):
         self.economic_sessions_changed()
         for target in tuple(self.control.intents):
+            self.economic_wake_startup(target)
             if self.common_pv(target):
                 self.optimum_connection(target)
             session = self.control.runtime.sessions.get(target)

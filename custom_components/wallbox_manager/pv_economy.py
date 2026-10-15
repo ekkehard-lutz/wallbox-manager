@@ -184,6 +184,11 @@ class EconomicSnapshot:
     state: EconomicState
     coverage_reason: str | None
     restart_reference: RestartReference | None
+    observed_active: bool
+
+    @property
+    def accounting_active(self):
+        return self.active or self.observed_active
 
     @property
     def exhausted(self):
@@ -253,6 +258,9 @@ class GridImportPolicy:
         self.restart_reference = restart_reference
         self.energy_ws = energy_ws
         self.active = active
+        # Live observational exposure is neither command confirmation nor
+        # restart approval, and is never restored from storage.
+        self.observed_active = False
         self.off_pending = off_pending
         self.off_in_flight = off_in_flight
         self.paused = paused
@@ -260,7 +268,7 @@ class GridImportPolicy:
         self.pause_reason = ECONOMIC_REASON if energy_ws >= LIMIT_WS else pause_reason
         self._anchor = None
         self._anchor_threshold = None
-        self._anchor_active = active
+        self._anchor_active = self.accounting_active
         self._threshold = None
         self._below_seconds = Fraction(0)
         self._events = []
@@ -268,6 +276,10 @@ class GridImportPolicy:
         self._source_high_water = None
         self._acceptance_high_water = None
         self.coverage_reason = "no_measurement_anchor"
+
+    @property
+    def accounting_active(self):
+        return self.active or self.observed_active
 
     @property
     def exhausted(self):
@@ -306,7 +318,11 @@ class GridImportPolicy:
         if self._anchor is None:
             return EconomicState.SUSPENDED_UNKNOWN
         if self._anchor.import_w > self._threshold:
-            return EconomicState.EXCEEDING if self.active else EconomicState.CLEAR
+            return (
+                EconomicState.EXCEEDING
+                if self.accounting_active
+                else EconomicState.CLEAR
+            )
         if self.energy_ws:
             return EconomicState.BELOW_RESET_PENDING
         return EconomicState.CLEAR
@@ -327,13 +343,14 @@ class GridImportPolicy:
             self.state,
             self.coverage_reason,
             self.restart_reference,
+            self.observed_active,
         )
 
     def invalidate(self, reason="unsupported_interval"):
         """Discard an unclosed tail at an input/authorization uncertainty boundary."""
         self._anchor = None
         self._anchor_threshold = None
-        self._anchor_active = self.active
+        self._anchor_active = self.accounting_active
         self._events.clear()
         self._below_seconds = Fraction(0)
         self.coverage_reason = reason
@@ -362,11 +379,20 @@ class GridImportPolicy:
         if type(active) is not bool:
             raise ValueError("invalid accounting applicability")
         if active != self.active:
-            self._event(_Event(_fraction(at), active=active))
+            self._event(_Event(_fraction(at), active=active or self.observed_active))
             self.active = active
         if active and self.paused:
             # Physical positive readback is not an authorized restart ACK.
             self.paused = False
+        return self.snapshot
+
+    def observe_active(self, active, *, at):
+        """Count proved physical exposure without modifying command/STOP history."""
+        if type(active) is not bool:
+            raise ValueError("invalid observational activity")
+        if active != self.observed_active:
+            self._event(_Event(_fraction(at), active=active or self.active))
+            self.observed_active = active
         return self.snapshot
 
     def mark_off_pending(self):
@@ -394,6 +420,7 @@ class GridImportPolicy:
         return self.snapshot
 
     def confirm_off(self, *, at):
+        self.observe_active(False, at=at)
         self.set_active(False, at=at)
         self.off_pending = False
         self.off_in_flight = False
@@ -508,12 +535,15 @@ class GridImportPolicy:
         self._anchor = sample
         self._threshold = threshold_w
         self._anchor_threshold = threshold_w
-        self._anchor_active = self.active
+        self._anchor_active = self.accounting_active
         self._events.clear()
         self.coverage_reason = None
         if sample.import_w > threshold_w:
             self._below_seconds = Fraction(0)
         return self.snapshot
+
+    def has_meter_generation(self, generation):
+        return generation in self._generations
 
     def clear_scope(self):
         """End an explicit PV attempt/terminated external transaction completely."""

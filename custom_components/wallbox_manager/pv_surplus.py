@@ -1030,6 +1030,8 @@ class PVSurplus:
         self.pv_retry_until[target] = self.monotonic() + (
             0 if target in self.economic_waits else 60
         )
+        if target in self.economic_activation_pending:
+            self.optimum_wakes.setdefault(target, asyncio.Event()).clear()
         self.status[target] = "awaiting_applied"
         self.tasks[target] = self.hass.async_create_background_task(
             self.pv_startup_sequence(target, epoch), "PV startup reconciliation"
@@ -1042,6 +1044,11 @@ class PVSurplus:
                     self.optimum_wakes.setdefault(target, asyncio.Event()).clear()
                     await self.optimum_wait(
                         target, self.setting(target)["regulation_interval"]
+                    )
+                elif target in self.economic_activation_pending:
+                    await self.economic_startup_wait(
+                        target,
+                        max(0, self.pv_retry_until[target] - self.monotonic()),
                     )
                 else:
                     await self.wait(
