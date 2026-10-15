@@ -408,6 +408,7 @@ class ControlRuntime:
             and hasattr(self, "profiles")
             and self.profiles.common_pv(target)
         ):
+            fresh_floor = None
             if intent.hard_max_w is not None:
                 economic_max = intent.hard_max_w
                 witness = _minimum_witness or intent.minimum_exception
@@ -430,6 +431,30 @@ class ControlRuntime:
                     if hard_max_w is None
                     else min(hard_max_w, economic_max)
                 )
+            if (
+                self.profiles.optimum_fast(target)
+                and (regulator := self.profiles.optimum_regulators.get(target))
+                and (confirmed := self.confirmed_point(target))
+                and confirmed.charging
+            ):
+                # Compare executable offers on one live voltage basis. A lower
+                # old soft request can otherwise rebound above a new fallback,
+                # and measured EV watts need not equal nominal offered watts.
+                volts = inputs.voltage.active_voltages(
+                    confirmed.mode, datetime.now(UTC)
+                )
+                maximum = regulator.executable_max(
+                    confirmed.current_a * sum(volts) if volts else Fraction(0),
+                    energy_desired=energy_desired,
+                )
+                if maximum is not None:
+                    # Only the independently revalidated exact floor may exceed
+                    # an ordinary economic/feedback bound; never a higher point.
+                    if fresh_floor is not None:
+                        maximum = max(maximum, fresh_floor.offered_power_w)
+                    hard_max_w = (
+                        maximum if hard_max_w is None else min(hard_max_w, maximum)
+                    )
         if (
             request.target_w == 0
             and caps.stop.state != EvidenceState.VERIFIED

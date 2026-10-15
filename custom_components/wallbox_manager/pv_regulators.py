@@ -112,6 +112,8 @@ class FastDischargeRegulator:
     restart_blocked: bool = False
     response_observed: bool = False
     phase_change_pending: bool = False
+    increase_authorized: bool = False
+    economic_deficit: Fraction = Fraction(0)
 
     def dispatched(self, point):
         """Freeze physical evidence before the wire write, separately from ACK."""
@@ -153,6 +155,7 @@ class FastDischargeRegulator:
             self.command_delta = self.dispatch_delta if dispatched else None
             self.command_offered = point.offered_power_w if point is not None else None
             self.response_observed = False
+            self.increase_authorized = False
             if point is not None and not point.charging:
                 self.requested = Fraction(0)
         if key == self.dispatch_key:
@@ -211,6 +214,29 @@ class FastDischargeRegulator:
             and not self.response_observed
             and now - self.command_since < SETTLING_SECONDS
         )
+
+    def executable_max(self, offered, *, energy_desired=False):
+        """Bound FAST execution relative to the confirmed, freshly priced offer.
+
+        A retained soft preference is still useful for desired-phase planning,
+        but only the ordinary source/response gates can authorize its increase
+        over a changed confirmed point. Measured allocation excess must reduce
+        the offer even when nominal watts already fit the economic ceiling.
+        Each correction uses post-command evidence, never an assumed A-to-W
+        vehicle response or a repeated subtraction from the old soft target.
+        """
+        maximum = None if energy_desired or self.increase_authorized else offered
+        if (
+            self.economic_deficit > 0
+            and self.evidence is not None
+            and self.command_evidence is not None
+            and all(
+                a > b
+                for a, b in zip(self.evidence.times, self.command_evidence, strict=True)
+            )
+        ):
+            maximum = max(Fraction(0), offered - self.economic_deficit)
+        return maximum
 
     def update_budget(self, wallbox, discharge, limit, imported, exported, evidence):
         """Same economic-budget evidence tracking for FAST and BALANCE."""
@@ -271,6 +297,11 @@ class FastDischargeRegulator:
         if min(wallbox, discharge, limit, imported, exported) < 0:
             raise ValueError("negative power measurement")
         self.update_budget(wallbox, discharge, limit, imported, exported, evidence)
+        self.economic_deficit = (
+            max(Fraction(0), wallbox - self.hard_max)
+            if discharge > limit
+            else Fraction(0)
+        )
         generation = evidence.times
         observed = self.observe_response(wallbox, confirmed, now=now, step=step)
         offered = confirmed.offered_power_w if confirmed is not None else wallbox
@@ -319,6 +350,7 @@ class FastDischargeRegulator:
                 # Do not accumulate that same headroom across stable EV samples.
                 requested = wallbox + max(0, self.hard_max - wallbox) / 2
                 self.reason = "new_evidence_increase"
+                self.increase_authorized = True
             else:
                 # A timeout permits deficit correction, not speculative rises
                 # while the EV has still not followed the accepted setpoint.

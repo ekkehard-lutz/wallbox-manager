@@ -110,6 +110,9 @@ async def oscillation_start(grid):
     c.intent(t).current_limits[1] = 20
     clock[0] = 30
     samples(p, t, actual=3970, discharge=2800, pv=2000, load=4470)
+    # Qualify the genuine floor response and ordinary upward interval before
+    # isolating voltage quantization with the historical soft preference.
+    p.pv_request(t)
     # Restore the historical soft request held during the real six-voltage run.
     p.optimum_regulators[t].requested = SOFT
     p.optimum_regulators[t].updated_at = clock[0]
