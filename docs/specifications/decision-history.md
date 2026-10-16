@@ -157,3 +157,15 @@ With explicit OFF, operational OCPP, independent fresh confirmation of physical 
 
 **Scope:** Documentation only. No code, version, release, merge, deployment or wallbox firmware changes.
 
+## 16 October 2026 – Remove 10-second metering gap rule and separate profile availability [APPROVED]
+
+**Source:** Explicit later user decision of 16 October 2026. The previously approved **10-second source/acceptance report-gap rule is removed** because sensor inputs are assumed to reliably announce value changes: 30 seconds or longer without a message means **unchanged**, not unavailable. The user also confirmed that dependent PV profiles require their relevant Fronius/smart-meter/BYD inputs, while **NETZ remains independently possible** with a working wallbox connection. Normative requirements: revised [PV-ECO-05](pv-regulation.md#pv-eco-05--last-value-held-validity-and-causality-approved-revised-16-october-2026), clarified [PV-ARCH-03](pv-regulation.md#pv-arch-03--profiles-with-battery-and-forecast-approved).
+
+**Supersession:** The old distinct-report-at-most-10s source/acceptance rule and the earlier 16 October open compatibility question are now **HISTORICAL / SUPERSEDED**. The earlier 15 October Q1 reference is preserved as history, not an active parallel requirement. Valid unsmoothed grid-import values are held and used on successive ticks for the approximate nominal 50 Wh budget and strictly >15 s supported reset, even when unchanged for 30 s or longer. No fictitious fresh measurement is asserted and no event-triggered second PV regulator is introduced.
+
+**Real failure/unknown:** HA may mark values `unknown` or `unavailable` because of device, Modbus, network or integration issues, not only permanent hardware failure. During **known** invalid values and WBM/HA downtime, do not invent measurement values, backfill energy or reset budget; retain transaction/authority-bound provenance and economic recovery constraints. This availability rule concerns ordinary metering, not proof of commanded physical transitions or verified control permission/authority.
+
+**Profile independence:** Unavailable mandatory measurements prevent the **dependent PV profile** from making new PV control decisions. A battery failure does not in itself prohibit separately configured battery-free PV_SURPLUS when grid import/export and EV input remain available. **NETZ does not require Fronius/BYD HA sensor values** but still requires applicable OCPP connection, permission, authority, verified capabilities and explicit profile selection. No implicit PV-to-NETZ fallback or newly invented emergency permission-OFF is authorized.
+
+**Status:** Documentation decision only; no implementation, tests, version, release, deploy or wallbox firmware changes. Reliable change-report semantics are an explicit project assumption to be verified for the installed sources.
+
