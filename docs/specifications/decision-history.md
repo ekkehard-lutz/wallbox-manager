@@ -169,3 +169,15 @@ With explicit OFF, operational OCPP, independent fresh confirmation of physical 
 
 **Status:** Documentation decision only; no implementation, tests, version, release, deploy or wallbox firmware changes. Reliable change-report semantics are an explicit project assumption to be verified for the installed sources.
 
+## 16 October 2026 – Wallbox status through CP pause and full reconnect bootstrap [APPROVED]
+
+**Source:** Subsequent explicit user decision of 16 October 2026, recorded as individually approved requirements [PV-OCPP-05](pv-regulation.md#pv-ocpp-05--retain-wallbox-reported-connection-and-charging-status-during-cp-pause-approved-16-october-2026) and [PV-OCPP-06](pv-regulation.md#pv-ocpp-06--initial-synchronization-of-all-supported-state-on-every-ocpp-reconnect-approved-16-october-2026).
+
+**CP pause/reporting:** The WBM uses the **most recent wallbox-reported connector and charging status** instead of layering a CP observability timeout/revalidation algorithm over it. During a CP-blocked pause, an unplugged car may continue to appear connected until the station's existing nominal **3600 s / 2 s** CP probe detects disconnection and sends a new OCPP report. This delay is explicitly accepted. The prior PV-OCPP-04 case-C grey/stale display requirement is **superseded**, while station-owned physical CP safety, verified command responses, transaction and authority rules are unchanged.
+
+**New connection baseline:** After `wallbox-stationary` restart, wallbox reboot, OCPP reconnect or HA/WBM reload/restart, a **complete new-generation initial snapshot** of supported known measurements and states must be transmitted/read, **even if values are not changing** (including L2/L3 continuously at 0 A). A new connection cannot silently inherit old current values from the former session. Prefer station-initiated immediate OCPP reports plus supported explicit readback, with unknown/unsupported fields marked accordingly. During CP block the station may only know its own last reported connector status; this is a reported state, not newly confirmed physical sensing. Existing transaction, authority, phase and applied-point confirmations still gate relevant commands.
+
+**Current interface gap:** `wallbox-stationary/main` at [`2baf0daa`](https://github.com/ekkehard-lutz/wallbox-stationary/blob/2baf0daa8c446dad7570e5daa5f0f1cba486e915/ocpp_runtime/station.py) resets and sends connector status after registration but delays its first meter report and can skip physical-status refresh under CP block. A complete immediate replay is **not proven** for all desired fields and needs separately approved interface work or supported readback. OCPP reconnect is not by itself a guarantee of full telemetry replay.
+
+**Supersession and scope:** Later CP-display requirements replace the conflicting 15 October stale/grey status interpretation only; no implicit Local-to-Remote takeover, unsafe positive restart, invented transaction, economic STOP reset or physical phase/current proof. Documentation only; no implementation, release, merge or deployment.
+
