@@ -229,9 +229,13 @@ Wallbox power should increase only in a controlled manner, but **decrease prompt
 
 Evidence: PDF pp. 209–246, 401–426, 529–535, 540–545; hardware test `pv6` current at the original reconciliation.
 
-### PV-BAL-03 – Freshness and smoothing [APPROVED EXISTING PARAMETERS; no new introduction]
+### PV-BAL-03 – Freshness and smoothing [APPROVED; revised 16 October 2026]
 
-Regulation interval (e.g. 5 s) and averaging window (current default 5 s) are **separate** settings. According to existing documentation, averaging applies only to **PV power and total consumer power**, rather than SoC, electrical safety, voltage or measured EV power. A 5 s cycle does not prove new physically synchronous Fronius/EV data. Additional smoothing must not improperly conceal a dangerous load step and must be assessed against existing measurement-generation/response policy.
+**Revised requirement (16 October 2026):** The **regulation interval** remains independently configurable **in seconds** (for example 5 s). Replace the previous smoothing **time window in seconds** with **"Power smoothing – number of regulation cycles"**, an integer N >= 1. On each PV regulation tick, sample the current valid PV and household/consumer power once and calculate their rolling mean across at most the most recent N tick samples. **N=1 means no smoothing**; **N=3 with a 5 s tick** corresponds to three samples over approximately 15 s. N remains the same if the user changes the regulation interval. Do not smooth SoC, EV response, grid-import economic evidence, voltage or safety/physical proof; averaging must not hide prompt necessary downward adjustment. A cached sample reused on a tick is not a new physical measurement generation.
+
+**Migration:** The existing option `power_smoothing_window` currently stores **seconds**, with 0=off and a default of 5 s. A stored 5 s value must **not** be interpreted as five regulation ticks (25 s at T=5 s). The implementation must migrate the units using a versioned option or new key, preserving comparable effective behavior wherever possible. With the revised count semantics N=1 replaces legacy 0=off. Any change of the factory default requires a separate explicit decision.
+
+**Historical rule superseded:** The earlier seconds-based time-weighted window was approved as an existing parameter; it is deliberately superseded here. The existing PV-only and household-only smoothing scope and the separate configurable regulation interval are retained.
 
 Evidence: PDF pp. 31–40, 209–246, 529–535; `README.md` (Regulation parameters).
 
@@ -471,7 +475,7 @@ Unified economic STOP for **PV_MAXIMUM, PV_OPTIMUM, PV_SURPLUS with battery and 
 
 ### PV-ECO-03 – Exactly which energy counts [APPROVED]
 
-When **actual measured positive grid-import power `P_import > T_import`**, the **entire** grid-import power over the supported duration counts towards the budget, rather than just the portion above T_import. For `P_import <= T_import`, do not integrate; already accumulated energy initially remains. Budget exhaustion at **50 Wh** triggers the economic OFF request. The 50 Wh value is a **command-trigger threshold**, rather than a guaranteed physical ceiling on subsequent grid import (measurement and OCPP latency).
+When **actual measured positive grid-import power `P_import > T_import`**, the **entire** grid-import power over the supported duration counts towards the budget, rather than just the portion above T_import. For `P_import <= T_import`, do not integrate; already accumulated energy initially remains. Budget exhaustion at the **nominal 50 Wh** threshold triggers the economic OFF request. It is a **command-trigger threshold**, not a guaranteed physical energy ceiling. Later **PV-ECO-09** approves approximate rather than exact Wh detection, without intentionally increasing the nominal budget.
 
 ### PV-ECO-04 – Reset / dynamic interval [APPROVED]
 
@@ -514,6 +518,18 @@ Evidence for PV-ECO-01 through -08: PDF pp. 539–545, 566–583, 595–600, 605
 
 ---
 
+### PV-ECO-09 – Approximate 50 Wh economic intervention, not exact metering [APPROVED; 16 October 2026]
+
+The **nominal 50 Wh** total measured grid-import threshold above the applicable `M/2` comparison stays in force as an **economic OFF-command trigger**. Product behavior does **not** require exact rational arithmetic, bit-exact Watt-second accounting or sub-cycle reconstruction. A computationally simple estimate from the latest **valid, unsmoothed grid-import power** and control-loop time is acceptable, for example `estimated_wh += grid_import_w * elapsed_seconds / 3600` on eligible cycles. Start the guarded OFF command process **on the first cycle that detects the nominal threshold**, rather than delaying deliberately or substituting a new 100 Wh setting. Physical energy may in practice have reached **60, 80 or 100 Wh** due to measurement, cycle, command or station delays; no hard maximum or precise physical 50 Wh guarantee is asserted. Preserve observability of the estimated amount and the requested, accepted and physically confirmed stop.
+
+**Scope of supersession:** This changes the **required arithmetic precision** and accepts delayed real-world detection; it does not abolish the actual charging/transaction/authority scope, the strict **>15 s** supported reset condition, the actual `M/2` comparison, recorded STOP/provenance, persistence, model-based restart inhibition, source availability or OCPP safety/readback gates. The earlier statement in PV-ECO-05 that the existing implementation uses **exact watt-seconds** remains a historical implementation detail, not a future product requirement.
+
+**OPEN integration detail:** PV-ECO-05 still requires distinct source evidence and <=10 s source and acceptance gaps. Accepting approximate Wh **does not by itself supersede that validity contract**. Last-value-held, change-only HA reporting may conflict with this rule even when the source reliably reports actual changes. Resolve that question explicitly before coding; do not silently reinterpret a cached value as a newly received physical report, account across unknown/downtime gaps or remove this previously approved requirement without a separate decision.
+
+Source: [16 October 2026 user decision](decision-history.md#16-october-2026--smoothing-units-and-approximate-50-wh-trigger-approved).
+
+---
+
 ## 8. Technical validation, diagnostics and quality contract
 
 ### PV-QA-01 – Do not confuse diagnostics with effectiveness [APPROVED]
@@ -540,6 +556,8 @@ Evidence: PDF pp. 99–119, 235–252, 529–535; `docs/pv-surplus-profile.md`, 
 12. No automatic Local→Remote takeover, no unauthorized commands, authority takes status priority.
 13. PV-OCPP-04 acceptance matrix: permission without transaction/preparation; retained legal current; normal live vehicle-absent standby; CP-blocked/probe/disconnection evidence; all restart/reconnect cases; explicit OFF, transaction-scoped persistence and unresolved interface limitations. Keep command request, ACK, confirmed state, physical observation and dashboard presentation separate in verification.
 14. PV-ARCH-05/06/08: replay repeated/equal and rapidly changing OCPP and HA measurements with WBM observing only or without authority; no background PV regulation, redundant OCPP targets or expensive all-entity reactions. Compare HA Core CPU WBM enabled/disabled and record profiler evidence, not an invented numeric threshold.
+17. PV-BAL-03: validate tick-count smoothing N=1 and N=3, independence from interval setting, limited input scope, stale input handling and safe migration of the existing seconds-based setting without a 5 s → 5 ticks reinterpretation.
+18. PV-ECO-09: estimate Wh from valid raw grid-import power and cycle timing; request OFF when the 50 Wh nominal threshold is first detected, allow unavoidable later physical realization, preserve >15 s reset, provenance and restart gates; flag rather than silently remove any incompatibility with PV-ECO-05 source continuity.
 15. PV-ARCH-06: while PV control is active, apply multiple input updates and an unplugging event within one interval; verify exactly one per-tick PV decision, latest consistent snapshot, correct configurable smoothing, deduplicated commands, and preserved FAST/BALANCE asymmetry, SoC/economic decisions and phase-switch lockout.
 16. PV-ARCH-07: inject authority revocation, OCPP disconnect, critical fault and late ACKs between ticks; verify prompt executor invalidation, per-dispatch live safety fences and independent physical feedback. Verify reconnect/readback without fabricated measurement generations, fictitious 50 Wh accounting or accidental restart.
 
@@ -635,4 +653,4 @@ The **intent** is binding, rather than an unsupported fixed number: fast economi
 
 - Explicit user-approved documentation task of 15 October 2026: general charging permission, retained legal startup current, physical CP observability and restart recovery; recorded in [decision-history.md](decision-history.md#15-october-2026--charging-permission-connection-readiness-and-recovery-approved). No new PDF page numbers are assigned to this later decision. Subsequent explicit approvals on the same date resolve Q1 prospective accounting, Q2 accepted unattributed-flow uncertainty and Q3 evidence-based OFF display; recorded separately in the [Q1–Q3 decision entry](decision-history.md#15-october-2026--subsequent-q1-q2-and-q3-decisions-approved). The 16 October architecture approval for event-fed observations, a single PV regulation tick and immediate safety exceptions is recorded in [the later history entry](decision-history.md#16-october-2026--event-fed-inputs-and-clocked-regulation-approved). These approvals authorize documentation only, not implementation or overall V3 sign-off.
 
-**Approval note:** V3 is a repository-versioned **consolidated DRAFT**. Inclusion in GitHub is **not overall subject-matter approval** or an instruction to implement/deploy. Only explicit overall subject-matter approval makes it a normative requirements baseline. The individual PV-OCPP-04 and PV-ARCH-05–08 decisions are APPROVED; that does not approve V3 as a whole.
+**Approval note:** V3 is a repository-versioned **consolidated DRAFT**. Inclusion in GitHub is **not overall subject-matter approval** or an instruction to implement/deploy. Only explicit overall subject-matter approval makes it a normative requirements baseline. The individual PV-OCPP-04, PV-ARCH-05–08, PV-BAL-03 revision and PV-ECO-09 decisions are APPROVED; that does not approve V3 as a whole.
