@@ -181,3 +181,15 @@ With explicit OFF, operational OCPP, independent fresh confirmation of physical 
 
 **Supersession and scope:** Later CP-display requirements replace the conflicting 15 October stale/grey status interpretation only; no implicit Local-to-Remote takeover, unsafe positive restart, invented transaction, economic STOP reset or physical phase/current proof. Documentation only; no implementation, release, merge or deployment.
 
+## 16 October 2026 – WBM initiates the OCPP connection bootstrap [APPROVED]
+
+**Source:** Explicit user follow-up asking whether WBM detects connect/reconnect and deciding that WBM itself should initiate initial synchronization, including after WBM restart. This clarifies, rather than removes, the full supported-state baseline requirement of [PV-OCPP-06](pv-regulation.md#pv-ocpp-06--initial-synchronization-of-all-supported-state-on-every-ocpp-reconnect-approved-16-october-2026).
+
+**Connection ownership:** `wallbox-stationary` connects as the WebSocket/OCPP client to the WBM's configured CSMS listener. Every new accepted socket reaches `CentralSystem.on_connect()` in WBM and creates a fresh connection token; `BootNotification` establishes its own boot generation. After the boot response, WBM already initiates read-only `GetBaseReport` discovery and can extend that lifecycle with a **single, generation-scoped complete initialization coordinator**. On WBM restart the server listener is recreated and the station's own reconnect loop establishes a **new connection**, so the same bootstrap path applies. Retries depend on normal connection availability and the station's backoff/rejection behavior, not on WBM reaching out to the station's URL.
+
+**How information arrives:** WBM initiates supported requests and tracks completeness. `GetBaseReport` is capability inventory, **not meter telemetry**. For push-only states/metering, WBM must coordinate reliable initial reports from the station, using a verified supported request/trigger **only if available**, otherwise a station post-registration initial publication. The existing `wallbox-stationary` implementation does not establish a complete immediate meter/charging-state snapshot or `TriggerMessage` support. A separate station interface modification may be necessary and needs distinct authorization. This is a functional contract, not a claim of existing implementation.
+
+**Fencing:** Never treat previous OCPP connection values as current new-generation data; no duplicate bootstraps, no old-session ACK acceptance, no implicit authority takeover or economic positive restart. Each field is pending/ready/unsupported independently, and normal changed-only operation begins after its current-generation initial observation. No periodic reinitialization during normal operation; request readback only where the interface actually supports it.
+
+**Status:** Documentation change only; no WBM/station code, deployment, merge, tag or release.
+
