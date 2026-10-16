@@ -9,7 +9,7 @@ from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .core.models import ConnectorId, EvseId, StationId
-from .entity import device_info, write_state_if_changed
+from .entity import device_info
 
 
 def control_id(entry_id, target, key):
@@ -175,20 +175,20 @@ class ControlEntity(RestoreEntity):
     @callback
     def _expired(self, now):
         self._expire = None
-        write_state_if_changed(self)
+        self.async_write_ha_state()
         self._schedule_expiry()
 
     @callback
     def _session_changed(self):
-        write_state_if_changed(self)
+        self.async_write_ha_state()
 
     @callback
     def _changed(self, target):
         if target == self.target:
-            write_state_if_changed(self)
+            self.async_write_ha_state()
 
     @callback
     def _telemetry(self, snapshot):
         if snapshot.token.station == self.target.station:
             self._schedule_expiry()
-            write_state_if_changed(self)
+            self.async_write_ha_state()

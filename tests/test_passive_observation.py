@@ -6,6 +6,11 @@ from unittest.mock import Mock
 
 import pytest
 from homeassistant.core import callback
+from homeassistant.core_config import DATA_CUSTOMIZE
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_state_report_event,
+)
 from test_control_runtime import manual as manual
 from test_ha_control import controls as controls
 from test_ha_diagnostics import diagnostics as diagnostics
@@ -24,7 +29,6 @@ from custom_components.wallbox_manager.core.telemetry import (
     Observation,
     Quantity,
 )
-from custom_components.wallbox_manager.entity import write_state_if_changed
 from custom_components.wallbox_manager.runtime import Runtime
 
 
@@ -122,36 +126,87 @@ def test_runtime_keeps_new_provenance_and_rejects_duplicate_observations():
     assert published.call_args.args[0].connected is False
 
 
-async def test_repeated_control_publications_do_not_write_identical_ha_state(
-    controls, monkeypatch
-):
+async def test_repeated_control_publications_report_without_state_changes(controls):
     hass, entities, (control, bound, *_), _, _ = controls
-    writers = []
-    for entity in entities.values():
-        writer = Mock(wraps=entity.async_write_ha_state)
-        monkeypatch.setattr(entity, "async_write_ha_state", writer)
-        writers.append(writer)
+    ids = [entity.entity_id for entity in entities.values()]
+    before = {
+        entity_id: (
+            state.last_changed,
+            state.last_updated,
+            state.last_reported,
+        )
+        for entity_id in ids
+        if (state := hass.states.get(entity_id)) is not None
+    }
+    changes, reports = [], []
+
+    @callback
+    def changed(event):
+        changes.append(event)
+
+    @callback
+    def reported(event):
+        reports.append(event)
+
+    unsubscribe_changes = async_track_state_change_event(hass, ids, changed)
+    unsubscribe_reports = async_track_state_report_event(hass, ids, reported)
     for _ in range(3):
         control.publish(bound.target)
-    assert all(writer.call_count == 0 for writer in writers)
+    await hass.async_block_till_done()
+    assert not changes
+    assert len(reports) == 3 * len(ids)
+    for entity_id in ids:
+        state = hass.states.get(entity_id)
+        assert (state.last_changed, state.last_updated) == before[entity_id][:2]
+        assert state.last_reported > before[entity_id][2]
     control.restore(bound.target, target_w=4600)
-    assert (
-        hass.states.get(entities["desired_charging_power"].entity_id).state == "4600.0"
-    )
-    # Only the desired-power projection changed; other entities stay quiet.
-    assert sum(writer.call_count for writer in writers) == 1
-    for writer in writers:
-        writer.reset_mock()
+    await hass.async_block_till_done()
+    power_id = entities["desired_charging_power"].entity_id
+    assert hass.states.get(power_id).state == "4600.0"
+    assert [event.data["entity_id"] for event in changes] == [power_id]
+    changes.clear()
     control.publish(bound.target)
-    assert all(writer.call_count == 0 for writer in writers)
+    await hass.async_block_till_done()
+    assert not changes
+    unsubscribe_changes()
+    unsubscribe_reports()
+
+
+@pytest.mark.parametrize("force_update", [False, True])
+async def test_control_publications_preserve_customization_and_force_update(
+    controls, force_update
+):
+    hass, entities, (control, bound, *_), _, _ = controls
+    entity = entities["desired_charging_power"]
+    entity._attr_force_update = force_update
+    hass.data.setdefault(DATA_CUSTOMIZE, {})[entity.entity_id] = {
+        "friendly_name": "Customized power",
+        "review_attribute": "retained",
+    }
+    control.publish(bound.target)
+    await hass.async_block_till_done()
+    before = hass.states.get(entity.entity_id).last_reported
+    changes = []
+
+    @callback
+    def changed(event):
+        changes.append(event)
+
+    unsubscribe = async_track_state_change_event(hass, entity.entity_id, changed)
+    control.publish(bound.target)
+    await hass.async_block_till_done()
+    state = hass.states.get(entity.entity_id)
+    assert state.attributes["friendly_name"] == "Customized power"
+    assert state.attributes["review_attribute"] == "retained"
+    assert state.last_reported > before
+    assert bool(changes) is force_update
+    unsubscribe()
 
 
 @pytest.mark.parametrize("event", ["authority", "disconnect"])
-async def test_live_invalidation_is_immediately_presented(controls, monkeypatch, event):
+async def test_live_invalidation_is_immediately_presented(controls, event):
     hass, entities, (control, bound, *_), _, _ = controls
     entity = entities["desired_charging_power"]
-    writer = Mock(wraps=entity.async_write_ha_state)
-    monkeypatch.setattr(entity, "async_write_ha_state", writer)
     if event == "authority":
         control.runtime.observe_authority(
             bound.token,
@@ -163,7 +218,6 @@ async def test_live_invalidation_is_immediately_presented(controls, monkeypatch,
     else:
         control.runtime.disconnect(bound.token)
         reason = "disconnected"
-    assert writer.call_count > 0
     attrs = hass.states.get(entity.entity_id).attributes
     assert not attrs["execution_ready"]
     assert attrs["execution_blocked_reason"] == reason
@@ -188,7 +242,7 @@ async def test_presentation_never_resolves_and_preserves_pending_confirmed_point
         attrs = entity.extra_state_attributes
         assert attrs["applied_current_a"] == 16
         assert attrs["applied_phase_count"] == 1
-        write_state_if_changed(entity)
+        entity.async_write_ha_state()
     assert control.confirmed_point(bound.target) == confirmed
     assert peer.operations == before
     control.pending_points.pop(bound.target)
@@ -267,8 +321,8 @@ async def test_real_options_reload_replaces_input_subscription(tmp_path, monkeyp
         await hass.async_stop()
 
 
-async def test_station_projections_keep_metadata_without_rewriting_unrelated_entities(
-    diagnostics, monkeypatch
+async def test_station_projections_keep_metadata_without_unrelated_state_changes(
+    diagnostics,
 ):
     from test_ha_observations import operational
 
@@ -289,11 +343,18 @@ async def test_station_projections_keep_metadata_without_rewriting_unrelated_ent
     entities = [
         entity for platform in platforms for entity in platform.entities.values()
     ]
-    writers = {entity: Mock(wraps=entity.async_write_ha_state) for entity in entities}
-    for entity, writer in writers.items():
-        monkeypatch.setattr(entity, "async_write_ha_state", writer)
+    changes = []
+
+    @callback
+    def changed(event):
+        changes.append(event)
+
+    unsubscribe = async_track_state_change_event(
+        hass, [entity.entity_id for entity in entities], changed
+    )
     runtime.observe(token, (sample,))
-    assert all(writer.call_count == 0 for writer in writers.values())
+    await hass.async_block_till_done()
+    assert not changes
     # A new acquisition of the same number is meaningful provenance, not a no-op.
     newer = replace(
         sample,
@@ -301,14 +362,16 @@ async def test_station_projections_keep_metadata_without_rewriting_unrelated_ent
         received_at=now + timedelta(seconds=1),
     )
     runtime.observe(token, (newer,))
-    assert writers[meter].call_count == 1
-    assert sum(writer.call_count for writer in writers.values()) == 1
+    await hass.async_block_till_done()
+    assert [event.data["entity_id"] for event in changes] == [meter.entity_id]
     assert (
         hass.states.get(meter.entity_id).attributes["observed_at"]
         == newer.observed_at.isoformat()
     )
     runtime.disconnect(token)
     assert not meter.available
+    assert hass.states.get(meter.entity_id).state == "unavailable"
+    unsubscribe()
 
 
 async def test_unchanged_battery_reconciliation_does_not_publish(grid, monkeypatch):

@@ -5,7 +5,6 @@ from homeassistant.core import callback
 
 from .control.requests import Direction
 from .control_entity import ControlEntity, setup_control_entities
-from .entity import write_state_if_changed
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -100,7 +99,7 @@ class ActiveWallbox(SelectEntity):
 
     @callback
     def _changed(self):
-        write_state_if_changed(self)
+        self.async_write_ha_state()
 
     async def async_select_option(self, option):
         from homeassistant.exceptions import HomeAssistantError
