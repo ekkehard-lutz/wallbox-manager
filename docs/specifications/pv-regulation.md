@@ -2,11 +2,11 @@
 
 **Status:** DRAFT for overall subject-matter approval; **no new implementation instruction without review**
 
-**Updated:** 15 October 2026; original source reconciliation: 13 October 2026
+**Updated:** 16 October 2026; original source reconciliation: 13 October 2026
 
 **Reference:** `wallbox-manager` v0.3.2-beta.13 (release commit `aaef76d41295cf0b0255933f72b6d65448f6864a`), GitHub branch `develop` / release tag `v0.3.2-beta.13`
 
-**Work type:** Chronological source reconciliation, English documentation migration and incorporation of the individually approved PV-OCPP-04 decision; no changes to control software, HA or the wallbox.
+**Work type:** Source reconciliation, English migration and separately approved PV-OCPP-04 (15 October) and PV-ARCH-05–08 (16 October) decisions; documentation only, no control-software, HA or station change.
 
 **Primary sources:** User-supplied PDF printout *Wallbox Modbus-Abendauswertung* (619 pages, discussion of 4–12 October 2026), particularly pp. 1–19, 67–83, 92–119, 132–148, 209–246, 266–320, 401–449, 460–480, 501–528, 529–545 and 566–619; repository documents, **especially the latest** `docs/pv-grid-import-policy-design.md` from `v0.3.2-beta.13` (see source list below). PV-OCPP-04 is sourced separately to the explicit user approval of 15 October 2026, recorded in the [decision history](decision-history.md#15-october-2026--charging-permission-connection-readiness-and-recovery-approved).
 
@@ -20,7 +20,7 @@
 - **OBSERVED:** Finding from a hardware log or discussion. Without comparison against the target specification, this does not authorize a change.
 - **OPEN:** No binding threshold or proven cause exists. Do not introduce an arbitrary new rule.
 
-**Precedence in a conflict:** (1) Latest explicitly confirmed decision in the discussion → (2) its detailed, approved realization in the beta.13 design/review report → (3) older current specifications that have not been superseded → (4) older draft/implementation reports as history. This precedence governs the **target behavior contract**; actual behavior and code require separate assessment. The 15 October 2026 decision supersedes only the permission-preparation dependency specified in PV-OCPP-04; it does not reopen unrelated policies or approve the overall V3 draft.
+**Precedence in a conflict:** (1) Latest explicitly confirmed decision in the discussion → (2) its detailed, approved realization in the beta.13 design/review report → (3) older current specifications that have not been superseded → (4) older draft/implementation reports as history. This precedence governs the **target behavior contract**; actual behavior and code require separate assessment. The 15 October 2026 decision supersedes only the permission-preparation dependency specified in PV-OCPP-04. The 16 October 2026 decision replaces ordinary measurement-triggered PV power regulation with one clocked regulator (PV-ARCH-05–08), while retaining immediate safety and command lifecycle processing, evidence/freshness requirements and the existing economic policy. Neither decision approves the overall V3 draft.
 
 **For every future change:** Identify the requirement ID, unchanged/superseded target behavior, observed actual behavior, deviation, effects on other IDs, concrete test cases, expected diagnostic evidence and, where applicable, *explicit* approval of a target-behavior change. No iteration may silently discard an approved requirement merely because a new log exists.
 
@@ -60,6 +60,34 @@ Evidence: PDF pp. 575–580, 609; `docs/pv-optimum-design.md`, `docs/pv-grid-imp
 `wallbox-manager` owns profile policy, the charging operating point and OCPP control. The Fronius/BYD integration supplies measurements; Wallbox Manager does **not** control the home battery through a parallel Modbus path. The wallbox hardware owns CP, vehicle state and physical phase relays. A future energy manager must not create a second competing regulator. Reuse means **shared functions**, rather than duplicated algorithms.
 
 Evidence: PDF pp. 1–19, 209–246, 579–583.
+
+### PV-ARCH-05 – Two event-fed input interfaces and one observation snapshot [APPROVED]
+
+Wallbox Manager has exactly two incoming observation interfaces: **(1) OCPP to the wallbox** for telemetry, station/transaction state and command responses, and **(2) internal Home Assistant state entities** for PV, household/grid, battery and forecast information. Both are treated as reliable event-fed sources for the information they actually deliver. Initialize known HA entity state and obtain supported wallbox discovery/readback once on setup, boot, reconnect or required recovery; thereafter maintain one canonical observation store. Subscribe only to relevant configured HA entities. Ordinary incoming events **update observations without running PV regulation**. Unchanged value reports may update timestamps/provenance without repeated business-state publication or control computation.
+
+Keep value, identity, source time, receipt time, validity and OCPP connection/boot generation distinguishable. Communication liveness does **not** prove each sensor or physical variable is fresh. OCPP does not universally guarantee push reports for all variables; where confirmed state cannot be obtained through notifications, retain specifically justified **bounded** reads/readbacks. A HA dashboard may display meaningful new observations promptly without triggering a PV-control step.
+
+### PV-ARCH-06 – One periodic PV regulation step with a current snapshot [APPROVED]
+
+An active authorized **automatic PV profile** runs **one configurable regulation cycle**, for example every **5 seconds**; this is an illustration, not a new fixed timing parameter. Each cycle reads a consistent snapshot, applies the existing shared profile, SoC, FAST/BALANCE, electrical and 50 Wh policies, and submits a new target only when required. Ordinary changes in PV, grid, battery, vehicle connection or profile selection are reflected in the **next** cycle, not in an additional event-triggered control pass. An unchanged target must not cause redundant OCPP commands; queued and confirmed states remain separate. No competing duplicate PV loop or per-event power recalculation is permitted.
+
+Smoothing, where justified, is owned by the regulator and samples configured inputs once per control cycle. For example three consecutive 5-second cycle samples form a three-element sliding average; they do **not** establish three independent physical OCPP/HA measurement generations. **PV-BAL-03** continues to define independent regulation-interval/averaging settings and smoothing scope (PV and total consumer power, not SoC, EV response, voltage or safety evidence). **PV-ECO-05** still requires source/acceptance timestamp continuity, at most 10 seconds each: reading the same cached value at consecutive ticks must never invent source evidence, counted Wh or supported reset time.
+
+When WBM only observes, when authority is absent, or when no automatic PV control is active, there is **no background cyclic PV policy evaluation** merely because battery SoC or other inputs are configured. Fixed/manual control does not need a continuously running PV regulator. Genuine time-based obligations (e.g. roughly 300-second forecast planning, local-midnight transition, permitted dwell/lockouts) remain scheduled as needed. The older **PV-PLAN-04** allowance for immediate recalculation on defined measurement events no longer authorizes a parallel ordinary PV power-regulation path; immediate exceptional processing is limited by PV-ARCH-07.
+
+### PV-ARCH-07 – Immediate safety and asynchronous OCPP execution [APPROVED]
+
+Loss of control authority, OCPP disconnect and critical hardware/safety faults must invalidate control readiness promptly, **independent of the PV regulation tick**. The station remains responsible for physical CP and local protections. A normal unplugging/status event can be incorporated into the next PV decision, but queued/new commands still have to pass the existing live pre-dispatch authority, permission, connection, transaction, intent and safety checks. OCPP CALL/CALLRESULT/ERROR handling, command serialization, delayed acknowledgements, readback and confirmation of the **actual physical operating point** are asynchronous and separate from the regulator; protocol acceptance never substitutes for physical proof.
+
+WebSocket Ping/Pong already supplies transport liveness; choosing to ping only after inactivity is an optional optimization, **not** a new correctness precondition. Liveness cannot extend individual metering/phase/voltage safety evidence indefinitely. Boot, disconnect and reconnect invalidate or resynchronize affected execution evidence. Preserve PV-OCPP-01–04, verified phase switching, CP lockouts, response/measurement causality, existing SoC/FAST/BALANCE safeguards and 50 Wh accounting/recovery restrictions; no new automatic authority takeover or unsafe restart.
+
+### PV-ARCH-08 – Remove redundant work and validate performance [APPROVED architectural approach]
+
+Implement the above architecture by **removing or replacing** redundant event listeners, periodic tasks, publications and duplicated regulation paths, not by adding another coordination layer. Separate OCPP input/recovery, HA observation intake, one PV decision engine and guarded asynchronous OCPP execution. Every implementation review must identify which old path becomes obsolete, preserve invariants with tests, and report simplifications/removals as well as additions. Diagnostics and HA state updates must not trigger fresh full-profile calculations when only presentation changes.
+
+Use the proven clocked design of **wallbox-stationary** as a **conceptual reference, not drop-in code**: its [dynamic regulator](https://github.com/ekkehard-lutz/wallbox-stationary/blob/6edf3b0a8b46bc1a1f2c34f1e986c179915dd2f0/services/dynamic_amps.py) runs one T_TAKT loop, reads a measurement snapshot and buffered grid history, and conditionally applies a current target. That code still reads inverter values inside the tick and polls the HA forecast; its input acquisition is **not yet the event-fed interface required here**. Its PV loop also does not supply the required dynamic 1p↔3p selection, verified switching and phase lockouts of WBM.
+
+Validate observation-only CPU cost with WBM disabled/enabled without takeover under comparable conditions, profile active-cycle computations, redundant entity publications, safety invalidation between ticks, and preservation of all earlier PV-OCPP/PV-ECO requirements. A numeric CPU pass threshold remains OPEN until measurement context is established; observed high CPU is not proof of a specific root cause. Source: [16 October decision](decision-history.md#16-october-2026--event-fed-inputs-and-clocked-regulation-approved).
 
 ---
 
@@ -511,6 +539,9 @@ Evidence: PDF pp. 99–119, 235–252, 529–535; `docs/pv-surplus-profile.md`, 
 11. Battery-free SURPLUS using **only** grid import/export + EV mapping; incomplete configuration remains blocked.
 12. No automatic Local→Remote takeover, no unauthorized commands, authority takes status priority.
 13. PV-OCPP-04 acceptance matrix: permission without transaction/preparation; retained legal current; normal live vehicle-absent standby; CP-blocked/probe/disconnection evidence; all restart/reconnect cases; explicit OFF, transaction-scoped persistence and unresolved interface limitations. Keep command request, ACK, confirmed state, physical observation and dashboard presentation separate in verification.
+14. PV-ARCH-05/06/08: replay repeated/equal and rapidly changing OCPP and HA measurements with WBM observing only or without authority; no background PV regulation, redundant OCPP targets or expensive all-entity reactions. Compare HA Core CPU WBM enabled/disabled and record profiler evidence, not an invented numeric threshold.
+15. PV-ARCH-06: while PV control is active, apply multiple input updates and an unplugging event within one interval; verify exactly one per-tick PV decision, latest consistent snapshot, correct configurable smoothing, deduplicated commands, and preserved FAST/BALANCE asymmetry, SoC/economic decisions and phase-switch lockout.
+16. PV-ARCH-07: inject authority revocation, OCPP disconnect, critical fault and late ACKs between ticks; verify prompt executor invalidation, per-dispatch live safety fences and independent physical feedback. Verify reconnect/readback without fabricated measurement generations, fictitious 50 Wh accounting or accidental restart.
 
 ### PV-QA-03 – Hardware acceptance criteria [OPEN]
 
@@ -602,6 +633,6 @@ The **intent** is binding, rather than an unsupported fixed number: fast economi
 
 ### Later individually approved decision
 
-- Explicit user-approved documentation task of 15 October 2026: general charging permission, retained legal startup current, physical CP observability and restart recovery; recorded in [decision-history.md](decision-history.md#15-october-2026--charging-permission-connection-readiness-and-recovery-approved). No new PDF page numbers are assigned to this later decision. Subsequent explicit approvals on the same date resolve Q1 prospective accounting, Q2 accepted unattributed-flow uncertainty and Q3 evidence-based OFF display; recorded separately in the [Q1–Q3 decision entry](decision-history.md#15-october-2026--subsequent-q1-q2-and-q3-decisions-approved). These approvals authorize documentation only, not implementation or overall V3 sign-off.
+- Explicit user-approved documentation task of 15 October 2026: general charging permission, retained legal startup current, physical CP observability and restart recovery; recorded in [decision-history.md](decision-history.md#15-october-2026--charging-permission-connection-readiness-and-recovery-approved). No new PDF page numbers are assigned to this later decision. Subsequent explicit approvals on the same date resolve Q1 prospective accounting, Q2 accepted unattributed-flow uncertainty and Q3 evidence-based OFF display; recorded separately in the [Q1–Q3 decision entry](decision-history.md#15-october-2026--subsequent-q1-q2-and-q3-decisions-approved). The 16 October architecture approval for event-fed observations, a single PV regulation tick and immediate safety exceptions is recorded in [the later history entry](decision-history.md#16-october-2026--event-fed-inputs-and-clocked-regulation-approved). These approvals authorize documentation only, not implementation or overall V3 sign-off.
 
-**Approval note:** V3 is a repository-versioned **consolidated DRAFT**. Inclusion in GitHub is **not overall subject-matter approval** or an instruction to implement/deploy. Only explicit overall subject-matter approval makes it a normative requirements baseline. The individual PV-OCPP-04 decision is APPROVED; that does not approve V3 as a whole.
+**Approval note:** V3 is a repository-versioned **consolidated DRAFT**. Inclusion in GitHub is **not overall subject-matter approval** or an instruction to implement/deploy. Only explicit overall subject-matter approval makes it a normative requirements baseline. The individual PV-OCPP-04 and PV-ARCH-05–08 decisions are APPROVED; that does not approve V3 as a whole.
