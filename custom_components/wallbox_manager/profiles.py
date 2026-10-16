@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 
 from homeassistant.core import callback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 
 from .control.commands import CommandReason, CommandResult, CommandStatus, ControlArea
@@ -109,8 +110,22 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
         self.session_unsubscribe = control.runtime.sessions.subscribe(
             self.sessions_changed
         )
-        self.unsubscribe_battery = hass.bus.async_listen(
-            "state_changed", self.battery_changed
+        self.unsubscribe_battery = lambda: None
+        self.subscribe_inputs()
+
+    def subscribe_inputs(self):
+        """Replace the indexed subscription after configuration/history is loaded."""
+        self.unsubscribe_battery()
+        entities = {
+            self.references.get(key)
+            for key in (*OPTIMUM_REFERENCES, "min_soc_speicher")
+        } | {self.battery.reserve, self.battery.soc}
+        if self.battery.record:
+            entities.add(self.battery.record["entity"])
+        entities.discard(None)
+        entities.discard("")
+        self.unsubscribe_battery = async_track_state_change_event(
+            self.hass, entities, self.battery_changed
         )
 
     async def load(self):
@@ -120,6 +135,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
         stored = await self.store.async_load() or {}
         migrated = migrate_regulation(self.entry.options, stored)
         self.references.update(migrated)
+        self.subscribe_inputs()
         for key, value in stored.items():
             try:
                 if value.get("profile") not in (
@@ -363,14 +379,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
     @callback
     def battery_changed(self, event):
         self.pv_measurement_changed(event)
-        self.pv_soc_changed(event)
         entity = event.data.get("entity_id")
-        if entity == self.references.get("min_soc_speicher"):
-            for target in tuple(self.control.intents):
-                if self.common_pv(target):
-                    self.setting(target)  # Reproject targets before the next command.
-                    self.optimum_wakes.setdefault(target, asyncio.Event()).set()
-                    self.control.publish(target)
         recovery = self.battery.record.get("entity") if self.battery.record else None
         if entity not in (self.battery.reserve, self.battery.soc, recovery):
             return
@@ -1150,6 +1159,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 await self.reconcile_battery()
 
     async def reconcile_battery(self, exclude=None):
+        before = self.battery.status, dict(self.battery.diagnostics)
         requests = [
             self.setting(t)["min_soc"]
             for s in self.control.runtime.stations
@@ -1191,8 +1201,9 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 else:
                     self.battery.resume()
         await self.battery.update(max(requests) if requests else None)
-        for target in self.control.intents:
-            self.control.publish(target)
+        if before != (self.battery.status, self.battery.diagnostics):
+            for target in self.control.intents:
+                self.control.publish(target)
 
     @diagnostic_recovery
     async def recover(self, target, record):

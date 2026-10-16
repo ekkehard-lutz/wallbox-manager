@@ -81,12 +81,13 @@ class ProfileOwnership:
         self.listeners.add(listener)
         return lambda: self.listeners.discard(listener)
 
-    def publish(self):
+    def publish(self, *, controls=True):
         for listener in tuple(self.listeners):
             listener()
-        for _, control in self.entries.values():
-            for target in tuple(control.intents):
-                control.publish(target)
+        if controls:
+            for _, control in self.entries.values():
+                for target in tuple(control.intents):
+                    control.publish(target)
 
     def register(self, entry, control):
         self.suspended.discard(entry.entry_id)
@@ -100,7 +101,7 @@ class ProfileOwnership:
 
         @callback
         def device_changed(event):
-            self.publish()
+            self.publish(controls=False)
 
         unsubscribe_device = self.hass.bus.async_listen(
             "device_registry_updated", device_changed
@@ -249,9 +250,10 @@ class ProfileOwnership:
             await self.store.async_save(self.saved())
 
     def changed(self):
+        before = self.ready, self.context, self.status, self.record
         control, target = self.resolve(self.active_wallbox)
         if self.transition:
-            self.publish()
+            self.publish(controls=False)
             return
         if control and control.entry_id in self.suspended:
             # Teardown disconnects are expected; an actually observed Local
@@ -263,7 +265,9 @@ class ProfileOwnership:
                 and control.runtime.authority(target.station) == ControlAuthority.LOCAL
             ):
                 self.revoke("ownership_rejected_local")
-            self.publish()
+            self.publish(
+                controls=before != (self.ready, self.context, self.status, self.record)
+            )
             return
         if self.ready and (control is None or not self.permits(control, target)):
             # Execution is fenced immediately, but transport loss is not an
@@ -313,7 +317,9 @@ class ProfileOwnership:
                     )
                 )
         self.diagnose(control, target)
-        self.publish()
+        self.publish(
+            controls=before != (self.ready, self.context, self.status, self.record)
+        )
 
     def diagnose(self, control, target):
         if not control or not self.entries[control.entry_id][0].options.get(

@@ -136,6 +136,7 @@ async def test_sensor_event_during_storage_load_has_history(grid):
     p, t, (c, *_) = grid
     clone = GridProfiles(p.hass, p.entry, c, p.battery)
     clone.references["leistung_pv"] = "sensor.startup_pv"
+    clone.subscribe_inputs()
     try:
         p.hass.states.async_set("sensor.startup_pv", 2000, {"unit_of_measurement": "W"})
         await asyncio.sleep(0)

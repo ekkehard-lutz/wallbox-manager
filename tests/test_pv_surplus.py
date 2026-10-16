@@ -34,6 +34,8 @@ async def grid(base_grid):  # noqa: F811
     profile.references.update(
         leistung_pv="sensor.pv", leistung_verbraucher="sensor.load"
     )
+    # Production options changes reload/rebind the indexed HA subscription.
+    profile.subscribe_inputs()
     # These beta.1 state-machine cases explicitly exercise immediate PV pauses.
     profile.setting(target)["pv_stop_delay"] = 0
     return base_grid

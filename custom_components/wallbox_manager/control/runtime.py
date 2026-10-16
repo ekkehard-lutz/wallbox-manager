@@ -369,6 +369,26 @@ class ControlRuntime:
         )
         return result
 
+    def execution_inputs(self, target):
+        """Read live prerequisites without selecting or advancing an operating point."""
+        state = self.runtime.get(target.station)
+        if self._closed or state is None or not state.connected:
+            return None, "disconnected"
+        if self.runtime.authority(target.station) != ControlAuthority.REMOTE:
+            return None, "no_authority"
+        inputs = self.inputs(target)
+        if inputs is None:
+            return None, "capabilities_unavailable"
+        caps = inputs.capabilities
+        if (
+            caps.scope != target
+            or caps.connection_generation != state.token.connection_generation
+            or caps.boot_generation != state.token.boot_generation
+            or caps.firmware != state.identity.firmware
+        ):
+            return None, "capabilities_unavailable"
+        return inputs, None
+
     def resolve(
         self,
         target,
@@ -383,22 +403,10 @@ class ControlRuntime:
         _technical_minimum=False,
         _minimum_witness=None,
     ):
-        state = self.runtime.get(target.station)
-        if self._closed or state is None or not state.connected:
-            return None, None, "disconnected"
-        if self.runtime.authority(target.station) != ControlAuthority.REMOTE:
-            return None, None, "no_authority"
-        inputs = self.inputs(target)
-        if inputs is None:
-            return None, None, "capabilities_unavailable"
+        inputs, blocked = self.execution_inputs(target)
+        if blocked:
+            return None, None, blocked
         caps = inputs.capabilities
-        if (
-            caps.scope != target
-            or caps.connection_generation != state.token.connection_generation
-            or caps.boot_generation != state.token.boot_generation
-            or caps.firmware != state.identity.firmware
-        ):
-            return None, None, "capabilities_unavailable"
         intent = self.intent(target)
         request = request or intent.request
         if _technical_minimum and not minimum_positive:
@@ -590,10 +598,25 @@ class ControlRuntime:
 
     def attributes(self, target):
         intent = self.intent(target)
+        inputs, blocked = self.execution_inputs(target)
+        # Presentation reports live prerequisites and the last actual decision.
+        # Feasibility is established by execution, never by reading attributes.
         if hasattr(self, "profiles") and target in self.profiles.debounce_tasks:
-            inputs, blocked = self.inputs(target), "power_edit_pending"
-        else:
-            inputs, _, blocked = self.resolve(target)
+            blocked = "power_edit_pending"
+        elif blocked is None:
+            blocked = self.blocker(target)
+            if blocked is None and intent.solver_result is not None:
+                if intent.solver_result.point is None:
+                    blocked = intent.solver_result.reason.value
+            if blocked is None and intent.request.target_w > 0:
+                if not inputs.eligible_modes:
+                    blocked = "no_eligible_mode"
+                elif not any(
+                    inputs.voltage.active_voltages(mode, datetime.now(UTC))
+                    for mode in inputs.eligible_modes
+                ):
+                    blocked = "voltage_unavailable"
+        adapter_available = self.adapter(target) is not None
         applied = self.confirmed_point(target)
         return {
             "electrical_recovery_status": self.recovery_status.get(target),
@@ -619,9 +642,9 @@ class ControlRuntime:
             )
             if self.runtime.get(target.station)
             else None,
-            "execution_ready": blocked is None and self.adapter(target) is not None,
+            "execution_ready": blocked is None and adapter_available,
             "execution_blocked_reason": blocked
-            or ("adapter_unavailable" if self.adapter(target) is None else None),
+            or ("adapter_unavailable" if not adapter_available else None),
             "control_status": intent.status,
             "solver_reason": intent.solver_result.reason.value
             if intent.solver_result

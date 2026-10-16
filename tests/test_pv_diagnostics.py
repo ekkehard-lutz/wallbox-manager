@@ -250,30 +250,21 @@ async def test_command_failure_is_not_reported_as_start(grid, caplog, monkeypatc
     assert line["applied"] is None
 
 
-async def test_soc_safety_event_has_explicit_reason(grid, caplog):
-    from homeassistant.core import Event
-
+async def test_clocked_soc_stop_has_explicit_reason(grid, caplog):
     p, t, _ = grid
     p.entry.options = {"pv_diagnostic_logging": True}
     p.setting(t)["profile"] = "PV_SURPLUS"
-    p.references["soc_speicher_aktuell"] = "sensor.soc"
-    p.references["min_soc_speicher"] = "number.reserve"
-    p.hass.states.async_set("number.reserve", 5)
-    p.hass.states.async_set("sensor.soc", "80", {"unit_of_measurement": "%"})
+    measurements(p, t, soc=89)
     p.control.intent(t)
     p.pv_ongoing[t] = True
     p.optimum_modes[t] = "PV_BALANCE"
     caplog.set_level(logging.INFO)
-    p.pv_soc_changed(
-        Event(
-            "state_changed",
-            {"entity_id": "sensor.soc", "new_state": p.hass.states.get("sensor.soc")},
-        )
-    )
+    # Ordinary events no longer run policy; the explicit cycle retains STOP.
+    p.pv_edit(t)
     (line,) = records(caplog)
     assert line["reason"] == "stopped_battery_soc"
-    assert line["soc_allows_charging"] is False
-    assert line["soc_event"]["value"] == 80
+    assert line["soc"] == 89
+    assert line["selected"]["charging"] is False
 
 
 async def test_no_authority_is_explicit(grid, caplog):

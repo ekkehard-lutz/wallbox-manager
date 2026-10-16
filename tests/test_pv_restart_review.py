@@ -14,7 +14,7 @@ from test_pv_surplus import measurements
 from custom_components.wallbox_manager.control.requests import Direction
 
 
-async def started(grid):
+async def started(grid, *, wake=None):
     profile, target, manual = grid
     control = manual[0]
     measurements(profile, target, soc=96)
@@ -23,7 +23,9 @@ async def started(grid):
 
     async def wait(_):
         sleeping.set()
-        await asyncio.Event().wait()
+        await (wake if wake is not None else asyncio.Event()).wait()
+        if wake is not None:
+            wake.clear()
 
     profile.wait = wait
     profile.debounce_wait = AsyncMock()
@@ -70,10 +72,13 @@ async def economic_pause(profile, target, control):
     return clock
 
 
-async def test_soc_stop_wakes_parked_regulator_without_revoking_permission(grid):
-    p, t, (c, _, _, *_) = await started(grid)
-    # No periodic timer or debounce is released by the test.
+async def test_soc_stop_on_control_clock_preserves_permission(grid):
+    wake = asyncio.Event()
+    p, t, (c, _, _, *_) = await started(grid, wake=wake)
     measurements(p, t, soc=89)
+    await p.hass.async_block_till_done()
+    assert c.confirmed_point(t).charging  # The observation alone runs no policy.
+    wake.set()
     await applied(c, t, False)
     assert c.runtime.enabled(t) is True
     assert c.runtime.sessions.get(t).active
@@ -230,10 +235,12 @@ async def test_reload_does_not_restore_continuation(grid, soc):
             assert result.status.value != "applied"
             assert len(peer.requests) == count
         clone.wait = lambda _: asyncio.Event().wait()
+        before_permission = c.confirmed_point(t)
         await clone.permission(t, True)
-        # Repeated ON adopts no operating point or continuation by itself.
-        if soc <= 95:
-            assert c.confirmed_point(t) is None
+        # This fixture reuses ControlRuntime: its prior confirmed physical point
+        # remains separate from the new profile's uninitialized continuation.
+        # Repeated ON neither adopts a new point nor runs policy to clear the old one.
+        assert c.confirmed_point(t) == before_permission
         assert not clone.pv_ongoing.get(t, False)
         assert len(peer.requests) == count
         assert c.runtime.enabled(t) is True

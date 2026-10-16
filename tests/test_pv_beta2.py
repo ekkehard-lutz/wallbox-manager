@@ -376,8 +376,16 @@ async def test_phase_lockout_continues_past_pv_stop_delay_until_soc_target(grid)
     assert c.runtime.enabled(t) is True
 
 
-async def test_fresh_measurement_wakes_zero_delay_start_without_periodic_tick(grid):
-    p, t, (c, _, _, *_), _ = await prepare(grid)
+async def test_fresh_measurement_waits_for_existing_startup_clock(grid):
+    p, t, (c, _, _, *_), clock = await prepare(grid)
+    gate, waits = asyncio.Event(), asyncio.Queue()
+
+    async def wait(seconds):
+        waits.put_nowait(seconds)
+        await gate.wait()
+        gate.clear()
+
+    p.wait = wait
     measurements(p, t, pv=0)
     await p.permission(t, True)
     await asyncio.sleep(0)
@@ -392,7 +400,13 @@ async def test_fresh_measurement_wakes_zero_delay_start_without_periodic_tick(gr
 
     unsubscribe = c.subscribe(changed)
     try:
+        delay = await asyncio.wait_for(waits.get(), 1)
         measurements(p, t)
+        await p.hass.async_block_till_done()
+        assert not done.is_set()
+        # Phase 1 retains the existing startup retry, rather than adding a loop.
+        clock[0] += delay
+        gate.set()
         await asyncio.wait_for(done.wait(), 1)
         p.debounce_wait.assert_not_awaited()
     finally:

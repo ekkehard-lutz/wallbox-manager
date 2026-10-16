@@ -11,7 +11,7 @@ from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
 from .diagnostics import profile_event
 from .freshness import LIVE_FRESHNESS
-from .pv_diagnostics import active, cycle, diagnostic_plan, entity_sample, number
+from .pv_diagnostics import active, cycle, diagnostic_plan, number
 from .pv_input_diagnostics import diagnostic_reading, diagnostic_request
 from .pv_optimum import FAST_OBSERVATION_SECONDS
 from .pv_regulators import pv_balance
@@ -171,80 +171,6 @@ class PVSurplus:
             and self.control.intent(target).request.direction == direction
             and (direction != Direction.DOWN or point.offered_power_w <= power)
         )
-
-    def pv_soc_changed(self, event):
-        """Fence unsafe queued work and wake the same regulator for immediate OFF.
-
-        Use the event's value: a later recovery must not hide a threshold crossing
-        that occurred while a command or regulation timer was waiting.
-        """
-        if self.closed or event.data.get("entity_id") != self.references.get(
-            "soc_speicher_aktuell"
-        ):
-            return
-        for target in tuple(self.control.intents):
-            if not self.common_pv(target):
-                continue
-            if target in self.control.pending_points:
-                continue  # Normal SoC policy belongs to the next regulation tick.
-            if (
-                not self.pv_ongoing.get(target, False)
-                and self.control.intent(target).request.target_w <= 0
-            ):
-                continue
-            with cycle(self, target, "soc_event"):
-                try:
-                    soc = reading(
-                        event.data.get("new_state"),
-                        datetime.now(UTC),
-                        soc=True,
-                        diagnostic_key="soc_speicher_aktuell",
-                    )
-                    mode = self.common_soc_policy(
-                        target,
-                        soc,
-                        self.pv_target(target, datetime.now(UTC)),
-                        datetime.now(UTC),
-                    )
-                    power = int(mode != "STOP")
-                    status = "actively_charging" if power else "stopped_battery_soc"
-                except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                    power, status = Fraction(0), "measurements_unavailable"
-                if record := active(self, target):
-                    record.data.update(
-                        policy_reason=status, soc_allows_charging=power > 0
-                    )
-                    record.data["soc_event"] = entity_sample(
-                        event.data.get("new_state"),
-                        event.data.get("entity_id"),
-                        datetime.now(UTC),
-                    )
-                if status == "measurements_unavailable":
-                    self.pv_input_gap(target)
-                    continue
-                if power > 0:
-                    if (
-                        self.pv_ongoing.get(target, False)
-                        and target in self.pv_stop_since
-                    ):
-                        self.pv_plan(target)
-                    continue
-                point = self.control.confirmed_point(target)
-                needs_stop = (
-                    self.pv_ongoing.get(target, False)
-                    or self.control.intent(target).request.target_w > 0
-                    or (point and point.charging)
-                )
-                self.pv_ongoing[target] = False
-                if not needs_stop:
-                    continue
-                self.invalidate(target)
-                self.control._edit(
-                    target, {"target_w": Fraction(0), "direction": Direction.DOWN}
-                )
-                self.status[target] = status
-                if self.valid(target, self.epochs[target]):
-                    self.launch(target, stop_first=True)
 
     def selected_power_states(self, target):
         return [
@@ -572,10 +498,12 @@ class PVSurplus:
             if hard_max == 0 and self.control.runtime.enabled(target) is not False:
                 return 0, Direction.DOWN, status, resolve(0, Direction.DOWN)
             return power, direction, status, None
+        # A verified zero-current stop needs no positive phase eligibility.
+        # This also preserves protective STOP when input events no longer dispatch.
         if status != "profile_unavailable" and (
             status == "safe_stop_unavailable"
             or inputs is None
-            or (transition_mode is None and not inputs.eligible_modes)
+            or (power > 0 and transition_mode is None and not inputs.eligible_modes)
             or result is None
             or result.point is None
         ):
@@ -808,21 +736,11 @@ class PVSurplus:
         return min(deadlines)
 
     def pv_measurement_changed(self, event):
-        """Input gaps pause regulation; valid observations can resume a start."""
-        entity = event.data.get("entity_id")
+        """Retain input history; ordinary events do not plan or relaunch PV work."""
         if self.closed:
             return
+        entity = event.data.get("entity_id")
         state = event.data.get("new_state")
-        planner_input = entity in (
-            self.references.get("leistung_pv"),
-            self.references.get("leistung_verbraucher"),
-        ) or bool(
-            state and state.attributes.get("wallbox_manager_role") == "session_power"
-        )
-        if (
-            planner_input and self.optimum_observe_day()
-        ) or entity == self.references.get("remaining_pv_energy"):
-            self.optimum_refresh(datetime.now(UTC))
         for key in ("leistung_pv", "leistung_verbraucher"):
             if entity == self.references.get(key):
                 try:
@@ -834,81 +752,6 @@ class PVSurplus:
                 self.power_history[key].add(
                     self.monotonic(), value, valid_for=valid_for
                 )
-        for target in tuple(self.tasks):
-            if self.setting(target)["profile"] not in (
-                "PV_SURPLUS",
-                "PV_OPTIMUM",
-                "PV_MAXIMUM",
-            ):
-                continue
-            if target in self.control.pending_points:
-                continue  # Keep the dispatched decision; the next tick samples anew.
-            attrs = (
-                (state or event.data.get("old_state")).attributes
-                if state or event.data.get("old_state")
-                else {}
-            )
-            power = entity in (
-                self.references.get("leistung_pv"),
-                self.references.get("leistung_verbraucher"),
-                self.references.get("grid_import_power"),
-                self.references.get("grid_export_power"),
-            ) or (
-                attrs.get("wallbox_manager_role") == "session_power"
-                and attrs.get("wallbox_manager_entry") == self.entry_id
-                and attrs.get("station_id") == target.station.value
-                and attrs.get("evse_id") == target.evse.value
-                and attrs.get("connector_id") == target.value
-            )
-            soc = entity == self.references.get("soc_speicher_aktuell")
-            if not power and not soc:
-                continue
-            try:
-                reading(state, datetime.now(UTC), soc=soc)
-            except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                self.pv_input_gap(target)
-                continue
-            if self.pv_ongoing.get(target, False) and target in self.pv_stop_since:
-                self.pv_plan(target)
-            command = self.control.intent(target).command_result
-            waiting_for_plan = (
-                target in self.pv_startups
-                and target not in self.economic_activation_pending
-                and command is not None
-                and command.detail is not None
-                and self.status.get(target) == "awaiting_applied"
-            )
-            if not self.pv_ongoing.get(target, False) and (
-                waiting_for_plan
-                or self.status.get(target)
-                in (
-                    "paused_insufficient_pv",
-                    "waiting_battery_soc",
-                    "stopped_battery_soc",
-                    "measurements_unavailable",
-                    "pv_start_delay",
-                )
-            ):
-                _, _, planned, _ = self.pv_plan(target)
-                if planned in (
-                    "actively_charging",
-                    "pv_start_delay",
-                ) and planned != self.status.get(target):
-                    start = self.pv_start_since.get(target)
-                    regulator = self.optimum_regulators.get(target)
-                    session = self.pv_sessions.get(target)
-                    self.invalidate(target, preserve_economic_evidence=True)
-                    # This is a meter-driven relaunch in the same control scope.
-                    # Retain response/source proof just as the start clock is
-                    # retained; a new acquisition is not a lifecycle handover.
-                    if regulator is not None:
-                        self.optimum_regulators[target] = regulator
-                    if session is not None:
-                        self.pv_sessions[target] = session
-                    if start is not None:
-                        self.pv_start_since[target] = start
-                    if self.valid(target, self.epochs[target]):
-                        self.launch(target)
 
     def pv_point_confirmed(self, target, point, previous):
         """Record causes only after the shared command lifecycle confirms OFF."""
