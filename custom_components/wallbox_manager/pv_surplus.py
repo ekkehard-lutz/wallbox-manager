@@ -9,6 +9,7 @@ from .control.commands import CommandReason, CommandStatus
 from .control.requests import Direction
 from .control.runtime import PowerSettings
 from .core.capabilities import EvidenceState
+from .core.telemetry import Observation
 from .diagnostics import profile_event
 from .freshness import LIVE_FRESHNESS
 from .pv_diagnostics import active, cycle, diagnostic_plan, number
@@ -33,6 +34,13 @@ def reading(state, now, *, soc=False, energy=False, max_age=LIVE_FRESHNESS):
     """Reject missing units, non-finite values, old and future observations."""
     if state is None:
         raise ValueError("missing measurement")
+    if isinstance(state, Observation):
+        if (
+            not state.fresh(now)
+            or not 0 <= (now - state.observed_at).total_seconds() <= max_age
+        ):
+            raise ValueError("invalid ledger measurement")
+        return state.value
     if state.attributes.get("restored") is True:
         raise ValueError("restored state is not a live measurement")
     value = Fraction(state.state)
@@ -64,6 +72,14 @@ def power_valid_for(state, now, *, max_age=LIVE_FRESHNESS):
     """Known validity bounds history segments as well as current snapshots."""
     if state is None:
         return 0
+    if isinstance(state, Observation):
+        return max(
+            0,
+            (
+                min(state.valid_until, state.observed_at + timedelta(seconds=max_age))
+                - now
+            ).total_seconds(),
+        )
     expiry = getattr(state, "last_reported", state.last_updated) + timedelta(
         seconds=max_age
     )
@@ -171,18 +187,13 @@ class PVSurplus:
             and (direction != Direction.DOWN or point.offered_power_w <= power)
         )
 
-    def selected_power_states(self, target):
-        return [
-            s
-            for s in self.hass.states.async_all("sensor")
-            if s.attributes.get("wallbox_manager_role") == "session_power"
-            and s.attributes.get("wallbox_manager_entry") == self.entry_id
-            and s.attributes.get("station_id") == target.station.value
-            and s.attributes.get("evse_id") == target.evse.value
-            and s.attributes.get("connector_id") == target.value
-            and s.attributes.get("runtime_incarnation")
-            == self.control.runtime.runtime_id
-        ]
+    def selected_power_observations(self, target):
+        runtime = self.control.runtime
+        snapshot = runtime.get(target.station)
+        if snapshot is None or not snapshot.connected:
+            return ()
+        reason, observation = runtime.sessions.power_status(target, datetime.now(UTC))
+        return (observation,) if reason == "valid" else ()
 
     def household_measurements(self, target, now):
         """Raw household proof for the planner, independent of regulator smoothing."""
@@ -198,7 +209,7 @@ class PVSurplus:
             now,
             diagnostic_key="leistung_verbraucher",
         )
-        candidates = self.selected_power_states(target)
+        candidates = self.selected_power_observations(target)
         if len(candidates) == 1:
             actual = reading(candidates[0], now, diagnostic_key="selected_ev_power")
         elif candidates:
@@ -239,7 +250,7 @@ class PVSurplus:
                 for key in ("grid_import_power", "grid_export_power")
             ]
             imported, exported = (reading(state, now) for state in states)
-            candidates = self.selected_power_states(target)
+            candidates = self.selected_power_observations(target)
             if len(candidates) != 1 or min(imported, exported) < 0:
                 raise ValueError("missing actual EV or measured site grid input")
             actual = reading(candidates[0], now, diagnostic_key="selected_ev_power")
@@ -262,7 +273,7 @@ class PVSurplus:
         load_state = self.hass.states.get(
             self.references.get("leistung_verbraucher", "")
         )
-        candidates = self.selected_power_states(target)
+        candidates = self.selected_power_observations(target)
         if record := active(self, target):
             record.capture_inputs(candidates)
         pv, load = (
@@ -597,7 +608,7 @@ class PVSurplus:
                 regulator = self.optimum_regulators.get(target)
                 reserve_permits = regulator is None
                 if regulator and regulator.evidence and minimum and minimum.point:
-                    candidates = self.selected_power_states(target)
+                    candidates = self.selected_power_observations(target)
                     if len(candidates) == 1:
                         reserve_permits = regulator.minimum_allowed(
                             minimum.point,
@@ -1025,8 +1036,6 @@ class PVSurplus:
                 await self.control.wait_for_pending_point(target)
                 if not self.valid(target, epoch):
                     return
-                if event := self.optimum_wakes.get(target):
-                    event.clear()
                 with (
                     self.control.phase_probe(
                         target,

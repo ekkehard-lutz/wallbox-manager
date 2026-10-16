@@ -38,7 +38,8 @@ async def test_ledger_sensor_pv_continues_but_invalid_power_still_pauses(grid, p
     await asyncio.sleep(
         max(0, (session.started_at - datetime.now(UTC)).total_seconds()) + 0.01
     )
-    at = session.started_at
+    runtime.sessions.clear_live(t.station)
+    at = datetime.now(UTC) - timedelta(milliseconds=10)
     accepted_at = at + timedelta(milliseconds=1)
     runtime.observe(
         bound.token, (observation(t.evse, Quantity.POWER, 1380, accepted_at),)

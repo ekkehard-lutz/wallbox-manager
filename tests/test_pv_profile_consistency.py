@@ -396,7 +396,7 @@ async def test_permission_before_transaction_starts_floor_then_requires_ev_respo
     p.optimum_days[t] = PVDay(
         dt_util.as_local(datetime.now(UTC)).date().isoformat(), "BEFORE_SURPLUS"
     )
-    await transaction(peer, connector=1, kind="Ended")
+    await transaction(peer, connector=1, kind="Ended", at=datetime.now(UTC))
     await p.hass.async_block_till_done()
 
     startup_waits, regulation_waits = asyncio.Queue(), asyncio.Queue()
@@ -428,7 +428,7 @@ async def test_permission_before_transaction_starts_floor_then_requires_ev_respo
     assert peer.operations == ["permission", "enabled_get"]
     assert t not in p.economic_policies
 
-    await transaction(peer, identity="floor-start", connector=1)
+    await transaction(peer, identity="floor-start", connector=1, at=datetime.now(UTC))
     cohort(
         p,
         t,

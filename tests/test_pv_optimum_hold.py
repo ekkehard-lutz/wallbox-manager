@@ -28,7 +28,8 @@ def period(request):
 
 
 def samples(p, t, *, actual=0, imported=0, discharge=0, soc=90, pv=4000, load=500):
-    measurements(p, t, actual=actual, pv=pv, load=load, soc=soc)
+    at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    measurements(p, t, actual=actual, pv=pv, load=load, soc=soc, observed_at=at)
     for key, value in (
         ("storage_discharge_power", discharge),
         ("grid_import_power", imported),
@@ -36,7 +37,6 @@ def samples(p, t, *, actual=0, imported=0, discharge=0, soc=90, pv=4000, load=50
     ):
         p.hass.states.async_set(p.references[key], value, {"unit_of_measurement": "W"})
 
-    at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     for entity in (
         "sensor.selected",
         "sensor.pv",
@@ -454,7 +454,7 @@ async def test_minimum_hold_never_overrides_hard_fences(grid, event):
     else:
         from test_ocpp21_control import transaction
 
-        await transaction(peer, connector=1, kind="Ended")
+        await transaction(peer, connector=1, kind="Ended", at=datetime.now(UTC))
         await evaluate(p, t)
     assert len(peer.requests) == before + (event == "limits")
 

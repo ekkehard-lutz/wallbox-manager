@@ -100,7 +100,9 @@ async def recreate(
         live.enabled_poll_task.cancel()
     measured(runtime, token, bound.target)
     if transaction_event:
-        await transaction(peer, connector=1, identity=transaction_id)
+        await transaction(
+            peer, connector=1, identity=transaction_id, at=datetime.now(UTC)
+        )
     if phase_event:
         await physical_report(peer, getattr(peer, "phase_read_value", "Rxx"))
     new_control = create_control_runtime(
@@ -126,7 +128,15 @@ async def recreate(
 
     new_profile.wait = wait
     new_profile.recovery_parked = parked
-    measurements(new_profile, bound.target, pv=2300, load=0, actual=0, soc=96)
+    measurements(
+        new_profile,
+        bound.target,
+        pv=2300,
+        load=0,
+        actual=0,
+        soc=96,
+        power=new_profile.setting(bound.target)["profile"] != "NETZ",
+    )
     new_owner.changed()
     task = new_profile.recoveries.get(bound.target)
     if task and wait_recovery:
@@ -721,6 +731,27 @@ async def reconnect(
             evse={"id": 1, "connector_id": 1},
         )
     )
+    if profile.setting(target)["profile"] != "NETZ":
+        from custom_components.wallbox_manager.core.telemetry import (
+            Channel,
+            Observation,
+            Quantity,
+        )
+
+        at = datetime.now(UTC)
+        runtime.observe(
+            token,
+            (
+                Observation(
+                    Channel(target, Quantity.POWER),
+                    session.current_power_w or 0,
+                    at,
+                    at,
+                    at + timedelta(seconds=90),
+                    "reconnected:meter",
+                ),
+            ),
+        )
     await control.adapter(target).read_enabled()
     return token
 

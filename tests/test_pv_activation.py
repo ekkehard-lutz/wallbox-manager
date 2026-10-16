@@ -133,8 +133,12 @@ async def test_genuine_vehicle_return_initializes_fast(grid):
     p.optimum_policy(t)
     p.optimum_modes[t] = "PV_BALANCE"
     identity = c.runtime.sessions.get(t).external_transaction_id
-    await transaction(peer, identity=identity, connector=1, kind="Ended")
-    await transaction(peer, identity="new-activation", connector=1)
+    await transaction(
+        peer, identity=identity, connector=1, kind="Ended", at=datetime.now(UTC)
+    )
+    await transaction(
+        peer, identity="new-activation", connector=1, at=datetime.now(UTC)
+    )
     p.optimum_policy(t)
     assert p.optimum_modes[t] == "FAST_DISCHARGE"
 
@@ -184,7 +188,9 @@ async def test_enable_without_transaction_waits_for_new_session(grid, profile):
     setup_optimum(p, t, soc=96)
     p.setting(t)["profile"] = profile
     identity = c.runtime.sessions.get(t).external_transaction_id
-    await transaction(peer, identity=identity, connector=1, kind="Ended")
+    await transaction(
+        peer, identity=identity, connector=1, kind="Ended", at=datetime.now(UTC)
+    )
     gate, parked = asyncio.Event(), asyncio.Event()
     clock = [0]
     p.monotonic = lambda: clock[0]
@@ -201,7 +207,7 @@ async def test_enable_without_transaction_waits_for_new_session(grid, profile):
     # A repeated OFF read is not a new departure and cannot cancel this request.
     await c.adapter(t).read_enabled()
     assert t in p.enable_requests
-    await transaction(peer, identity="arriving-car", connector=1)
+    await transaction(peer, identity="arriving-car", connector=1, at=datetime.now(UTC))
     measurements(p, t, soc=96)
     clock[0] = 60
     gate.set()

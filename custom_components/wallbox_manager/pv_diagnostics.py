@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 from functools import wraps
 
-from .core.telemetry import Channel, Quantity, state_flag
+from .core.telemetry import Channel, Observation, Quantity, state_flag
 from .diagnostics import cycle_event, diagnostic_level
 from .freshness import LIVE_FRESHNESS, freshness_for
 
@@ -52,6 +52,22 @@ def entity_sample(state, entity_id, now, *, max_age=LIVE_FRESHNESS):
         "age_s": None,
         "freshness": "missing",
     }
+    if isinstance(state, Observation):
+        return {
+            **result,
+            "state": str(state.value) if state.value is not None else "unknown",
+            "value": number(state.value),
+            "available": state.value is not None,
+            "freshness": "fresh" if state.fresh(now) else "expired",
+            "age_s": (now - state.observed_at).total_seconds(),
+            "timestamp": state.received_at.isoformat(),
+            "age_basis": "received_at",
+            "unit": "W",
+            "observed_at": state.observed_at.isoformat(),
+            "received_at": state.received_at.isoformat(),
+            "valid_until": state.valid_until.isoformat(),
+            "source": state.source,
+        }
     if not entity_id:
         result["freshness"] = "not_configured"
     if state is None:
@@ -176,7 +192,7 @@ class Cycle:
             }
             if selected is not None:
                 self.data["wallbox_power_sources"] = [
-                    entity_sample(s, s.entity_id, now) for s in selected
+                    entity_sample(s, None, now) for s in selected
                 ]
         runtime = p.control.runtime
         state = runtime.get(t.station)

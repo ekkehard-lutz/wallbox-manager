@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from dataclasses import replace
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -236,7 +237,7 @@ async def test_permission_on_without_vehicle_transaction_or_economic_scope(grid)
     from test_ocpp21_control import transaction
 
     p, t, (c, _, peer, *_), _ = await startup(grid)
-    await transaction(peer, connector=1, kind="Ended")
+    await transaction(peer, connector=1, kind="Ended", at=datetime.now(UTC))
     await p.hass.async_block_till_done()
     assert c.blocker(t) == "transaction_unavailable"
     assert t not in p.economic_policies
@@ -277,7 +278,7 @@ async def test_transaction_ending_while_permission_queued_does_not_cancel_on(gri
     pending = asyncio.create_task(p.permission(t, True))
     try:
         await asyncio.wait_for(queued.wait(), 1)
-        await transaction(peer, connector=1, kind="Ended")
+        await transaction(peer, connector=1, kind="Ended", at=datetime.now(UTC))
     finally:
         live._call_lock.release()
     assert (await pending).status == CommandStatus.APPLIED
@@ -294,7 +295,7 @@ async def test_real_transaction_after_standby_continues_without_second_on(
     p, t, (c, _, peer, *_), clock = await startup(grid)
     if profile == "NETZ":
         await p.select(t, "NETZ")
-    await transaction(peer, connector=1, kind="Ended")
+    await transaction(peer, connector=1, kind="Ended", at=datetime.now(UTC))
     await p.hass.async_block_till_done()
     parked, release = asyncio.Event(), asyncio.Event()
 
@@ -307,7 +308,7 @@ async def test_real_transaction_after_standby_continues_without_second_on(
     peer.permissions.clear()
     assert (await p.permission(t, True)).status == CommandStatus.APPLIED
     await asyncio.wait_for(parked.wait(), 1)
-    await transaction(peer, identity="new-real", connector=1)
+    await transaction(peer, identity="new-real", connector=1, at=datetime.now(UTC))
     measurements(p, t, pv=2331, load=358, actual=0, soc=96)
     clock[0] = 60
     parked.clear()

@@ -12,7 +12,10 @@ from test_ocpp21_control import connected as connected
 from test_pv_optimum import setup_optimum
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
-from test_pv_surplus import measurements
+from test_pv_surplus import (
+    invalidate_power,
+    measurements,
+)
 
 from custom_components.wallbox_manager.diagnostics import event_record
 from custom_components.wallbox_manager.profiles import target_key
@@ -196,6 +199,7 @@ async def test_proven_soc_stop_does_not_require_power_measurements(grid, profile
         "sensor.grid_import_power",
     ):
         p.hass.states.async_remove(entity)
+    invalidate_power(p, t)
     assert p.pv_request(t)[0] == 0
     assert p.pv_plan(t)[3].point.charging is False
     assert p.optimum_modes[t] == "STOP"

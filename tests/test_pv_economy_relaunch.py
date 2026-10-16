@@ -13,6 +13,7 @@ from test_pv_economy_control import cohort, prepared
 from test_pv_optimum_hold import evaluate, period
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
+from test_pv_surplus import power_measurement
 from test_voltage_command_fence import voltage
 
 from custom_components.wallbox_manager.control.commands import CommandStatus
@@ -42,6 +43,7 @@ def zero_cohort_without_pv(p, target, clock, second, *, exported=0):
     """Valid post-OFF acquisition; leave the unavailable PV source untouched."""
     clock[0] = second
     source = datetime.now(UTC).isoformat()
+    power_measurement(p, target, 0, at=source)
     for entity, value in (
         ("sensor.selected", 0),
         (p.references["leistung_verbraucher"], 1000),
@@ -393,7 +395,9 @@ async def test_real_lifecycle_boundary_differs_from_clocked_input_recovery(
         await p.permission(target, False)
     elif boundary == "ended":
         identity = c.runtime.sessions.get(target).external_transaction_id
-        await transaction(peer, identity=identity, connector=1, kind="Ended")
+        await transaction(
+            peer, identity=identity, connector=1, kind="Ended", at=datetime.now(UTC)
+        )
         await p.hass.async_block_till_done()
         if p.economic_lifecycle_tasks:
             await asyncio.gather(*tuple(p.economic_lifecycle_tasks))

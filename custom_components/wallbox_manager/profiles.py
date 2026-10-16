@@ -123,6 +123,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             entities.add(self.battery.record["entity"])
         entities.discard(None)
         entities.discard("")
+        self.economic_subscribe_inputs()
         self.unsubscribe_battery = async_track_state_change_event(
             self.hass, entities, self.battery_changed
         )
@@ -1112,6 +1113,18 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
 
     def sessions_changed(self):
         self.economic_sessions_changed()
+        for target in (
+            self.economic_policies.keys() | self.economic_activation_pending.keys()
+        ):
+            if self.setting(target)["profile"] not in (
+                "PV_SURPLUS",
+                "PV_OPTIMUM",
+                "PV_MAXIMUM",
+            ):
+                continue
+            for observation in self.selected_power_observations(target):
+                self.economic_first_acceptance(observation)
+            self.economic_observe(target, activity_event=True)
         for target in tuple(self.control.intents):
             self.economic_wake_startup(target)
             if self.common_pv(target):

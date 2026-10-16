@@ -4,12 +4,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
 
+from .core.telemetry import Observation
+
 UNCERTAINTY_W = Fraction(100)
 SETTLING_SECONDS = 20
 IMPORT_CONFIRM_SECONDS = 10
 
 
 def source_time(state):
+    if isinstance(state, Observation):
+        return state.observed_at
     value = state.attributes.get("observed_at")
     at = datetime.fromisoformat(value) if value else state.last_updated
     # HA reports may be refreshed without a new device measurement. For sources

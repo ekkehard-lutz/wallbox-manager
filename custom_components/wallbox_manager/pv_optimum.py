@@ -254,7 +254,7 @@ class PVOptimum:
             0,
         )
 
-    def optimum_observe_day(self, now=None, *, target=None, observation=...):
+    def optimum_observe_day(self, now=None, *, target=None):
         """Daily surplus proof uses raw, fresh load excluding this selected EV."""
         if self.closed:
             return False
@@ -469,17 +469,20 @@ class PVOptimum:
             self.control.publish(target)
         if not any(s["profile"] == "PV_OPTIMUM" for s in self.settings.values()):
             return
+        tick = self.monotonic()
+        delay = min(
+            TARGET_PLANNING_SECONDS,
+            float(remaining_day_seconds(now)),
+            *(p[1] - tick for p in self.optimum_plans.values() if p[1] > tick),
+        )
         self.optimum_unsubscribe = async_track_point_in_utc_time(
             self.hass,
             self.optimum_plan,
-            now
-            + timedelta(
-                seconds=min(TARGET_PLANNING_SECONDS, float(remaining_day_seconds(now)))
-            ),
+            now + timedelta(seconds=delay),
         )
 
-    def optimum_request(self, target, *, policy=None):
-        values, mode, expiry = policy or self.optimum_policy(target)
+    def optimum_request(self, target):
+        values, mode, expiry = self.optimum_policy(target)
         if mode == "STOP":
             self.pv_expiry[target] = expiry
             self.optimum_regulators.pop(target, None)
@@ -530,7 +533,7 @@ class PVOptimum:
                 "leistung_pv",
                 "leistung_verbraucher",
             )
-            states = [self.selected_power_states(target)[0]] + [
+            states = [self.selected_power_observations(target)[0]] + [
                 self.hass.states.get(self.references[key]) for key in keys
             ]
             evidence = PowerEvidence(
@@ -567,7 +570,7 @@ class PVOptimum:
                     "leistung_pv",
                     "leistung_verbraucher",
                 )
-                states = [self.selected_power_states(target)[0]] + [
+                states = [self.selected_power_observations(target)[0]] + [
                     self.hass.states.get(self.references.get(key, "")) for key in keys
                 ]
                 watts = [reading(state, now) for state in states[1:]]
@@ -685,7 +688,7 @@ class PVOptimum:
         if regulator and regulator.evidence and minimum and minimum.point:
             from .pv_surplus import reading
 
-            candidates = self.selected_power_states(target)
+            candidates = self.selected_power_observations(target)
             if len(candidates) != 1:
                 return power, Direction.DOWN, "measurements_unavailable", None
             actual = reading(candidates[0], datetime.now(UTC))
@@ -783,7 +786,7 @@ class PVOptimum:
                 for key in ("grid_import_power", "grid_export_power")
             ]
             imported, exported = (reading(state, now) for state in states)
-            candidates = self.selected_power_states(target)
+            candidates = self.selected_power_observations(target)
             if len(candidates) != 1 or min(imported, exported) < 0:
                 raise ValueError("unavailable continuation measurements")
             if imported > GRID_DEADBAND_W and exported > GRID_DEADBAND_W:

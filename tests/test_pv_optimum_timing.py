@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from homeassistant.util import dt as dt_util
@@ -11,6 +11,7 @@ from test_ocpp21_control import connected as connected
 from test_pv_optimum import setup_optimum
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
+from test_pv_surplus import invalidate_power
 
 from custom_components.wallbox_manager.pv_optimum import PVDay, target_soc
 
@@ -47,6 +48,28 @@ async def test_target_initial_then_exact_five_minute_planning(grid):
         p.optimum_policy(t)
         assert p.optimum_targets[t] == 60
         assert calculate.call_count == 2
+
+
+async def test_planner_preserves_existing_deadline_and_local_midnight(
+    grid, monkeypatch
+):
+    p, t, _ = grid
+    now, clock = active_policy(p, t)
+    p.optimum_policy(t)
+    clock[0] = 100
+    track = Mock(return_value=lambda: None)
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.pv_optimum.async_track_point_in_utc_time",
+        track,
+    )
+    p.optimum_plan(now)
+    assert track.call_args.args[2] == now + timedelta(seconds=200)
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.pv_optimum.remaining_day_seconds",
+        lambda _: 0.5,
+    )
+    p.optimum_plan(now)
+    assert track.call_args.args[2] == now + timedelta(seconds=0.5)
 
 
 async def test_soc_compares_against_cached_target_between_planning_cycles(grid):
@@ -219,7 +242,7 @@ async def test_missing_actual_power_preserves_evidence_but_blocks_new_requests(g
     set_sensor(p, "grid_import_power", 1000)
     p.pv_request(t)
     assert p.optimum_regulators[t].import_since == 0
-    p.hass.states.async_remove("sensor.selected")
+    invalidate_power(p, t)
     clock[0] = 1
     p.pv_request(t)
     assert p.optimum_regulators[t].import_since == 0

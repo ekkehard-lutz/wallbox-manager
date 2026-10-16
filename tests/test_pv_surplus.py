@@ -14,6 +14,11 @@ from test_ocpp21_control import connected as connected
 from custom_components.wallbox_manager.control.requests import Direction
 from custom_components.wallbox_manager.core.capabilities import EvidenceState
 from custom_components.wallbox_manager.core.models import PhaseMode
+from custom_components.wallbox_manager.core.telemetry import (
+    Channel,
+    Observation,
+    Quantity,
+)
 from custom_components.wallbox_manager.profiles import GridProfiles
 from custom_components.wallbox_manager.pv_surplus import PV_DEFAULTS, decision, reading
 
@@ -132,8 +137,77 @@ def test_invalid_measurements(value, unit, age):
         reading(state, now)
 
 
-def measurements(profile, target, *, pv=8000, load=5000, actual=3000, soc=None):
-    observed_at = datetime.now(UTC).isoformat()
+def power_measurement(profile, target, actual, *, at=None, valid_until=None):
+    """Replace a synthetic policy cohort and publish its independent HA output.
+
+    Cohort tests deliberately set arbitrary source clocks; real meter ordering
+    and ledger arbitration are covered by the Runtime/Session Ledger suites.
+    """
+    from custom_components.wallbox_manager.session_entity import SessionSensor
+
+    at = at or datetime.now(UTC)
+    at = datetime.fromisoformat(at) if isinstance(at, str) else at
+    try:
+        value = Fraction(str(actual))
+    except ValueError, TypeError, ZeroDivisionError:
+        value = None
+    runtime = profile.control.runtime
+    ledger = runtime.sessions
+    channel = Channel(target, Quantity.POWER)
+    ledger._meters.pop(channel, None)
+    ledger._event_meters.pop(channel, None)
+    session = ledger.get(target)
+    if session is not None and session.active:
+        ledger._records[session.session_id] = replace(
+            session, power_at=None, current_power_w=None
+        )
+    runtime.sessions.observe(
+        (
+            Observation(
+                Channel(target, Quantity.POWER),
+                value,
+                at,
+                at,
+                valid_until or at + timedelta(seconds=90),
+                "test:scoped-meter",
+            ),
+        )
+    )
+    if session is None:
+        return  # Metering without a real transaction cannot create a session entity.
+    sensor = SessionSensor(runtime, profile.entry_id, target, "power")
+    profile.hass.states.async_set(
+        "sensor.selected",
+        actual,
+        {**sensor.extra_state_attributes, "unit_of_measurement": "W"},
+    )
+
+
+def invalidate_power(profile, target):
+    power_measurement(profile, target, None)
+
+
+def stale_power(profile, target):
+    profile.control.runtime.sessions.clear_live(target.station)
+    power_measurement(
+        profile, target, 3000, at=datetime.now(UTC) - timedelta(seconds=91)
+    )
+
+
+def measurements(
+    profile,
+    target,
+    *,
+    pv=8000,
+    load=5000,
+    actual=3000,
+    soc=None,
+    observed_at=None,
+    power=True,
+):
+    observed_at = observed_at or datetime.now(UTC).isoformat()
+    if soc is not None:
+        profile.references["soc_speicher_aktuell"] = "sensor.soc"
     profile.references.update(
         leistung_pv="sensor.pv", leistung_verbraucher="sensor.load"
     )
@@ -150,7 +224,8 @@ def measurements(profile, target, *, pv=8000, load=5000, actual=3000, soc=None):
         "runtime_incarnation": profile.control.runtime.runtime_id,
         "observed_at": observed_at,
     }
-    profile.hass.states.async_set("sensor.selected", actual, attrs)
+    if power:
+        power_measurement(profile, target, actual, at=observed_at)
     profile.hass.states.async_set(
         "sensor.other", 99999, {**attrs, "connector_id": "other"}
     )
@@ -199,13 +274,14 @@ def grid_measurements(profile, *, imported=0, exported=0, observed_at=None):
         if observed_at is not None:
             attrs["observed_at"] = observed_at
         profile.hass.states.async_set(profile.references[key], value, attrs)
+    profile.subscribe_inputs()
 
 
 async def test_scoped_actual_measurement(grid):
     p, t, _ = grid
     measurements(p, t)
     assert p.pv_measurements(t) == (6000, None)
-    p.hass.states.async_set("sensor.selected", "unavailable")
+    invalidate_power(p, t)
     assert p.pv_request(t)[2] == "measurements_unavailable"
 
 
@@ -353,15 +429,7 @@ async def test_expired_session_power_and_missing_reference(grid):
     p, t, _ = grid
     assert p.pv_request(t)[2] == "measurements_unavailable"
     measurements(p, t)
-    state = p.hass.states.get("sensor.selected")
-    p.hass.states.async_set(
-        "sensor.selected",
-        state.state,
-        {
-            **state.attributes,
-            "valid_until": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
-        },
-    )
+    stale_power(p, t)
     assert p.pv_request(t)[2] == "measurements_unavailable"
 
 

@@ -287,11 +287,12 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
     c, _, peer, _, locked, _ = await setup(manual)
     p.setting(t).update(profile="PV_SURPLUS", approximation="up")
     measurements(p, t, pv=1700, load=0, actual=0, soc=96)
-    parked = asyncio.Event()
+    parked, wake = asyncio.Event(), asyncio.Event()
 
     async def wait(_):
         parked.set()
-        await asyncio.Event().wait()
+        await wake.wait()
+        wake.clear()
 
     p.wait, p.debounce_wait = wait, AsyncMock()
     p.monotonic = lambda: 100
@@ -315,7 +316,7 @@ async def test_phase_retry_after_off_obeys_start_threshold(grid, soc):
     if soc > 95:
         parked.clear()
         measurements(p, t, pv=5000, load=0, actual=0, soc=soc)
-        p.optimum_wakes.setdefault(t, asyncio.Event()).set()
+        wake.set()  # The next regulation tick, without a separate SoC wake path.
         await asyncio.wait_for(parked.wait(), 1)
     assert c.confirmed_point(t).charging is (soc > 95)
     assert c.runtime.enabled(t) is True

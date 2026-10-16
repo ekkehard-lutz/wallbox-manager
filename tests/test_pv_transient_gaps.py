@@ -13,7 +13,11 @@ from test_profile_ownership import site as site
 from test_pv_beta2 import prepare
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
-from test_pv_surplus import measurements
+from test_pv_surplus import (
+    invalidate_power,
+    measurements,
+    stale_power,
+)
 from test_voltage_command_fence import voltage
 
 from custom_components.wallbox_manager.control.commands import CommandStatus
@@ -44,7 +48,6 @@ async def running(grid):
 
 async def test_new_external_transaction_never_inherits_old_pv_budget(grid, monkeypatch):
     p, t, (c, _, peer, *_), _, tick = await running(grid)
-    confirmed = c.confirmed_point(t)
     policy = p.economic_policies[t]
     energy = policy.energy_ws
     count = len(peer.requests)
@@ -58,12 +61,16 @@ async def test_new_external_transaction_never_inherits_old_pv_budget(grid, monke
                 inputs(target), current_mode=None, eligible_modes=()
             ),
         )
-        await transaction(peer, identity="started-after-applied", connector=1)
+        await transaction(
+            peer, identity="started-after-applied", connector=1, at=datetime.now(UTC)
+        )
         assert c.runtime.sessions.get(t).session_id != old_session
         await tick()
-        assert c.confirmed_point(t) == confirmed
+        # No meter is attributed to the new transaction yet. The old session's
+        # public HA projection cannot authorize it; zero remains safely executable.
+        assert not c.confirmed_point(t).charging
         assert p.economic_policies[t] is policy and policy.energy_ws == energy
-        assert len(peer.requests) == count and t not in p.pv_retry_until
+        assert len(peer.requests) == count + 1 and t not in p.pv_retry_until
     measurements(p, t, pv=2400, load=0, actual=0, soc=96)
     await tick()
     assert not c.confirmed_point(t).charging
@@ -123,7 +130,9 @@ async def test_critical_measurement_events_stop_without_losing_verified_energy(
         p.hass.states.async_set(
             entity, "unavailable" if gap == "unavailable" else state.state, attributes
         )
-        await asyncio.sleep(0)  # Run both real measurement and SoC listeners.
+        if entity == "sensor.selected":
+            (stale_power if gap == "stale" else invalidate_power)(p, t)
+        await asyncio.sleep(0)  # Run the real measurement listeners.
         await tick()
         assert not c.confirmed_point(t).charging and not p.pv_ongoing[t]
         assert p.economic_policies[t].energy_ws == energy
@@ -239,9 +248,13 @@ async def test_allocation_recovery_and_shortfall_do_not_create_economic_stop_tim
 async def test_real_ended_session_resets_soc_hysteresis_even_between_ticks(grid):
     p, t, (c, _, peer, *_), _, tick = await running(grid)
     identity = c.runtime.sessions.get(t).external_transaction_id
-    await transaction(peer, identity=identity, connector=1, kind="Ended")
+    await transaction(
+        peer, identity=identity, connector=1, kind="Ended", at=datetime.now(UTC)
+    )
     assert not p.pv_ongoing[t]
-    await transaction(peer, identity="genuinely-new-session", connector=1)
+    await transaction(
+        peer, identity="genuinely-new-session", connector=1, at=datetime.now(UTC)
+    )
     measurements(p, t, pv=2170, load=0, actual=0, soc=93)
     await tick()
     assert not p.pv_ongoing[t]

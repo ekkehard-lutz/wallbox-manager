@@ -589,6 +589,9 @@ class Runtime:
             evses=tuple(sorted(evses, key=lambda e: e.value)),
             connectors=tuple(sorted(connectors, key=lambda c: (c.evse.value, c.value))),
         )
+        # Ledger callbacks may run eagerly and read both stores. Expose the
+        # matching station observations before the ledger publishes its update.
+        self._stations[token.station] = updated
         if track_sessions:
             self.sessions.observe(incoming, session_external_id)
         if updated != old:

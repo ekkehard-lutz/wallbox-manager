@@ -1,6 +1,7 @@
 """Prospective retained-current accounting through real ledger and HA projections."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
@@ -16,6 +17,7 @@ from custom_components.wallbox_manager.core.authority import (
     ControlAuthority,
 )
 from custom_components.wallbox_manager.core.events import StationIdentity
+from custom_components.wallbox_manager.core.models import ConnectorId
 from custom_components.wallbox_manager.core.sessions import (
     SessionEvent,
     SessionEventKind,
@@ -114,7 +116,9 @@ async def meter(
             actual,
             at,
             at,
-            at + timedelta(seconds=30),
+            datetime.fromisoformat(attributes["valid_until"])
+            if attributes and "valid_until" in attributes
+            else at + timedelta(seconds=30),
             "test:real-meter",
         )
         assert control.runtime.observe(bound.adapter.token, (sample,))
@@ -183,6 +187,43 @@ async def test_q1_real_measurements_anchor_and_count_without_positive_command(re
     await meter(retained, 10, power=False)
     assert policy.energy_ws == 20000
     assert not peer.requests and not peer.permissions
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "transaction_attribute",
+        "session_attribute",
+        "runtime_attribute",
+        "duplicate",
+        "removed",
+    ],
+)
+async def test_ha_output_metadata_cannot_change_canonical_q1_accounting(
+    retained, change
+):
+    p, target, (_, _, peer, *_), _, _ = retained
+    await meter(retained, 0)
+    state = p.hass.states.get("sensor.selected")
+    if change == "removed":
+        p.hass.states.async_remove(state.entity_id)
+    elif change == "duplicate":
+        p.hass.states.async_set("sensor.duplicate", 999999, dict(state.attributes))
+    else:
+        key = {
+            "transaction_attribute": "external_transaction_id",
+            "session_attribute": "session_id",
+            "runtime_attribute": "runtime_incarnation",
+        }[change]
+        p.hass.states.async_set(
+            state.entity_id, 999999, {**state.attributes, key: "other"}
+        )
+    await p.hass.async_block_till_done()
+    p.economic_observe(target)
+    assert p.economic_attributes(target)["pv_economic_monitoring_active"]
+    await meter(retained, 5)
+    assert p.economic_policies[target].energy_ws == 10000
+    assert not peer.requests and not peer.permissions
     assert p.control.runtime.enabled(target) is True
 
 
@@ -195,9 +236,6 @@ async def test_q1_real_measurements_anchor_and_count_without_positive_command(re
         "permission",
         "ev",
         "ambiguous_ev",
-        "transaction_attribute",
-        "session_attribute",
-        "runtime_attribute",
         "expired_ev",
         "grid",
         "minimum",
@@ -244,31 +282,33 @@ async def test_each_missing_q1_condition_prevents_monitoring_and_no_permission_o
             control.runtime.get(target.station).token,
             EnabledObservation(target, None, at, at + timedelta(seconds=60)),
         )
-    elif missing in (
-        "ev",
-        "ambiguous_ev",
-        "transaction_attribute",
-        "session_attribute",
-        "runtime_attribute",
-        "expired_ev",
-    ):
-        old = p.hass.states.get("sensor.selected")
-        attrs = dict(old.attributes)
-        if missing == "ev":
-            p.hass.states.async_remove("sensor.selected")
-        elif missing == "ambiguous_ev":
-            p.hass.states.async_set("sensor.duplicate", 2300, attrs)
-        else:
-            key, value = {
-                "transaction_attribute": ("external_transaction_id", "other"),
-                "session_attribute": ("session_id", "other"),
-                "runtime_attribute": ("runtime_incarnation", "other"),
-                "expired_ev": (
-                    "valid_until",
-                    (Clock.now(UTC) - timedelta(seconds=1)).isoformat(),
-                ),
-            }[missing]
-            p.hass.states.async_set("sensor.selected", 2300, {**attrs, key: value})
+    elif missing == "ev":
+        control.runtime.sessions.clear_live(target.station)
+    elif missing == "ambiguous_ev":
+        ledger = control.runtime.sessions
+        channel = Channel(target, Quantity.POWER)
+        observation = ledger._meters.pop(channel)
+        ledger._meters[Channel(target.evse, Quantity.POWER)] = replace(
+            observation, channel=Channel(target.evse, Quantity.POWER)
+        )
+        control.runtime.session_event(
+            control.runtime.get(target.station).token,
+            SessionEvent(
+                ConnectorId(target.evse, "other"),
+                "other",
+                SessionEventKind.STARTED,
+                Clock.now(UTC),
+            ),
+            live=True,
+        )
+    elif missing == "expired_ev":
+        ledger = control.runtime.sessions
+        channel = Channel(target, Quantity.POWER)
+        observation = ledger._meters[channel]
+        ledger._meters[channel] = replace(
+            observation,
+            valid_until=observation.observed_at + timedelta(milliseconds=500),
+        )
     elif missing == "grid":
         p.hass.states.async_set(
             p.references["grid_import_power"],

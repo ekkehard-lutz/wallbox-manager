@@ -11,7 +11,7 @@ from test_ocpp21_control import connected as connected
 from test_pv_optimum import setup_optimum
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
-from test_pv_surplus import measurements
+from test_pv_surplus import invalidate_power, measurements
 
 from custom_components.wallbox_manager.profiles import target_key
 from custom_components.wallbox_manager.pv_optimum import (
@@ -103,9 +103,9 @@ async def test_clouds_never_end_dynamic_and_unknown_ev_is_not_zero(grid):
     p.optimum_target(t, datetime.now(UTC))
     assert p.optimum_day_for(t).state == "DYNAMIC"
     p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat())
-    p.hass.states.async_remove("sensor.selected")
+    invalidate_power(p, t)
     measurements(p, t, pv=10000)
-    p.hass.states.async_remove("sensor.selected")
+    invalidate_power(p, t)
     enabled = c.runtime.enabled
     c.runtime.enabled = lambda _: None
     c.runtime.physical_state_fresh = lambda _: False

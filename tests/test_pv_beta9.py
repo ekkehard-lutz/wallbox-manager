@@ -9,7 +9,10 @@ from test_ocpp21_control import connected as connected
 from test_power_solver import run as run
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
-from test_pv_surplus import measurements
+from test_pv_surplus import (
+    measurements,
+    stale_power,
+)
 from test_pv_transient_gaps import running
 
 from custom_components.wallbox_manager.control.requests import Direction
@@ -226,7 +229,7 @@ async def test_wire_dedup_voltage_then_transaction_and_rejection(manual):
         result = await c.apply_stored(t, reuse_applied=True)
         assert result.status == CommandStatus.APPLIED
     assert len(peer.requests) == count
-    await transaction(peer, identity="replacement", connector=1)
+    await transaction(peer, identity="replacement", connector=1, at=datetime.now(UTC))
     result = await c.apply_stored(t, reuse_applied=True)
     assert result.status == CommandStatus.APPLIED
     assert len(peer.requests) == count + 1
@@ -346,17 +349,7 @@ async def test_live_hard_budget_fences_a_queued_positive_command(grid, change):
         elif change == "missing":
             p.hass.states.async_remove("sensor.storage_discharge_power")
         else:
-            state = p.hass.states.get("sensor.selected")
-            p.hass.states.async_set(
-                "sensor.selected",
-                state.state,
-                {
-                    **state.attributes,
-                    "observed_at": (
-                        datetime.now(UTC) - timedelta(seconds=91)
-                    ).isoformat(),
-                },
-            )
+            stale_power(p, t)
     result = await pending
     assert result.status != CommandStatus.APPLIED
     assert len(peer.requests) == before
@@ -455,5 +448,8 @@ async def test_balance_wait_is_bounded_by_battery_source_expiry(grid):
             "observed_at": (now - timedelta(seconds=80)).isoformat(),
         },
     )
-    p.optimum_request(t, policy=({}, "PV_BALANCE", now + timedelta(seconds=90)))
+    p.setting(t).update(profile="PV_SURPLUS", soll_soc_speicher=80)
+    p.optimum_modes[t] = "PV_BALANCE"
+    p.pv_ongoing[t] = True
+    p.optimum_request(t)
     assert p.pv_expiry[t] == now + timedelta(seconds=10)
