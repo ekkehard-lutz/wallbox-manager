@@ -117,7 +117,7 @@ async def test_activation_boundary_and_input_recovery(grid, soc, expected):
     p.optimum_policy(t)
     assert p.optimum_modes[t] == "FAST_DISCHARGE"
     p.hass.states.async_remove("sensor.pv")
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_request(t)
     assert p.optimum_modes[t] == "FAST_DISCHARGE"
     measurements(p, t, soc=84, pv=0)
     p.optimum_policy(t)

@@ -407,13 +407,18 @@ async def test_permission_before_transaction_starts_floor_then_requires_ev_respo
         await startup_release.wait()
         startup_release.clear()
 
-    async def regulation_wait(target, seconds):
-        assert target == t
+    async def regulation_wait(seconds):
         regulation_waits.put_nowait(seconds)
         await regulation_release.wait()
         regulation_release.clear()
 
-    p.wait, p.optimum_wait = startup_wait, regulation_wait
+    async def wait(seconds):
+        if t in p.pv_startups:
+            await startup_wait(seconds)
+        else:
+            await regulation_wait(seconds)
+
+    p.wait = wait
     peer.operations.clear()
     assert (await p.permission(t, True)).status == CommandStatus.APPLIED
     assert await asyncio.wait_for(startup_waits.get(), 1) == 60

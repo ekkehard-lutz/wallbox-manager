@@ -13,7 +13,6 @@ from .diagnostics import profile_event
 from .freshness import LIVE_FRESHNESS
 from .pv_diagnostics import active, cycle, diagnostic_plan, number
 from .pv_input_diagnostics import diagnostic_reading, diagnostic_request
-from .pv_optimum import FAST_OBSERVATION_SECONDS
 from .pv_regulators import pv_balance
 from .pv_soc import UnsafeTargetRange
 
@@ -348,13 +347,6 @@ class PVSurplus:
             self.pv_start_since.pop(target, None)
             self.pv_stop_since.pop(target, None)
         self.pv_sessions[target] = identity
-
-    def pv_input_gap(self, target):
-        """Missing input cancels start evidence, never restarts a pending stop."""
-        self.pv_start_since.pop(target, None)
-        self.pv_expiry.pop(target, None)
-        self.status[target] = "measurements_unavailable"
-        self.pv_measurement_status[target] = "measurements_unavailable"
 
     @diagnostic_request
     def pv_request(self, target):
@@ -713,9 +705,7 @@ class PVSurplus:
     def pv_wait_seconds(self, target):
         now = self.monotonic()
         settings = self.setting(target)
-        deadlines = [
-            1 if self.optimum_fast(target) else settings["regulation_interval"]
-        ]
+        deadlines = [settings["regulation_interval"]]
         for timers, field in ((self.pv_start_since, "pv_start_delay"),):
             if target in timers and timers[target] + settings[field] > now:
                 deadlines.append(timers[target] + settings[field] - now)
@@ -752,6 +742,7 @@ class PVSurplus:
                 self.power_history[key].add(
                     self.monotonic(), value, valid_for=valid_for
                 )
+                self.optimum_observe_day(now)
 
     def pv_point_confirmed(self, target, point, previous):
         """Record causes only after the shared command lifecycle confirms OFF."""
@@ -885,7 +876,7 @@ class PVSurplus:
             while self.pv_startup_valid(target, epoch):
                 if target in self.economic_waits:
                     self.optimum_wakes.setdefault(target, asyncio.Event()).clear()
-                    await self.optimum_wait(
+                    await self.economic_startup_wait(
                         target, self.setting(target)["regulation_interval"]
                     )
                 elif target in self.economic_activation_pending:
@@ -1034,7 +1025,6 @@ class PVSurplus:
                 await self.control.wait_for_pending_point(target)
                 if not self.valid(target, epoch):
                     return
-                started = self.monotonic()
                 if event := self.optimum_wakes.get(target):
                     event.clear()
                 with (
@@ -1169,15 +1159,8 @@ class PVSurplus:
                     self.pv_confirm(target)
                     self.control.publish(target)
                 seconds = self.pv_wait_seconds(target)
-                if self.optimum_fast(target):
-                    seconds = min(
-                        seconds,
-                        max(0, FAST_OBSERVATION_SECONDS - (self.monotonic() - started)),
-                    )
-                if self.shared_pv_execution(target):
-                    await self.optimum_wait(target, seconds)
-                else:
-                    await self.wait(seconds)
+                await self.wait(seconds)
+
         except asyncio.CancelledError:
             raise
         except Exception:

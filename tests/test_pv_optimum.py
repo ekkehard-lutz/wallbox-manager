@@ -153,13 +153,13 @@ async def test_target_and_reentry_independent_of_ev_power_or_connection(grid):
     now = setup_optimum(p, t, soc=40)
     p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "DYNAMIC")
     p.hass.states.async_remove("sensor.selected")
-    p.optimum_refresh(now)
+    p.pv_request(t)
     assert p.optimum_targets[t] == 40
     assert p.optimum_modes[t] == "STOP"
     p.hass.states.async_set(
         p.references["soc_speicher_aktuell"], 60, {"unit_of_measurement": "%"}
     )
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_request(t)
     assert p.optimum_modes[t] == "FAST_DISCHARGE"
     assert p.pv_request(t)[2] == "measurements_unavailable"
     measurements(p, t, soc=60)

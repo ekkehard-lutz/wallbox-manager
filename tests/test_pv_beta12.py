@@ -58,10 +58,10 @@ def stale_ev(p):
 async def test_passive_ev_timeout_cannot_obscure_local_authority(grid):
     p, t, (c, _, peer, *_), _ = configure(grid)
     authority(c, t, ControlAuthority.LOCAL)
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_edit(t)
     assert p.status.get(t) != "measurements_unavailable"
     stale_ev(p)
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_edit(t)
     assert p.status[t] == "measurements_unavailable"  # Genuine independent input gap.
     assert c.inputs(t).voltage.active_voltages(
         c.inputs(t).current_mode, datetime.now(UTC)
@@ -643,7 +643,7 @@ async def test_authority_precedes_independent_required_measurement_warning(
     }[bad]
     state = p.hass.states.get(entity)
     p.hass.states.async_set(entity, "unavailable", dict(state.attributes))
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_edit(t)
     attrs = ChargingProfile(c, p.entry_id, t).extra_state_attributes
     assert attrs["profile_status"] == expected
     assert attrs["pv_measurement_status"] == "measurements_unavailable"
@@ -663,7 +663,6 @@ async def test_fresh_passive_telemetry_does_not_imply_control_permission(
 ):
     p, t, (c, _, peer, *_), clock = configure(grid)
     authority(c, t, value)
-    p.optimum_refresh(datetime.now(UTC))
     assert p.attributes(t)["profile_status"] == expected
     assert p.attributes(t)["pv_measurement_status"] is None
     assert not peer.requests and not peer.authority_requests
@@ -691,12 +690,10 @@ async def test_authority_transitions_publish_promptly_and_clear_obsolete_input_s
                 "no_authority" if value == ControlAuthority.LOCAL else "idle"
             )
         stale_ev(p)
-        p.optimum_refresh(datetime.now(UTC))
-        assert p.attributes(t)["profile_status"] == "measurements_unavailable"
+        assert p.attributes(t)["profile_status"] == "idle"
         authority(c, t, ControlAuthority.LOCAL)
         assert p.attributes(t)["profile_status"] == "no_authority"
         samples(p, t)
-        p.optimum_refresh(datetime.now(UTC))
         assert p.attributes(t)["pv_measurement_status"] is None
         authority(c, t, ControlAuthority.REMOTE)
         assert p.attributes(t)["profile_status"] == "idle"
@@ -708,13 +705,13 @@ async def test_authority_transitions_publish_promptly_and_clear_obsolete_input_s
 async def test_reconnect_never_exposes_old_authority_or_sends_commands(grid):
     p, t, (c, bound, peer, *_), clock = configure(grid)
     stale_ev(p)
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_edit(t)
     c.runtime.disconnect(bound.token)
     assert p.attributes(t)["profile_status"] == "disconnected"
     c.runtime.connect(t.station, protocol="ocpp", protocol_version="2.1")
     assert p.attributes(t)["profile_status"] == "authority_unknown"
     samples(p, t)
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_edit(t)
     assert p.attributes(t)["pv_measurement_status"] is None
     assert not peer.requests and not peer.authority_requests
 
@@ -723,7 +720,7 @@ async def test_reload_classifies_local_authority_without_old_warning_cache(grid)
     p, t, (c, _, peer, *_), clock = configure(grid)
     authority(c, t, ControlAuthority.LOCAL)
     stale_ev(p)
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_edit(t)
     assert p.pv_measurement_status[t] == "measurements_unavailable"
     samples(p, t)
     await p.close()

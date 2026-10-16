@@ -642,7 +642,7 @@ async def test_observer_gap_preserves_verified_budget_without_an_economic_timer(
     assert t not in p.pv_stop_since
     clock[0] = 2
     p.hass.states.async_remove("sensor.remaining_pv_energy")
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_request(t)
     assert t not in p.pv_stop_since and policy.energy_ws == 10000
     p.hass.states.async_set(
         "sensor.remaining_pv_energy", 4423.6, {"unit_of_measurement": "Wh"}
@@ -761,7 +761,7 @@ async def test_pending_optimum_command_coalesces_settling_without_parallel_off(g
         count = len(peer.requests)
         clock[0] = 1
         samples(p, t, imported=1000)
-        p.optimum_refresh(datetime.now(UTC))
+        p.pv_request(t)
         p.pv_edit(t)
         assert c.pending_points[t] == point
         assert c.intent(t).generation == generation

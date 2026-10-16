@@ -1,4 +1,4 @@
-"""Independent fast observation, transient grace and target planning clocks."""
+"""Clocked regulation, transient grace and independent daily target planning."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -62,7 +62,7 @@ async def test_soc_compares_against_cached_target_between_planning_cycles(grid):
     ]:
         clock[0] = tick
         set_sensor(p, "soc_speicher_aktuell", soc, "%")
-        p.optimum_refresh(datetime.now(UTC))
+        p.pv_request(t)
         assert p.optimum_modes[t] == mode
         assert p.optimum_plans[t][1] == deadline
 
@@ -91,7 +91,7 @@ async def test_surplus_and_finished_bypass_planning_deadline(grid):
     assert p.optimum_targets[t] == 80
 
 
-async def test_activation_and_reload_replan_immediately_and_observe_each_second(grid):
+async def test_activation_and_reload_replan_without_soc_policy_observation(grid):
     p, t, _ = grid
     now, _ = active_policy(p, t)
     p.optimum_policy(t)
@@ -113,14 +113,17 @@ async def test_activation_and_reload_replan_immediately_and_observe_each_second(
         }
     )
     with patch(
-        "homeassistant.helpers.event.async_track_time_interval",
+        "custom_components.wallbox_manager.pv_optimum.async_track_point_in_utc_time",
         return_value=lambda: None,
     ) as track:
         await p.load()
-        assert track.call_args.args[2] == timedelta(seconds=1)
+        due = track.call_args.args[2]
+        assert 0 < (due - datetime.now(UTC)).total_seconds() <= 300
         assert p.optimum_targets[t] == 40
         set_sensor(p, "soc_speicher_aktuell", 40, "%")
         track.call_args.args[1](datetime.now(UTC))
+        assert t not in p.optimum_modes
+        p.pv_request(t)  # Only a regulation evaluation observes the new SoC.
         assert p.optimum_modes[t] == "STOP"
 
 
@@ -143,7 +146,9 @@ async def test_cached_target_never_authorizes_stale_forecast(grid):
 
 
 @pytest.mark.parametrize("interval", [5, 17, 300])
-async def test_fast_loop_one_second_and_no_extra_command_debounce(grid, interval):
+async def test_fast_loop_uses_configured_cycle_and_no_extra_command_debounce(
+    grid, interval
+):
     p, t, _ = grid
     _, clock = active_policy(p, t)
     p.setting(t)["regulation_interval"] = interval
@@ -158,8 +163,11 @@ async def test_fast_loop_one_second_and_no_extra_command_debounce(grid, interval
 
     p.wait = wait
     await p.permission(t, True)
+    p.pv_expiry.pop(t, None)  # Isolate regulation cadence from validity deadlines.
     await p.tasks[t]
-    assert waits == [1, 1, 1]
+    assert len(waits) == 1 and 1 < waits[0] <= interval
+    if interval <= 90:
+        assert waits == [interval]
     p.debounce_wait.assert_not_called()
     assert p.optimum_plans[t][1] == 300
     p.optimum_modes[t] = "PV_BALANCE"
@@ -167,30 +175,25 @@ async def test_fast_loop_one_second_and_no_extra_command_debounce(grid, interval
     assert p.pv_wait_seconds(t) == interval
 
 
-async def test_soc_transition_wakes_balance_loop_without_new_authority(grid):
+async def test_soc_updates_wait_for_regulation_without_waking_another_loop(grid):
     p, t, (_, _, peer, *_) = grid
     active_policy(p, t)
     set_sensor(p, "soc_speicher_aktuell", 40, "%")
     p.optimum_policy(t)
-    p.optimum_wakes.setdefault(t, asyncio.Event()).clear()
-    entered = asyncio.Event()
-
-    async def wait(seconds):
-        entered.set()
-        await asyncio.Event().wait()
-
-    p.wait = wait
-    task = asyncio.create_task(p.optimum_wait(t, 300))
-    await entered.wait()
+    event = p.optimum_wakes.setdefault(t, asyncio.Event())
+    event.clear()
     count = len(peer.requests)
     set_sensor(p, "soc_speicher_aktuell", 46, "%")
-    p.optimum_refresh(datetime.now(UTC))
-    await asyncio.wait_for(task, 1)
+    await p.hass.async_block_till_done()
+    assert p.optimum_modes[t] == "STOP"
+    assert not event.is_set()
+    p.pv_request(t)
     assert p.optimum_modes[t] == "FAST_DISCHARGE"
-    assert len(peer.requests) == count  # Policy observation alone cannot send commands.
+    assert not event.is_set()
+    assert len(peer.requests) == count
 
 
-async def test_observer_tracks_grace_while_command_execution_is_pending(grid):
+async def test_regulation_tracks_grace_while_command_execution_is_pending(grid):
     p, t, (c, _, peer, *_) = grid
     _, clock = active_policy(p, t)
     p.setting(t)["optimum_max_discharge_w"] = 4800
@@ -202,7 +205,7 @@ async def test_observer_tracks_grace_while_command_execution_is_pending(grid):
     with patch.object(c, "pending_points", {t: object()}):
         for tick in (0, 1, 2, 3):
             clock[0] = tick
-            p.optimum_refresh(datetime.now(UTC))
+            p.pv_request(t)
             regulator = p.optimum_regulators[t]
             assert regulator.import_since == 0
             assert regulator.requested <= regulator.hard_max
@@ -214,11 +217,11 @@ async def test_missing_actual_power_preserves_evidence_but_blocks_new_requests(g
     p, t, _ = grid
     _, clock = active_policy(p, t)
     set_sensor(p, "grid_import_power", 1000)
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_request(t)
     assert p.optimum_regulators[t].import_since == 0
     p.hass.states.async_remove("sensor.selected")
     clock[0] = 1
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_request(t)
     assert p.optimum_regulators[t].import_since == 0
     assert p.pv_request(t)[0] == 0
     assert p.optimum_targets[t] == 40

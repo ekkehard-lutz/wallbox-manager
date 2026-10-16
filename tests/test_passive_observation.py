@@ -48,7 +48,7 @@ async def test_only_configured_inputs_enter_profile_callback(grid, monkeypatch):
     monkeypatch.setattr(p, "battery_changed", changed)
     reconcile = Mock()
     monkeypatch.setattr(p, "sessions_changed", reconcile)
-    for name in ("pv_plan", "optimum_refresh", "common_soc_policy"):
+    for name in ("pv_plan", "optimum_policy", "common_soc_policy"):
         monkeypatch.setattr(
             p, name, Mock(side_effect=AssertionError("event ran policy"))
         )
@@ -428,3 +428,66 @@ async def test_physical_invalidation_is_published_even_with_unchanged_snapshot(
     assert runtime.get(token.station) == snapshot
     assert hass.states.get(meter.entity_id).attributes["state_fresh"] is False
     assert hass.states.get(meter.entity_id).state == "occupied"
+
+
+@pytest.mark.parametrize(
+    "authority,permission", [("local", False), ("remote", False), ("local", True)]
+)
+async def test_passive_event_storm_and_daily_planning_never_run_pv_policy(
+    grid, monkeypatch, authority, permission
+):
+    from test_pv_beta12 import authority as observe_authority
+    from test_pv_optimum import setup_optimum
+
+    p, target, (control, bound, peer, *_) = grid
+    setup_optimum(p, target)
+    peer.enabled = permission
+    assert await bound.read_enabled() is permission
+    observe_authority(control, target, ControlAuthority(authority))
+    scheduled = []
+
+    def schedule(hass, action, due):
+        scheduled.append((action, due))
+        return Mock()
+
+    monkeypatch.setattr(
+        "custom_components.wallbox_manager.pv_optimum.async_track_point_in_utc_time",
+        schedule,
+    )
+    policy = {}
+    for name in ("pv_plan", "pv_request", "optimum_policy", "common_soc_policy"):
+        policy[name] = Mock(
+            side_effect=AssertionError("passive observation ran PV policy")
+        )
+        monkeypatch.setattr(p, name, policy[name])
+    await p.load()
+    assert len(scheduled) == 1
+    assert 0 < (scheduled[0][1] - datetime.now(UTC)).total_seconds() <= 300
+    requests, operations = list(peer.requests), list(peer.operations)
+    for index in range(1000):
+        p.hass.states.async_set(f"sensor.unrelated_{index}", index)
+    for index in range(100):
+        p.hass.states.async_set("sensor.pv", 8000 + index, {"unit_of_measurement": "W"})
+        p.hass.states.async_set(
+            "sensor.load", 5000 + index, {"unit_of_measurement": "W"}
+        )
+        now = datetime.now(UTC)
+        control.runtime.observe(
+            bound.token,
+            (
+                Observation(
+                    Channel(target, Quantity.POWER),
+                    index,
+                    now,
+                    now,
+                    now + timedelta(seconds=90),
+                    "storm",
+                ),
+            ),
+        )
+    await p.hass.async_block_till_done()
+    scheduled[0][0](scheduled[0][1])
+    assert len(scheduled) == 2  # Only the independent daily planner is rescheduled.
+    assert all(not method.called for method in policy.values())
+    assert not p.tasks
+    assert peer.requests == requests and peer.operations == operations

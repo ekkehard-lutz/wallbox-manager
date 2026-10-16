@@ -1,10 +1,11 @@
 """Independent Optimum SoC policy and PV-day observation, never device control."""
 
-import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 
+from homeassistant.core import callback
+from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.util import dt as dt_util
 
 from .control.requests import Direction
@@ -14,7 +15,6 @@ from .pv_budget import PowerEvidence, source_time
 from .pv_regulators import GRID_DEADBAND_W, FastDischargeRegulator
 from .pv_soc import clamp_target, soc_policy, target_bounds
 
-FAST_OBSERVATION_SECONDS = 1
 TARGET_PLANNING_SECONDS = 300
 
 OPTIMUM_DEFAULTS = {
@@ -188,8 +188,6 @@ class PVOptimum:
         if decision.mode != previous:
             profile_event(self, target, "soc_mode", **context)
             self.pv_stop_since.pop(target, None)
-            if asyncio.current_task() is not self.tasks.get(target):
-                self.optimum_wakes.setdefault(target, asyncio.Event()).set()
         self.optimum_modes[target] = decision.mode
         return decision.mode
 
@@ -453,48 +451,32 @@ class PVOptimum:
         """Existing deadband stabilizes confirmed FAST points, never BALANCE OFF."""
         return GRID_DEADBAND_W if self.optimum_fast(target) else 0
 
-    async def optimum_wait(self, target, seconds):
-        """Wake an existing balance loop on a responsive SoC mode transition."""
-        event = self.optimum_wakes.setdefault(target, asyncio.Event())
-        tasks = [
-            asyncio.create_task(self.wait(seconds)),
-            asyncio.create_task(event.wait()),
-        ]
-        try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    def optimum_refresh(self, now):
-        """Track policy independently of EV connection, permission or authority."""
+    @callback
+    def optimum_plan(self, now):
+        """Maintain daily forecast targets; never evaluate charging policy."""
+        if self.optimum_unsubscribe:
+            self.optimum_unsubscribe()
+            self.optimum_unsubscribe = None
         if self.closed:
             return
-        self.optimum_observe_day(now)
         for target in tuple(self.control.intents):
-            if not self.common_pv(target):
+            if self.setting(target)["profile"] != "PV_OPTIMUM":
                 continue
             try:
-                policy = self.optimum_policy(target, now)
+                self.optimum_target(target, now)
             except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                self.pv_input_gap(target)
-            else:
-                if policy[1] == "FAST_DISCHARGE":
-                    try:
-                        # Observe even while serialized OCPP work is pending.
-                        # Only the existing PV loop may dispatch an operating point.
-                        self.optimum_request(target, policy=policy)
-                    except ValueError, TypeError, ZeroDivisionError, OverflowError:
-                        self.pv_input_gap(target)
-                        self.control.publish(target)
-                        continue
-                self.pv_measurement_status.pop(target, None)
-                if self.status.get(target) == "measurements_unavailable":
-                    self.status[target] = (
-                        "actively_charging" if self.pv_ongoing.get(target) else "idle"
-                    )
+                pass  # Missing planning evidence cannot authorize control.
             self.control.publish(target)
+        if not any(s["profile"] == "PV_OPTIMUM" for s in self.settings.values()):
+            return
+        self.optimum_unsubscribe = async_track_point_in_utc_time(
+            self.hass,
+            self.optimum_plan,
+            now
+            + timedelta(
+                seconds=min(TARGET_PLANNING_SECONDS, float(remaining_day_seconds(now)))
+            ),
+        )
 
     def optimum_request(self, target, *, policy=None):
         values, mode, expiry = policy or self.optimum_policy(target)
