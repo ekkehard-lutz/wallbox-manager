@@ -173,10 +173,12 @@ async def test_disabled_exhausted_recovery_resumes_on_verified_model_improvement
     peer.enabled = False
     await bound.read_enabled()
     parked = asyncio.Queue()
+    gate = asyncio.Event()
 
     async def wait(_):
         parked.put_nowait(None)
-        await asyncio.Event().wait()
+        await gate.wait()
+        gate.clear()
 
     p.wait = wait
     p.launch = type(p).launch.__get__(p)
@@ -204,11 +206,12 @@ async def test_disabled_exhausted_recovery_resumes_on_verified_model_improvement
             load=1000,
         )
         await p.hass.async_block_till_done()
+        gate.set()  # Advance the existing control clock, not an observation wake.
         await asyncio.wait_for(parked.get(), 2)
         assert all(period(request)["limit"] == 0 for request in peer.requests[before:])
     assert policy.energy_ws == 0 and policy.restart_required
     assert policy.restart_reference == reference
-    # The ordinary meter wake and startup path can now prepare a battery-assisted
+    # The next existing control cycle can now prepare a battery-assisted
     # point; no new restart timer or battery availability sensor is involved.
     for second in (18, 19):
         cohort(
@@ -225,6 +228,7 @@ async def test_disabled_exhausted_recovery_resumes_on_verified_model_improvement
             load=1000,
         )
         await p.hass.async_block_till_done()
+        gate.set()
         await asyncio.wait_for(parked.get(), 2)
     assert c.runtime.enabled(t) is True
     assert c.confirmed_point(t).charging

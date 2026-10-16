@@ -1,4 +1,4 @@
-"""Real meter relaunches preserve economic coverage inside the owned PV scope."""
+"""Observation-only events preserve economic history until the next control cycle."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -17,33 +17,20 @@ from test_voltage_command_fence import voltage
 
 from custom_components.wallbox_manager.control.commands import CommandStatus
 from custom_components.wallbox_manager.core.authority import ControlAuthority
-from custom_components.wallbox_manager.profiles import GridProfiles
 from custom_components.wallbox_manager.pv_economy import ECONOMIC_REASON
 
 
-async def relaunch_fixture(grid, *, imported=800, current=10):
-    """Own a real OCPP point, with the existing PV producer initially parked."""
+async def observation_fixture(grid, *, imported=800, current=10):
+    """Park automatic power control; accounting still consumes real HA reports."""
     p, target, context, clock = await prepared(grid, current=current, imported=imported)
-    parked = asyncio.Queue()
-
-    async def wait(_):
-        parked.put_nowait(clock[0])
-        await asyncio.Event().wait()
-
-    p.wait = wait
     p.tasks[target] = asyncio.create_task(asyncio.Event().wait())
-    # configure() parks automatic launch for direct command tests. Restore the
-    # actual producer here: its replacement must run through solver and OCPP.
-    p.launch = GridProfiles.launch.__get__(p)
-    return p, target, context, clock, parked
+    return p, target, context, clock, (p, target)
 
 
-async def parked_at(parked, second):
-    async def reached():
-        while await parked.get() < second:
-            pass
-
-    await asyncio.wait_for(reached(), 2)
+async def control_cycle(context, second):
+    p, target = context
+    assert p.monotonic() >= second
+    await evaluate(p, target)
 
 
 async def publish(p, target, clock, second, **values):
@@ -78,7 +65,7 @@ def pv_gap(p, target):
 
 
 async def recover_pv(p, target, parked, *, pv=4000, source=None):
-    """The real state listener reaches pv_measurement_changed and relaunches."""
+    """Recovery events leave the producer/intent untouched until a control cycle."""
     old_task, epoch = p.tasks[target], p.epochs.get(target, 0)
     generation = p.control.intent(target).generation
     state = p.hass.states.get(p.references["leistung_pv"])
@@ -88,16 +75,16 @@ async def recover_pv(p, target, parked, *, pv=4000, source=None):
         {**state.attributes, "observed_at": (source or datetime.now(UTC)).isoformat()},
     )
     await p.hass.async_block_till_done()
-    await parked_at(parked, p.monotonic())
-    assert p.epochs[target] == epoch + 1
-    assert p.control.intent(target).generation > generation
-    assert p.tasks[target] is not old_task
+    assert p.epochs.get(target, 0) == epoch
+    assert p.control.intent(target).generation == generation
+    assert p.tasks[target] is old_task
+    await control_cycle(parked, p.monotonic())
 
 
-async def test_import_energy_crosses_internal_meter_relaunch_without_lost_interval(
+async def test_import_energy_crosses_clocked_input_recovery_without_lost_interval(
     grid,
 ):
-    p, target, (c, _, peer, *_), clock, parked = await relaunch_fixture(grid)
+    p, target, (c, _, peer, *_), clock, parked = await observation_fixture(grid)
     await publish(p, target, clock, 5, imported=800)
     policy = p.economic_policies[target]
     identity = p.economic_identities[target]
@@ -111,15 +98,15 @@ async def test_import_energy_crosses_internal_meter_relaunch_without_lost_interv
     assert p.economic_policies[target] is policy
     assert p.economic_identities[target] == identity
     await publish(p, target, clock, 10, imported=800)
-    await parked_at(parked, 10)
+    await control_cycle(parked, 10)
     assert policy.energy_ws == 8000
     assert policy.coverage_reason is None
     assert all(period(request)["limit"] > 0 for request in peer.requests[count:])
     assert not policy.exhausted and not policy.off_pending
 
 
-async def test_causal_voltage_threshold_event_survives_internal_meter_relaunch(grid):
-    p, target, (c, _, peer, *_), clock, parked = await relaunch_fixture(grid)
+async def test_causal_voltage_threshold_event_survives_clocked_input_recovery(grid):
+    p, target, (c, _, peer, *_), clock, parked = await observation_fixture(grid)
     await publish(p, target, clock, 5, imported=650)
     policy = p.economic_policies[target]
     assert policy.energy_ws == 4000 and policy.threshold_w == 690
@@ -131,16 +118,16 @@ async def test_causal_voltage_threshold_event_survives_internal_meter_relaunch(g
     pv_gap(p, target)
     await recover_pv(p, target, parked)
     await publish(p, target, clock, 10, imported=650)
-    await parked_at(parked, 10)
+    await control_cycle(parked, 10)
     # The held 650 W sample is below T during 5..7, then counts entirely during
-    # 7..10. Replacing the producer at t=8 cannot discard either causal segment.
+    # 7..10. An input recovery at t=8 cannot discard either causal segment.
     assert policy.energy_ws == 4000 + 650 * 3
     assert policy.threshold_w == 600 and policy.below_seconds == 0
     assert all(period(request)["limit"] > 0 for request in peer.requests[count:])
 
 
-async def test_below_threshold_reset_continuity_survives_protective_off_relaunch(grid):
-    p, target, (c, _, peer, *_), clock, parked = await relaunch_fixture(
+async def test_below_threshold_reset_continuity_survives_protective_off_recovery(grid):
+    p, target, (c, _, peer, *_), clock, parked = await observation_fixture(
         grid, imported=2000
     )
     await publish(p, target, clock, 5, imported=2000)
@@ -178,7 +165,7 @@ async def test_below_threshold_reset_continuity_survives_protective_off_relaunch
             pv=4000,
             load=2610,
         )
-        await parked_at(parked, second)
+        await control_cycle(parked, second)
         assert policy.below_seconds == second - 5
         assert policy.energy_ws == (10000 if second == 20 else 0)
     assert not policy.off_pending and not policy.restart_required
@@ -188,7 +175,7 @@ async def test_below_threshold_reset_continuity_survives_protective_off_relaunch
 async def test_confirmed_economic_stop_keeps_cause_reference_after_meter_reset(
     grid, delayed_relaunch
 ):
-    p, target, (c, _, peer, *_), clock, parked = await relaunch_fixture(
+    p, target, (c, _, peer, *_), clock, parked = await observation_fixture(
         grid, imported=1300
     )
     policy = p.economic_policies[target]
@@ -235,7 +222,7 @@ async def test_confirmed_economic_stop_keeps_cause_reference_after_meter_reset(
     if delayed_relaunch:
         # BALANCE becomes normally eligible with its configured start delay.
         # That existing delay precedes the economic model comparison, so the
-        # meter callback legitimately replaces the task without granting restart.
+        # next control cycle prepares a delayed start without granting restart.
         p.setting(target)["pv_start_delay"] = 30
         pv_gap(p, target)
         p.hass.states.async_set("sensor.soc", 81, {"unit_of_measurement": "%"})
@@ -259,7 +246,7 @@ async def test_confirmed_economic_stop_keeps_cause_reference_after_meter_reset(
             pv=4000,
             load=1000,
         )
-        await parked_at(parked, Fraction("185.001"))
+        await control_cycle(parked, Fraction("185.001"))
         assert p.status[target] == "economic_restart_inhibited"
     else:
         # An ordinary callback must not bypass the unchanged-condition gate.
@@ -273,6 +260,7 @@ async def test_confirmed_economic_stop_keeps_cause_reference_after_meter_reset(
         )
         await p.hass.async_block_till_done()
         assert p.epochs.get(target, 0) == epoch
+        await control_cycle(parked, p.monotonic())
     assert not p.economic_restart_permits(target, p.economic_minimum(target).point)
     assert p.economic_reasons[target] == "economic_conditions_unchanged"
     assert p.economic_policies[target] is policy
@@ -287,7 +275,7 @@ async def test_confirmed_economic_stop_keeps_cause_reference_after_meter_reset(
 async def test_real_meter_coverage_gaps_and_duplicates_preserve_proved_energy(
     grid, gap
 ):
-    p, target, (_, _, peer, *_), clock, parked = await relaunch_fixture(grid)
+    p, target, (_, _, peer, *_), clock, parked = await observation_fixture(grid)
     await publish(p, target, clock, 5, imported=800)
     policy = p.economic_policies[target]
     pv_gap(p, target)
@@ -325,7 +313,7 @@ async def test_real_meter_coverage_gaps_and_duplicates_preserve_proved_energy(
     assert policy.energy_ws == 4000 and policy.below_seconds == 0
     if gap == "duplicate":
         await publish(p, target, clock, 10, imported=800)
-        await parked_at(parked, 10)
+        await control_cycle(parked, 10)
         assert policy.energy_ws == 8000
     elif gap in ("missing", "invalid"):
         assert policy.coverage_reason is not None
@@ -340,7 +328,7 @@ async def test_real_meter_coverage_gaps_and_duplicates_preserve_proved_energy(
             else p._economic_test_source + timedelta(seconds=15)
         )
         await publish(p, target, clock, next_second, imported=800, source=next_source)
-        await parked_at(parked, next_second)
+        await control_cycle(parked, next_second)
         assert policy.energy_ws == 8000
     assert not policy.exhausted and not policy.off_pending
     assert not peer.authority_requests
@@ -348,14 +336,14 @@ async def test_real_meter_coverage_gaps_and_duplicates_preserve_proved_energy(
 
 @pytest.mark.parametrize("gap", ["invalid", "acceptance_gap", "duplicate"])
 async def test_reset_proof_breaks_on_real_gap_but_not_duplicate_reports(grid, gap):
-    p, target, _, clock, parked = await relaunch_fixture(grid)
+    p, target, _, clock, parked = await observation_fixture(grid)
     await publish(p, target, clock, 5, imported=800)
     policy = p.economic_policies[target]
     pv_gap(p, target)
     await recover_pv(p, target, parked)
     for second in (6, 11):
         await publish(p, target, clock, second, imported=0)
-        await parked_at(parked, second)
+        await control_cycle(parked, second)
     assert policy.energy_ws == 4800 and policy.below_seconds == 5
     entity = p.references["grid_import_power"]
     state = p.hass.states.get(entity)
@@ -375,7 +363,7 @@ async def test_reset_proof_breaks_on_real_gap_but_not_duplicate_reports(grid, ga
             imported=0,
             source=p._economic_test_source + timedelta(seconds=16),
         )
-        await parked_at(parked, 22)
+        await control_cycle(parked, 22)
         assert policy.energy_ws == 4800 and policy.below_seconds == 0
     else:
         clock[0] = 16
@@ -384,18 +372,18 @@ async def test_reset_proof_breaks_on_real_gap_but_not_duplicate_reports(grid, ga
         await p.hass.async_block_till_done()
         assert policy.energy_ws == 4800 and policy.below_seconds == 5
         await publish(p, target, clock, 21, imported=0)
-        await parked_at(parked, 21)
+        await control_cycle(parked, 21)
         assert policy.energy_ws == 4800 and policy.below_seconds == 15
         await publish(p, target, clock, Fraction("21.001"), imported=0)
-        await parked_at(parked, Fraction("21.001"))
+        await control_cycle(parked, Fraction("21.001"))
         assert policy.energy_ws == 0
 
 
 @pytest.mark.parametrize("boundary", ["off", "ended", "authority", "connection"])
-async def test_real_lifecycle_boundary_differs_from_internal_meter_relaunch(
+async def test_real_lifecycle_boundary_differs_from_clocked_input_recovery(
     grid, boundary
 ):
-    p, target, (c, bound, peer, *_), clock, parked = await relaunch_fixture(grid)
+    p, target, (c, bound, peer, *_), clock, parked = await observation_fixture(grid)
     await publish(p, target, clock, 5, imported=800)
     policy = p.economic_policies[target]
     pv_gap(p, target)

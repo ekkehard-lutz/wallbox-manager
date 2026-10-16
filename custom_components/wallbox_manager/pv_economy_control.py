@@ -97,8 +97,7 @@ class PVEconomicControl:
                     activity_event=event.data.get("entity_id")
                     != self.references.get("grid_import_power"),
                 )
-                # Wake the existing serialized loop; observers never dispatch.
-                self.optimum_wakes.setdefault(target, asyncio.Event()).set()
+                # Accounting stays event-fed; power policy runs on its existing clock.
                 self.control.publish(target)
 
         # Identical valued state reports still contain distinct meter generations.

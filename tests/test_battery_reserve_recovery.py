@@ -377,6 +377,7 @@ async def test_late_success_automatically_reconciles_through_profile_event(grid)
         ),
     )
     profile.battery = reserve
+    profile.subscribe_inputs()  # Rebind after replacing configured inputs.
     profile.active = lambda _: True
     profile.setting(target)["min_soc"] = 40
     reserve.write = AsyncMock(side_effect=ValueError("transient"))

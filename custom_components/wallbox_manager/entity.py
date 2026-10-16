@@ -21,6 +21,19 @@ from .core.telemetry import Channel, Quantity
 from .runtime import Runtime
 
 
+@callback
+def write_state_if_changed(entity):
+    """Compare the full HA projection with HA's own state, without another cache."""
+    previous = entity.hass.states.get(entity.entity_id)
+    current = entity._async_calculate_state()
+    if (
+        previous is None
+        or previous.state != current.state
+        or previous.attributes != current.attributes
+    ):
+        entity.async_write_ha_state()
+
+
 def station_identifier(entry_id: str, station: StationId) -> str:
     """Stable across runtime restarts; separate identical IDs on other listeners."""
     return f"{entry_id}:{station.value}"
@@ -206,4 +219,4 @@ class StationEntity(Entity):
     def _changed(self, snapshot):
         if snapshot.token.station == self.station:
             self.snapshot = snapshot
-            self.async_write_ha_state()
+            write_state_if_changed(self)

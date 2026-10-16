@@ -13,7 +13,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .core.telemetry import Quantity
-from .entity import StationEntity, device_info, scope_attributes
+from .entity import StationEntity, device_info, scope_attributes, write_state_if_changed
 from .session_ledger import scope_parts
 
 SENSOR_KEYS = (
@@ -181,12 +181,12 @@ class SessionEntity(StationEntity):
 
     @callback
     def _session_changed(self):
-        self.async_write_ha_state()
+        write_state_if_changed(self)
 
     @callback
     def _tick(self, now):
         if self.session.active:
-            self.async_write_ha_state()
+            write_state_if_changed(self)
 
 
 class SessionActive(SessionEntity, BinarySensorEntity):

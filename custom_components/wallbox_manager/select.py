@@ -1,9 +1,11 @@
 """Stable direction values with localized approximation labels."""
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.core import callback
 
 from .control.requests import Direction
 from .control_entity import ControlEntity, setup_control_entities
+from .entity import write_state_if_changed
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -94,7 +96,11 @@ class ActiveWallbox(SelectEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        self.async_on_remove(self.ownership.subscribe(self.async_write_ha_state))
+        self.async_on_remove(self.ownership.subscribe(self._changed))
+
+    @callback
+    def _changed(self):
+        write_state_if_changed(self)
 
     async def async_select_option(self, option):
         from homeassistant.exceptions import HomeAssistantError
