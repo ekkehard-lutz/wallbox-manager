@@ -13,6 +13,7 @@ from test_ocpp21_control import transaction
 from test_pv_optimum_hold import configure, evaluate, period, phase_start, samples
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
+from test_pv_surplus import invalidate_power, stale_power
 from test_voltage_command_fence import voltage
 
 from custom_components.wallbox_manager.control.commands import CommandStatus
@@ -22,6 +23,7 @@ from custom_components.wallbox_manager.core.authority import (
 )
 from custom_components.wallbox_manager.core.capabilities import CurrentLimit
 from custom_components.wallbox_manager.core.models import PhaseMode
+from custom_components.wallbox_manager.core.telemetry import Quantity
 
 PROFILES = ("PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM")
 
@@ -272,6 +274,8 @@ async def test_lockout_does_not_extend_through_invalid_critical_measurements(
     p.hass.states.async_set(
         entity, "unavailable" if gap == "unavailable" else state.state, attributes
     )
+    if channel == "ev":
+        (stale_power if gap == "stale" else invalidate_power)(p, t)
     clock[0] = 31
     before = len(peer.requests)
     await evaluate(p, t)
@@ -311,7 +315,7 @@ async def test_lockout_never_overrides_live_control_fences(grid, fence):
     elif fence == "ownership":
         c.profile_permitted = lambda _: False
     elif fence == "transaction":
-        await transaction(peer, connector=1, kind="Ended")
+        await transaction(peer, connector=1, kind="Ended", at=datetime.now(UTC))
     else:
         await p.permission(t, False)
         assert c.runtime.enabled(t) is False
@@ -437,8 +441,12 @@ async def test_lockout_conflicting_measurements_stop_safely(grid, conflict):
             p.references["grid_export_power"], 1200, {"unit_of_measurement": "W"}
         )
     else:
-        state = p.hass.states.get("sensor.selected")
-        p.hass.states.async_set("sensor.duplicate_ev", 1000, dict(state.attributes))
+        runtime = c.runtime
+        observation = runtime.sessions.measurement(t, Quantity.POWER, datetime.now(UTC))
+        runtime.observe(
+            runtime.get(t.station).token,
+            (replace(observation, value=observation.value + 1),),
+        )
     before = len(peer.requests)
     await evaluate(p, t)
     assert not c.confirmed_point(t).charging

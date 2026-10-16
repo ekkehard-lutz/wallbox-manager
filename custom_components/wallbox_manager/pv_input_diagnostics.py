@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 from functools import wraps
 
+from .core.telemetry import Observation
 from .diagnostics import diagnostic_level
 from .freshness import LIVE_FRESHNESS
 from .pv_diagnostics import _ACTIVE, entity_sample, number
@@ -79,6 +80,16 @@ def input_sample(state, entity_id, now, max_age, value, accepted):
         source_timestamp_status="unavailable",
         effective_valid_until=None,
     )
+    if isinstance(state, Observation):
+        sample.update(
+            source_observed_at=state.observed_at.isoformat(),
+            source_received_at=state.received_at.isoformat(),
+            source_timestamp_status="provided",
+            effective_valid_until=min(
+                state.valid_until, state.observed_at + timedelta(seconds=max_age)
+            ).isoformat(),
+        )
+        return sample
     if state is not None:
         updated = state.last_updated
         reported = getattr(state, "last_reported", None)

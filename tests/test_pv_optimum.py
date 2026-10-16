@@ -12,7 +12,7 @@ from test_control_runtime import manual as manual
 from test_ocpp21_control import connected as connected
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
-from test_pv_surplus import measurements
+from test_pv_surplus import invalidate_power, measurements
 
 from custom_components.wallbox_manager.control.requests import Direction
 from custom_components.wallbox_manager.core.authority import (
@@ -98,6 +98,8 @@ def setup_optimum(p, t, *, soc=90, pv=8000, load=5000, actual=3000):
             "next_setting": (now + timedelta(hours=1)).isoformat(),
         },
     )
+    session = p.control.runtime.sessions.get(t)
+    p.optimum_connections[t] = (session.session_id, session.active)
     return datetime.now(UTC)
 
 
@@ -152,14 +154,14 @@ async def test_target_and_reentry_independent_of_ev_power_or_connection(grid):
     p, t, (c, *_) = grid
     now = setup_optimum(p, t, soc=40)
     p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat(), "DYNAMIC")
-    p.hass.states.async_remove("sensor.selected")
-    p.optimum_refresh(now)
+    invalidate_power(p, t)
+    p.pv_request(t)
     assert p.optimum_targets[t] == 40
     assert p.optimum_modes[t] == "STOP"
     p.hass.states.async_set(
         p.references["soc_speicher_aktuell"], 60, {"unit_of_measurement": "%"}
     )
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_request(t)
     assert p.optimum_modes[t] == "FAST_DISCHARGE"
     assert p.pv_request(t)[2] == "measurements_unavailable"
     measurements(p, t, soc=60)

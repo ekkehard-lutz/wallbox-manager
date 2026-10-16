@@ -28,7 +28,8 @@ def period(request):
 
 
 def samples(p, t, *, actual=0, imported=0, discharge=0, soc=90, pv=4000, load=500):
-    measurements(p, t, actual=actual, pv=pv, load=load, soc=soc)
+    at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    measurements(p, t, actual=actual, pv=pv, load=load, soc=soc, observed_at=at)
     for key, value in (
         ("storage_discharge_power", discharge),
         ("grid_import_power", imported),
@@ -36,7 +37,6 @@ def samples(p, t, *, actual=0, imported=0, discharge=0, soc=90, pv=4000, load=50
     ):
         p.hass.states.async_set(p.references[key], value, {"unit_of_measurement": "W"})
 
-    at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     for entity in (
         "sensor.selected",
         "sensor.pv",
@@ -454,7 +454,7 @@ async def test_minimum_hold_never_overrides_hard_fences(grid, event):
     else:
         from test_ocpp21_control import transaction
 
-        await transaction(peer, connector=1, kind="Ended")
+        await transaction(peer, connector=1, kind="Ended", at=datetime.now(UTC))
         await evaluate(p, t)
     assert len(peer.requests) == before + (event == "limits")
 
@@ -642,7 +642,7 @@ async def test_observer_gap_preserves_verified_budget_without_an_economic_timer(
     assert t not in p.pv_stop_since
     clock[0] = 2
     p.hass.states.async_remove("sensor.remaining_pv_energy")
-    p.optimum_refresh(datetime.now(UTC))
+    p.pv_request(t)
     assert t not in p.pv_stop_since and policy.energy_ws == 10000
     p.hass.states.async_set(
         "sensor.remaining_pv_energy", 4423.6, {"unit_of_measurement": "Wh"}
@@ -761,7 +761,7 @@ async def test_pending_optimum_command_coalesces_settling_without_parallel_off(g
         count = len(peer.requests)
         clock[0] = 1
         samples(p, t, imported=1000)
-        p.optimum_refresh(datetime.now(UTC))
+        p.pv_request(t)
         p.pv_edit(t)
         assert c.pending_points[t] == point
         assert c.intent(t).generation == generation

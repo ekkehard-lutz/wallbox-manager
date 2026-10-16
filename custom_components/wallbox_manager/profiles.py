@@ -27,7 +27,6 @@ from .power_history import PowerHistory
 from .pv_diagnostics import diagnostic_permission
 from .pv_economy_control import PVEconomicControl
 from .pv_optimum import (
-    FAST_OBSERVATION_SECONDS,
     OPTIMUM_DEFAULTS,
     OPTIMUM_REFERENCES,
     PVOptimum,
@@ -124,6 +123,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             entities.add(self.battery.record["entity"])
         entities.discard(None)
         entities.discard("")
+        self.economic_subscribe_inputs()
         self.unsubscribe_battery = async_track_state_change_event(
             self.hass, entities, self.battery_changed
         )
@@ -182,10 +182,6 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             self.optimum_unsubscribe()
             self.optimum_unsubscribe = None
         if self.references.get("soc_speicher_aktuell"):
-            from datetime import timedelta
-
-            from homeassistant.helpers.event import async_track_time_interval
-
             saved = await self.optimum_day_store.async_load() or {}
             # beta.5 active/ended did not prove surplus or forecast exhaustion.
             self.optimum_days.clear()
@@ -195,15 +191,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 else {}
             )
             self.optimum_save_day()
-            self.optimum_refresh(datetime.now(UTC))
-
-            @callback
-            def observe(now):
-                self.optimum_refresh(now)
-
-            self.optimum_unsubscribe = async_track_time_interval(
-                self.hass, observe, timedelta(seconds=FAST_OBSERVATION_SECONDS)
-            )
+            self.optimum_plan(datetime.now(UTC))
 
     def seed_power_history(self):
         from .pv_surplus import power_valid_for, reading
@@ -513,7 +501,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
         profile_event(self, target, "profile_selected", profile_name=profile)
         self.optimum_plans.pop(target, None)
         if profile in ("PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"):
-            self.optimum_refresh(datetime.now(UTC))
+            self.optimum_plan(datetime.now(UTC))
         await self.save()
         await self.reconcile_battery(exclude=target)
         self.control.publish(target)
@@ -1125,6 +1113,18 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
 
     def sessions_changed(self):
         self.economic_sessions_changed()
+        for target in (
+            self.economic_policies.keys() | self.economic_activation_pending.keys()
+        ):
+            if self.setting(target)["profile"] not in (
+                "PV_SURPLUS",
+                "PV_OPTIMUM",
+                "PV_MAXIMUM",
+            ):
+                continue
+            for observation in self.selected_power_observations(target):
+                self.economic_first_acceptance(observation)
+            self.economic_observe(target, activity_event=True)
         for target in tuple(self.control.intents):
             self.economic_wake_startup(target)
             if self.common_pv(target):

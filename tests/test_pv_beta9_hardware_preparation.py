@@ -11,6 +11,7 @@ from test_pv_beta9 import evidence, point
 from test_pv_optimum_hold import configure, evaluate, samples
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
+from test_pv_surplus import stale_power
 
 from custom_components.wallbox_manager.control.requests import Direction
 from custom_components.wallbox_manager.pv_regulators import FastDischargeRegulator
@@ -67,6 +68,8 @@ async def test_stale_ev_or_site_pauses_then_recovers_conservatively(
             "observed_at": (datetime.now(UTC) - timedelta(seconds=91)).isoformat(),
         },
     )
+    if missing == "sensor.selected":
+        stale_power(p, t)
     await evaluate(p, t)
     assert not c.confirmed_point(t).charging
     count = len(peer.requests)

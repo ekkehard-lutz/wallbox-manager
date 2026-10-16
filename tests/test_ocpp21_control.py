@@ -241,11 +241,13 @@ def reference_control(adapter):
     )
 
 
-async def transaction(peer, identity="active", evse=1, connector=None, kind="Started"):
+async def transaction(
+    peer, identity="active", evse=1, connector=None, kind="Started", at=None
+):
     await peer.call(
         call.TransactionEvent(
             event_type=kind,
-            timestamp=(datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+            timestamp=(at or datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
             trigger_reason="CablePluggedIn",
             seq_no=0,
             transaction_info={"transaction_id": identity},

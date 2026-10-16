@@ -11,7 +11,7 @@ from test_ocpp21_control import connected as connected
 from test_pv_optimum import setup_optimum
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
-from test_pv_surplus import measurements
+from test_pv_surplus import invalidate_power, measurements
 
 from custom_components.wallbox_manager.profiles import target_key
 from custom_components.wallbox_manager.pv_optimum import (
@@ -103,9 +103,9 @@ async def test_clouds_never_end_dynamic_and_unknown_ev_is_not_zero(grid):
     p.optimum_target(t, datetime.now(UTC))
     assert p.optimum_day_for(t).state == "DYNAMIC"
     p.optimum_days[t] = PVDay(dt_util.as_local(now).date().isoformat())
-    p.hass.states.async_remove("sensor.selected")
+    invalidate_power(p, t)
     measurements(p, t, pv=10000)
-    p.hass.states.async_remove("sensor.selected")
+    invalidate_power(p, t)
     enabled = c.runtime.enabled
     c.runtime.enabled = lambda _: None
     c.runtime.physical_state_fresh = lambda _: False
@@ -129,21 +129,24 @@ def test_remaining_local_day_obeys_dst(monkeypatch, month, day, hours):
     assert remaining_house_energy(24, seconds) == Fraction(hours * 1000)
 
 
-async def test_clock_observes_surplus_and_exhaustion_without_event_planning(grid):
+async def test_surplus_observation_and_clocked_planning_have_separate_responsibilities(
+    grid,
+):
     p, t, _ = grid
     now = setup_optimum(p, t, pv=500, load=1000, actual=0)
     p.optimum_target(t, now)
     assert p.optimum_day_for(t).state == "BEFORE_SURPLUS"
     p.hass.states.async_set("sensor.load", 100, {"unit_of_measurement": "W"})
-    assert p.optimum_day_for(t).state == "BEFORE_SURPLUS"
-    p.optimum_refresh(datetime.now(UTC))
+    assert p.optimum_day_for(t).state == "DYNAMIC"
+    assert p.optimum_targets[t] == 80  # Observing surplus does not run planning.
+    p.optimum_plan(datetime.now(UTC))
     assert p.optimum_day_for(t).state == "DYNAMIC"
     p.hass.states.async_remove("sensor.storage_capacity")
     p.hass.states.async_set(
         "sensor.remaining_pv_energy", 0, {"unit_of_measurement": "Wh"}
     )
     assert p.optimum_day_for(t).state == "DYNAMIC"
-    p.optimum_refresh(datetime.now(UTC))
+    p.optimum_plan(datetime.now(UTC))
     assert p.optimum_day_for(t).state == "FINISHED"
     assert p.optimum_targets[t] == 80
     assert p.pv_plan(t)[3] is None

@@ -105,7 +105,9 @@ async def manual(connected):
     )
     control = create_control_runtime(live.runtime, server, source)
     measured(live.runtime, live.token, bound.target)
-    await asyncio.wait_for(transaction(peer, connector=1), 2)
+    await asyncio.wait_for(
+        transaction(peer, connector=1, at=datetime.now(UTC) - timedelta(seconds=2)), 2
+    )
     return control, bound, peer, wire, source, server
 
 

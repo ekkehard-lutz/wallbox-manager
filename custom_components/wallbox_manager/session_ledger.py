@@ -143,6 +143,26 @@ class SessionLedger:
         # stream. At equal timestamps the explicitly scoped event still wins.
         return max(candidates, key=lambda o: o.observed_at, default=None)
 
+    def power_status(self, scope, now):
+        """Expose the exact availability guard without relaxing attribution."""
+        session = self.get(scope)
+        if session is None:
+            return "no_session", None
+        if not session.active:
+            return "completed", None
+        observation = self.measurement(session.scope, Quantity.POWER, now)
+        if observation is None:
+            return "no_fresh_scoped_measurement", None
+        if observation.observed_at < session.started_at:
+            return "measurement_precedes_transaction", observation
+        if observation.observed_at != session.power_at:
+            return "ledger_timestamp_mismatch", observation
+        if observation.value != session.current_power_w:
+            return "ledger_value_conflict", observation
+        if session.current_power_w is None:
+            return "invalid_or_conflicting_measurement", observation
+        return "valid", observation
+
     def _invalidate_ambiguous(self):
         for session in self.latest:
             if not session.active or self._unambiguous(session.scope):

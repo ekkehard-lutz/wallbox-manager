@@ -90,27 +90,11 @@ class SessionEntity(StationEntity):
         return self.session is not None
 
     def power_status(self, now):
-        """Expose the exact availability guard without relaxing attribution."""
         session = self.session
-        if not session.active:
-            return "completed", None
         snapshot = self.runtime.get(session.station_id)
-        if snapshot is None or not snapshot.connected:
+        if session.active and (snapshot is None or not snapshot.connected):
             return "disconnected", None
-        observation = self.runtime.sessions.measurement(
-            session.scope, Quantity.POWER, now
-        )
-        if observation is None:
-            return "no_fresh_scoped_measurement", None
-        if observation.observed_at < session.started_at:
-            return "measurement_precedes_transaction", observation
-        if observation.observed_at != session.power_at:
-            return "ledger_timestamp_mismatch", observation
-        if observation.value != session.current_power_w:
-            return "ledger_value_conflict", observation
-        if session.current_power_w is None:
-            return "invalid_or_conflicting_measurement", observation
-        return "valid", observation
+        return self.runtime.sessions.power_status(self.scope, now)
 
     @property
     def extra_state_attributes(self):

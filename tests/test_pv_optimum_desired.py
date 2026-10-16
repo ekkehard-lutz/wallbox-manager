@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
 
 import pytest
 from test_control_runtime import manual as manual
@@ -40,7 +39,7 @@ async def test_blocked_desire_and_hold_are_distinct_and_diagnosed(grid, caplog):
     for second, amps in ((30, 10), (40, 11), (50, 10)):
         clock[0] = second
         set_budget(p, t, amps)
-        p.optimum_refresh(datetime.now(UTC))
+        p.pv_request(t)
         with cycle(p, t, "regulation"):
             await evaluate(p, t)
         assert p.optimum_regulators[t].requested == 230 * amps
@@ -88,7 +87,7 @@ async def test_automatic_probe_uses_latest_desire_or_stays_three_phase(grid, rec
         assert p.pv_retry_until[t] == 60
         for second in range(1, 10):
             set_budget(p, t, 10)
-            p.optimum_refresh(datetime.now(UTC))
+            p.pv_request(t)
             await tick(second)
             assert selected(c.intent(t).energy_desired) == (1, 10)
             assert len(peer.requests) == before + 2
@@ -154,7 +153,7 @@ async def test_probe_revalidates_desired_phase_at_transport_lock(grid, recover_p
             samples(p, t, actual=4140, discharge=6000)
         else:
             set_budget(p, t, 11)  # Same phase: safe lower current remains allowed.
-        p.optimum_refresh(datetime.now(UTC))
+        p.pv_request(t)
     finally:
         transport_lock.release()
     result = await asyncio.wait_for(task, 2)
@@ -208,7 +207,7 @@ async def test_cancelled_probe_replans_next_cycle_without_busy_delay(grid):
         await asyncio.wait_for(queued.wait(), 2)
         before = len(peer.requests)
         samples(p, t, actual=4140, discharge=6000)
-        p.optimum_refresh(datetime.now(UTC))
+        p.pv_request(t)
         transport_lock.release()
         await asyncio.wait_for(parked.get(), 2)
         assert len(peer.requests) == before

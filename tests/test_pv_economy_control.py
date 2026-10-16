@@ -15,6 +15,7 @@ from test_pv_beta12 import authority, voltages
 from test_pv_optimum_hold import configure, evaluate, period
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
+from test_pv_surplus import power_measurement
 from test_voltage_command_fence import voltage
 
 from custom_components.wallbox_manager.control.commands import CommandStatus
@@ -57,6 +58,9 @@ def cohort(
     for entity, value in states:
         old = p.hass.states.get(entity)
         at = ev_source if entity == "sensor.selected" and ev_source else source
+        if entity == "sensor.selected":
+            power_measurement(p, t, value, at=at)
+            continue
         p.hass.states.async_set(
             entity,
             value,
@@ -75,6 +79,16 @@ async def prepared(grid, *, phases=1, current=10, imported=0):
         await c.change(t, target_w=230 * phases * current, allowed=True)
     ).status == CommandStatus.APPLIED
     p._economic_test_source = datetime.now(UTC) - timedelta(seconds=60)
+    # These cohorts use a simulated source clock, including samples before wall time.
+    ledger = c.runtime.sessions
+    session = ledger.get(t)
+    ledger.clear_live(t.station)
+    ledger._records[session.session_id] = replace(
+        session,
+        started_at=p._economic_test_source - timedelta(seconds=1),
+        power_at=None,
+        current_power_w=None,
+    )
     cohort(p, t, clock, 0, actual=230 * phases * current, imported=imported)
     p.setting(t)["profile"] = "PV_OPTIMUM"
     p.optimum_initialize(t)

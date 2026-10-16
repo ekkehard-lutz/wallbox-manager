@@ -35,8 +35,8 @@ from custom_components.wallbox_manager.core.telemetry import (
 async def park_background_regulator(p, t):
     """Direct command-fence cases own their single dispatched command.
 
-    Meter events now wake the shared regulator independently of tick(). Park
-    that unrelated producer before checking the direct command's live fence.
+    Park the existing periodic producer before checking the direct command's
+    live fence; ordinary meter events cannot initiate an additional cycle.
     """
     task = p.tasks.pop(t)
     task.cancel()
@@ -125,7 +125,10 @@ async def test_regulator_confirms_snapshot_then_uses_new_measurements(grid, chan
         assert len(peer.requests) == count + 1
         assert p.status[t] == "measurements_unavailable"
     elif change == "activity":
-        assert c.confirmed_point(t) == point and len(peer.requests) == count
+        # ACK confirmed the sent 10 A snapshot above. The next cycle now reads
+        # the newer canonical OCPP power, independently of the old HA output.
+        assert c.confirmed_point(t).current_a == 6
+        assert len(peer.requests) == count + 1
     else:
         assert (
             c.confirmed_point(t).current_a

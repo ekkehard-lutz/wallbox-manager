@@ -13,6 +13,7 @@ from test_pv_beta12 import voltages
 from test_pv_optimum_hold import configure, evaluate, period, samples
 from test_pv_surplus import base_grid as base_grid
 from test_pv_surplus import grid as grid
+from test_pv_surplus import power_measurement
 
 from custom_components.wallbox_manager.control.commands import CommandStatus
 from custom_components.wallbox_manager.core.capabilities import CurrentLimit
@@ -33,6 +34,8 @@ def cohort(p, t, *, actual, discharge, pv, load, imported=0, exported=0, times=N
             "leistung_verbraucher",
         )
     ]
+    if times:
+        power_measurement(p, t, actual, at=times[0])
     for index, entity in enumerate(entities):
         state = p.hass.states.get(entity)
         p.hass.states.async_set(
@@ -111,7 +114,7 @@ async def test_r6_exact_logged_unanswered_rebound(grid, profile):
     assert regulator.command_ev_baseline == Fraction("4139.97607421875")
     assert regulator.command_delta < 0
     # Shift the exact logged source spacing into the live fixture's valid window.
-    origin = datetime.now(UTC) - timedelta(seconds=5)
+    origin = datetime.now(UTC) - timedelta(seconds=3)
     offsets = (2.381068, 1.718309, 1.618579, 1.714534, 1.616438, 1.613364)
     times = tuple(origin + timedelta(seconds=s) for s in offsets)
     regulator.command_evidence = (origin,) * 6

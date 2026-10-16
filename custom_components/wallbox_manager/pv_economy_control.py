@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 from fractions import Fraction
 
 from homeassistant.core import callback
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_state_report_event,
+)
 
+from .core.telemetry import Observation
 from .pv_budget import UNCERTAINTY_W, source_time
 from .pv_economy import (
     ECONOMIC_REASON,
@@ -59,62 +64,45 @@ class PVEconomicControl:
         self.economic_observation_rejected = {}
         self.economic_pending_durability = {}
 
-        @callback
-        def relevant(data):
-            state = data.get("new_state") or data.get("old_state")
-            return data.get("entity_id") == self.references.get(
-                "grid_import_power"
-            ) or bool(
-                state
-                and state.attributes.get("wallbox_manager_role") == "session_power"
-                and state.attributes.get("wallbox_manager_entry") == self.entry_id
-            )
-
-        @callback
-        def observe(event):
-            if self.closed:
-                return
-            state = event.data.get("new_state")
-            if state is not None:
-                self.economic_first_acceptance(
-                    state, reported_at=event.data.get("last_reported")
-                )
-            for target in (
-                self.economic_policies.keys() | self.economic_activation_pending.keys()
-            ):
-                if self.setting(target)["profile"] not in PV_PROFILES:
-                    continue
-                self.economic_observe(
-                    target,
-                    state=state
-                    if event.data.get("entity_id")
-                    == self.references.get("grid_import_power")
-                    else None,
-                    reported_at=event.data.get("last_reported")
-                    if event.data.get("entity_id")
-                    == self.references.get("grid_import_power")
-                    else None,
-                    activity_event=event.data.get("entity_id")
-                    != self.references.get("grid_import_power"),
-                )
-                # Accounting stays event-fed; power policy runs on its existing clock.
-                self.control.publish(target)
-
-        # Identical valued state reports still contain distinct meter generations.
-        unchanged = self.hass.bus.async_listen(
-            "state_reported", observe, event_filter=relevant
+        self.economic_unsubscribe = lambda: None
+        self.economic_control_unsubscribe = self.control.subscribe(
+            self.economic_refresh
         )
-        changed = self.hass.bus.async_listen(
-            "state_changed", observe, event_filter=relevant
+
+    def economic_subscribe_inputs(self):
+        self.economic_unsubscribe()
+        entities = (
+            [self.references["grid_import_power"]]
+            if self.references.get("grid_import_power")
+            else []
         )
-        control_changed = self.control.subscribe(self.economic_refresh)
+        changed = async_track_state_change_event(
+            self.hass, entities, self.economic_measurement_changed
+        )
+        reported = async_track_state_report_event(
+            self.hass, entities, self.economic_measurement_changed
+        )
 
         def unsubscribe():
-            unchanged()
             changed()
-            control_changed()
+            reported()
 
         self.economic_unsubscribe = unsubscribe
+
+    @callback
+    def economic_measurement_changed(self, event):
+        if self.closed:
+            return
+        state = event.data.get("new_state")
+        reported_at = event.data.get("last_reported")
+        if state is not None:
+            self.economic_first_acceptance(state, reported_at=reported_at)
+        for target in (
+            self.economic_policies.keys() | self.economic_activation_pending.keys()
+        ):
+            if self.setting(target)["profile"] in PV_PROFILES:
+                self.economic_observe(target, state=state, reported_at=reported_at)
+                self.control.publish(target)
 
     def economic_refresh(self, target):
         """Place voltage/current/phase threshold changes at their observation."""
@@ -193,16 +181,21 @@ class PVEconomicControl:
     def economic_first_acceptance(self, state, *, reported_at=None):
         """Keep one source/acceptance pair; repeated HA reports earn no new time."""
         try:
-            source = exact_time(
-                reported_at
-                if reported_at is not None and not state.attributes.get("observed_at")
-                else source_time(state)
-            )
-            old = self.economic_sample_acceptances.get(state.entity_id)
+            if isinstance(state, Observation):
+                source, key = exact_time(state.observed_at), state.channel
+            else:
+                source = exact_time(
+                    reported_at
+                    if reported_at is not None
+                    and not state.attributes.get("observed_at")
+                    else source_time(state)
+                )
+                key = state.entity_id
+            old = self.economic_sample_acceptances.get(key)
             if old and source <= old[0]:
                 return (source, old[1]) if source == old[0] else None
             result = source, exact_time(self.monotonic())
-            self.economic_sample_acceptances[state.entity_id] = result
+            self.economic_sample_acceptances[key] = result
             return result
         except ValueError, TypeError, AttributeError, OverflowError:
             return None
@@ -256,7 +249,7 @@ class PVEconomicControl:
                     exact_time(self.monotonic()),
                 )
                 self.economic_observation_gaps.add(target)
-                candidates = self.selected_power_states(target)
+                candidates = self.selected_power_observations(target)
                 self.economic_observation_rejected[target] = (
                     self.economic_first_acceptance(candidates[0])
                     if len(candidates) == 1
@@ -283,7 +276,6 @@ class PVEconomicControl:
 
     def economic_retained_ev_evidence(self, target, now):
         """Validate the selected real meter, history and causal first acceptances."""
-        from .core.telemetry import Quantity
         from .pv_surplus import reading
 
         runtime = self.control.runtime
@@ -291,32 +283,20 @@ class PVEconomicControl:
         if runtime.enabled(target) is not True:
             raise ValueError("retained_permission_unconfirmed")
         _, boundary, accepted_boundary = self.economic_observation_context(target)
-        session = runtime.sessions.get(target)
-        candidates = self.selected_power_states(target)
+        candidates = self.selected_power_observations(target)
         if len(candidates) != 1:
             raise ValueError("retained_ev_measurement_missing_or_ambiguous")
         ev = candidates[0]
-        attrs = ev.attributes
-        meter = runtime.sessions.measurement(target, Quantity.POWER, now)
         zero_at = (
             runtime.physical_limit_since(target)
             if runtime.physical_limitation(target) == "pause_cp_unverified"
             else None
         )
-        if not (
-            attrs.get("external_transaction_id") == session.external_transaction_id
-            and attrs.get("session_id") == session.session_id
-            and attrs.get("session_active") is True
-            and attrs.get("power_availability_reason") == "valid"
-            and meter
-            and meter.observed_at >= max(boundary, session.started_at)
-            and meter.received_at >= boundary
-            and meter.observed_at == session.power_at == source_time(ev)
-            and meter.value == session.current_power_w == reading(ev, now)
-        ):
+        if min(ev.observed_at, ev.received_at) < boundary:
             raise ValueError("retained_ev_attribution_unverified")
-        if zero_at is not None and min(meter.observed_at, meter.received_at) <= zero_at:
+        if zero_at is not None and min(ev.observed_at, ev.received_at) <= zero_at:
             raise ValueError("retained_waiting_post_zero_measurement")
+        reading(ev, now)  # Source age/future checks remain separate from attribution.
         ev_accepted = self.economic_first_acceptance(ev)
         if (
             not ev_accepted
@@ -324,20 +304,18 @@ class PVEconomicControl:
             or (
                 target in self.economic_observation_gaps
                 and (
-                    source_time(ev) < boundary
+                    ev.observed_at < boundary
                     or ev_accepted == self.economic_observation_rejected.get(target)
                 )
             )
         ):
             raise ValueError("retained_waiting_prospective_measurements")
-        return meter, ev, ev_accepted, boundary
+        return ev, ev_accepted, boundary
 
     def economic_retained_evidence(self, target, state, now):
         from .pv_surplus import power_valid_for
 
-        meter, ev, ev_accepted, boundary = self.economic_retained_ev_evidence(
-            target, now
-        )
+        ev, ev_accepted, boundary = self.economic_retained_ev_evidence(target, now)
         grid_accepted = self.economic_first_acceptance(state)
         if not (
             ev_accepted
@@ -354,7 +332,7 @@ class PVEconomicControl:
         self.economic_observation_ready.add(target)
         self.economic_observation_gaps.discard(target)
         self.economic_observation_rejected.pop(target, None)
-        return meter.value > GRID_DEADBAND_W, grid_accepted[1], deadline
+        return ev.value > GRID_DEADBAND_W, grid_accepted[1], deadline
 
     async def economic_prepare(self, target, *, resume):
         """Restore before preparation, or durably begin an explicit user scope."""
@@ -517,7 +495,7 @@ class PVEconomicControl:
         from .pv_surplus import reading
 
         now = datetime.now(UTC)
-        candidates = self.selected_power_states(target)
+        candidates = self.selected_power_observations(target)
         if len(candidates) != 1:
             raise ValueError("economic EV measurement ambiguous")
         ev = reading(candidates[0], now)
@@ -661,7 +639,7 @@ class PVEconomicControl:
                     return
                 if activity_event:
                     try:
-                        meter, _, ev_accepted, _ = self.economic_retained_ev_evidence(
+                        meter, ev_accepted, _ = self.economic_retained_ev_evidence(
                             target, now
                         )
                         if meter.value <= GRID_DEADBAND_W:
@@ -732,7 +710,7 @@ class PVEconomicControl:
                     self.economic_off_at[target] = now
                 active = False
             elif enabled is True and positive is not None:
-                candidates = self.selected_power_states(target)
+                candidates = self.selected_power_observations(target)
                 if (
                     not positive[1]
                     and len(candidates) == 1
@@ -973,7 +951,7 @@ class PVEconomicControl:
             # Reusing a previously confirmed zero is not new physical proof
             # against a subsequently acquired, still-valid positive response.
             zero_at = self.control.runtime.physical_limit_since(target)
-            candidates = self.selected_power_states(target)
+            candidates = self.selected_power_observations(target)
             observed_after_zero = bool(
                 policy.observed_active
                 and zero_at is not None
@@ -1198,6 +1176,7 @@ class PVEconomicControl:
 
     async def economic_close(self):
         self.economic_unsubscribe()
+        self.economic_control_unsubscribe()
         if self.economic_lifecycle_tasks:
             await asyncio.gather(*self.economic_lifecycle_tasks)
         await self.economic_store.close()
