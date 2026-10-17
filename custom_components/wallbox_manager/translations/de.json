@@ -4,10 +4,13 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "OCPP-Endpunkt im vertrauenswürdigen lokalen Netzwerk. Manuelle Steuerung benötigt ausdrücklich verifizierte Fähigkeiten. Wallbox-Verbindung: ws://HA-address:port/station-id.",
+        "description": "Passiver OCPP-2.1-Endpunkt für genau eine Wallbox, einen EVSE und einen Anschluss. Keine Ladesteuerung.",
         "data": {
           "host": "Lokale Bind-Adresse",
-          "port": "WebSocket-Port"
+          "port": "WebSocket-Port",
+          "station_id": "OCPP-Stationskennung",
+          "evse_id": "EVSE-Kennung",
+          "connector_id": "Anschlusskennung"
         }
       }
     },
@@ -15,7 +18,7 @@
       "already_configured": "Wallbox Manager ist bereits eingerichtet."
     },
     "error": {
-      "invalid_listener": "Eine gültige IP-Adresse und einen Port zwischen 1 und 65535 eingeben."
+      "invalid_listener": "Gültige IP-Adresse, freien Port sowie Stations-, EVSE- und Anschlusskennung angeben."
     }
   },
   "entity": {
@@ -168,6 +171,9 @@
       },
       "zero_current": {
         "name": "{scope} Nullstrom-Unterstützung"
+      },
+      "physical_phases": {
+        "name": "Zuletzt beobachtete Phasen"
       }
     },
     "switch": {
@@ -243,9 +249,6 @@
           "PV_MAXIMUM": "PV Maximum"
         }
       },
-      "active_wallbox": {
-        "name": "Aktive Wallbox"
-      },
       "pv_approximation": {
         "name": "PV-Leistungsannäherung",
         "state": {
@@ -268,86 +271,6 @@
       }
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Wallbox Manager",
-        "description": "Alle PV-Profile benötigen die gemessene Netzbezugs- und Netzeinspeiseleistung. Ohne Speicher nutzt PV-Überschuss diese Zähler und die Wallbox-Leistung; separate PV-Erzeugungs- und Verbrauchsreferenzen sind nicht erforderlich. Speicherprofile benötigen zusätzlich ihre Speicher- und Leistungsreferenzen; PV Optimum außerdem die Prognose für den verbleibenden Tag.",
-        "sections": {
-          "general": {
-            "name": "Allgemeine Parameter",
-            "data": {
-              "min_soc_speicher": "Mindestreserve",
-              "soc_speicher_aktuell": "Ladezustand",
-              "leistung_pv": "PV-Leistung",
-              "leistung_verbraucher": "Verbrauchsleistung",
-              "storage_discharge_power": "Speicher-Entladeleistung",
-              "storage_capacity": "Nennkapazität des Speichers (WHRtg)",
-              "remaining_pv_energy": "Erwartete verbleibende PV-Energie heute",
-              "grid_import_power": "Netzbezugsleistung",
-              "grid_export_power": "Netzeinspeiseleistung",
-              "diagnostic_level": "Diagnosestufe"
-            },
-            "data_description": {
-              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox.",
-              "storage_discharge_power": "Tatsächliche nichtnegative Entladeleistung; null beim Laden.",
-              "storage_capacity": "Fronius Nennkapazität des Speichers: WHRtg / model_120_whrtg, in Wh oder kWh.",
-              "remaining_pv_energy": "Erwartete verbleibende PV-Produktion heute, in Wh oder kWh.",
-              "grid_import_power": "Nichtnegative aus dem Netz bezogene Leistung.",
-              "grid_export_power": "Nichtnegative ins Netz eingespeiste Leistung.",
-              "diagnostic_level": "Wallbox-Manager-Diagnosen: 0 aus, 1 Ereignisse und Fehler, 2 mit relevanten Daten, 3 vollständige Diagnosespur. Normale Warnungen und Fehler bleiben auch bei Stufe 0 aktiv. Standardmäßig deaktiviert."
-            }
-          },
-          "regulation": {
-            "name": "Regelparameter",
-            "data": {
-              "regulation_interval": "Regelintervall",
-              "pv_start_delay": "PV-Startverzögerung",
-              "pv_stop_delay": "PV-Stoppverzögerung",
-              "soc_hysterese": "SoC-Hysterese und Ziel-Sicherheitsabstand",
-              "power_smoothing_window": "Leistungsglättung Zeitfenster"
-            },
-            "data_description": {
-              "pv_stop_delay": "Altwert für die Kompatibilität. Der wirtschaftliche PV-Stopp nutzt jetzt das gemessene 50-Wh-Netzbezugsbudget; diese Verzögerung steuert ihn nicht."
-            }
-          }
-        }
-      }
-    }
-  },
-  "config_subentries": {
-    "wallbox": {
-      "title": "Wallbox",
-      "initiate_flow": {
-        "user": "Wallbox",
-        "reconfigure": "Fähigkeiten konfigurieren"
-      },
-      "step": {
-        "reconfigure": {
-          "title": "Stationsfähigkeiten",
-          "description": "Nur fehlende OCPP-Angaben ergänzen. Ein leeres Formular benötigt keine Ergänzungen.",
-          "data": {
-            "reference_phases": "Unterstützte Phasenanzahlen (z. B. 1,3)",
-            "reference_min_a": "Minimaler Strom (A)",
-            "reference_step_a": "Stromschrittweite (A)",
-            "reference_phase_switching": "Phasenumschaltung unterstützt",
-            "reference_enable_disable": "Ladefreigabe unterstützt",
-            "reference_max_1a": "Maximaler Strom 1p (A)",
-            "reference_max_2a": "Maximaler Strom 2p (A)",
-            "reference_max_3a": "Maximaler Strom 3p (A)"
-          }
-        }
-      },
-      "error": {
-        "invalid_reference": "Gültige Zuordnung und widerspruchsfreie Referenzwerte eingeben."
-      },
-      "abort": {
-        "reconfigure_successful": "Stationsfähigkeiten gespeichert.",
-        "discovered_automatically": "Wallboxen werden automatisch über OCPP angelegt."
-      },
-      "entry_type": "Wallbox"
-    }
-  },
   "selector": {
     "diagnostic_level": {
       "options": {
@@ -355,6 +278,25 @@
         "1": "Ereignisse und Fehler",
         "2": "Ereignisse mit relevanten Daten",
         "3": "Vollständige Diagnosespur"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Messwertzuordnung (nur gespeichert)",
+        "description": "Keine Ladesteuerung in dieser passiven Version.",
+        "data": {
+          "min_soc_speicher": "min soc speicher",
+          "soc_speicher_aktuell": "soc speicher aktuell",
+          "leistung_pv": "leistung pv",
+          "leistung_verbraucher": "leistung verbraucher",
+          "storage_discharge_power": "storage discharge power",
+          "storage_capacity": "storage capacity",
+          "remaining_pv_energy": "remaining pv energy",
+          "grid_import_power": "grid import power",
+          "grid_export_power": "grid export power"
+        }
       }
     }
   }

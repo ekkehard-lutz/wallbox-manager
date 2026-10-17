@@ -1,4 +1,4 @@
-# Wallbox Manager – Decision History and Supersession Register (4–15 October 2026)
+# Wallbox Manager – Decision History and Supersession Register (4–16 October 2026)
 
 **Purpose:** Historical traceability for the consolidated requirements baseline V3; this is **INFORMATIVE / NON-NORMATIVE**, rather than a second specification. The original record refers to the 619-page PDF printout of the linked discussion uploaded on 13 October 2026. Page numbers refer to that printout. The sequence follows **later explicit user decisions**, rather than interim proposals or Codex reports alone. The separately sourced 15 October entry records an individually approved decision and does not approve the overall V3 draft.
 
@@ -132,3 +132,84 @@ With explicit OFF, operational OCPP, independent fresh confirmation of physical 
 **Remaining implementation/interface question:** The reviewed periodic station reader's disabled-permission gates can prevent fresh OFF-state observations. Removing them or adding station-side readback is not approved here; any enhancement needs a demonstrated concrete requirement and separate implementation authorization. Actual deployment and hardware evidence remain unverified.
 
 **Acceptance and retained scope:** The existing [23 scenarios](pv-regulation.md#6410-acceptance-matrix-approved-decision-verification-pending) retain their numbering; rows 3–7, 15, 19 and 22 are clarified for these decisions. Electrical/economic/CP constants, L/M/U SoC behavior, FAST/BALANCE/F1/F2 protections, station CP ownership, guarded phase switching, authority and transaction fencing remain unchanged. This entry records approved policy, not completed software or hardware acceptance.
+
+## 16 October 2026 – Event-fed inputs and clocked regulation [APPROVED]
+
+**Source and scope:** Explicit user decision of 16 October 2026, following observations that WBM-enabled HA Core CPU is materially higher even without control takeover, and that disabling WBM returns it to baseline. The CPU observations implicate WBM but do not identify the root cause. This individually approved architecture decision is **not** taken from the earlier 619-page PDF and **does not** approve all V3. Its normative requirements are [PV-ARCH-05–08](pv-regulation.md#pv-arch-05--two-event-fed-input-interfaces-and-one-observation-snapshot-approved).
+
+**Approved architecture:** Exactly two incoming sources — OCPP wallbox reports and internal HA state entities. Initialize and resynchronize supported state at start/reconnect; maintain current observations from incoming data without starting regulation on each event. A single configurable PV regulation tick (illustratively 5 seconds) reads a consistent snapshot, applies the already approved policy, optional configured smoothing and guarded command submission. Normal sensor, profile and unplugging events wait until the next regulation tick. Inactive/observation-only WBM does not continually run the PV controller; no second per-event PV recalculation path.
+
+**Immediate exceptions and retained rules:** Revoked authority, OCPP disconnect and critical safety/hardware faults invalidate execution promptly. OCPP responses, stale-command fences, physical readback and confirmed operating points remain independent of the PV tick. Ping/Pong proves transport liveness, not measurement freshness. No relaxing of distinct measurement-generation and <=10 s 50 Wh evidence requirements, >15 s reset, SoC thresholds, FAST/BALANCE behavior, 300 s forecast planning, phase switching/lockouts, physical evidence, CP ownership, permission, persistence or restart inhibition. Repeated cached values at successive ticks are not new source readings. An earlier allowance to recompute after individual measurement events does not license a competing ordinary PV regulator.
+
+**Implementation comparison:** The existing working [wallbox-stationary regulator at 6edf3b0a8b46bc1a1f2c34f1e986c179915dd2f0](https://github.com/ekkehard-lutz/wallbox-stationary/blob/6edf3b0a8b46bc1a1f2c34f1e986c179915dd2f0/services/dynamic_amps.py) uses T_TAKT, a current snapshot, short history and conditional target application. Its inverter values are still fetched in the loop and its HA forecast is polled. It is therefore a **timed-regulator reference**, not evidence of event-fed source acquisition and not a replacement for WBM's verified dynamic 1p↔3p phase behavior.
+
+**Process:** Profile first; inspect listeners, timers, publications and background computations; consolidate by removing obsolete code, not adding duplicate layers. Prove behavior with no-authority idle CPU comparisons, one-decision-per-tick checks, exact economic/safety regressions and immediate loss-of-authority/disconnect tests. No code edit, release, merge, deployment or station-firmware action is authorized merely by this documentation decision.
+
+## 16 October 2026 – Smoothing units and approximate 50 Wh trigger [APPROVED]
+
+**Source:** Explicit user follow-up of 16 October 2026, referencing the actual WBM options screenshot: regulation interval 5 seconds, power smoothing window 5 seconds. The user proposed smoothing as a **number of regulation cycles**, and accepted a nominal 50 Wh economic intervention being physically detected only after e.g. 60, 80 or 100 Wh. These changes are separately approved target requirements, not a claim about the current implementation or complete V3 approval.
+
+**Smoothing decision:** [PV-BAL-03](pv-regulation.md#pv-bal-03--freshness-and-smoothing-approved-revised-16-october-2026) now specifies **N recent regulation ticks**; N=1 is unsmoothed, N=3 with T=5 s gives approximately 15 s of history. The configured regulation interval remains in seconds and separate. Keep smoothing limited to PV and household/consumer power. Existing seconds-based saved options require a version-aware migration (never silently map 5 seconds to 5 ticks).
+
+**50 Wh decision:** [PV-ECO-09](pv-regulation.md#pv-eco-09--approximate-50-wh-economic-intervention-not-exact-metering-approved-16-october-2026) replaces exact numeric Wh/Ws accounting as a requirement with a simple approximate estimate on regulation ticks. The **nominal 50 Wh** threshold still initiates economic OFF promptly when detected; it is not a guaranteed hard cap on physical grid energy. Latency or discretization may result in higher actual consumption, which is accepted. Preserve M/2 comparison, transaction/authority-specific applicability, scope/history, >15 s reset, safety/OCPP confirmations and economic restart conditions.
+
+**Unresolved separate validity question:** The prior **<=10 s distinct-source and acceptance-time gap** contract in PV-ECO-05 remains approved and is not silently removed by acceptance of approximate math. It may be incompatible with event-only, last-value-held sources, even when their reported values reliably represent changes. Clarify this in a separate explicit requirements decision before changing the corresponding validation logic. No extrapolation through unknown/downtime gaps is authorized.
+
+**Scope:** Documentation only. No code, version, release, merge, deployment or wallbox firmware changes.
+
+## 16 October 2026 – Remove 10-second metering gap rule and separate profile availability [APPROVED]
+
+**Source:** Explicit later user decision of 16 October 2026. The previously approved **10-second source/acceptance report-gap rule is removed** because sensor inputs are assumed to reliably announce value changes: 30 seconds or longer without a message means **unchanged**, not unavailable. The user also confirmed that dependent PV profiles require their relevant Fronius/smart-meter/BYD inputs, while **NETZ remains independently possible** with a working wallbox connection. Normative requirements: revised [PV-ECO-05](pv-regulation.md#pv-eco-05--last-value-held-validity-and-causality-approved-revised-16-october-2026), clarified [PV-ARCH-03](pv-regulation.md#pv-arch-03--profiles-with-battery-and-forecast-approved).
+
+**Supersession:** The old distinct-report-at-most-10s source/acceptance rule and the earlier 16 October open compatibility question are now **HISTORICAL / SUPERSEDED**. The earlier 15 October Q1 reference is preserved as history, not an active parallel requirement. Valid unsmoothed grid-import values are held and used on successive ticks for the approximate nominal 50 Wh budget and strictly >15 s supported reset, even when unchanged for 30 s or longer. No fictitious fresh measurement is asserted and no event-triggered second PV regulator is introduced.
+
+**Real failure/unknown:** HA may mark values `unknown` or `unavailable` because of device, Modbus, network or integration issues, not only permanent hardware failure. During **known** invalid values and WBM/HA downtime, do not invent measurement values, backfill energy or reset budget; retain transaction/authority-bound provenance and economic recovery constraints. This availability rule concerns ordinary metering, not proof of commanded physical transitions or verified control permission/authority.
+
+**Profile independence:** Unavailable mandatory measurements prevent the **dependent PV profile** from making new PV control decisions. A battery failure does not in itself prohibit separately configured battery-free PV_SURPLUS when grid import/export and EV input remain available. **NETZ does not require Fronius/BYD HA sensor values** but still requires applicable OCPP connection, permission, authority, verified capabilities and explicit profile selection. No implicit PV-to-NETZ fallback or newly invented emergency permission-OFF is authorized.
+
+**Status:** Documentation decision only; no implementation, tests, version, release, deploy or wallbox firmware changes. Reliable change-report semantics are an explicit project assumption to be verified for the installed sources.
+
+## 16 October 2026 – Wallbox status through CP pause and full reconnect bootstrap [APPROVED]
+
+**Source:** Subsequent explicit user decision of 16 October 2026, recorded as individually approved requirements [PV-OCPP-05](pv-regulation.md#pv-ocpp-05--retain-wallbox-reported-connection-and-charging-status-during-cp-pause-approved-16-october-2026) and [PV-OCPP-06](pv-regulation.md#pv-ocpp-06--initial-synchronization-of-all-supported-state-on-every-ocpp-reconnect-approved-16-october-2026).
+
+**CP pause/reporting:** The WBM uses the **most recent wallbox-reported connector and charging status** instead of layering a CP observability timeout/revalidation algorithm over it. During a CP-blocked pause, an unplugged car may continue to appear connected until the station's existing nominal **3600 s / 2 s** CP probe detects disconnection and sends a new OCPP report. This delay is explicitly accepted. The prior PV-OCPP-04 case-C grey/stale display requirement is **superseded**, while station-owned physical CP safety, verified command responses, transaction and authority rules are unchanged.
+
+**New connection baseline:** After `wallbox-stationary` restart, wallbox reboot, OCPP reconnect or HA/WBM reload/restart, a **complete new-generation initial snapshot** of supported known measurements and states must be transmitted/read, **even if values are not changing** (including L2/L3 continuously at 0 A). A new connection cannot silently inherit old current values from the former session. Prefer station-initiated immediate OCPP reports plus supported explicit readback, with unknown/unsupported fields marked accordingly. During CP block the station may only know its own last reported connector status; this is a reported state, not newly confirmed physical sensing. Existing transaction, authority, phase and applied-point confirmations still gate relevant commands.
+
+**Current interface gap:** `wallbox-stationary/main` at [`2baf0daa`](https://github.com/ekkehard-lutz/wallbox-stationary/blob/2baf0daa8c446dad7570e5daa5f0f1cba486e915/ocpp_runtime/station.py) resets and sends connector status after registration but delays its first meter report and can skip physical-status refresh under CP block. A complete immediate replay is **not proven** for all desired fields and needs separately approved interface work or supported readback. OCPP reconnect is not by itself a guarantee of full telemetry replay.
+
+**Supersession and scope:** Later CP-display requirements replace the conflicting 15 October stale/grey status interpretation only; no implicit Local-to-Remote takeover, unsafe positive restart, invented transaction, economic STOP reset or physical phase/current proof. Documentation only; no implementation, release, merge or deployment.
+
+## 16 October 2026 – WBM initiates the OCPP connection bootstrap [APPROVED]
+
+**Source:** Explicit user follow-up asking whether WBM detects connect/reconnect and deciding that WBM itself should initiate initial synchronization, including after WBM restart. This clarifies, rather than removes, the full supported-state baseline requirement of [PV-OCPP-06](pv-regulation.md#pv-ocpp-06--initial-synchronization-of-all-supported-state-on-every-ocpp-reconnect-approved-16-october-2026).
+
+**Connection ownership:** `wallbox-stationary` connects as the WebSocket/OCPP client to the WBM's configured CSMS listener. Every new accepted socket reaches `CentralSystem.on_connect()` in WBM and creates a fresh connection token; `BootNotification` establishes its own boot generation. After the boot response, WBM already initiates read-only `GetBaseReport` discovery and can extend that lifecycle with a **single, generation-scoped complete initialization coordinator**. On WBM restart the server listener is recreated and the station's own reconnect loop establishes a **new connection**, so the same bootstrap path applies. Retries depend on normal connection availability and the station's backoff/rejection behavior, not on WBM reaching out to the station's URL.
+
+**How information arrives:** WBM initiates supported requests and tracks completeness. `GetBaseReport` is capability inventory, **not meter telemetry**. For push-only states/metering, WBM must coordinate reliable initial reports from the station, using a verified supported request/trigger **only if available**, otherwise a station post-registration initial publication. The existing `wallbox-stationary` implementation does not establish a complete immediate meter/charging-state snapshot or `TriggerMessage` support. A separate station interface modification may be necessary and needs distinct authorization. This is a functional contract, not a claim of existing implementation.
+
+**Fencing:** Never treat previous OCPP connection values as current new-generation data; no duplicate bootstraps, no old-session ACK acceptance, no implicit authority takeover or economic positive restart. Each field is pending/ready/unsupported independently, and normal changed-only operation begins after its current-generation initial observation. No periodic reinitialization during normal operation; request readback only where the interface actually supports it.
+
+**Status:** Documentation change only; no WBM/station code, deployment, merge, tag or release.
+
+## 17 October 2026 – Clocked PV target across OCPP disconnect [APPROVED]
+
+**Decision:** While an already authorized automatic PV profile remains selected through a temporary OCPP communication loss, the configured regulator cadence can continue producing a **provisional energetic target** from still-valid HA inputs; this is not an executable wallbox operating point and does not manufacture absent EV/meter, transaction, phase or other physical evidence. During the outage, **no OCPP control commands are sent**, and there is **no command/setpoint queue**. WBM uses its existing connection/BootNotification initialization (PV-OCPP-06) to re-establish current-generation status and technical prerequisites. Only the **next ordinary regulation tick after readiness** determines a fresh executable point and may send it through existing checks. Do not replay a stored pre-disconnect command or add a reconnect-triggered policy loop, extra timer, or implicit authority takeover. Explicit user OFF/Local takeover and safety revocation remain authoritative; persisted 50 Wh STOP/restart history is unchanged, and outage intervals earn no economic credit.
+
+**Requirement:** [PV-ARCH-09](pv-regulation.md#pv-arch-09--clocked-pv-target-during-temporary-ocpp-disconnect-no-deferred-command-queue-approved-17-october-2026). This clarification permits provisional computation across **temporary communication loss** only and does not supersede the ordinary rule of no cyclic PV policy in passive Local/unauthorized operation. It also does not claim that a complete station baseline is currently supported. The consolidated V3 document as a whole remains **DRAFT**.
+
+**Scope:** Documentation only. Current priority remains eliminating avoidable passive Home Assistant CPU load (repeated profile-setting/SoC calculations, broad runtime/entity publications, redundant expiry timers and activity/logbook pressure). No production implementation, test, merge to `develop`, release, deployment, or station modification is authorized by this entry.
+
+
+## 17 October 2026 – Minimal passive v0.4 restart [APPROVED]
+
+Explicit user decision: architectural restart from minimal production code and a
+new focused suite, rather than another refactor. Normative milestone decisions
+are [V04-01–12](passive-v0.4.md). One independent entry/device/connector, preserved
+public identities/storage/statistics, safely detached legacy subentries and a
+recognizable single-instance card. Local settings remain functional; all physical
+control is unavailable. Future PV/OCPP/economic/safety decisions remain preserved,
+including PV-ARCH-09, without implementing a regulator now. Coordinated multiple
+wallbox management belongs to a separate future Energy Manager. No release,
+deployment, main/develop change or station modification in this assignment.
