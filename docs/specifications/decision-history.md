@@ -193,3 +193,11 @@ With explicit OFF, operational OCPP, independent fresh confirmation of physical 
 
 **Status:** Documentation change only; no WBM/station code, deployment, merge, tag or release.
 
+## 17 October 2026 – Clocked PV target across OCPP disconnect [APPROVED]
+
+**Decision:** While an already authorized automatic PV profile remains selected through a temporary OCPP communication loss, the configured regulator cadence can continue producing a **provisional energetic target** from still-valid HA inputs; this is not an executable wallbox operating point and does not manufacture absent EV/meter, transaction, phase or other physical evidence. During the outage, **no OCPP control commands are sent**, and there is **no command/setpoint queue**. WBM uses its existing connection/BootNotification initialization (PV-OCPP-06) to re-establish current-generation status and technical prerequisites. Only the **next ordinary regulation tick after readiness** determines a fresh executable point and may send it through existing checks. Do not replay a stored pre-disconnect command or add a reconnect-triggered policy loop, extra timer, or implicit authority takeover. Explicit user OFF/Local takeover and safety revocation remain authoritative; persisted 50 Wh STOP/restart history is unchanged, and outage intervals earn no economic credit.
+
+**Requirement:** [PV-ARCH-09](pv-regulation.md#pv-arch-09--clocked-pv-target-during-temporary-ocpp-disconnect-no-deferred-command-queue-approved-17-october-2026). This clarification permits provisional computation across **temporary communication loss** only and does not supersede the ordinary rule of no cyclic PV policy in passive Local/unauthorized operation. It also does not claim that a complete station baseline is currently supported. The consolidated V3 document as a whole remains **DRAFT**.
+
+**Scope:** Documentation only. Current priority remains eliminating avoidable passive Home Assistant CPU load (repeated profile-setting/SoC calculations, broad runtime/entity publications, redundant expiry timers and activity/logbook pressure). No production implementation, test, merge to `develop`, release, deployment, or station modification is authorized by this entry.
+
