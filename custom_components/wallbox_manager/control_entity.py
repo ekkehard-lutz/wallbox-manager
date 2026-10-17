@@ -137,6 +137,11 @@ class ControlEntity(RestoreEntity):
             self.control.runtime.subscribe(self._telemetry, select=self.runtime_view)
         )
         self.async_on_remove(
+            self.control.runtime.subscribe(
+                self._refresh_expiry, select=self.expiry_view
+            )
+        )
+        self.async_on_remove(
             self.control.runtime.sessions.subscribe(self._session_changed)
         )
 
@@ -218,11 +223,33 @@ class ControlEntity(RestoreEntity):
     @callback
     def _telemetry(self, snapshot):
         if snapshot.token.station == self.target.station:
-            self._schedule_expiry()
             self.async_write_ha_state()
 
-    def runtime_view(self, snapshot):
-        """Readiness/display depend on voltage and physical state, not all meters."""
+    # The same pure selector is evaluated once per publication for all controls
+    # and profiles. Per-entity bound wrappers would repeat that work.
+    runtime_view = staticmethod(control_view)
+
+    def expiry_view(self, snapshot):
         if snapshot.token.station != self.target.station:
             return None
-        return control_view(snapshot)
+        return (
+            snapshot.token,
+            snapshot.connected,
+            tuple(
+                (o.channel, o.valid_until)
+                for o in snapshot.observations
+                if o.channel.scope in (self.target, self.target.evse)
+                and o.channel.quantity.value.startswith("voltage_")
+            ),
+            tuple(o.valid_until for o in snapshot.enabled if o.scope == self.target),
+            tuple(
+                o.valid_until
+                for o in snapshot.physical_phases
+                if o.scope == self.target
+            ),
+        )
+
+    @callback
+    def _refresh_expiry(self, snapshot):
+        if snapshot.token.station == self.target.station:
+            self._schedule_expiry()

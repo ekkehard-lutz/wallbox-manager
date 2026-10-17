@@ -81,7 +81,8 @@ class StationSnapshot:
 
 
 def control_view(snapshot):
-    """Live readiness dependencies; power/energy arrive through the session ledger."""
+    """Control values/validity, distinct from acquisition and deadline refreshes."""
+    now = datetime.now(UTC)
     return (
         snapshot.token,
         snapshot.connected,
@@ -93,11 +94,14 @@ def control_view(snapshot):
         snapshot.electrical,
         snapshot.authority,
         snapshot.authority_revision,
-        snapshot.enabled,
-        snapshot.physical_phases,
+        tuple(
+            (o.scope, o.enabled, o.revision, o.observed_at <= now < o.valid_until)
+            for o in snapshot.enabled
+        ),
+        tuple((o.scope, o.mode, o.fresh(now)) for o in snapshot.physical_phases),
         tuple(t for t in snapshot.connectors if actively_charging(snapshot, t)),
         tuple(
-            o
+            (o.channel, o.value, o.fresh(now))
             for o in snapshot.observations
             if o.channel.quantity in STATE_OPTIONS
             or o.channel.quantity.value.startswith("voltage_")

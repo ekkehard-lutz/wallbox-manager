@@ -72,6 +72,7 @@ class ActiveWallbox(SelectEntity):
         self.ownership = ownership
         self.entry_id = entry_id
         self._attr_unique_id = f"{entry_id}:active_wallbox"
+        self._published_view = None
 
     @property
     def options(self):
@@ -95,11 +96,24 @@ class ActiveWallbox(SelectEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
+        self._published_view = self.visible_view()
         self.async_on_remove(self.ownership.subscribe(self._changed))
+
+    def visible_view(self):
+        return (
+            self.ownership.active_wallbox,
+            self.ownership.status,
+            self.ownership.ready,
+            self.ownership.transition,
+            self.ownership.inventory(),
+        )
 
     @callback
     def _changed(self):
-        self.async_write_ha_state()
+        view = self.visible_view()
+        if view != self._published_view:
+            self._published_view = view
+            self.async_write_ha_state()
 
     async def async_select_option(self, option):
         from homeassistant.exceptions import HomeAssistantError

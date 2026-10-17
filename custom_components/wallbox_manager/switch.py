@@ -3,6 +3,7 @@
 from homeassistant.components.switch import SwitchEntity
 
 from .control_entity import ControlEntity, setup_control_entities
+from .core.events import control_view
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -18,6 +19,16 @@ class ChargingEnabled(ControlEntity, SwitchEntity):
     @property
     def is_on(self):
         return self.control.runtime.enabled(self.target)
+
+    def runtime_view(self, snapshot):
+        # This hardware projection retains each permission readback and the
+        # latest physical-phase deadline. Intent/configuration entities need
+        # only the semantic control change, not every acquisition timestamp.
+        return (
+            control_view(snapshot),
+            tuple(o for o in snapshot.enabled if o.scope == self.target),
+            tuple(o for o in snapshot.physical_phases if o.scope == self.target),
+        )
 
     @property
     def available(self):

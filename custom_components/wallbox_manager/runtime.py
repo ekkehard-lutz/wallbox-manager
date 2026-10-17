@@ -56,15 +56,16 @@ class Runtime:
     def _publish(self, snapshot: StationSnapshot, *, previous=None, invalidate=False):
         previous = previous or self.get(snapshot.token.station)
         self._stations[snapshot.token.station] = snapshot
+        views = {}
         for listener, select in tuple(self._listeners.items()):
             try:
-                if (
-                    select is None
-                    or previous is None
-                    or invalidate
-                    or select(previous) != select(snapshot)
-                ):
-                    listener(snapshot)
+                if select is not None and previous is not None and not invalidate:
+                    key = id(select)
+                    if key not in views:
+                        views[key] = select(previous), select(snapshot)
+                    if views[key][0] == views[key][1]:
+                        continue
+                listener(snapshot)
             except Exception:
                 _LOGGER.exception("Snapshot subscriber failed")
 
