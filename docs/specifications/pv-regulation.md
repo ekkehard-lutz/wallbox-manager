@@ -91,6 +91,18 @@ Validate observation-only CPU cost with WBM disabled/enabled without takeover un
 
 ---
 
+### PV-ARCH-09 – Clocked PV target during temporary OCPP disconnect; no deferred command queue [APPROVED, 17 October 2026]
+
+During an already authorized automatic PV charging intent, **temporary loss of the OCPP connection does not by itself stop the configured PV calculation cadence**. The regulator can continue determining its **provisional energetic target** from available Home Assistant PV/grid/household/battery input at the existing configured interval. This does **not** authorize control actions or pretend that missing station readings are current: physical phases/voltages, actual EV power, transaction and charging response evidence required by individual policies or by executable-point selection remain unavailable until independently re-established. Invalid or missing inputs do not become zero or grant economic credit. Explicit user OFF, explicit Local authority/revocation and other actual safety/intent changes continue to stop or invalidate the applicable control activity; this exception is for a **temporary connection outage**, not permanent passive observation.
+
+From disconnect until connection-scoped initialization and the necessary live permission, authority, transaction, capability, actual phase and physical-response evidence are re-established, **no OCPP charging command is dispatched**. There is **no pending setpoint queue, buffered command replay, resend of the last pre-disconnect setpoint, or special reconnect-driven regulation cycle**. After successful current-generation initialization under PV-OCPP-06, the **first ordinary configured regulation tick** takes the latest available measurements, makes a fresh policy/executable-point decision and submits a command **only if the existing live safety/authority/permission/transaction/phase/command guards permit it** and an application is needed. Preserve original configured cadence; do not invent another polling or wake timer to accelerate reconnect. Stale old-generation ACKs and accepted/applied operating points cannot satisfy new-generation proof.
+
+Connection loss does not create economic accounting eligibility, permit downtime energy integration, erase persisted 50 Wh STOP/restart history, grant a fresh restart or imply a zero-current physical response. Keep the existing distinction between a provisional energetic target and a verified executable OCPP operating point. This is a **future implementation requirement only**, not approval to change the running code or station during passive CPU optimization.
+
+Evidence: Explicit user decision of 17 October 2026; [decision history](decision-history.md#17-october-2026--clocked-pv-target-across-ocpp-disconnect-approved).
+
+---
+
 ## 2. Shared battery SoC state machine
 
 ### PV-SOC-01 – One target SoC T, one hysteresis parameter H [APPROVED]
