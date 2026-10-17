@@ -107,6 +107,7 @@ class PVOptimum:
         )
 
     def pv_target(self, target, now):
+        self.normalize_settings(target)
         settings = self.setting(target)
         reserve = self.pv_reserve()
         lower, _ = target_bounds(reserve, settings["soc_hysterese"])

@@ -13,6 +13,7 @@ from homeassistant.helpers.storage import Store
 
 from .control.commands import CommandReason, CommandResult, CommandStatus, ControlArea
 from .core.authority import ControlAuthority
+from .core.events import control_view
 from .core.telemetry import Channel, Quantity, State
 from .core.values import scalar
 from .diagnostics import (
@@ -92,6 +93,9 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
         self.timer_wait = asyncio.sleep
         self.grid_timers = {}
         self.settings = {}
+        for snapshot in control.runtime.stations:
+            for target in snapshot.connectors:
+                self.initialize_settings(target)
         self.tasks = {}
         self.recoveries = {}
         self.recovery_ready = True
@@ -105,7 +109,7 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
         self.battery_dirty = False
         self.suppressed = set()
         self.economic_initialize()
-        self.unsubscribe = control.runtime.subscribe(self.changed)
+        self.unsubscribe = control.runtime.subscribe(self.changed, select=control_view)
         self.session_unsubscribe = control.runtime.sessions.subscribe(
             self.sessions_changed
         )
@@ -151,6 +155,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                         **PV_DEFAULTS,
                         **OPTIMUM_DEFAULTS,
                         **value,
+                        **{
+                            k: self.entry.options[k]
+                            for k in DEFAULTS
+                            if k in self.entry.options
+                        },
                         "soc_hysterese": migrated["soc_hysterese"],
                     }
                     # Preserve legacy values for audit; clamp deterministically even
@@ -172,6 +181,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                     self.settings[key].pop("grid_activated_at", None)
             except ValueError, TypeError, KeyError:
                 continue
+
+        self.normalize_settings()
 
         if migrated != dict(self.entry.options) and hasattr(
             self.entry, "async_on_unload"
@@ -209,31 +220,47 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             history.add(self.monotonic(), value, valid_for=valid_for)
 
     def setting(self, target):
-        settings = self.settings.setdefault(
-            target_key(target),
-            {
-                "profile": "NETZ",
-                "power_kw": 11,
-                "min_soc": 20,
-                **PV_DEFAULTS,
-                **OPTIMUM_DEFAULTS,
-            },
-        )
+        """Ordinary reads never project or mutate persisted configuration."""
+        settings = self.settings.get(target_key(target))
+        return settings if settings is not None else self.default_settings()
 
-        for key in DEFAULTS:
-            if key in self.entry.options:
-                settings[key] = self.entry.options[key]
+    def default_settings(self):
+        return {
+            "profile": "NETZ",
+            "power_kw": 11,
+            "min_soc": 20,
+            **PV_DEFAULTS,
+            **OPTIMUM_DEFAULTS,
+            **{k: self.entry.options[k] for k in DEFAULTS if k in self.entry.options},
+        }
+
+    def initialize_settings(self, target):
+        key = target_key(target)
+        if key not in self.settings:
+            self.settings[key] = self.default_settings()
+            self.normalize_settings(target)
+
+    def normalize_settings(self, target=None):
+        """Project at input/policy boundaries, never during HA property reads."""
         try:
-            bounded = clamp_settings(settings, self.pv_reserve())
+            reserve = self.pv_reserve()
         except ValueError, TypeError, OverflowError:
-            pass  # Missing/impossible reserve is blocked by the execution policy.
-        else:
+            return  # Missing reserve still blocks execution through its live read.
+        items = (
+            self.settings.items()
+            if target is None
+            else ((target_key(target), self.settings[target_key(target)]),)
+        )
+        for key, settings in items:
+            try:
+                bounded = clamp_settings(settings, reserve)
+            except ValueError, TypeError, OverflowError:
+                continue  # Impossible legacy H stays visible and blocks policy.
             if any(settings[k] != bounded[k] for k in TARGET_FIELDS):
-                settings.setdefault(
+                bounded.setdefault(
                     "legacy_soc_targets", {k: settings[k] for k in TARGET_FIELDS}
                 )
-                settings.update(bounded)
-        return settings
+                self.settings[key] = bounded
 
     def available_profiles(self, target):
         # Entity options are scoped to this connector's owning integration entry.
@@ -366,6 +393,10 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
 
     @callback
     def battery_changed(self, event):
+        if event.data.get("entity_id") == self.references.get("min_soc_speicher"):
+            self.normalize_settings()
+            for target in tuple(self.control.intents):
+                self.control.publish(target)
         self.pv_measurement_changed(event)
         entity = event.data.get("entity_id")
         recovery = self.battery.record.get("entity") if self.battery.record else None
@@ -542,6 +573,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             raise ValueError("invalid PV thresholds or interval")
 
     async def set_value(self, target, field, value):
+        self.initialize_settings(target)
+        self.normalize_settings(target)
         if field in ("grid_start_delay", "grid_duration"):
             value = duration_seconds(value)
             if self.setting(target).get("grid_request"):
@@ -574,6 +607,9 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
                 return
             self.entry.options = options
             self.references.update(options)
+            for existing in self.settings.values():
+                existing[field] = settings[field]
+            self.normalize_settings()
             if field == "soc_hysterese":
                 self.settings[target_key(target)] = settings
             if field == "power_smoothing_window":
@@ -1084,6 +1120,8 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             self.control.publish(target)
 
     def changed(self, snapshot):
+        for target in snapshot.connectors:
+            self.initialize_settings(target)
         for target in (
             self.tasks.keys()
             | self.debounce_tasks.keys()
@@ -1112,6 +1150,11 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
         self.sessions_changed()
 
     def sessions_changed(self):
+        economic_before = {
+            target: self.economic_attributes(target)
+            for target in self.economic_policies.keys()
+            | self.economic_activation_pending.keys()
+        }
         self.economic_sessions_changed()
         for target in (
             self.economic_policies.keys() | self.economic_activation_pending.keys()
@@ -1145,6 +1188,9 @@ class GridProfiles(GridTiming, PVSurplus, PVOptimum, PVEconomicControl):
             session = self.control.runtime.sessions.get(target)
             if session and not session.active:
                 self.pv_sync_session(target)
+        for target, before in economic_before.items():
+            if self.economic_attributes(target) != before:
+                self.control.publish(target)
         self.battery_dirty = True
         if not self.closed and (self.battery_task is None or self.battery_task.done()):
             self.battery_task = self.hass.async_create_background_task(

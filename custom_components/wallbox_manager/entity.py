@@ -147,7 +147,12 @@ def async_setup_station_entities(
     def changed(snapshot):
         add(snapshot.token.station, snapshot)
 
-    entry.async_on_unload(runtime.subscribe(changed))
+    entry.async_on_unload(
+        runtime.subscribe(
+            changed,
+            select=lambda s: (s.token, s.identity, s.supported_channels),
+        )
+    )
     # Registry identities persist; don't invent a runtime connection on reload.
     prefix = f"{entry.entry_id}:"
     for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
@@ -198,9 +203,33 @@ class StationEntity(Entity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        self.async_on_remove(self.runtime.subscribe(self._changed))
+        self.async_on_remove(
+            self.runtime.subscribe(self._changed, select=self.runtime_view)
+        )
         # Updates can occur after scheduling entity addition but before attachment.
         self.snapshot = self.runtime.get(self.station)
+
+    def runtime_view(self, snapshot):
+        """Station metadata has no dependency on routine electrical reports."""
+        if snapshot.token.station != self.station:
+            return None
+        return (
+            snapshot.token,
+            snapshot.connected,
+            snapshot.identity,
+            snapshot.evses,
+            snapshot.connectors,
+            snapshot.capabilities,
+            snapshot.charging_schedule,
+            snapshot.discovery,
+            snapshot.protocol,
+            snapshot.protocol_version,
+            snapshot.electrical,
+            snapshot.authority,
+            snapshot.authority_revision,
+            snapshot.enabled,
+            snapshot.physical_phases,
+        )
 
     @callback
     def _changed(self, snapshot):

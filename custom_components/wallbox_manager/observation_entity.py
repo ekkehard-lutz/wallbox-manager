@@ -33,6 +33,20 @@ class ObservationEntity(StationEntity):
     def physical_state(self):
         return self.channel.quantity in STATE_OPTIONS
 
+    def runtime_view(self, snapshot):
+        # Keep acquisition timestamps: a genuine same-valued report is still
+        # a report. Other measurement channels do not affect this entity.
+        if snapshot.token.station != self.station:
+            return None
+        return (
+            snapshot.token,
+            snapshot.connected,
+            snapshot.identity,
+            snapshot.connectors,
+            snapshot.enabled if self.physical_state else None,
+            snapshot.observation(self.channel),
+        )
+
     @property
     def observation(self):
         value = self.snapshot.observation(self.channel) if self.snapshot else None

@@ -81,7 +81,7 @@ async def test_measurement_storm_waits_for_one_existing_regulation_cycle(
     monkeypatch.setattr(p, "pv_edit", edit)
     monkeypatch.setattr(p, "pv_plan", plan)
     before = list(peer.operations)
-    for index in range(100):
+    for index in range(2000):
         p.hass.states.async_set("sensor.pv", 4000 + index, {"unit_of_measurement": "W"})
         now = datetime.now(UTC)
         control.runtime.observe(
