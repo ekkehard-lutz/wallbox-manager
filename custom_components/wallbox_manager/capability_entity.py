@@ -42,7 +42,11 @@ def setup_capability_entities(hass, entry, add_entities):
                 if capability.value is not None:
                     add(capability.scope, capability.key)
 
-    entry.async_on_unload(runtime.subscribe(changed))
+    entry.async_on_unload(
+        runtime.subscribe(
+            changed, select=lambda s: (s.token, s.connectors, s.electrical)
+        )
+    )
     for entity in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id):
         if entity.unique_id.startswith(prefix):
             try:

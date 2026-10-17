@@ -32,7 +32,7 @@ class Runtime:
         self._physical_limits = {}
         self._departures = {}
         self._departure_sequences = {}
-        self._listeners: set[Callable[[StationSnapshot], None]] = set()
+        self._listeners: dict[Callable[[StationSnapshot], None], Callable | None] = {}
 
     @property
     def stations(self) -> tuple[StationSnapshot, ...]:
@@ -44,16 +44,27 @@ class Runtime:
         return self._stations.get(station)
 
     def subscribe(
-        self, listener: Callable[[StationSnapshot], None]
+        self, listener: Callable[[StationSnapshot], None], *, select=None
     ) -> Callable[[], None]:
-        self._listeners.add(listener)
-        return lambda: self._listeners.discard(listener)
+        self._listeners[listener] = select
 
-    def _publish(self, snapshot: StationSnapshot) -> None:
+        def unsubscribe():
+            self._listeners.pop(listener, None)
+
+        return unsubscribe
+
+    def _publish(self, snapshot: StationSnapshot, *, previous=None, invalidate=False):
+        previous = previous or self.get(snapshot.token.station)
         self._stations[snapshot.token.station] = snapshot
-        for listener in tuple(self._listeners):
+        for listener, select in tuple(self._listeners.items()):
             try:
-                listener(snapshot)
+                if (
+                    select is None
+                    or previous is None
+                    or invalidate
+                    or select(previous) != select(snapshot)
+                ):
+                    listener(snapshot)
             except Exception:
                 _LOGGER.exception("Snapshot subscriber failed")
 
@@ -470,7 +481,7 @@ class Runtime:
         self._departures.pop(target, None)
         state = self.get(token.station)
         # Publish the changed validity even when the reported enums are unchanged.
-        self._publish(replace(state))
+        self._publish(replace(state), invalidate=True)
 
     def observe(
         self,
@@ -595,7 +606,7 @@ class Runtime:
         if track_sessions:
             self.sessions.observe(incoming, session_external_id)
         if updated != old:
-            self._publish(updated)
+            self._publish(updated, previous=old)
         for channel, (previous, was_fresh) in physical_changes.items():
             observation = updated.observation(channel)
             fresh = self.physical_state_fresh(observation)

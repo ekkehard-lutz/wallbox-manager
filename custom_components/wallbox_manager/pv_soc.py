@@ -33,8 +33,9 @@ def clamp_settings(settings, reserve):
     An impossible interval raises rather than inventing an unsafe target.
     """
     result = dict(settings)
+    lower, upper = target_bounds(reserve, result["soc_hysterese"])
     for key in TARGET_FIELDS:
-        result[key] = float(clamp_target(result[key], reserve, result["soc_hysterese"]))
+        result[key] = float(min(upper, max(lower, Fraction(str(result[key])))))
     result["optimum_upper_soc"] = max(
         result["optimum_lower_soc"], result["optimum_upper_soc"]
     )

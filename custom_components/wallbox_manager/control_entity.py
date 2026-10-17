@@ -8,6 +8,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.restore_state import RestoreEntity
 
+from .core.events import control_view
 from .core.models import ConnectorId, EvseId, StationId
 from .entity import device_info
 
@@ -43,7 +44,9 @@ def setup_control_entities(hass, entry, add_entities, factory):
                 ):
                     add(target)
 
-    entry.async_on_unload(runtime.subscribe(changed))
+    entry.async_on_unload(
+        runtime.subscribe(changed, select=lambda s: (s.protocol_version, s.connectors))
+    )
     # Persisted registry identity keeps offline entities present after reload.
     prefix = f"{entry.entry_id}:control:"
     for entity in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id):
@@ -69,7 +72,11 @@ class ControlEntity(RestoreEntity):
         self.target = target
         self.entry_id = entry_id
         self.key = key
+        if hasattr(control, "profiles"):
+            control.profiles.initialize_settings(target)
         self._expire = None
+        self._expiry_deadline = None
+        self._session_context = None
         self._attr_unique_id = control_id(entry_id, target, key)
         self._attr_translation_key = key
         self._attr_translation_placeholders = {
@@ -123,9 +130,12 @@ class ControlEntity(RestoreEntity):
             except ValueError, TypeError:
                 pass  # Unknown/unavailable or obsolete state cannot authorize work.
         self.async_on_remove(self._cancel_expiry)
+        self._session_context = self.session_view()
         self._schedule_expiry()
         self.async_on_remove(self.control.subscribe(self._changed))
-        self.async_on_remove(self.control.runtime.subscribe(self._telemetry))
+        self.async_on_remove(
+            self.control.runtime.subscribe(self._telemetry, select=self.runtime_view)
+        )
         self.async_on_remove(
             self.control.runtime.sessions.subscribe(self._session_changed)
         )
@@ -138,17 +148,17 @@ class ControlEntity(RestoreEntity):
         if self._expire is not None:
             self._expire()
             self._expire = None
+        self._expiry_deadline = None
 
     @callback
     def _schedule_expiry(self):
-        self._cancel_expiry()
         snapshot = self.control.runtime.get(self.target.station)
         now = datetime.now(UTC)
         deadlines = (
             [
                 o.valid_until
                 for o in snapshot.observations
-                if o.channel.scope == self.target
+                if o.channel.scope in (self.target, self.target.evse)
                 and o.channel.quantity.value.startswith("voltage_")
                 and o.valid_until is not None
                 and o.valid_until > now
@@ -167,20 +177,38 @@ class ControlEntity(RestoreEntity):
                 for o in snapshot.physical_phases
                 if o.scope == self.target and o.valid_until > now
             )
-        if deadlines:
+        deadline = min(deadlines, default=None)
+        if deadline == self._expiry_deadline:
+            return
+        self._cancel_expiry()
+        if deadline is not None:
+            self._expiry_deadline = deadline
             self._expire = async_track_point_in_utc_time(
-                self.hass, self._expired, min(deadlines)
+                self.hass, self._expired, deadline
             )
 
     @callback
     def _expired(self, now):
         self._expire = None
+        self._expiry_deadline = None
         self.async_write_ha_state()
         self._schedule_expiry()
 
     @callback
     def _session_changed(self):
-        self.async_write_ha_state()
+        context = self.session_view()
+        if context != self._session_context:
+            self._session_context = context
+            self.async_write_ha_state()
+
+    def session_view(self):
+        session = self.control.runtime.sessions.get(self.target)
+        return (
+            (session.session_id, session.active) if session else None,
+            self.control.profiles.active(self.target)
+            if hasattr(self.control, "profiles")
+            else None,
+        )
 
     @callback
     def _changed(self, target):
@@ -192,3 +220,9 @@ class ControlEntity(RestoreEntity):
         if snapshot.token.station == self.target.station:
             self._schedule_expiry()
             self.async_write_ha_state()
+
+    def runtime_view(self, snapshot):
+        """Readiness/display depend on voltage and physical state, not all meters."""
+        if snapshot.token.station != self.target.station:
+            return None
+        return control_view(snapshot)

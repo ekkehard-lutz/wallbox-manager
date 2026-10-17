@@ -124,7 +124,10 @@ class ControlRuntime:
         self._takeover_generations = {}
         self.takeover_results = {}
         self.electrical_capabilities = electrical_capabilities
-        self._unsubscribe_defaults = runtime.subscribe(self._initialize_defaults)
+        self._unsubscribe_defaults = runtime.subscribe(
+            self._initialize_defaults,
+            select=lambda s: (s.token, s.connected, s.connectors, s.electrical),
+        )
         for snapshot in runtime.stations:
             self._initialize_defaults(snapshot)
 

@@ -1,13 +1,14 @@
 """Immutable discovery/runtime boundary, independent of HA and wire protocols."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from .authority import AuthorityObservation
 from .capabilities import CapabilityEvidence, CapabilitySnapshot
 from .electrical import ElectricalCapability
 from .enabled import EnabledObservation
 from .models import ConnectorId, EvseId, PhysicalPhaseObservation, StationId
-from .telemetry import Channel, Observation
+from .telemetry import STATE_OPTIONS, Channel, Observation, Quantity, State
 
 
 @dataclass(frozen=True)
@@ -77,3 +78,57 @@ class StationSnapshot:
 
     def observation(self, channel: Channel) -> Observation | None:
         return next((o for o in self.observations if o.channel == channel), None)
+
+
+def control_view(snapshot):
+    """Live readiness dependencies; power/energy arrive through the session ledger."""
+    return (
+        snapshot.token,
+        snapshot.connected,
+        snapshot.identity,
+        snapshot.connectors,
+        snapshot.capabilities,
+        snapshot.charging_schedule,
+        snapshot.discovery,
+        snapshot.electrical,
+        snapshot.authority,
+        snapshot.authority_revision,
+        snapshot.enabled,
+        snapshot.physical_phases,
+        tuple(t for t in snapshot.connectors if actively_charging(snapshot, t)),
+        tuple(
+            o
+            for o in snapshot.observations
+            if o.channel.quantity in STATE_OPTIONS
+            or o.channel.quantity.value.startswith("voltage_")
+        ),
+    )
+
+
+def actively_charging(state, target):
+    """Require actual positive flow; an idle relay or a desired target is no proof."""
+    charging = state.observation(Channel(target, Quantity.CHARGING_STATE))
+    if charging is None or charging.value != State.CHARGING:
+        return False
+    now = datetime.now(UTC)
+    samples = [
+        o
+        for o in state.observations
+        if o.channel.scope == target
+        and o.channel.quantity
+        in (
+            Quantity.POWER,
+            Quantity.CURRENT_L1,
+            Quantity.CURRENT_L2,
+            Quantity.CURRENT_L3,
+        )
+        and o.observed_at <= now
+        and o.fresh(now)
+    ]
+    if not samples:
+        return False
+    # A newer zero reading supersedes older positive measurements.
+    latest = max(o.observed_at for o in samples)
+    samples = [o for o in samples if o.observed_at == latest]
+    power = next((o for o in samples if o.channel.quantity == Quantity.POWER), None)
+    return power.value > 0 if power else any(o.value > 0 for o in samples)
