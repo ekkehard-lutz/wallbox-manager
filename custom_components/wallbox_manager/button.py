@@ -1,51 +1,24 @@
-"""Explicit, station-scoped authority takeover; never a return-control action."""
+"""Explicitly unavailable takeover action, retaining its public registry identity."""
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity import Entity
 
-from .authority_entity import setup_authority_entities
-from .entity import StationEntity
-
-
-async def async_setup_entry(hass, entry, async_add_entities):
-    setup_authority_entities(
-        hass,
-        entry,
-        async_add_entities,
-        "take_control",
-        lambda station: TakeControlButton(
-            entry.runtime_data.control, entry.entry_id, station
-        ),
-    )
+from .entity import WallboxEntity
 
 
-class TakeControlButton(StationEntity, ButtonEntity):
-    _attr_entity_category = None
+async def async_setup_entry(hass, entry, add):
+    state = entry.runtime_data.state
+    add([TakeControl(entry, "station", (state.binding[0], None, None), "take_control")])
 
-    def __init__(self, control, entry_id, station):
-        super().__init__(control.runtime, entry_id, station, "take_control")
-        self.control = control
 
+class TakeControl(WallboxEntity, ButtonEntity):
     @property
     def available(self):
-        adapter = self.control.authority_adapter(self.station)
-        return bool(
-            self.snapshot
-            and self.snapshot.connected
-            and adapter
-            and adapter.can_take_control()
-        )
+        return False
 
-    @property
-    def extra_state_attributes(self):
-        result = self.control.takeover_results.get(self.station)
-        return {
-            **super().extra_state_attributes,
-            "takeover_status": result.status.value if result else None,
-            "takeover_reason": result.reason.value
-            if result and result.reason
-            else None,
-        }
+    async def async_added_to_hass(self):
+        await Entity.async_added_to_hass(self)
 
     async def async_press(self):
-        await self.control.take_control(self.station)
-        self.async_write_ha_state()
+        raise HomeAssistantError("Takeover is unavailable in passive v0.4")

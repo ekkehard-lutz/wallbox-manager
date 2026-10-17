@@ -1,0 +1,54 @@
+{
+  "method": "tests/test_passive_benchmark.py with real HA entities/events; protocol behavior separately verified over real local WebSockets",
+  "live_cpu_verified": false,
+  "workloads": {
+    "change_only_idle": {
+      "accepted": 0,
+      "control_commands": 0,
+      "ha_changes": 0,
+      "ha_writes": 0,
+      "unrelated_writes": 0,
+      "value_changes": 0
+    },
+    "changed_values": {
+      "accepted": 100,
+      "control_commands": 0,
+      "ha_changes": 100,
+      "ha_writes": 100,
+      "unrelated_writes": 0,
+      "value_changes": 100
+    },
+    "disconnect_reconnect": {
+      "accepted": 26,
+      "control_commands": 0,
+      "ha_changes": 52,
+      "ha_writes": 75,
+      "unrelated_writes": 0,
+      "value_changes": 26
+    },
+    "initial_sync": {
+      "accepted": 26,
+      "control_commands": 0,
+      "ha_changes": 39,
+      "ha_writes": 39,
+      "unrelated_writes": 0,
+      "value_changes": 26
+    },
+    "other_instance": {
+      "accepted": 0,
+      "control_commands": 0,
+      "ha_changes": 0,
+      "ha_writes": 0,
+      "unrelated_writes": 0,
+      "value_changes": 0
+    },
+    "same_value_reports": {
+      "accepted": 2000,
+      "control_commands": 0,
+      "ha_changes": 2000,
+      "ha_writes": 2000,
+      "unrelated_writes": 0,
+      "value_changes": 0
+    }
+  }
+}

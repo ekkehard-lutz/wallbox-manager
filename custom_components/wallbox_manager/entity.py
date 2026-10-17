@@ -1,238 +1,165 @@
-"""Push-only station diagnostics, independent of protocol adapter objects.
-
-DeviceInfo, diagnostic categorization and subscription/removal patterns adapted
-from lbbrhzn/ocpp sensor.py and __init__.py at
-848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
-See THIRD_PARTY_NOTICES.md. Generic Runtime replaces direct charge-point access.
-"""
+"""Stable public identities and thin, direct observation/settings entities."""
 
 import json
-from collections.abc import Callable
+from datetime import UTC, datetime
 
 from homeassistant.core import callback
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.entity import DeviceInfo, Entity, EntityCategory
+from homeassistant.helpers.entity import DeviceInfo, Entity
+from homeassistant.helpers.event import async_track_point_in_utc_time
 
 from .const import DOMAIN
-from .core.events import StationSnapshot
-from .core.models import ConnectorId, EvseId, StationId
-from .core.telemetry import Channel, Quantity
-from .runtime import Runtime
 
 
-def station_identifier(entry_id: str, station: StationId) -> str:
-    """Stable across runtime restarts; separate identical IDs on other listeners."""
-    return f"{entry_id}:{station.value}"
+def unique_id(entry_id, family, scope, role, projection=None):
+    if family == "station":
+        return f"{entry_id}:{scope[0]}:{role}"
+    parts = [*scope, role]
+    if family == "observation":
+        parts.append(projection)
+    return f"{entry_id}:{family}:" + json.dumps(parts, separators=(",", ":"))
 
 
-def device_info(entry_id: str, station: StationId, snapshot: StationSnapshot | None):
-    info = DeviceInfo(
-        identifiers={(DOMAIN, station_identifier(entry_id, station))},
-        name=station.value,
+def device_info(entry, state):
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{entry.entry_id}:{state.binding[0]}")},
+        name=state.binding[0],
+        **state.identity,
     )
-    if snapshot is not None:
-        for key, value in (
-            ("manufacturer", snapshot.identity.vendor),
-            ("model", snapshot.identity.model),
-            ("sw_version", snapshot.identity.firmware),
-            ("serial_number", snapshot.identity.serial),
-        ):
-            if value is not None:
-                info[key] = value
-    return info
 
 
-def scope_attributes(runtime, entry_id, scope):
-    """Expose safe card joins; broader telemetry is usable only if unambiguous."""
-    from .ownership import identity
-
-    station = scope.station if isinstance(scope, (EvseId, ConnectorId)) else scope
-    snapshot = runtime.get(station)
-    matches = (
-        [
-            t
-            for t in snapshot.connectors
-            if t == scope or t.evse == scope or t.station == scope
-        ]
-        if snapshot
-        else []
-    )
-    attrs = {
-        "wallbox_manager_scope": "connector"
-        if isinstance(scope, ConnectorId)
-        else "evse"
-        if isinstance(scope, EvseId)
-        else "station"
-    }
-    if isinstance(scope, ConnectorId):
-        attrs["wallbox_manager_target"] = identity(entry_id, scope)
-    elif len(matches) == 1:
-        attrs["wallbox_manager_targets"] = [identity(entry_id, matches[0])]
-    return attrs
-
-
-def observation_unique_id(entry_id, channel, projection=None):
-    scope = channel.scope
-    evse = (
-        scope.evse
-        if isinstance(scope, ConnectorId)
-        else scope
-        if isinstance(scope, EvseId)
-        else None
-    )
-    station = evse.station if evse else scope
-    parts = [
-        station.value,
-        evse.value if evse else None,
-        scope.value if isinstance(scope, ConnectorId) else None,
-        channel.quantity.value,
-        projection,
-    ]
-    return f"{entry_id}:observation:" + json.dumps(parts, separators=(",", ":"))
-
-
-def restored_channel(entry_id, unique_id):
-    prefix = f"{entry_id}:observation:"
-    if not unique_id.startswith(prefix):
-        return None
-    try:
-        station, evse, connector, quantity, _ = json.loads(unique_id[len(prefix) :])
-        scope = StationId(station)
-        if evse is not None:
-            scope = EvseId(scope, evse)
-        if connector is not None:
-            scope = ConnectorId(scope, connector)
-        return Channel(scope, Quantity(quantity))
-    except TypeError, ValueError:
-        return None
-
-
-@callback
-def async_setup_station_entities(
-    hass, entry, async_add_entities, factory: Callable, observation_factory=None
-):
-    """Subscribe before replaying snapshots; discover new stations without reload."""
-    runtime = entry.runtime_data.state
-    registry = dr.async_get(hass)
-    seen: set[StationId] = set()
-    observed_entities = set()
-
-    @callback
-    def add_observation(channel):
-        if observation_factory is None:
-            return
-        entities = []
-        for entity in observation_factory(runtime, entry.entry_id, channel):
-            if entity.unique_id not in observed_entities:
-                observed_entities.add(entity.unique_id)
-                entities.append(entity)
-        if entities:
-            async_add_entities(entities)
-
-    @callback
-    def add(station, snapshot):
-        registry.async_get_or_create(
-            config_entry_id=entry.entry_id,
-            **device_info(entry.entry_id, station, snapshot),
-        )
-        if station not in seen:
-            seen.add(station)
-            async_add_entities(factory(runtime, entry.entry_id, station))
-        if snapshot is not None:
-            for channel in snapshot.supported_channels:
-                add_observation(channel)
-
-    @callback
-    def changed(snapshot):
-        add(snapshot.token.station, snapshot)
-
-    entry.async_on_unload(
-        runtime.subscribe(
-            changed,
-            select=lambda s: (s.token, s.identity, s.supported_channels),
-        )
-    )
-    # Registry identities persist; don't invent a runtime connection on reload.
-    prefix = f"{entry.entry_id}:"
-    for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
-        for domain, identifier in device.identifiers:
-            if domain == DOMAIN and identifier.startswith(prefix):
-                station = StationId(identifier[len(prefix) :])
-                add(station, runtime.get(station))
-    for entity in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id):
-        if channel := restored_channel(entry.entry_id, entity.unique_id):
-            add_observation(channel)
-    for snapshot in runtime.stations:
-        changed(snapshot)
-
-
-class StationEntity(Entity):
+class WallboxEntity(Entity):
     _attr_has_entity_name = True
     _attr_should_poll = False
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, runtime: Runtime, entry_id: str, station: StationId, key: str):
-        self.runtime = runtime
-        self.station = station
-        self.entry_id = entry_id
-        self._semantic_role = key
-        self.snapshot = runtime.get(station)
-        self._attr_unique_id = f"{station_identifier(entry_id, station)}:{key}"
-        self._attr_translation_key = key
+    def __init__(self, entry, family, scope, role):
+        self.entry, self.observed = entry, entry.runtime_data.state
+        self.family, self.scope, self.role = family, tuple(scope), role
+        self.key = (family, self.scope, role)
+        self._expiry = None
+        self._attr_unique_id = unique_id(entry.entry_id, family, scope, role)
+        self._attr_translation_key = "session_" + role if family == "session" else role
+        label = (
+            "Station"
+            if scope[1] is None
+            else f"EVSE {scope[1]}" + (f" / {scope[2]}" if scope[2] else "")
+        )
+        self._attr_translation_placeholders = {"scope": label}
 
     @property
     def device_info(self):
-        return device_info(self.entry_id, self.station, self.snapshot)
+        return device_info(self.entry, self.observed)
 
     @property
     def available(self):
-        return self.snapshot is not None
+        return self.observed.connected and self.observed.value(self.key) is not None
 
     @property
     def extra_state_attributes(self):
+        station, evse, connector = self.scope
+        target = json.dumps(
+            [self.entry.entry_id, *self.observed.binding], separators=(",", ":")
+        )
         attrs = {
-            "wallbox_manager_role": self._semantic_role,
-            "wallbox_manager_entry": self.entry_id,
-            "station_id": self.station.value,
-            "runtime_incarnation": self.runtime.runtime_id,
+            "wallbox_manager_role": "session_" + self.role
+            if self.family == "session"
+            else self.role,
+            "wallbox_manager_entry": self.entry.entry_id,
+            "station_id": station,
+            "evse_id": evse,
+            "connector_id": connector,
+            "wallbox_manager_scope": "connector"
+            if connector
+            else "evse"
+            if evse
+            else "station",
+            "runtime_incarnation": self.observed.runtime_id,
+            "connected": self.observed.connected,
         }
-        if self.snapshot is not None:
-            attrs["connected"] = self.snapshot.connected
+        attrs["wallbox_manager_target" if connector else "wallbox_manager_targets"] = (
+            target if connector else [target]
+        )
+        if observation := self.observed.observations.get(self.key):
+            attrs.update(
+                source=observation.source,
+                observed_at=observation.observed_at.isoformat(),
+                received_at=observation.received_at.isoformat(),
+                valid_until=observation.valid_until.isoformat()
+                if observation.valid_until
+                else None,
+                connection_generation=observation.generation[0],
+                boot_generation=observation.generation[1],
+            )
         return attrs
+
+    def cancel_expiry(self):
+        if self._expiry:
+            self._expiry()
+            self._expiry = None
+
+    def schedule_expiry(self):
+        self.cancel_expiry()
+        observation = self.observed.observations.get(self.key)
+        if (
+            observation
+            and observation.valid_until
+            and observation.valid_until > datetime.now(UTC)
+        ):
+            self._expiry = async_track_point_in_utc_time(
+                self.hass, self.expired, observation.valid_until
+            )
+
+    @callback
+    def expired(self, now):
+        self._expiry = None
+        self.async_write_ha_state()
+
+    def changed(self):
+        self.schedule_expiry()
+        self.async_write_ha_state()
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        self.async_on_remove(
-            self.runtime.subscribe(self._changed, select=self.runtime_view)
-        )
-        # Updates can occur after scheduling entity addition but before attachment.
-        self.snapshot = self.runtime.get(self.station)
+        self.async_on_remove(self.observed.watch(self.key, self.changed))
+        self.async_on_remove(self.cancel_expiry)
+        self.schedule_expiry()
 
-    def runtime_view(self, snapshot):
-        """Station metadata has no dependency on routine electrical reports."""
-        if snapshot.token.station != self.station:
-            return None
-        return (
-            snapshot.token,
-            snapshot.connected,
-            snapshot.identity,
-            snapshot.evses,
-            snapshot.connectors,
-            snapshot.capabilities,
-            snapshot.charging_schedule,
-            snapshot.discovery,
-            snapshot.protocol,
-            snapshot.protocol_version,
-            snapshot.electrical,
-            snapshot.authority,
-            snapshot.authority_revision,
-            snapshot.enabled,
-            snapshot.physical_phases,
-        )
 
-    @callback
-    def _changed(self, snapshot):
-        if snapshot.token.station == self.station:
-            self.snapshot = snapshot
-            self.async_write_ha_state()
+class SettingEntity(WallboxEntity):
+    def __init__(self, entry, role):
+        super().__init__(entry, "control", entry.runtime_data.state.binding, role)
+        self.settings = entry.runtime_data.settings
+
+    @property
+    def available(self):
+        return True
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            **super().extra_state_attributes,
+            "state_represents": "desired_intent",
+            "connected": None,  # Local settings do not mirror live hardware state.
+            "execution_ready": False,
+            "execution_blocked_reason": "passive_only",
+            "control_status": "passive_only",
+            "profile_status": "passive_only",
+            "profile_control_ready": False,
+            "applied_current_a": None,
+            "applied_phase_count": None,
+            "applied_offered_power_w": None,
+            "command_status": None,
+            "command_reason": None,
+            "solver_reason": None,
+            "electrical_recovery_status": None,
+            "physical_phase_mode": None,
+            "physical_phase_valid_until": None,
+            "actual_enabled": None,
+            "control_authority": "unknown",
+            "grid_request_armed": False,
+            "grid_timing_state": "unavailable",
+        }
+
+    async def async_added_to_hass(self):
+        # Settings never subscribe to telemetry or generation publications.
+        await Entity.async_added_to_hass(self)
+        self.async_on_remove(self.settings.watch(self.role, self.async_write_ha_state))
