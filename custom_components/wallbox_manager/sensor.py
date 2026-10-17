@@ -231,6 +231,7 @@ class Reading(WallboxEntity, SensorEntity):
             self._refresh = None
         if (
             self.role == "duration"
+            and self.available
             and self.observed.session
             and self.observed.session["ended_at"] is None
             and self.observed.session.get("generation")

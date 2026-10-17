@@ -81,6 +81,15 @@ test('existing configured entity can bind a card to its entry',()=>{
   assert.equal(c.discovery.entry,'B');
 });
 
+test('a missing explicit binding never falls back to another entry',async()=>{
+  for (const config of [{entity:'removed.soll_power'}, {entry_id:'removed'}]) {
+    const {card:c,get,calls}=card(states('OTHER'),config);
+    assert.equal(Object.keys(c.discovery.roles).length,0);
+    get('power').value='8.4'; await c.editNumber('power');
+    assert.equal(calls.length,0);
+  }
+});
+
 test('number and duration edits keep local service interactions',async()=>{
   const {card:c,get,calls}=card();
   get('power').value='8.4'; await c.editNumber('power');

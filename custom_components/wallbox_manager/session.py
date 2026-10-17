@@ -75,10 +75,12 @@ def event(state, generation, scope, external_id, kind, at, sequence):
             or at < datetime.fromisoformat(old["updated_at"])
         ):
             return False
-    elif kind == "Ended":
+    elif kind == "Ended" or (old and at <= datetime.fromisoformat(old["updated_at"])):
         return False
     before = view(state, at)
     if old is None or old["external_transaction_id"] != external_id:
+        if old:
+            state.closed_transactions.add(old["external_transaction_id"])
         # Updated without Started must not invent the start timestamp or meter.
         state.session = {
             "session_id": uuid4().hex,
@@ -98,7 +100,12 @@ def event(state, generation, scope, external_id, kind, at, sequence):
     )
     if kind == "Ended":
         session.update(ended_at=at.isoformat())
+        if session.get("energy_at") != at.isoformat():
+            session["end_meter_before_end"] = session.get("end_meter")
+            session.update(end_meter=None, energy=None)
         state.closed_transactions.add(external_id)
+    if old and tuple(old["scope"]) != tuple(scope):
+        state.publish(*[("session", tuple(old["scope"]), key) for key in KEYS])
     state.add_session(scope)
     state.add_active(scope)
     publish(
@@ -121,10 +128,18 @@ def meter(state, quantity, value, at, *, boundary=False, channel=None):
         )
     ):
         return
-    if session["ended_at"] and at > datetime.fromisoformat(session["ended_at"]):
+    if session["ended_at"] and at != datetime.fromisoformat(session["ended_at"]):
         return
     before = view(state, at)
     if quantity == "power":
+        previous = session.get("power_channel")
+        observation = (
+            state.observations.get((previous[0], tuple(previous[1]), previous[2]))
+            if previous
+            else None
+        )
+        if observation and observation.observed_at > at:
+            return
         if channel is None:
             channel = ("transaction", tuple(session["scope"]), "power")
             state.observe(
@@ -137,11 +152,31 @@ def meter(state, quantity, value, at, *, boundary=False, channel=None):
             )
         session["power_channel"] = list(channel)
     elif quantity == "energy":
+        # Transaction registers may be session-relative; never subtract a
+        # lifetime/parent register from a transaction-scoped baseline.
+        stream = (
+            [channel[0], list(channel[1]), channel[2]]
+            if channel
+            else ["transaction", session["scope"], "energy"]
+        )
+        if session.get("energy_channel", stream) != stream:
+            return
+        if "energy_channel" not in session and session.get("start_meter") is not None:
+            session["energy_invalid"] = True  # Legacy baseline has no stream proof.
+        session["energy_channel"] = stream
         previous_at = session.get("energy_at")
         if previous_at and at < datetime.fromisoformat(previous_at):
             return
         previous = session.get("end_meter")
-        if value is None or (previous is not None and value < previous):
+        if previous is None:
+            previous = session.pop("end_meter_before_end", None)
+        if value is None or (
+            previous is not None
+            and (
+                value < previous
+                or (previous_at == at.isoformat() and value != previous)
+            )
+        ):
             session["energy_invalid"] = True
         if boundary and session["started_at"] == at.isoformat() and previous_at is None:
             session["start_meter"] = value

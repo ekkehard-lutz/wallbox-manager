@@ -150,10 +150,6 @@ class Settings:
         if self.values.get(field) == value:
             return
         updated = {**self.values, field: value}
-        if role in REGULATION:
-            self.hass.config_entries.async_update_entry(
-                self.entry, options={**self.entry.options, role: value}
-            )
         # Preserve foreign targets/fields verbatim; beta.18's own loader remains usable.
         profiles = {
             **self.profiles,
@@ -163,6 +159,10 @@ class Settings:
             },
         }
         await self.store.async_save(profiles)
+        if role in REGULATION:
+            self.hass.config_entries.async_update_entry(
+                self.entry, options={**self.entry.options, role: value}
+            )
         self.profiles, self.values = profiles, updated
         for listener in tuple(self.listeners.get(role, ())):
             listener()

@@ -228,6 +228,80 @@ async def test_ended_transaction_cannot_reopen_after_another_session(ha):
     assert state.session["external_transaction_id"] == "new"
 
 
+async def test_delayed_and_superseded_transactions_cannot_replace_current(ha):
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    first = datetime.now(UTC)
+    session.event(state, gen, state.binding, "old", "Started", first, 0)
+    later = datetime.now(UTC)
+    session.event(state, gen, state.binding, "current", "Started", later, 0)
+    assert not session.event(state, gen, state.binding, "delayed", "Started", first, 0)
+    assert not session.event(
+        state, gen, state.binding, "old", "Updated", datetime.now(UTC), 10
+    )
+    assert state.session["external_transaction_id"] == "current"
+
+
+async def test_session_energy_streams_and_final_endpoint_are_not_invented(ha):
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    start = datetime.now(UTC)
+    session.event(state, gen, state.binding, "real", "Started", start, 0)
+    session.meter(state, "energy", 0, start, boundary=True)
+    power = ("observation", ("Wallbox01", "1", None), "power")
+    fresh = datetime.now(UTC)
+    state.observe(gen, power, 800, "meter", fresh)
+    session.meter(state, "power", 800, fresh, channel=power)
+    session.meter(state, "power", 100, start)
+    assert session.view(state, fresh)["power"] == 800
+    session.meter(
+        state,
+        "energy",
+        12345,
+        datetime.now(UTC),
+        channel=("observation", ("Wallbox01", "1", None), "energy"),
+    )
+    assert session.view(state, start)["energy"] == 0
+    session.meter(state, "energy", 1.2, datetime.now(UTC), boundary=True)
+    assert session.view(state, start)["energy"] == 1.2
+    end = datetime.now(UTC)
+    session.event(state, gen, state.binding, "real", "Ended", end, 1)
+    assert session.view(state, end)["energy"] is None
+    assert session.view(state, end)["end_meter"] is None
+    session.meter(state, "energy", 1.3, start, boundary=True)
+    assert session.view(state, end)["energy"] is None
+    session.meter(state, "energy", 1.4, end, boundary=True)
+    assert session.view(state, end)["energy"] == 1.4
+    # A reset at the final endpoint must remain unknown, even after Ended cleared
+    # the public provisional meter value.
+    start = datetime.now(UTC)
+    session.event(state, gen, state.binding, "reset", "Started", start, 0)
+    session.meter(state, "energy", 0, start, boundary=True)
+    session.meter(state, "energy", 2, datetime.now(UTC), boundary=True)
+    end = datetime.now(UTC)
+    session.event(state, gen, state.binding, "reset", "Ended", end, 1)
+    session.meter(state, "energy", 1, end, boundary=True)
+    assert session.view(state, end)["energy"] is None
+
+
+async def test_superseded_parent_session_is_unavailable_and_stops_timer(ha):
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    scope = ("Wallbox01", "1", None)
+    session.event(state, gen, scope, "parent", "Started", datetime.now(UTC), 0)
+    await ha.async_block_till_done()
+    duration = next(e for e in entities(ha, entry) if e.role == "duration")
+    assert duration._refresh is not None
+    session.event(state, gen, state.binding, "next", "Started", datetime.now(UTC), 0)
+    await ha.async_block_till_done()
+    assert not duration.available
+    assert ha.states.get(duration.entity_id).state == "unavailable"
+    assert duration._refresh is None
+
+
 async def test_observation_metadata_and_all_local_setting_roles(ha):
     from custom_components.wallbox_manager.sensor import Reading
     from custom_components.wallbox_manager.settings import NUMBERS, SELECTS, TIMES

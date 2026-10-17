@@ -206,6 +206,8 @@ class Adapter(ChargePoint):
         )
 
     async def _handle_call(self, message):
+        if not self.live(self.generation):
+            return
         await super()._handle_call(message)
         if self.after_boot:
             self.after_boot = False
@@ -313,7 +315,8 @@ class Adapter(ChargePoint):
                 )
             for role, value, observed, _unit in samples(meter_value, session=True):
                 # Transaction boundary energy is session-only, never lifetime energy.
-                session.meter(self.state, role, value, observed, boundary=True)
+                if observed <= at:
+                    session.meter(self.state, role, value, observed, boundary=True)
         return call_result.TransactionEvent(
             id_token_info={"status": "Unknown"} if id_token else None
         )
@@ -325,6 +328,7 @@ class Adapter(ChargePoint):
         report = self.report
         if (
             report
+            and not report["complete"].is_set()
             and report["request"] == request_id
             and self.live(report["generation"])
         ):
@@ -358,6 +362,8 @@ class Adapter(ChargePoint):
         return call_result.NotifyEvent()
 
     def variable(self, generation, component, variable, value, at, source):
+        if not self.live(generation):
+            return
         name = variable.get("name")
         evse = component.get("evse")
         scope = (
@@ -470,6 +476,7 @@ class Adapter(ChargePoint):
                     permissions.append(row)
             if len(permissions) > 1:
                 raise ValueError("Ambiguous permission inventory")
+            inventory_at = datetime.now(UTC)
             for row in report["rows"]:
                 component, variable = row.get("component", {}), row.get("variable", {})
                 evse = component.get("evse")
@@ -483,9 +490,7 @@ class Adapter(ChargePoint):
                     for a in row.get("variable_attribute", [])
                     if a.get("type", "Actual") == "Actual"
                 ]
-                if len(attrs) != 1:
-                    continue
-                attr = attrs[0]
+                attr = attrs[0] if len(attrs) == 1 else {}
                 name = variable.get("name")
                 key = CAPABILITIES.get(name)
                 if key and component.get("name") == (
@@ -499,10 +504,24 @@ class Adapter(ChargePoint):
                     )
                     else "Connector"
                 ):
+                    if (
+                        set(component) != {"name", "evse"}
+                        or set(variable) != {"name"}
+                        or set(evse or {})
+                        != (
+                            {"id"}
+                            if component["name"] == "EVSE"
+                            else {"id", "connector_id"}
+                        )
+                    ):
+                        continue
                     raw = attr.get("value")
                     try:
                         value = (
-                            ",".join(str(int(n.strip())) for n in raw.split(","))
+                            ",".join(
+                                str(n)
+                                for n in sorted(int(n.strip()) for n in raw.split(","))
+                            )
                             if key == "supported_phases"
                             else {"true": True, "false": False}[raw.lower()]
                             if key
@@ -510,12 +529,16 @@ class Adapter(ChargePoint):
                             else float(raw)
                         )
                         if type(value) is float and (
-                            not math.isfinite(value) or value < 0
+                            not math.isfinite(value)
+                            or value <= 0
+                            or row.get("variable_characteristics", {}).get("unit", "A")
+                            != "A"
                         ):
                             value = None
                         if key == "supported_phases" and (
                             not value
                             or any(n not in ("1", "2", "3") for n in value.split(","))
+                            or len(set(value.split(","))) != len(value.split(","))
                         ):
                             value = None
                     except ValueError, TypeError, KeyError, AttributeError:
@@ -525,13 +548,19 @@ class Adapter(ChargePoint):
                         ("capability", scope, key),
                         value,
                         "ocpp2.1:FullInventory",
+                        inventory_at,
                         status="verified" if value is not None else "degraded",
                     )
-                if name in (
-                    "ControlAuthority",
-                    "ChargingEnabled",
-                    "PhaseRotation",
-                ) and attr.get("mutability", "ReadOnly") in ("ReadOnly", "ReadWrite"):
+                if (
+                    len(attrs) == 1
+                    and name
+                    in (
+                        "ControlAuthority",
+                        "ChargingEnabled",
+                        "PhaseRotation",
+                    )
+                    and attr.get("mutability", "ReadOnly") in ("ReadOnly", "ReadWrite")
+                ):
                     endpoint = {"component": component, "variable": variable}
                     # Inventory identifies the endpoint, not a fresh live value.
                     await self.read(generation, endpoint)

@@ -64,10 +64,10 @@ comment lines, are recorded in [footprint.json](footprint.json). Against beta.18
 | Source | beta.18 | Passive rewrite |
 | --- | ---: | ---: |
 | Production Python modules | 77 | 18 |
-| Production Python lines | 18,097 | 2,375 |
+| Production Python lines | 18,097 | 2,456 |
 | JavaScript card lines | 441 | 350 |
-| Python test lines (including fixture) | 32,129 | 1,286 |
-| JavaScript test lines | 871 | 117 |
+| Python test lines (including fixture) | 32,129 | 1,527 |
+| JavaScript test lines | 871 | 126 |
 
 The footprint is the entire remaining source, not net Git additions. Production
 Python is approximately 87% smaller. The exact final counts are machine-readable;
@@ -217,19 +217,21 @@ session state/closed transaction IDs use `wallbox_manager.E.passive_session`.
 No previous-generation power/activity is restored as live. Economic protection
 and recovery cannot silently run because those modules do not exist.
 
-Rollback assessment: tests preserve the original energy entity ID/device and
+Rollback assessment: the maintained tests preserve the original energy entity ID/device and
 statistics metadata through subentry detach/removal and compatible subentry
 reconstruction; profile values remain readable in the legacy map; the legacy
-session document remains byte-semantically unchanged. Restoring beta.18 code can
-rediscover/recreate its subentry from retained references without recreating HA
-entities or repairing history. New passive session history is separate and is
+session document remains byte-semantically unchanged. A separate local check imported the actual immutable beta.18
+`station_config.setup_station_configuration` and its reference validator. It
+recreated the subentry from retained references while preserving the disabled
+historical energy registry entry and physical device. This verifies that helper,
+not a complete beta.18 restart or Recorder database rollback. New passive session history is separate and is
 not imported as control/recovery proof by beta.18. No live migration was attempted.
 A real HA backup is required before the separately approved first installation;
 real installation/version-specific behavior and CPU acceptance remain unverified.
 
 ## Focused tests and deterministic workloads
 
-The new suite contains **21 new Python tests** and **7 new JavaScript tests**.
+The new suite contains **29 focused Python tests** and **8 focused JavaScript tests**.
 Specifically retained/adapted legacy Python tests: **0**; retained legacy frontend
 tests: **0**. The fixture is newly written around real HA entity platforms and
 registries. Real local WebSockets and the pinned OCPP library exercise actual
@@ -308,3 +310,9 @@ No simulation proves live CPU improvement or resolution of Activity/Logbook load
 The generation, provenance and legitimate acquisition writes remain intentionally
 visible. No Recorder exclusions, hidden telemetry suppression, station traffic
 change or deployment was used to improve the counts.
+
+## Independent final review
+
+See [final-review.md](final-review.md) for the focused audit of commit
+`e190afa97015983bd093482bf57ea91b4ef01ab9`, corrections, counterexamples against
+that original source, and remaining limitations. Counts above include those fixes.

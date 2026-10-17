@@ -79,6 +79,15 @@ async def test_subentry_migration_preserves_registry_and_rollback(ha):
         device_id=device.id,
         suggested_object_id="my_historical_energy",
     )
+    disabled = registry.async_get_or_create(
+        "sensor",
+        "wallbox_manager",
+        unique_id(entry.entry_id, "observation", ("Wallbox01", "1", None), "power"),
+        config_entry=entry,
+        config_subentry_id=subentry.subentry_id,
+        device_id=device.id,
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
     ha.config_entries.async_update_entry(entry, data={"host": "127.0.0.1", "port": 0})
     original_id = entry.entry_id
     assert migrate(ha, entry, {}) == ("Wallbox01", "1", "1")
@@ -90,6 +99,11 @@ async def test_subentry_migration_preserves_registry_and_rollback(ha):
     kept = registry.async_get(entity.entity_id)
     assert kept.unique_id == energy_id and kept.device_id == device.id
     assert kept.config_subentry_id is None
+    assert (
+        registry.async_get(disabled.entity_id).disabled_by
+        == er.RegistryEntryDisabler.USER
+    )
+    assert registry.async_get(disabled.entity_id).config_subentry_id is None
     assert (
         entry.options["passive_v04_legacy_subentries"][0]["id"] == subentry.subentry_id
     )
@@ -126,6 +140,29 @@ async def test_subentry_migration_preserves_registry_and_rollback(ha):
     ) == ("kWh", "energy", "total_increasing")
     assert len(dr.async_entries_for_config_entry(devices, entry.entry_id)) == 1
     assert ha.states.get(entity.entity_id).state == "123.456"
+    assert (
+        registry.async_get(disabled.entity_id).disabled_by
+        == er.RegistryEntryDisabler.USER
+    )
+    assert ha.states.get(disabled.entity_id) is None
+
+
+async def test_foreign_parent_scope_registry_fails_before_writes(ha):
+    entry = config()
+    ha.config_entries._entries[entry.entry_id] = entry
+    registry = er.async_get(ha)
+    foreign = registry.async_get_or_create(
+        "sensor",
+        "wallbox_manager",
+        unique_id(entry.entry_id, "observation", ("Wallbox01", "2", None), "energy"),
+        config_entry=entry,
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
+    before = dict(entry.data), dict(entry.options), dict(entry.subentries)
+    with pytest.raises(ConfigEntryError, match="migration decision"):
+        migrate(ha, entry, {})
+    assert (dict(entry.data), dict(entry.options), dict(entry.subentries)) == before
+    assert registry.async_get(foreign.entity_id) is foreign
 
 
 async def test_ambiguous_migration_fails_before_any_write(ha):
@@ -254,3 +291,56 @@ async def test_profile_edits_are_serialized_without_lost_updates(ha):
         data[settings.key]["min_soc"],
         data[settings.key]["grid_duration"],
     ) == (8.1, 44, 15600)
+
+
+async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
+    from datetime import UTC, datetime
+
+    from homeassistant.core import State
+    from homeassistant.helpers import restore_state
+
+    entry = config()
+    ha.config_entries._entries[entry.entry_id] = entry
+    restored = restore_state.async_get(ha)
+    for domain, role, value, attrs in (
+        (
+            "number",
+            "allowed_current_1p",
+            "6.3333333333",
+            {"exact_current_limit_a": "19/3"},
+        ),
+        ("number", "desired_charging_power", "7200", {}),
+        ("select", "power_approximation", "up", {}),
+    ):
+        registered = er.async_get(ha).async_get_or_create(
+            domain,
+            "wallbox_manager",
+            unique_id(entry.entry_id, "control", ("Wallbox01", "1", "1"), role),
+            config_entry=entry,
+            suggested_object_id="historical_" + role,
+        )
+        restored.last_states[registered.entity_id] = restore_state.StoredState(
+            State(registered.entity_id, value, attrs), None, datetime.now(UTC)
+        )
+    await ha.install(entry)
+    settings = entry.runtime_data.settings
+    assert settings.get("allowed_current_1p") == "19/3"
+    assert settings.get("desired_charging_power") == 7200
+    assert settings.get("power_approximation") == "up"
+    current = next(e for e in entities(ha, entry) if e.role == "allowed_current_1p")
+    assert current.entity_id == "number.historical_allowed_current_1p"
+    assert current.extra_state_attributes["exact_current_limit_a"] == "19/3"
+
+
+async def test_failed_setting_save_does_not_commit_options_or_memory(ha, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    entry = await ha.install()
+    settings = entry.runtime_data.settings
+    before = dict(entry.options), dict(settings.values), dict(settings.profiles)
+    monkeypatch.setattr(
+        settings.store, "async_save", AsyncMock(side_effect=OSError("disk"))
+    )
+    with pytest.raises(OSError, match="disk"):
+        await settings.set("pv_stop_delay", 120)
+    assert (dict(entry.options), settings.values, settings.profiles) == before

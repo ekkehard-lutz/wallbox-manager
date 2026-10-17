@@ -356,6 +356,83 @@ async def test_real_idle_connection_only_polls_permission(ha):
         assert set(station.operations) <= READ_ONLY
 
 
+async def test_inventory_rejects_conflicts_invalid_units_and_wrong_scopes(ha):
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    async with peer(entry) as station:
+        evse, connector = {"id": 1}, {"id": 1, "connector_id": 1}
+        wrong_unit = row("Connector", "MaximumCurrent", "16", connector)
+        wrong_unit["variable_characteristics"]["unit"] = "kW"
+        station.rows = [
+            row("EVSE", "MinimumCurrent", "6", evse),
+            row("EVSE", "MinimumCurrent", "7", evse),
+            row("EVSE", "MinimumCurrent", "7", evse),
+            row("EVSE", "CurrentStep", "0", evse),
+            row("EVSE", "SupportedPhaseModes", "1,1,3", evse),
+            row("EVSE", "PhaseSwitchingSupported", "true", connector),
+            wrong_unit,
+        ]
+        await boot(station)
+        await eventually(
+            lambda: entry.runtime_data.server.initialization["status"] == "missing"
+        )
+        for scope, role in (
+            (("Wallbox01", "1", None), "minimum_current"),
+            (("Wallbox01", "1", None), "current_step"),
+            (("Wallbox01", "1", None), "supported_phases"),
+            (state.binding, "maximum_current"),
+        ):
+            assert state.value(("capability", scope, role)) is None
+        assert not any(k[2] == "phase_switching" for k in state.observations)
+        report = entry.runtime_data.server.adapter.report
+        rows = list(report["rows"])
+        await station.call(
+            call.NotifyReport(
+                request_id=station.request_id,
+                seq_no=1,
+                generated_at=datetime.now(UTC).isoformat(),
+                report_data=[wrong_unit],
+            )
+        )
+        assert report["rows"] == rows
+        assert not report["error"]
+
+
+async def test_transaction_measurement_after_its_event_is_not_live_proof(ha):
+    from datetime import timedelta
+
+    entry = await ha.install()
+    async with peer(entry, unsupported=True) as station:
+        await boot(station)
+        now = datetime.now(UTC)
+        await station.call(
+            call.TransactionEvent(
+                event_type="Started",
+                timestamp=now.isoformat(),
+                trigger_reason="Authorized",
+                seq_no=0,
+                transaction_info={"transaction_id": "actual"},
+                evse={"id": 1, "connector_id": 1},
+                meter_value=[
+                    {
+                        "timestamp": (now + timedelta(seconds=2)).isoformat(),
+                        "sampled_value": [
+                            {
+                                "measurand": "Power.Active.Import",
+                                "value": 1000,
+                                "unit_of_measure": {"unit": "W"},
+                            }
+                        ],
+                    }
+                ],
+            )
+        )
+        state = entry.runtime_data.state
+        assert state.session["external_transaction_id"] == "actual"
+        assert state.session.get("power_channel") is None
+        assert not any(k[0] == "transaction" for k in state.observations)
+
+
 async def test_late_response_from_replaced_boot_is_not_current_evidence(ha):
     entry = await ha.install()
     listener, state = entry.runtime_data.server, entry.runtime_data.state

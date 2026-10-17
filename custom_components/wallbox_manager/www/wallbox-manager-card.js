@@ -5,7 +5,7 @@ function discoverWallboxManager(states, config = {}) {
   const entries = Object.entries(states || {}).filter(([,s]) => s.attributes.wallbox_manager_entry);
   const ids = [...new Set(entries.map(([,s]) => s.attributes.wallbox_manager_entry))];
   const specified = config.entry_id || (config.entity && states[config.entity]?.attributes.wallbox_manager_entry);
-  const entry = specified || (ids.length === 1 ? ids[0] : null);
+  const entry = specified || (!config.entry_id && !config.entity && ids.length === 1 ? ids[0] : null);
   const roles = {}, ranks = {};
   for (const [id,s] of entries) {
     const a = s.attributes;

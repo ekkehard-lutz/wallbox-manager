@@ -32,6 +32,11 @@ def target(value):
 def binding_for(entry, registry, devices, profiles):
     candidates = set()
     stations = set()
+    scopes = []
+    if len(entry.subentries) > 1:
+        raise ConfigEntryError(
+            "Multiple legacy subentries require a migration decision"
+        )
     if "station_id" in entry.data:
         candidates.add(
             target(
@@ -73,13 +78,24 @@ def binding_for(entry, registry, devices, profiles):
             if entity.unique_id.startswith(start):
                 parts = json.loads(entity.unique_id[len(start) :])
                 stations.add(parts[0])
+                scopes.append(parts[:3])
                 if parts[1] is not None and parts[2] is not None:
                     candidates.add(target(parts[:3]))
     for device in dr.async_entries_for_config_entry(devices, entry.entry_id):
         for domain, identifier in device.identifiers:
             if domain == DOMAIN and identifier.startswith(f"{entry.entry_id}:"):
                 stations.add(identifier[len(entry.entry_id) + 1 :])
-    if len(candidates) != 1 or stations - {next(iter(candidates))[0]}:
+    if (
+        len(candidates) != 1
+        or stations - {next(iter(candidates))[0]}
+        or any(
+            any(
+                a is not None and a != b
+                for a, b in zip(scope, next(iter(candidates)), strict=True)
+            )
+            for scope in scopes
+        )
+    ):
         raise ConfigEntryError(
             "A single explicit station/EVSE/connector binding is required; "
             "multiple or incomplete legacy targets need a migration decision"
