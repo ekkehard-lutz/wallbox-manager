@@ -94,30 +94,79 @@ class ProfileOwnership:
         self.entries[entry.entry_id] = (entry, control)
         control.ownership = self
         control.entry_id = entry.entry_id
-        unsubscribe = control.runtime.subscribe(lambda snapshot: self.changed())
+        unsubscribe = control.runtime.subscribe(
+            lambda snapshot: self.changed(), select=self.runtime_view
+        )
+        unsubscribe_inventory = control.runtime.subscribe(
+            lambda snapshot: self.publish(controls=False),
+            select=lambda s: (s.protocol_version, s.connected, s.connectors),
+        )
         unsubscribe_control = control.subscribe(
             lambda target: self.checkpoint(control, target)
         )
 
         @callback
         def device_changed(event):
+            device = dr.async_get(self.hass).async_get(event.data.get("device_id"))
+            identifiers = (
+                device.identifiers
+                if device is not None
+                else event.data.get("device", {}).get("identifiers")
+            )
+            if identifiers is not None and not any(
+                domain == DOMAIN and identifier.startswith(f"{entry.entry_id}:")
+                for domain, identifier in identifiers
+            ):
+                return
+            if event.data.get("action") == "update" and not (
+                {"name", "name_by_user", "identifiers", "config_entries"}
+                & event.data.get("changes", {}).keys()
+            ):
+                return
             self.publish(controls=False)
 
         unsubscribe_device = self.hass.bus.async_listen(
             "device_registry_updated", device_changed
         )
+
+        async def configuration_changed(hass, updated_entry):
+            self.changed()
+            self.publish(controls=False)
+
+        unsubscribe_config = (
+            entry.add_update_listener(configuration_changed)
+            if hasattr(entry, "add_update_listener")
+            else lambda: None
+        )
         self.changed()
+        self.publish(controls=False)
 
         def remove():
             unsubscribe()
+            unsubscribe_inventory()
             unsubscribe_control()
             unsubscribe_device()
+            unsubscribe_config()
             if self.entries.get(entry.entry_id, (None, None))[1] is control:
                 self.entries.pop(entry.entry_id, None)
                 self.changed()
+                self.publish(controls=False)
             self.recovery_tasks.pop(control, None)
 
         return remove
+
+    @staticmethod
+    def runtime_view(snapshot):
+        """Ownership proof and inventory do not depend on meter/phase refreshes."""
+        return (
+            snapshot.token,
+            snapshot.connected,
+            snapshot.identity,
+            snapshot.connectors,
+            snapshot.authority,
+            snapshot.authority_revision,
+            tuple((o.scope, o.enabled, o.revision) for o in snapshot.enabled),
+        )
 
     def resolve(self, key):
         try:
@@ -253,7 +302,6 @@ class ProfileOwnership:
         before = self.ready, self.context, self.status, self.record
         control, target = self.resolve(self.active_wallbox)
         if self.transition:
-            self.publish(controls=False)
             return
         if control and control.entry_id in self.suspended:
             # Teardown disconnects are expected; an actually observed Local
@@ -265,9 +313,8 @@ class ProfileOwnership:
                 and control.runtime.authority(target.station) == ControlAuthority.LOCAL
             ):
                 self.revoke("ownership_rejected_local")
-            self.publish(
-                controls=before != (self.ready, self.context, self.status, self.record)
-            )
+            if before != (self.ready, self.context, self.status, self.record):
+                self.publish()
             return
         if self.ready and (control is None or not self.permits(control, target)):
             # Execution is fenced immediately, but transport loss is not an
@@ -317,9 +364,8 @@ class ProfileOwnership:
                     )
                 )
         self.diagnose(control, target)
-        self.publish(
-            controls=before != (self.ready, self.context, self.status, self.record)
-        )
+        if before != (self.ready, self.context, self.status, self.record):
+            self.publish()
 
     def diagnose(self, control, target):
         if not control or not self.entries[control.entry_id][0].options.get(
