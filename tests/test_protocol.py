@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from conftest import eventually
-from ocpp.exceptions import OCPPError
+from ocpp.exceptions import InternalError, OCPPError
 from ocpp.routing import after, on
 from ocpp.v21 import ChargePoint, call, call_result
 from websockets.asyncio.client import connect
@@ -34,6 +34,8 @@ class Station(ChargePoint):
     def __init__(self, socket, *, unsupported=False):
         super().__init__("Wallbox01", socket, response_timeout=2)
         self.operations = []
+        self.reads = []
+        self.fail_reads = set()
         self.background = []
         self.request_id = None
         self.unsupported = unsupported
@@ -84,6 +86,11 @@ class Station(ChargePoint):
 
     @on("GetVariables")
     def read(self, get_variable_data):
+        name = get_variable_data[0]["variable"]["name"]
+        self.reads.append(name)
+        if name in self.fail_reads:
+            self.fail_reads.remove(name)
+            raise InternalError("Simulated optional read failure")
         return call_result.GetVariables(
             get_variable_result=[
                 {
@@ -124,6 +131,45 @@ async def boot(station):
         )
     )
     assert response.status == "Accepted"
+
+
+@pytest.mark.parametrize("failed", ["ControlAuthority", "ChargingEnabled"])
+async def test_optional_read_failure_preserves_later_readbacks_and_permission_poll(
+    ha, failed
+):
+    entry = await ha.install()
+    listener, state = entry.runtime_data.server, entry.runtime_data.state
+    async with peer(entry) as station:
+        station.fail_reads.add(failed)
+        await boot(station)
+        await eventually(lambda: listener.initialization["status"] == "missing")
+        assert station.reads == ["ControlAuthority", "ChargingEnabled", "PhaseRotation"]
+        assert (
+            state.value(("station", ("Wallbox01", None, None), "physical_phases")) == 1
+        )
+        assert (
+            state.value(("capability", ("Wallbox01", "1", None), "minimum_current"))
+            == 6
+        )
+        authority = ("station", ("Wallbox01", None, None), "control_authority")
+        permission = ("control", state.binding, "charging_enabled")
+        assert state.value(authority) == (
+            None if failed == "ControlAuthority" else "local"
+        )
+        assert state.value(permission) == (
+            None if failed == "ChargingEnabled" else True
+        )
+        assert listener.adapter.poll is not None
+        if failed == "ChargingEnabled":
+            await asyncio.sleep(5.2)
+            await eventually(lambda: state.value(permission) is True)
+            assert station.reads == [
+                "ControlAuthority",
+                "ChargingEnabled",
+                "PhaseRotation",
+                "ChargingEnabled",
+            ]
+        assert set(station.operations) <= READ_ONLY
 
 
 async def test_real_boot_readback_push_reconnect_and_no_control(ha):

@@ -1,5 +1,9 @@
 # Independent final review of passive v0.4
 
+This records the review ending at `0b06dc7`; its size/test counts are historical.
+The subsequent focused bootstrap correction and current footprint are documented
+in [passive-rebuild-report.md](passive-rebuild-report.md) and [footprint.json](footprint.json).
+
 Reviewed starting commit `e190afa97015983bd093482bf57ea91b4ef01ab9` on
 `rewrite/passive-v0.4`; compatibility reference is immutable beta.18 commit
 `87963014c9af73416c438807f523a3da2a98bd22`. This is a source, real local HA
@@ -105,9 +109,9 @@ ownership, PV, economic or charging-control subsystem.
   Closed/superseded transaction ID tombstones are durable and unbounded; very
   long deployments could eventually need retention work. No speculative retention
   framework was added in this review.
-- Unsupported/missing readbacks remain unknown. A failed bootstrap read can end
-  that bounded initialization attempt before later endpoints are read. Discovery
-  and missing-field diagnostics expose this; no retry engine was added.
+- Unsupported/missing readbacks remain unknown. The bootstrap read-failure limitation identified here was subsequently fixed
+  by the focused beta.1 hardening; independent readbacks now continue and existing
+  permission polling survives an initial read failure. No retry engine was added.
 - Old translation labels/historical architecture documents remain as assets and
   history; they do not import or execute old subsystems. Runtime role strings and
   stored preferences with old control/PV names are compatibility data only.

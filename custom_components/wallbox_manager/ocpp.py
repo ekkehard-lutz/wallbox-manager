@@ -562,12 +562,19 @@ class Adapter(ChargePoint):
                     and attr.get("mutability", "ReadOnly") in ("ReadOnly", "ReadWrite")
                 ):
                     endpoint = {"component": component, "variable": variable}
-                    # Inventory identifies the endpoint, not a fresh live value.
-                    await self.read(generation, endpoint)
                     if name == "ChargingEnabled":
                         if permission is not None:
                             raise ValueError("Ambiguous permission endpoints")
                         permission = endpoint
+                    # Inventory identifies the endpoint, not a fresh live value.
+                    # Optional read failures must not suppress independent reads
+                    # or polling of an already validated permission endpoint.
+                    try:
+                        await self.read(generation, endpoint)
+                    except TimeoutError, OSError, OCPPError:
+                        pass
+                    if not self.live(generation):
+                        return
             self.station("revision", self.request_id)
             self.station("discovery", "verified")
         except TimeoutError, OSError, OCPPError, ConnectionClosed, ValueError:

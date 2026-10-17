@@ -1,9 +1,10 @@
 # Passive v0.4 rebuild: architecture, compatibility and migration review
 
 Branch: `rewrite/passive-v0.4`. Base/rollback: immutable `v0.3.2-beta.18`,
-`87963014c9af73416c438807f523a3da2a98bd22`. Manifest deliberately unchanged.
+`87963014c9af73416c438807f523a3da2a98bd22`. Manifest versioning is handled by the separate prerelease commit.
 This is an independent passive implementation. No legacy control runtime is
-loaded, disabled or wrapped. No release, merge, deployment or hardware operation.
+loaded, disabled or wrapped. No deployment or hardware operation is part of the
+rebuild or prerelease workflow.
 
 ## Architecture and removed subsystems
 
@@ -64,9 +65,9 @@ comment lines, are recorded in [footprint.json](footprint.json). Against beta.18
 | Source | beta.18 | Passive rewrite |
 | --- | ---: | ---: |
 | Production Python modules | 77 | 18 |
-| Production Python lines | 18,097 | 2,456 |
+| Production Python lines | 18,097 | 2,463 |
 | JavaScript card lines | 441 | 350 |
-| Python test lines (including fixture) | 32,129 | 1,527 |
+| Python test lines (including fixture) | 32,129 | 1,573 |
 | JavaScript test lines | 871 | 126 |
 
 The footprint is the entire remaining source, not net Git additions. Production
@@ -231,7 +232,7 @@ real installation/version-specific behavior and CPU acceptance remain unverified
 
 ## Focused tests and deterministic workloads
 
-The new suite contains **29 focused Python tests** and **8 focused JavaScript tests**.
+The new suite contains **31 focused Python tests** and **8 focused JavaScript tests**.
 Specifically retained/adapted legacy Python tests: **0**; retained legacy frontend
 tests: **0**. The fixture is newly written around real HA entity platforms and
 registries. Real local WebSockets and the pinned OCPP library exercise actual
@@ -316,3 +317,22 @@ change or deployment was used to improve the counts.
 See [final-review.md](final-review.md) for the focused audit of commit
 `e190afa97015983bd093482bf57ea91b4ef01ab9`, corrections, counterexamples against
 that original source, and remaining limitations. Counts above include those fixes.
+
+## Final bootstrap hardening for beta.1
+
+Optional GetVariables failures are isolated per endpoint. Timeout, recoverable
+transport and OCPP CALLERROR failures do not skip later independent advertised
+readbacks. A validated ChargingEnabled endpoint is retained before its initial
+read, so its existing five-second polling survives that initial failure. Failed
+reads do not fabricate values; missing fields stay unknown. Connection closure,
+invalid inventory and ambiguity still terminate initialization; cancellation and
+boot/connection fencing remain intact. No new timer, task type or retry loop.
+
+Two parameterized real-peer regression cases first failed on the original source,
+then passed after this seven-net-line Python correction. They cover authority
+failure followed by permission/phase acquisition, and permission failure followed
+by phase acquisition and successful actual five-second permission polling. Full
+maintained validation: 31 Python tests, eight JavaScript tests, Ruff lint/format,
+JavaScript syntax and whitespace checks. Benchmark counts remain unchanged.
+
+Release limitations and mandatory backup: [beta.1 notes](release-notes-beta.1.md).
