@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import math
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
 
 from ocpp.exceptions import OCPPError
@@ -230,7 +230,7 @@ class Adapter(ChargePoint):
         )
 
     def observe(self, generation, key, value, source, *args, **kwargs):
-        previous = self.state.observations.get(key)
+        previous = self.state.value(key)
         accepted = self.state.observe(generation, key, value, source, *args, **kwargs)
         if (
             accepted
@@ -242,18 +242,13 @@ class Adapter(ChargePoint):
                 "charging_enabled",
                 "physical_phases",
             )
-            and (
-                not previous
-                or previous.value != value
-                or previous.generation != generation
-                or previous.invalid_count
-            )
+            and previous != self.state.value(key)
         ):
             self.listener.diagnostic(
                 2,
                 "transition_" + key[2],
                 scope=key[1],
-                value=self.state.value(key) if key[2] == "physical_phases" else value,
+                value=self.state.value(key),
             )
         return accepted
 
@@ -489,7 +484,6 @@ class Adapter(ChargePoint):
                 {"true": True, "false": False}.get(value),
                 "ocpp2.1:" + source,
                 at,
-                valid_until=at + timedelta(seconds=15),
             )
         elif (
             component.get("name") == "Connector"
@@ -502,7 +496,6 @@ class Adapter(ChargePoint):
                 {"Rxx": 1, "RST": 3}.get(value),
                 "ocpp2.1:" + source,
                 at,
-                valid_until=at + timedelta(seconds=5),
             )
 
     async def read(self, generation, endpoint):
@@ -514,7 +507,10 @@ class Adapter(ChargePoint):
         )
         if not self.live(generation):
             return
-        rows = response.get_variable_result
+        rows = getattr(response, "get_variable_result", None)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            self.listener.diagnostic(3, "readback_malformed")
+            return
         self.listener.diagnostic(
             3,
             "readback_" + endpoint["variable"]["name"],
@@ -528,7 +524,14 @@ class Adapter(ChargePoint):
             return
         row = rows[0]
         if (
-            row.get("component") != endpoint["component"]
+            row.get("attribute_status") != "Accepted"
+            or row.get("attribute_value")
+            not in {
+                "ChargingEnabled": ("true", "false"),
+                "ControlAuthority": ("Local", "OCPP"),
+                "PhaseRotation": ("Rxx", "RST"),
+            }.get(endpoint["variable"]["name"], ())
+            or row.get("component") != endpoint["component"]
             or row.get("variable") != endpoint["variable"]
             or row.get("attribute_type", "Actual") != "Actual"
         ):
@@ -537,9 +540,7 @@ class Adapter(ChargePoint):
             generation,
             row["component"],
             row["variable"],
-            row.get("attribute_value")
-            if row.get("attribute_status") == "Accepted"
-            else None,
+            row["attribute_value"],
             at,
             "GetVariables",
         )
@@ -711,6 +712,7 @@ class Adapter(ChargePoint):
                     self.poll = self.spawn(self.poll_permission(generation, permission))
 
     async def poll_permission(self, generation, endpoint):
+        # Detect external changes when notifications are absent; no TTL refresh.
         while self.live(generation):
             await asyncio.sleep(5)
             try:

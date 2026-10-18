@@ -1,11 +1,8 @@
 """Stable public identities and thin, direct observation/settings entities."""
 
 import json
-from datetime import UTC, datetime
 
-from homeassistant.core import callback
 from homeassistant.helpers.entity import DeviceInfo, Entity
-from homeassistant.helpers.event import async_track_point_in_utc_time
 
 from .const import DOMAIN
 
@@ -35,7 +32,6 @@ class WallboxEntity(Entity):
         self.entry, self.observed = entry, entry.runtime_data.state
         self.family, self.scope, self.role = family, tuple(scope), role
         self.key = (family, self.scope, role)
-        self._expiry = None
         self._attr_unique_id = unique_id(entry.entry_id, family, scope, role)
         self._attr_translation_key = "session_" + role if family == "session" else role
         label = (
@@ -84,54 +80,17 @@ class WallboxEntity(Entity):
                 connection_generation=observation.generation[0],
                 boot_generation=observation.generation[1],
             )
-            # Measurement acquisition times remain exact internally. Public
-            # timestamps are intentionally absent rather than frozen at a change.
-            if self.role == "charging_enabled":
-                attrs.update(
-                    observed_at=observation.observed_at.isoformat(),
-                    received_at=observation.received_at.isoformat(),
-                    valid_until=observation.valid_until.isoformat()
-                    if observation.valid_until
-                    else None,
-                )
-            else:
-                attrs["valid_until"] = None
+            # Acquisition times stay internal; identical reads do not change
+            # Recorder-significant attributes. Compatibility deadlines are inert.
+            attrs["valid_until"] = None
         return attrs
 
-    def cancel_expiry(self):
-        if self._expiry:
-            self._expiry()
-            self._expiry = None
-
-    def schedule_expiry(self):
-        self.cancel_expiry()
-        observation = self.observed.observations.get(self.key)
-        if (
-            self.role == "charging_enabled"
-            and self.observed.connected
-            and observation
-            and self.observed.current(observation.generation)
-            and observation.valid_until
-            and observation.valid_until > datetime.now(UTC)
-        ):
-            self._expiry = async_track_point_in_utc_time(
-                self.hass, self.expired, observation.valid_until
-            )
-
-    @callback
-    def expired(self, now):
-        self._expiry = None
-        self.async_write_ha_state()
-
     def changed(self):
-        self.schedule_expiry()
         self.async_write_ha_state()
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
         self.async_on_remove(self.observed.watch(self.key, self.changed))
-        self.async_on_remove(self.cancel_expiry)
-        self.schedule_expiry()
 
 
 class SettingEntity(WallboxEntity):

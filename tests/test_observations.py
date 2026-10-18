@@ -166,41 +166,74 @@ async def test_passive_session_energy_is_not_lifetime_and_legacy_store_untouched
     assert session.view(state, later)["energy"] == pytest.approx(0.8)
 
 
-async def test_permission_expiry_is_one_timer_and_not_measurement_expiry(ha):
-    import asyncio
+@pytest.mark.parametrize("elapsed", [5, 15, 300, 18000])
+async def test_all_observations_hold_without_expiry_callbacks(ha, monkeypatch, elapsed):
+    from custom_components.wallbox_manager import entity, store
+    from custom_components.wallbox_manager.ocpp import Adapter
 
     entry = await ha.install()
     state = entry.runtime_data.state
     generation = state.reset(connected=True)
-    power = ("observation", ("Wallbox01", "1", None), "power")
-    state.observe(generation, power, 1234, "meter")
+    adapter = Adapter(Mock(), entry.runtime_data.server, generation)
+    scope = ("Wallbox01", "1", None)
+    values = {
+        ("observation", scope, "voltage_l1"): 230.1,
+        ("observation", scope, "current_l1"): 6.123,
+        ("observation", scope, "power"): 1409.9,
+    }
+    for key, value in values.items():
+        state.observe(generation, key, value, "meter")
+    at = datetime.now(UTC)
+    adapter.variable(
+        generation,
+        {"name": "WallboxController"},
+        {"name": "ChargingEnabled"},
+        "true",
+        at,
+        "NotifyEvent",
+    )
+    adapter.variable(
+        generation,
+        {"name": "Connector", "evse": {"id": 1, "connector_id": 1}},
+        {"name": "PhaseRotation"},
+        "RST",
+        at,
+        "NotifyEvent",
+    )
     permission = ("control", state.binding, "charging_enabled")
-    now = datetime.now(UTC)
+    phase = ("station", ("Wallbox01", None, None), "physical_phases")
+    values.update({permission: True, phase: 3})
+    readings = [e for e in entities(ha, entry) if e.key in values]
+    writes = [Mock(wraps=e.async_write_ha_state) for e in readings]
+    for e, write in zip(readings, writes, strict=True):
+        monkeypatch.setattr(e, "async_write_ha_state", write)
+        assert not hasattr(e, "_expiry")
+        assert not hasattr(state.observations[e.key], "valid_until")
+    assert not hasattr(entity, "async_track_point_in_utc_time")
+
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at + timedelta(seconds=elapsed)
+
+    monkeypatch.setattr(store, "datetime", Later)
+    assert all(state.value(key) == value for key, value in values.items())
+    assert all(e.available for e in readings)
+    assert not any(write.called for write in writes)
+    # A single explicit invalid phase report retains the same canonical value
+    # even after prolonged silence; a second distinct report removes it.
+    later = Later.now(UTC)
+    state.observe(generation, phase, None, "NotifyEvent", later)
+    assert state.value(phase) == state.last_observed_value(phase) == 3
     state.observe(
-        generation,
-        permission,
-        True,
-        "query",
-        now,
-        valid_until=now + timedelta(seconds=10),
+        generation, phase, None, "NotifyEvent", later + timedelta(microseconds=1)
     )
-    entity = next(e for e in entities(ha, entry) if e.role == "charging_enabled")
-    old = entity._expiry
-    now = datetime.now(UTC)
+    assert state.value(phase) is None
     state.observe(
-        generation,
-        permission,
-        True,
-        "query",
-        now,
-        valid_until=now + timedelta(milliseconds=30),
+        generation, phase, 1, "NotifyEvent", later + timedelta(microseconds=2)
     )
-    assert entity._expiry is not old
-    await asyncio.sleep(0.05)
-    await ha.async_block_till_done()
-    assert entity._expiry is None
-    assert ha.states.get(entity.entity_id).state == "unknown"
-    assert state.value(power) == 1234
+    assert state.value(phase) == 1
+
     from custom_components.wallbox_manager import async_unload_entry
 
     await async_unload_entry(ha, entry)
@@ -478,9 +511,7 @@ async def test_audited_status_authority_capabilities_and_permission_are_not_debo
     assert not switch.available
 
 
-async def test_unsuccessful_permission_readback_never_refreshes_confirmation(
-    ha, monkeypatch
-):
+async def test_unsuccessful_permission_readback_preserves_confirmation(ha, monkeypatch):
     from unittest.mock import AsyncMock
 
     from ocpp.v21 import call_result
@@ -510,7 +541,7 @@ async def test_unsuccessful_permission_readback_never_refreshes_confirmation(
         await adapter.read(gen, endpoint)
     assert (
         state.observations[permission] is confirmed
-    )  # Original deadline, not renewed.
+    )  # No failed read invents a new observation.
     monkeypatch.setattr(
         adapter,
         "request",
@@ -521,7 +552,8 @@ async def test_unsuccessful_permission_readback_never_refreshes_confirmation(
         ),
     )
     await adapter.read(gen, endpoint)
-    assert state.value(permission) is None  # Explicit unsuccessful read revokes now.
+    assert state.value(permission) is True
+    assert state.observations[permission] is confirmed
     assert state.observations[permission].invalid_count == 0
 
 
@@ -773,3 +805,156 @@ async def test_session_and_ordinary_power_share_normalization_and_safety_is_unch
     assert state.value(("control", state.binding, "charging_enabled")) is False
     await entry.runtime_data.settings.set("allowed_current_1p", "19/3")
     assert entry.runtime_data.settings.get("allowed_current_1p") == float(19 / 3)
+
+
+async def test_failed_actual_reads_leave_initial_and_confirmed_fields_untouched(ha):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, gen)
+    for name, component, key, valid, expected in [
+        (
+            "ChargingEnabled",
+            {"name": "WallboxController"},
+            ("control", state.binding, "charging_enabled"),
+            "true",
+            True,
+        ),
+        (
+            "ControlAuthority",
+            {"name": "WallboxController"},
+            ("station", ("Wallbox01", None, None), "control_authority"),
+            "OCPP",
+            "remote",
+        ),
+        (
+            "PhaseRotation",
+            {"name": "Connector", "evse": {"id": 1, "connector_id": 1}},
+            ("station", ("Wallbox01", None, None), "physical_phases"),
+            "RST",
+            3,
+        ),
+    ]:
+        endpoint = {"component": component, "variable": {"name": name}}
+        row = {
+            **endpoint,
+            "attribute_type": "Actual",
+            "attribute_status": "Accepted",
+            "attribute_value": valid,
+        }
+        failures = [
+            None,
+            {},
+            [],
+            [None],
+            [row, row],
+            [{**row, "attribute_status": "Rejected"}],
+            [{**row, "attribute_status": "UnknownVariable"}],
+            [{**row, "attribute_value": ""}],
+            [{**row, "attribute_value": None}],
+            [{**row, "attribute_value": {}}],
+            [{**row, "attribute_value": "unsupported"}],
+            [{k: v for k, v in row.items() if k != "attribute_value"}],
+            [{**row, "attribute_type": "Target"}],
+            [{**row, "component": {"name": "Other"}}],
+            [{**row, "variable": {"name": "Other"}}],
+        ]
+        for initialized in (False, True):
+            if initialized:
+                adapter.request = AsyncMock(
+                    return_value=SimpleNamespace(get_variable_result=[row])
+                )
+                await adapter.read(gen, endpoint)
+                assert state.value(key) == expected
+            previous = state.observations.get(key)
+            for result in failures:
+                adapter.request = AsyncMock(
+                    return_value=SimpleNamespace(get_variable_result=result)
+                )
+                await adapter.read(gen, endpoint)
+                assert state.observations.get(key) is previous
+                assert state.value(key) == (expected if initialized else None)
+            adapter.request = AsyncMock(side_effect=TimeoutError)
+            with pytest.raises(TimeoutError):
+                await adapter.read(gen, endpoint)
+            assert state.observations.get(key) is previous
+            if not initialized:
+                assert key not in state.observations and key[2] in state.missing
+
+
+async def test_identical_permission_readbacks_do_not_publish_or_change_attributes(
+    ha, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from homeassistant.core import callback
+    from homeassistant.helpers.event import async_track_state_report_event
+
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, gen)
+    endpoint = {
+        "component": {"name": "WallboxController"},
+        "variable": {"name": "ChargingEnabled"},
+    }
+    row = {**endpoint, "attribute_status": "Accepted", "attribute_value": "true"}
+    adapter.request = AsyncMock(return_value=SimpleNamespace(get_variable_result=[row]))
+    await adapter.read(gen, endpoint)
+    permission = next(e for e in entities(ha, entry) if e.role == "charging_enabled")
+    first = state.observations[permission.key]
+    published = ha.states.get(permission.entity_id)
+    attrs = permission.extra_state_attributes
+    writes = Mock(wraps=permission.async_write_ha_state)
+    monkeypatch.setattr(permission, "async_write_ha_state", writes)
+    changes, reports = [], []
+
+    @callback
+    def changed(event):
+        if event.data["entity_id"] == permission.entity_id:
+            changes.append(event)
+
+    @callback
+    def reported(event):
+        reports.append(event)
+
+    stop = ha.bus.async_listen("state_changed", changed)
+    stop_reports = async_track_state_report_event(ha, [permission.entity_id], reported)
+    for _ in range(2000):
+        await adapter.read(gen, endpoint)
+    await ha.async_block_till_done()
+    assert state.observations[permission.key].observed_at > first.observed_at
+    assert state.observations[permission.key].received_at > first.received_at
+    assert permission.extra_state_attributes == attrs
+    assert ha.states.get(permission.entity_id) is published
+    assert not writes.called and not changes and not reports
+    assert attrs["valid_until"] is attrs["enabled_valid_until"] is None
+    assert not {"observed_at", "received_at", "enabled_observed_at"} & attrs.keys()
+    # Readback changes and explicit unknown events remain immediately visible.
+    for value, expected in [("false", False), ("true", True)]:
+        row["attribute_value"] = value
+        await adapter.read(gen, endpoint)
+        assert permission.is_on is expected
+        assert ha.states.get(permission.entity_id).state == (
+            "on" if expected else "off"
+        )
+    adapter.variable(
+        gen,
+        endpoint["component"],
+        endpoint["variable"],
+        "",
+        datetime.now(UTC),
+        "NotifyEvent",
+    )
+    assert permission.is_on is None
+    assert ha.states.get(permission.entity_id).state == "unknown"
+    stop()
+    stop_reports()

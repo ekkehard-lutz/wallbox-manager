@@ -1,5 +1,12 @@
 # Wallbox Manager architecture
 
+**Historical implementation description:** Current passive v0.4 follows
+[WBM-ARCH-01–12](specifications/architecture-responsibility.md) and
+[V04-01–12](specifications/passive-v0.4.md). Older phase/permission freshness,
+sample-expiry and manager-side hardware safety/readback gates below are
+explicitly superseded by the 18 October 2026 responsibility decision.
+
+
 Status: design with initial pure-core implementation, 2026-09-23. Immutable
 identity/capability/request contracts, the operating-point solver and the
 protocol-independent control command boundary are implemented.
