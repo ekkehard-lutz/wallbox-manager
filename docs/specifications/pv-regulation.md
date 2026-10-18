@@ -2,7 +2,16 @@
 
 **Status:** DRAFT for overall subject-matter approval; **no new implementation instruction without review**
 
-**Updated:** 16 October 2026; original source reconciliation: 13 October 2026
+**18 October 2026 overarching override [APPROVED independently]:**
+[WBM-ARCH-01–12](architecture-responsibility.md) governs this entire draft and its
+acceptance matrices. Its explicit supersession register replaces manager-side
+physical safety gates, observation-age expiration and mandatory fresh physical
+proof/pre-command readback. Remaining “fresh”, “safety”, “proof”, “verified now”
+and readback language below cannot reinstate those obligations. Actual/requested
+state, source/response causality for optimization, economic policy and authority,
+intent, transaction and generation fencing remain distinct. **V3 stays DRAFT.**
+
+**Updated:** 18 October 2026 (architecture precedence); original source reconciliation: 13 October 2026
 
 **Reference:** `wallbox-manager` v0.3.2-beta.13 (release commit `aaef76d41295cf0b0255933f72b6d65448f6864a`), GitHub branch `develop` / release tag `v0.3.2-beta.13`
 
@@ -57,6 +66,8 @@ Evidence: PDF pp. 575–580, 609; `docs/pv-optimum-design.md`, `docs/pv-grid-imp
 
 ### PV-ARCH-04 – Ownership boundary [APPROVED]
 
+**18 October precedence:** WBM-ARCH-01–04/09 now makes the station solely responsible for all physical/electrical safety, interlocks and switching; WBM requests are optimization/policy proposals.
+
 `wallbox-manager` owns profile policy, the charging operating point and OCPP control. The Fronius/BYD integration supplies measurements; Wallbox Manager does **not** control the home battery through a parallel Modbus path. The wallbox hardware owns CP, vehicle state and physical phase relays. A future energy manager must not create a second competing regulator. Reuse means **shared functions**, rather than duplicated algorithms.
 
 Evidence: PDF pp. 1–19, 209–246, 579–583.
@@ -76,6 +87,8 @@ Smoothing, where justified, is owned by the regulator and samples configured inp
 When WBM only observes, when authority is absent, or when no automatic PV control is active, there is **no background cyclic PV policy evaluation** merely because battery SoC or other inputs are configured. Fixed/manual control does not need a continuously running PV regulator. Genuine time-based obligations (e.g. roughly 300-second forecast planning, local-midnight transition, permitted dwell/lockouts) remain scheduled as needed. The older **PV-PLAN-04** allowance for immediate recalculation on defined measurement events no longer authorizes a parallel ordinary PV power-regulation path; immediate exceptional processing is limited by PV-ARCH-07.
 
 ### PV-ARCH-07 – Immediate safety and asynchronous OCPP execution [APPROVED]
+
+**18 October precedence:** WBM-ARCH-01/09/11 supersedes manager hardware safety checks and mandatory physical proof below. Prompt authority/connection/intent fencing and truthful command outcomes remain; no mandatory fresh readback before requests.
 
 Loss of control authority, OCPP disconnect and critical hardware/safety faults must invalidate control readiness promptly, **independent of the PV regulation tick**. The station remains responsible for physical CP and local protections. A normal unplugging/status event can be incorporated into the next PV decision, but queued/new commands still have to pass the existing live pre-dispatch authority, permission, connection, transaction, intent and safety checks. OCPP CALL/CALLRESULT/ERROR handling, command serialization, delayed acknowledgements, readback and confirmation of the **actual physical operating point** are asynchronous and separate from the regulator; protocol acceptance never substitutes for physical proof.
 
@@ -182,7 +195,7 @@ Evidence: PDF pp. 12–17, 28–30, 44, 108–115; `docs/pv-optimum-design.md`.
 
 ### PV-PLAN-04 – Planning and freshness [APPROVED]
 
-Regular replanning occurs approximately every **300 s**; defined events may trigger immediate recalculation. Solcast updates may affect T between calculations and change it in **either direction** while `DYNAMIC` remains active. The external integration owns API requests and internal forecast updates; WBM makes **no** Solcast requests of its own (do not circumvent free API limits). The remaining forecast has its own slower freshness class, currently **900 s**; other required live measurements retain stricter freshness/validity rules. Forecast expiry must be diagnosable.
+Regular replanning occurs approximately every **300 s**; defined events may trigger immediate recalculation. Solcast updates may affect T between calculations and change it in **either direction** while `DYNAMIC` remains active. The external integration owns API requests and internal forecast updates; WBM makes **no** Solcast requests of its own (do not circumvent free API limits). **18 October supersession (WBM-ARCH-05/06):** The former 900 s forecast freshness class and stricter live-input age limits are removed. Forecast and ordinary inputs remain last-value-held until explicit new information or applicable lifecycle invalidation; age is diagnostic only. Planning cadence and the forecast's calendar-day meaning remain separate from observation validity.
 
 Evidence: PDF pp. 37–52, 101–119; `docs/pv-optimum-design.md`.
 
@@ -382,6 +395,8 @@ The station periodically releases CP to determine whether the vehicle remains co
 
 #### 6.4.7 Physical phase switching [RETAINED]
 
+**18 October precedence:** WBM-ARCH-01/09: the following sequence and all physical interlocks belong exclusively to the station. WBM does not implement, prove or revalidate its safety steps.
+
 The existing atomic, guarded 1p↔3p sequence remains unchanged:
 
 1. Set EVSE target current to 0 A.
@@ -541,6 +556,8 @@ During valid, actively eligible PV charging, the regulator uses current **unsmoo
 
 ### PV-ECO-06 – Narrow technical-minimum exception [APPROVED]
 
+**18 October precedence:** WBM-ARCH-09/11 supersedes the physical pre-send recheck below. M is a policy/optimization estimate from held observations and station outcomes, not an independent safety certification.
+
 If the ordinary economic budget permits no positive point, an **already permitted** charging process may continue at **exactly M**, even if this temporarily exceeds `D`; **no arbitrarily higher point** may invoke this exception. Startup-response reserve, OFF-response evidence, SoC/profile thresholds, actual current/phase limits and authority/OCPP fences remain mandatory. Recheck correct physical determination of M before sending. Economic continuation ends only through the 50 Wh rule or an **independently valid** other STOP reason.
 
 **15 October boundary:** These conditions govern manager operating-point control and economic continuation. They are not a transaction-bound preparation prerequisite for general permission under PV-OCPP-04. Temporarily retained legal startup current is separately permitted there; it is not an expansion of the exact-M economic exception or authorization to bypass existing STOP/restart inhibition.
@@ -637,6 +654,7 @@ The **intent** is binding, rather than an unsupported fixed number: fast economi
 ## 10. Explicitly superseded rules – do not restore to the target matrix
 
 | Historical approach | Later binding replacement | Source |
+| Manager physical safety proofs, ordinary input TTLs (including 900 s forecast), mandatory pre-command readbacks | Station safety and held observations; explicit supersession register covering PV-ARCH/PLAN/FAST/BAL/PHASE/OCPP/ECO/QA clauses and acceptance matrices | [WBM-ARCH-01–12, 18 October 2026](architecture-responsibility.md) |
 |---|---|---|
 | Day starts at PV >=100 W (sometimes 5 min) or sunrise | First `PV > household consumption excluding the selected EV` | PDF pp. 1, 98–114 |
 | Sunset or sunset minus 1 h as mathematical planning horizon | Remaining **local calendar day until midnight**, with `FINISHED` once remaining PV <= remaining household demand | PDF pp. 98–119 |

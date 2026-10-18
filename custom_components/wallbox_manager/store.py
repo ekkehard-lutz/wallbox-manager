@@ -16,7 +16,6 @@ class Observation:
     received_at: datetime
     generation: tuple[int, int]
     unit: str | None = None
-    valid_until: datetime | None = None
     status: str = "ready"
     # Phase-only report watermark and consecutive invalid count (saturated at 2).
     # Acquisition/provenance fields continue to describe the last valid sample.
@@ -111,7 +110,6 @@ class State:
         at=None,
         *,
         unit=None,
-        valid_until=None,
         status="ready",
     ):
         if not self.current(generation) or not self.accepts(key[1]):
@@ -132,8 +130,8 @@ class State:
         if same_report_generation and at < latest:
             return False
         if same_report_generation and at == latest:
-            # Conflicts invalidate proof, but replaying one invalid timestamp
-            # cannot count twice or restore proof without a newer valid sample.
+            # Conflicts count as one invalid report; replay cannot count twice
+            # or recover a value without a newer valid sample.
             if (phase and previous.invalid_count) or previous.value == value:
                 return False
             value, status = None, "unknown"
@@ -146,7 +144,6 @@ class State:
             now,
             generation,
             unit,
-            valid_until,
             status,
             reported_at=at if phase else None,
             reported_generation=generation if phase else None,
@@ -173,7 +170,6 @@ class State:
         ):
             self.add_sensor(key)
         # Timestamp refreshes belong to the canonical store, not Recorder.
-        # Permission retains its one-shot expiry publication and exact deadline.
         if (
             previous is None
             or (not phase and not same_generation)
@@ -185,7 +181,6 @@ class State:
                 observation.status,
             )
             or (phase and before != self.last_observed_value(key))
-            or key[2] == "charging_enabled"
         ):
             self.publish(key)
         if key[2] in self.missing and value is not None:
@@ -193,8 +188,8 @@ class State:
             self.publish(("station", (self.binding[0], None, None), "discovery"))
         return True
 
-    def last_observed_value(self, key):
-        """Display only: current generation, tolerating one invalid phase report."""
+    def value(self, key):
+        """Current-generation last value, tolerating one invalid phase report."""
         observation = self.observations.get(key)
         if (
             not observation
@@ -204,15 +199,6 @@ class State:
             return None
         return observation.value
 
-    def value(self, key):
-        """Usable evidence: current generation, no invalid report, unexpired proof."""
-        observation = self.observations.get(key)
-        if (
-            observation is None
-            or not self.current(observation.generation)
-            or observation.invalid_count
-        ):
-            return None
-        if observation.valid_until and datetime.now(UTC) >= observation.valid_until:
-            return None
-        return observation.value
+    def last_observed_value(self, key):
+        """Compatibility alias for the single canonical observed-value view."""
+        return self.value(key)

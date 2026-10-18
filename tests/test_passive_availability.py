@@ -46,22 +46,20 @@ async def test_retained_observation_reconnect_and_exact_energy(ha):
     assert "received_at" not in reading.extra_state_attributes
 
 
-async def test_phase_last_observation_and_proof_expiry(ha, monkeypatch):
+async def test_phase_last_observation_has_no_expiry(ha, monkeypatch):
     entry = await ha.install()
     state = entry.runtime_data.state
     gen = state.reset(connected=True)
     key = ("station", ("Wallbox01", None, None), "physical_phases")
     at = datetime.now(UTC)
-    state.observe(gen, key, 3, "phase", at, valid_until=at + timedelta(seconds=5))
+    state.observe(gen, key, 3, "phase", at)
     phase = next(e for e in entities(ha, entry) if e.key == key)
-    assert phase.native_value == 3 and phase._expiry is None
+    assert phase.native_value == 3 and not hasattr(phase, "_expiry")
     write = Mock(wraps=phase.async_write_ha_state)
     monkeypatch.setattr(phase, "async_write_ha_state", write)
     for i in range(2000):
         moment = at + timedelta(microseconds=i + 1)
-        state.observe(
-            gen, key, 3, "phase", moment, valid_until=moment + timedelta(seconds=5)
-        )
+        state.observe(gen, key, 3, "phase", moment)
     assert write.call_count == 0
     print(
         "PHASE_BENCHMARK "
@@ -77,10 +75,10 @@ async def test_phase_last_observation_and_proof_expiry(ha, monkeypatch):
     class Later(datetime):
         @classmethod
         def now(cls, tz=None):
-            return at + timedelta(seconds=6)
+            return at + timedelta(hours=5)
 
     monkeypatch.setattr(store, "datetime", Later)
-    assert state.value(key) is None  # Expired proof cannot support future control.
+    assert state.value(key) == 3
     assert phase.native_value == 3 and phase.available
     assert phase.extra_state_attributes["valid_until"] is None
     assert write.call_count == 0
@@ -291,7 +289,7 @@ async def test_meter_session_projection_publishes_real_changes_only(ha, monkeypa
 
 
 @pytest.mark.parametrize("recovery", [3, 1])
-async def test_phase_single_invalid_preserves_display_but_revokes_proof(
+async def test_phase_single_invalid_preserves_canonical_value(
     ha, monkeypatch, recovery
 ):
     from dataclasses import replace
@@ -342,9 +340,9 @@ async def test_phase_single_invalid_preserves_display_but_revokes_proof(
     )
     assert phase.available and phase.native_value == 3
     assert state.last_observed_value(key) == 3
-    assert state.value(key) is None
+    assert state.value(key) == 3
     assert ha.states.get(phase.entity_id) is published
-    assert phase._expiry is None
+    assert not hasattr(phase, "_expiry")
     report("RST" if recovery == 3 else "Rxx", 2)
     assert state.value(key) == recovery
     assert state.last_observed_value(key) == recovery
@@ -398,7 +396,7 @@ async def test_phase_two_distinct_invalid_reports_only_publish_availability(ha, 
     stop = ha.bus.async_listen("state_changed", changed)
     stop_reports = async_track_state_report_event(ha, [phase.entity_id], reported)
     report("", 1)
-    assert phase.available and state.value(key) is None
+    assert phase.available and state.value(key) == 3
     report("unrecognized", 2)
     assert not phase.available and phase.native_value is None
     assert state.last_observed_value(key) is None
@@ -434,27 +432,27 @@ def test_phase_report_watermark_duplicates_conflicts_and_ordering():
 
     def observe(value, index):
         at = start + timedelta(microseconds=index)
-        return state.observe(
-            gen, key, value, "phase", at, valid_until=at + timedelta(seconds=5)
-        )
+        return state.observe(gen, key, value, "phase", at)
 
     assert observe(3, 0)
     assert observe(None, 2)
     first_invalid = state.observations[key]
     assert not observe(None, 2)
-    assert not observe(3, 2)  # Equal-time recovery cannot restore proof.
+    assert not observe(3, 2)  # Equal-time recovery cannot clear the invalid report.
     assert not observe(None, 1)
     assert not observe(1, 1)
     assert state.observations[key] is first_invalid
-    assert state.last_observed_value(key) == 3 and state.value(key) is None
+    assert state.last_observed_value(key) == state.value(key) == 3
     assert observe(None, 3)
     assert state.last_observed_value(key) is None
     assert not observe(3, 2)
     assert not observe(None, 3)
     assert observe(1, 4)
     assert state.value(key) == 1
-    assert observe(3, 4)  # Conflicting values at one timestamp invalidate proof once.
-    assert state.last_observed_value(key) == 1 and state.value(key) is None
+    assert observe(
+        3, 4
+    )  # Conflicting values at one timestamp count as one invalid report.
+    assert state.last_observed_value(key) == state.value(key) == 1
     assert state.observations[key].invalid_count == 1
     assert not observe(3, 4)
     assert not observe(1, 4)
@@ -477,7 +475,7 @@ async def test_phase_initial_invalid_and_generation_fencing(ha, boot):
     assert state.observe(gen, key, 3, "phase")
     valid = state.observations[key]
     assert state.observe(gen, key, None, "invalid")
-    assert phase.available and state.value(key) is None
+    assert phase.available and state.value(key) == 3
     if not boot:
         state.reset(connected=False)
         assert not phase.available and phase.native_value is None

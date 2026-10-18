@@ -213,3 +213,38 @@ control is unavailable. Future PV/OCPP/economic/safety decisions remain preserve
 including PV-ARCH-09, without implementing a regulator now. Coordinated multiple
 wallbox management belongs to a separate future Energy Manager. No release,
 deployment, main/develop change or station modification in this assignment.
+
+
+## 18 October 2026 – Station safety ownership and no-expiry observations [APPROVED]
+
+**Source:** Explicit user task “Architectural Responsibility Boundary and No-Expiry
+Observations”, based on develop / v0.4.0-beta.3. The independent normative
+[WBM-ARCH-01–12 decision](architecture-responsibility.md) takes precedence over
+conflicting passive/PV requirements and historical implementation descriptions.
+V3 as a whole remains DRAFT. Earlier decisions above are preserved as history.
+
+**Decision:** The station alone enforces physical/electrical safety, current and
+phase limits, CP and safe switching. WBM owns optimization, intent, economic and
+profile policy, authority and truthful outcomes/display. Its proposals may be
+suboptimal with incomplete/old observations; station rejection/delay/adjustment
+is normal. No WBM safety proof, age gate or mandatory pre-command physical readback.
+
+All ordinary observed values remain held without expiry. Explicit invalid reports,
+connection/boot boundaries and failed reads are different events: failed reads do
+not change an observed value. Preserve beta.3 one-invalid/two-invalid phase
+robustness, with one coherent canonical value instead of separate display and
+safety-proof semantics. Identical permission reads update internal acquisition
+metadata without repeated HA publication or public timestamp churn. Five-second
+permission polling can detect external changes, never maintain a TTL.
+
+**Explicit supersession:** The normative register names V04-08/10, PV-ARCH-04–09,
+PV-PLAN-04 (including 900 s forecast expiry), PV-FAST-03/04, PV-BAL-02/03,
+PV-PHASE-01/02, PV-OCPP-01/02/04–06 and section 6.4 acceptance rows, affected
+PV-ECO-01/02/05/06/08/09 and PV-QA-01/02 safety/freshness clauses. The beta.3
+5 s phase proof, 15 s permission confirmation and expiry callback are removed.
+Authority, transaction/intent fencing, economic/SoC policy, transport/response
+limits, command sequencing and session/business timers remain independently valid.
+
+**Authorized scope:** Small passive WBM runtime and specification change; full
+maintained tests, feature-branch commit/push. No active regulation, station change,
+main change, merge, tag, release or deployment. No hardware acceptance is claimed.

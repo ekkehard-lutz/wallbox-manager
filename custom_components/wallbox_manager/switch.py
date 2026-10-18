@@ -27,16 +27,10 @@ class Permission(WallboxEntity, SwitchEntity):
 
     @property
     def extra_state_attributes(self):
-        observation = self.observed.observations.get(self.key)
         return {
             **super().extra_state_attributes,
             "state_represents": "confirmed_hardware",
-            "enabled_valid_until": observation.valid_until.isoformat()
-            if observation and observation.valid_until
-            else None,
-            "enabled_observed_at": observation.observed_at.isoformat()
-            if observation
-            else None,
+            "enabled_valid_until": None,
             "execution_ready": False,
             "execution_blocked_reason": "passive_only",
         }

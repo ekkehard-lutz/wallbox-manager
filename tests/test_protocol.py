@@ -634,12 +634,12 @@ async def test_real_notify_event_empty_phase_does_not_flap_last_observed_sensor(
         await eventually(lambda: entry.runtime_data.server.adapter.bootstrap.done())
         generation = state.generation
         stop = None
-        for i, (raw, display, proof) in enumerate(
+        for i, (raw, display, observed) in enumerate(
             [
                 ("RST", 3, 3),
-                ("", 3, None),
+                ("", 3, 3),
                 ("RST", 3, 3),
-                ("", 3, None),
+                ("", 3, 3),
                 ("", None, None),
                 ("RST", 3, 3),
             ]
@@ -666,7 +666,7 @@ async def test_real_notify_event_empty_phase_does_not_flap_last_observed_sensor(
             )
             await ha.async_block_till_done()
             assert state.generation == generation
-            assert state.value(key) == proof
+            assert state.value(key) == observed
             assert phase.native_value == display
             assert phase.available == (display is not None)
             if i == 0:
@@ -676,3 +676,71 @@ async def test_real_notify_event_empty_phase_does_not_flap_last_observed_sensor(
         assert changes == ["unavailable", "3"]
         assert set(station.operations) <= READ_ONLY
         stop()
+
+
+async def test_response_timeout_preserves_observation_and_healthy_transport(ha):
+    from ocpp.v21 import call as requests
+
+    entry = await ha.install()
+    listener, state = entry.runtime_data.server, entry.runtime_data.state
+    async with peer(entry) as station:
+        await boot(station)
+        await eventually(lambda: listener.adapter.bootstrap.done())
+        adapter = listener.adapter
+        adapter.poll.cancel()
+        await asyncio.gather(adapter.poll, return_exceptions=True)
+        adapter._response_timeout = 0.03
+        key = ("control", state.binding, "charging_enabled")
+        previous = state.observations[key]
+        # Stop the peer's receiver while leaving its WebSocket transport alive.
+        # No CALLRESULT is produced, so the actual library response timer fires.
+        original = station.route_message
+
+        async def ignore_get_variables(raw):
+            wire = json.loads(raw)
+            if wire[0] == 2 and wire[2] == "GetVariables":
+                return
+            await original(raw)
+
+        station.route_message = ignore_get_variables
+        with pytest.raises(TimeoutError):
+            await adapter.read(
+                adapter.generation,
+                {
+                    "component": {"name": "WallboxController"},
+                    "variable": {"name": "ChargingEnabled"},
+                },
+            )
+        assert state.observations[key] is previous
+        assert state.value(key) is True and state.connected
+        assert (await station.call(requests.Heartbeat())).current_time
+
+
+async def test_ping_timeout_still_invalidates_connection(ha, monkeypatch):
+    from websockets.frames import OP_PONG
+
+    from custom_components.wallbox_manager import ocpp
+
+    serve = ocpp.serve
+    configured = {}
+
+    def quick_keepalive(*args, **kwargs):
+        configured.update(kwargs)
+        return serve(*args, **{**kwargs, "ping_interval": 0.03, "ping_timeout": 0.03})
+
+    monkeypatch.setattr(ocpp, "serve", quick_keepalive)
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    assert configured["ping_interval"] == configured["ping_timeout"] == 20
+    async with peer(entry) as station:
+        await eventually(lambda: state.connected)
+        socket = station._connection
+        send_frame = socket.protocol.send_frame
+
+        def drop_pong(frame):
+            if frame.opcode is not OP_PONG:
+                send_frame(frame)
+
+        monkeypatch.setattr(socket.protocol, "send_frame", drop_pong)
+        await eventually(lambda: not state.connected)
+        assert socket.close_code == 1011
