@@ -523,3 +523,253 @@ async def test_unsuccessful_permission_readback_never_refreshes_confirmation(
     await adapter.read(gen, endpoint)
     assert state.value(permission) is None  # Explicit unsuccessful read revokes now.
     assert state.observations[permission].invalid_count == 0
+
+
+@pytest.mark.parametrize(
+    "measurand,unit,raw,expected",
+    [
+        ("Voltage", "V", 231.43782, 231.4),
+        ("Voltage", "mV", 231437.82, 231.4),
+        ("Voltage", "kV", 0.23143782, 231.4),
+        ("Current.Import", "A", 8.236728, 8.237),
+        ("Current.Import", "mA", 8236.728, 8.237),
+        ("Power.Active.Import", "W", 1234.56, 1234.6),
+        ("Power.Active.Import", "kW", 1.23456, 1234.6),
+        ("Power.Active.Import", "MW", 0.00123456, 1234.6),
+    ],
+)
+def test_electrical_resolution_all_phases_and_supported_units(
+    measurand, unit, raw, expected
+):
+    prefix, canonical = {
+        "Voltage": ("voltage", "V"),
+        "Current.Import": ("current", "A"),
+        "Power.Active.Import": ("power", "W"),
+    }[measurand]
+    phases = ["L1", "L2", "L3"]
+    if measurand == "Voltage":
+        phases += ["L1-N", "L2-N", "L3-N"]
+    if measurand == "Power.Active.Import":
+        phases += [None]
+    for phase in phases:
+        value = list(
+            samples(
+                [
+                    {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "sampled_value": [
+                            {
+                                "measurand": measurand,
+                                "phase": phase,
+                                "value": raw,
+                                "unit_of_measure": {"unit": unit},
+                            }
+                        ],
+                    }
+                ]
+            )
+        )
+        role = prefix + "_" + phase[:2].lower() if phase else prefix
+        assert len(value) == 1
+        assert (value[0][0], value[0][1], value[0][3]) == (role, expected, canonical)
+
+
+@pytest.mark.parametrize(
+    "measurand,raw,unit,multiplier,expected",
+    [
+        ("Voltage", 231.45, "V", 0, 231.5),
+        ("Voltage", 231.449999, "V", 0, 231.4),
+        ("Voltage", 231.35, "V", 0, 231.4),
+        ("Voltage", 23145, "V", -2, 231.5),
+        ("Voltage", 0.23145, "V", 3, 231.5),
+        ("Voltage", 0.05, "V", 0, 0.1),
+        ("Current.Import", 8.2365, "A", 0, 8.237),
+        ("Current.Import", 8.23649999, "A", 0, 8.236),
+        ("Current.Import", 0.0005, "A", 0, 0.001),
+        ("Current.Import", 82365, "A", -4, 8.237),
+        ("Power.Active.Import", 1906.347, "W", 0, 1906.3),
+        ("Power.Active.Import", 1906.35, "W", 0, 1906.4),
+        ("Power.Active.Import", 1.23465, "kW", 0, 1234.7),
+        ("Power.Active.Import", 123465, "W", -2, 1234.7),
+        ("Power.Active.Import", 0, "W", 0, 0),
+        ("Voltage", 1000000000000000049999999999999, "mV", -12, 1000000000000000.0),
+        ("Voltage", 1000000000000000050000000000000, "mV", -12, 1000000000000000.1),
+    ],
+)
+def test_decimal_half_up_boundaries_after_conversion(
+    measurand, raw, unit, multiplier, expected
+):
+    values = list(
+        samples(
+            [
+                {
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "sampled_value": [
+                        {
+                            "measurand": measurand,
+                            "phase": "L1",
+                            "value": raw,
+                            "unit_of_measure": {"unit": unit, "multiplier": multiplier},
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+    assert values[0][1] == expected
+
+
+def test_raw_conflicts_are_checked_before_quantization():
+    at = datetime.now(UTC)
+
+    def voltage(raw, unit="V"):
+        return {
+            "measurand": "Voltage",
+            "phase": "L1",
+            "value": raw,
+            "unit_of_measure": {"unit": unit},
+        }
+
+    def parse(values):
+        return list(samples([{"timestamp": at.isoformat(), "sampled_value": values}]))
+
+    assert parse([voltage(231.41), voltage(231.42)])[0][1] is None
+    assert parse([voltage(231.41), voltage(231.42), voltage(231.41)])[0][1] is None
+    assert parse([voltage(231.41), voltage(231.41)])[0][1] == 231.4
+    assert parse([voltage(231.41), voltage(231410, "mV")])[0][1] == 231.4
+    assert parse([voltage(-1), voltage(231.41)])[0][1] is None
+    groups = [
+        {"timestamp": at.isoformat(), "sampled_value": [voltage(231.41)]},
+        {"timestamp": at.isoformat(), "sampled_value": [voltage(231.42)]},
+    ]
+    assert list(samples(groups))[0][1] is None
+    groups[1]["timestamp"] = (at + timedelta(microseconds=1)).isoformat()
+    assert [value for _, value, _, _ in samples(groups)] == [231.4, 231.4]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [-1, float("inf"), float("-inf"), float("nan"), None, True, "231.45", {}, 1e19],
+)
+def test_resolution_preserves_invalid_numeric_semantics(raw):
+    result = list(
+        samples(
+            [
+                {
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "sampled_value": [
+                        {
+                            "measurand": "Voltage",
+                            "phase": "L1",
+                            "value": raw,
+                            "unit_of_measure": {"unit": "V"},
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+    assert result[0][1] is None
+
+
+def test_resolution_preserves_missing_unsupported_and_energy_samples():
+    at = datetime.now(UTC).isoformat()
+    voltage = {
+        "measurand": "Voltage",
+        "phase": "L1",
+        "value": 231.45,
+        "unit_of_measure": {"unit": "V"},
+    }
+    for changes in [
+        {"unit_of_measure": {"unit": "unsupported"}},
+        {"unit_of_measure": {"unit": "V", "multiplier": 13}},
+        {"unit_of_measure": {"unit": "V", "multiplier": True}},
+        {"format": "SignedData"},
+    ]:
+        assert (
+            list(
+                samples([{"timestamp": at, "sampled_value": [{**voltage, **changes}]}])
+            )[0][1]
+            is None
+        )
+    assert list(samples([{"timestamp": at, "sampled_value": []}])) == []
+    assert list(samples([{"timestamp": "invalid", "sampled_value": [voltage]}])) == []
+    for changes in [
+        {"measurand": "unsupported"},
+        {"phase": "L4"},
+        {"context": "unsupported"},
+        {"location": "Inlet"},
+    ]:
+        assert (
+            list(
+                samples([{"timestamp": at, "sampled_value": [{**voltage, **changes}]}])
+            )
+            == []
+        )
+    missing = {k: v for k, v in voltage.items() if k != "value"}
+    assert list(samples([{"timestamp": at, "sampled_value": [missing]}]))[0][1] is None
+    for unit, raw in [
+        ("kWh", 123.45678901),
+        ("Wh", 123456.78901),
+        ("MWh", 0.12345678901),
+    ]:
+        group = [
+            {
+                "timestamp": at,
+                "sampled_value": [{"value": raw, "unit_of_measure": {"unit": unit}}],
+            }
+        ]
+        assert list(samples(group))[0][1] == 123.45678901
+        group[0]["sampled_value"][0]["context"] = "Transaction.Begin"
+        assert list(samples(group)) == []
+        assert list(samples(group, session=True))[0][1] == 123.45678901
+
+
+async def test_session_and_ordinary_power_share_normalization_and_safety_is_unchanged(
+    ha,
+):
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    generation = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, generation)
+    at = datetime.now(UTC).isoformat()
+    sample = {
+        "measurand": "Power.Active.Import",
+        "value": 1.906347,
+        "unit_of_measure": {"unit": "kW"},
+    }
+    adapter.transaction(
+        "Started",
+        at,
+        "CablePluggedIn",
+        0,
+        {"transaction_id": "actual-resolution"},
+        evse={"id": 1, "connector_id": 1},
+        meter_value=[{"timestamp": at, "sampled_value": [sample]}],
+    )
+    transaction = ("transaction", state.binding, "power")
+    assert state.value(transaction) == 1906.3
+    adapter.meters(
+        1, [{"timestamp": datetime.now(UTC).isoformat(), "sampled_value": [sample]}]
+    )
+    normal = ("observation", ("Wallbox01", "1", None), "power")
+    assert (
+        state.value(normal) == session.view(state, datetime.now(UTC))["power"] == 1906.3
+    )
+    capability = ("capability", ("Wallbox01", "1", None), "minimum_current")
+    state.observe(generation, capability, 6.123456789, "inventory", status="verified")
+    assert state.value(capability) == 6.123456789
+    controller = {"name": "WallboxController"}
+    adapter.variable(
+        generation,
+        controller,
+        {"name": "ChargingEnabled"},
+        "false",
+        datetime.now(UTC),
+        "GetVariables",
+    )
+    assert state.value(("control", state.binding, "charging_enabled")) is False
+    await entry.runtime_data.settings.set("allowed_current_1p", "19/3")
+    assert entry.runtime_data.settings.get("allowed_current_1p") == float(19 / 3)

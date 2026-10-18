@@ -267,8 +267,10 @@ async def test_meter_session_projection_publishes_real_changes_only(ha, monkeypa
         meter(100)
     assert write.call_count == 0
     meter(100.00000001)
+    assert write.call_count == 0  # Raw noise remains within the normalized bin.
+    meter(100.05)
     assert write.call_count == 1
-    assert ha.states.get(power.entity_id).state == "100.00000001"
+    assert ha.states.get(power.entity_id).state == "100.1"
     assert state.session["energy"] is None
     state.reset(connected=False)
     assert not power.available
@@ -283,9 +285,9 @@ async def test_meter_session_projection_publishes_real_changes_only(ha, monkeypa
         1,
     )
     assert not power.available  # Transaction confirmation is not a power report.
-    meter(100.00000001)
+    meter(100.05)
     assert power.available
-    assert ha.states.get(power.entity_id).state == "100.00000001"
+    assert ha.states.get(power.entity_id).state == "100.1"
 
 
 @pytest.mark.parametrize("recovery", [3, 1])

@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 
 from conftest import config, entities
 from homeassistant.core import callback
@@ -152,28 +153,65 @@ async def test_passive_workloads(ha, monkeypatch):
     await measure("changed_values", changing)
     assert results["changed_values"]["ha_writes"] == 100
 
+    adapter = Adapter(Mock(), one.runtime_data.server, generation)
+
+    def meter_voltage(raw, index):
+        adapter.meters(
+            1,
+            [
+                {
+                    "timestamp": (base + timedelta(microseconds=index)).isoformat(),
+                    "sampled_value": [
+                        {
+                            "measurand": "Voltage",
+                            "phase": "L1",
+                            "value": raw,
+                            "unit_of_measure": {"unit": "V"},
+                        }
+                    ],
+                }
+            ],
+        )
+
+    meter_voltage(230, 5000)
+    await ha.async_block_till_done()  # Settle source/unit provenance outside workload.
+
     async def fluctuations():
         for i in range(2000):
-            state.observe(
-                generation,
-                ("observation", scope, "voltage_l1"),
-                230 + (i + 1) * 0.00000001,
-                "initial",
-                base + timedelta(microseconds=6000 + i),
-            )
+            meter_voltage(230 + (i + 1) * 0.00000001, 6000 + i)
 
-    await measure("exact_voltage_changes", fluctuations)
-    assert results["exact_voltage_changes"]["ha_changes"] == 2000
+    await measure("normalized_voltage_reports", fluctuations)
+    assert results["normalized_voltage_reports"]["ha_writes"] == 0
+    assert results["normalized_voltage_reports"]["accepted"] == 2000
+    assert state.observations[("observation", scope, "voltage_l1")].observed_at == (
+        base + timedelta(microseconds=7999)
+    )
+
+    async def boundary():
+        meter_voltage(230.05, 8000)
+
+    await measure("normalized_voltage_boundary", boundary)
+    assert results["normalized_voltage_boundary"]["ha_changes"] == 1
+
+    def meter_energy(raw, index):
+        adapter.meters(
+            1,
+            [
+                {
+                    "timestamp": (base + timedelta(microseconds=index)).isoformat(),
+                    "sampled_value": [
+                        {"value": raw, "unit_of_measure": {"unit": "kWh"}}
+                    ],
+                }
+            ],
+        )
+
+    meter_energy(100, 8001)
+    await ha.async_block_till_done()
 
     async def energy():
         for i in range(1000):
-            state.observe(
-                generation,
-                ("observation", scope, "energy"),
-                100 + (i + 1) * 0.00000001,
-                "initial",
-                base + timedelta(microseconds=9000 + i),
-            )
+            meter_energy(100 + (i + 1) * 0.00000001, 9000 + i)
 
     await measure("exact_energy_changes", energy)
     assert results["exact_energy_changes"]["ha_changes"] == 1000
@@ -199,7 +237,7 @@ async def test_passive_workloads(ha, monkeypatch):
     async def silent():
         # No periodic scanner or metering timer exists; time passage alone does
         # not change ordinary source values or schedule any policy work.
-        assert state.value(("observation", scope, "voltage_l1")) == 230.00002
+        assert state.value(("observation", scope, "voltage_l1")) == 230.1
 
     await measure("change_only_idle", silent)
     assert results["change_only_idle"]["ha_writes"] == 0
