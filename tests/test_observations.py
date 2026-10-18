@@ -366,3 +366,160 @@ async def test_restart_keeps_session_identity_but_invalidates_live_proof(ha):
         1,
     )
     assert session.view(restored, datetime.now(UTC))["active"] is True
+
+
+async def test_audited_numeric_channels_omissions_invalid_samples_and_exact_energy(ha):
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, gen)
+    scope = ("Wallbox01", "1", None)
+    power = ("observation", scope, "power")
+    voltage = ("observation", scope, "voltage_l1")
+    energy = ("observation", scope, "energy")
+
+    def meters(samples):
+        adapter.meters(
+            1, [{"timestamp": datetime.now(UTC).isoformat(), "sampled_value": samples}]
+        )
+
+    meters(
+        [
+            {
+                "measurand": "Power.Active.Import",
+                "value": 100,
+                "unit_of_measure": {"unit": "W"},
+            },
+            {
+                "measurand": "Voltage",
+                "phase": "L1",
+                "value": 230,
+                "unit_of_measure": {"unit": "V"},
+            },
+            {"value": 123.45678901, "unit_of_measure": {"unit": "kWh"}},
+        ]
+    )
+    previous_power, previous_energy = (
+        state.observations[power],
+        state.observations[energy],
+    )
+    meters(
+        [
+            {
+                "measurand": "Voltage",
+                "phase": "L1",
+                "value": -1,
+                "unit_of_measure": {"unit": "V"},
+            }
+        ]
+    )
+    assert state.value(voltage) is None  # No global debounce of numeric invalidity.
+    assert state.observations[voltage].invalid_count == 0
+    assert state.observations[power] is previous_power
+    assert state.observations[energy] is previous_energy
+    meters([])  # Omission never erases a previously observed channel.
+    assert state.observations[power] is previous_power
+    meters([{"value": 123.45678902, "unit_of_measure": {"unit": "kWh"}}])
+    assert state.value(energy) == 123.45678902
+    assert state.value(power) == 100
+
+
+async def test_audited_status_authority_capabilities_and_permission_are_not_debounced(
+    ha,
+):
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, gen)
+    status = ("observation", state.binding, "connector_state")
+    for raw, expected in [
+        ("Available", "available"),
+        ("Unavailable", "unavailable"),
+        ("Faulted", "faulted"),
+    ]:
+        adapter.status(1, 1, raw, datetime.now(UTC).isoformat())
+        assert state.value(status) == expected
+    component = {"name": "WallboxController"}
+    authority = ("station", ("Wallbox01", None, None), "control_authority")
+    for raw, expected in [("OCPP", "remote"), ("Local", "local"), ("", "unknown")]:
+        adapter.variable(
+            gen,
+            component,
+            {"name": "ControlAuthority"},
+            raw,
+            datetime.now(UTC),
+            "NotifyEvent",
+        )
+        assert state.value(authority) == expected
+    capability = ("capability", ("Wallbox01", "1", None), "minimum_current")
+    state.observe(gen, capability, 6, "inventory", status="verified")
+    state.observe(gen, capability, None, "inventory", status="degraded")
+    assert state.value(capability) is None
+    assert state.observations[capability].status == "degraded"
+    permission = ("control", state.binding, "charging_enabled")
+    switch = next(e for e in entities(ha, entry) if e.key == permission)
+    for raw, expected in [("true", True), ("", None), ("true", True), ("false", False)]:
+        adapter.variable(
+            gen,
+            component,
+            {"name": "ChargingEnabled"},
+            raw,
+            datetime.now(UTC),
+            "NotifyEvent",
+        )
+        assert state.value(permission) is expected
+        assert state.observations[permission].invalid_count == 0
+        assert switch.is_on is expected
+    state.reset(connected=False)
+    assert not switch.available
+
+
+async def test_unsuccessful_permission_readback_never_refreshes_confirmation(
+    ha, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from ocpp.v21 import call_result
+
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, gen)
+    endpoint = {
+        "component": {"name": "WallboxController"},
+        "variable": {"name": "ChargingEnabled"},
+    }
+    permission = ("control", state.binding, "charging_enabled")
+    adapter.variable(
+        gen,
+        endpoint["component"],
+        endpoint["variable"],
+        "true",
+        datetime.now(UTC),
+        "GetVariables",
+    )
+    confirmed = state.observations[permission]
+    monkeypatch.setattr(adapter, "request", AsyncMock(side_effect=TimeoutError))
+    with pytest.raises(TimeoutError):
+        await adapter.read(gen, endpoint)
+    assert (
+        state.observations[permission] is confirmed
+    )  # Original deadline, not renewed.
+    monkeypatch.setattr(
+        adapter,
+        "request",
+        AsyncMock(
+            return_value=call_result.GetVariables(
+                get_variable_result=[{**endpoint, "attribute_status": "Rejected"}]
+            )
+        ),
+    )
+    await adapter.read(gen, endpoint)
+    assert state.value(permission) is None  # Explicit unsuccessful read revokes now.
+    assert state.observations[permission].invalid_count == 0

@@ -612,3 +612,67 @@ async def test_lifecycle_diagnostics_on_real_reconnect_without_meter_spam(
         assert "transition_control_authority" in events
     if level == 3:
         assert "readback_PhaseRotation" in events
+
+
+async def test_real_notify_event_empty_phase_does_not_flap_last_observed_sensor(ha):
+    from conftest import entities
+    from homeassistant.core import callback
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    key = ("station", ("Wallbox01", None, None), "physical_phases")
+    phase = next(e for e in entities(ha, entry) if e.key == key)
+    changes = []
+
+    @callback
+    def changed(event):
+        if event.data["entity_id"] == phase.entity_id:
+            changes.append(event.data["new_state"].state)
+
+    async with peer(entry) as station:
+        await boot(station)
+        await eventually(lambda: entry.runtime_data.server.adapter.bootstrap.done())
+        generation = state.generation
+        stop = None
+        for i, (raw, display, proof) in enumerate(
+            [
+                ("RST", 3, 3),
+                ("", 3, None),
+                ("RST", 3, 3),
+                ("", 3, None),
+                ("", None, None),
+                ("RST", 3, 3),
+            ]
+        ):
+            await station.call(
+                call.NotifyEvent(
+                    generated_at=datetime.now(UTC).isoformat(),
+                    seq_no=i,
+                    event_data=[
+                        {
+                            "event_id": i,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                            "trigger": "Alerting",
+                            "actual_value": raw,
+                            "event_notification_type": "HardWiredNotification",
+                            "component": {
+                                "name": "Connector",
+                                "evse": {"id": 1, "connector_id": 1},
+                            },
+                            "variable": {"name": "PhaseRotation"},
+                        }
+                    ],
+                )
+            )
+            await ha.async_block_till_done()
+            assert state.generation == generation
+            assert state.value(key) == proof
+            assert phase.native_value == display
+            assert phase.available == (display is not None)
+            if i == 0:
+                stop = ha.bus.async_listen("state_changed", changed)
+            elif i <= 2:
+                assert changes == []
+        assert changes == ["unavailable", "3"]
+        assert set(station.operations) <= READ_ONLY
+        stop()

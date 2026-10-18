@@ -246,10 +246,14 @@ class Adapter(ChargePoint):
                 not previous
                 or previous.value != value
                 or previous.generation != generation
+                or previous.invalid_count
             )
         ):
             self.listener.diagnostic(
-                2, "transition_" + key[2], scope=key[1], value=value
+                2,
+                "transition_" + key[2],
+                scope=key[1],
+                value=self.state.value(key) if key[2] == "physical_phases" else value,
             )
         return accepted
 
