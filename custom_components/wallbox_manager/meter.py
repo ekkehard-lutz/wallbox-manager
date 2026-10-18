@@ -1,13 +1,18 @@
 """Small OCPP2.1 meter normalizer extracted from beta.18 parsing rules."""
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
 UNITS = {
     "Voltage": {"V": 1, "mV": 0.001, "kV": 1000},
     "Current.Import": {"A": 1, "mA": 0.001},
     "Power.Active.Import": {"W": 1, "kW": 1000, "MW": 1000000},
     "Energy.Active.Import.Register": {"Wh": 0.001, "kWh": 1, "MWh": 1000},
+}
+RESOLUTION = {
+    "voltage": Decimal("0.1"),
+    "current": Decimal("0.001"),
+    "power": Decimal("0.1"),
 }
 CONNECTOR = {
     "Available": "available",
@@ -98,18 +103,31 @@ def samples(groups, *, session=False):
                         and -30 <= decimal.adjusted() <= 30
                         and len(decimal.as_tuple().digits) <= 40
                     ):
-                        number = float(
-                            decimal * Decimal(str(factor)) * Decimal(10) ** multiplier
-                        )
-                        if 0 <= number <= 10**18:
-                            value = number
+                        with localcontext() as context:
+                            if prefix:
+                                # Exact decimal conversion for all accepted electrical
+                                # inputs; retain the existing energy conversion context.
+                                context.prec = 64
+                            number = (
+                                decimal
+                                * Decimal(str(factor))
+                                * Decimal(10) ** multiplier
+                            )
+                            if 0 <= float(number) <= 10**18:
+                                value = float(number) if role == "energy" else number
                 except ValueError, OverflowError, InvalidOperation:
                     pass
             key = (role, at)
             if key in found and found[key] != value:
                 value = None
             found[key] = value
+    # Validate conflicts before quantization: distinct source values in one
+    # channel/timestamp must not become "equal" merely by rounding together.
     for (role, at), value in found.items():
+        if value is not None and role != "energy":
+            value = float(
+                value.quantize(RESOLUTION[role.split("_")[0]], rounding=ROUND_HALF_UP)
+            )
         yield (
             role,
             value,

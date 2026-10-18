@@ -1,7 +1,7 @@
 """One entry's canonical observations; direct, keyed entity publication."""
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -18,6 +18,11 @@ class Observation:
     unit: str | None = None
     valid_until: datetime | None = None
     status: str = "ready"
+    # Phase-only report watermark and consecutive invalid count (saturated at 2).
+    # Acquisition/provenance fields continue to describe the last valid sample.
+    reported_at: datetime | None = None
+    reported_generation: tuple[int, int] | None = None
+    invalid_count: int = 0
 
 
 class State:
@@ -117,21 +122,49 @@ class State:
             return False
         previous = self.observations.get(key)
         same_generation = previous and previous.generation == generation
-        if same_generation and at < previous.observed_at:
+        phase = key[0] == "station" and key[2] == "physical_phases"
+        before = self.last_observed_value(key) if phase else None
+        latest = (previous.reported_at or previous.observed_at) if previous else None
+        same_report_generation = (
+            previous
+            and (previous.reported_generation or previous.generation) == generation
+        )
+        if same_report_generation and at < latest:
             return False
-        if same_generation and at == previous.observed_at:
-            if previous.value == value:
+        if same_report_generation and at == latest:
+            # Conflicts invalidate proof, but replaying one invalid timestamp
+            # cannot count twice or restore proof without a newer valid sample.
+            if (phase and previous.invalid_count) or previous.value == value:
                 return False
             value, status = None, "unknown"
         if value is None and status == "ready":
             status = "unknown"
         observation = Observation(
-            value, source, at, now, generation, unit, valid_until, status
+            value,
+            source,
+            at,
+            now,
+            generation,
+            unit,
+            valid_until,
+            status,
+            reported_at=at if phase else None,
+            reported_generation=generation if phase else None,
+            invalid_count=1 if phase and value is None else 0,
         )
+        if phase and value is None and previous:
+            observation = replace(
+                previous,
+                reported_at=at,
+                reported_generation=generation,
+                invalid_count=min(2, previous.invalid_count + 1)
+                if same_report_generation
+                else 1,
+            )
         if observation == previous:
             return False
         self.accepted += 1
-        self.changed += previous is None or previous.value != value
+        self.changed += previous is None or previous.value != observation.value
         self.observations[key] = observation
         if (
             previous is None
@@ -142,9 +175,16 @@ class State:
         # Timestamp refreshes belong to the canonical store, not Recorder.
         # Permission retains its one-shot expiry publication and exact deadline.
         if (
-            not same_generation
+            previous is None
+            or (not phase and not same_generation)
             or (previous.value, previous.source, previous.unit, previous.status)
-            != (value, source, unit, status)
+            != (
+                observation.value,
+                observation.source,
+                observation.unit,
+                observation.status,
+            )
+            or (phase and before != self.last_observed_value(key))
             or key[2] == "charging_enabled"
         ):
             self.publish(key)
@@ -154,15 +194,24 @@ class State:
         return True
 
     def last_observed_value(self, key):
-        """Current-generation value, without asserting short-lived proof validity."""
+        """Display only: current generation, tolerating one invalid phase report."""
         observation = self.observations.get(key)
-        if not observation or not self.current(observation.generation):
+        if (
+            not observation
+            or not self.current(observation.generation)
+            or observation.invalid_count >= 2
+        ):
             return None
         return observation.value
 
     def value(self, key):
+        """Usable evidence: current generation, no invalid report, unexpired proof."""
         observation = self.observations.get(key)
-        if observation is None or not self.current(observation.generation):
+        if (
+            observation is None
+            or not self.current(observation.generation)
+            or observation.invalid_count
+        ):
             return None
         if observation.valid_until and datetime.now(UTC) >= observation.valid_until:
             return None

@@ -1,0 +1,70 @@
+{
+  "base_commit": "a1c50e8eb4dfa5b532a44e86fed400d0e71ceff2",
+  "method": "Identical instrumented OCPP Adapter.meters workloads before/after meter.py change with real HA entities, counted HA writes, state_changed and unchanged state_reported events; initial values settled before counters.",
+  "raw_voltage": "230.01 + (i+1)*1e-8 V for i=0..1999; then 230.05 V",
+  "raw_energy": "100 + (i+1)*1e-8 kWh for i=0..999",
+  "before": {
+    "exact_energy": {
+      "accepted": 1000,
+      "expected_observed_at": "2026-10-18T13:11:11.084304+00:00",
+      "final_value": 100.00001,
+      "ha_writes": 1000,
+      "observed_at": "2026-10-18T13:11:11.084304+00:00",
+      "state_changed": 1000,
+      "state_reported": 0,
+      "estimated_recorder_rows": 1000
+    },
+    "voltage_boundary": {
+      "accepted": 1,
+      "expected_observed_at": "2026-10-18T13:11:11.082306+00:00",
+      "final_value": 230.05,
+      "ha_writes": 1,
+      "observed_at": "2026-10-18T13:11:11.082306+00:00",
+      "state_changed": 1,
+      "state_reported": 0,
+      "estimated_recorder_rows": 1
+    },
+    "voltage_same_bin": {
+      "accepted": 2000,
+      "expected_observed_at": "2026-10-18T13:11:11.082305+00:00",
+      "final_value": 230.01002,
+      "ha_writes": 2000,
+      "observed_at": "2026-10-18T13:11:11.082305+00:00",
+      "state_changed": 2000,
+      "state_reported": 0,
+      "estimated_recorder_rows": 2000
+    }
+  },
+  "after": {
+    "exact_energy": {
+      "accepted": 1000,
+      "expected_observed_at": "2026-10-18T13:14:32.177669+00:00",
+      "final_value": 100.00001,
+      "ha_writes": 1000,
+      "observed_at": "2026-10-18T13:14:32.177669+00:00",
+      "state_changed": 1000,
+      "state_reported": 0,
+      "estimated_recorder_rows": 1000
+    },
+    "voltage_boundary": {
+      "accepted": 1,
+      "expected_observed_at": "2026-10-18T13:14:32.175671+00:00",
+      "final_value": 230.1,
+      "ha_writes": 1,
+      "observed_at": "2026-10-18T13:14:32.175671+00:00",
+      "state_changed": 1,
+      "state_reported": 0,
+      "estimated_recorder_rows": 1
+    },
+    "voltage_same_bin": {
+      "accepted": 2000,
+      "expected_observed_at": "2026-10-18T13:14:32.175670+00:00",
+      "final_value": 230.0,
+      "ha_writes": 0,
+      "observed_at": "2026-10-18T13:14:32.175670+00:00",
+      "state_changed": 0,
+      "state_reported": 0,
+      "estimated_recorder_rows": 0
+    }
+  }
+}

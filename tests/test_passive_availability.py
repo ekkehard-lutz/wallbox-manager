@@ -267,8 +267,10 @@ async def test_meter_session_projection_publishes_real_changes_only(ha, monkeypa
         meter(100)
     assert write.call_count == 0
     meter(100.00000001)
+    assert write.call_count == 0  # Raw noise remains within the normalized bin.
+    meter(100.05)
     assert write.call_count == 1
-    assert ha.states.get(power.entity_id).state == "100.00000001"
+    assert ha.states.get(power.entity_id).state == "100.1"
     assert state.session["energy"] is None
     state.reset(connected=False)
     assert not power.available
@@ -283,6 +285,234 @@ async def test_meter_session_projection_publishes_real_changes_only(ha, monkeypa
         1,
     )
     assert not power.available  # Transaction confirmation is not a power report.
-    meter(100.00000001)
+    meter(100.05)
     assert power.available
-    assert ha.states.get(power.entity_id).state == "100.00000001"
+    assert ha.states.get(power.entity_id).state == "100.1"
+
+
+@pytest.mark.parametrize("recovery", [3, 1])
+async def test_phase_single_invalid_preserves_display_but_revokes_proof(
+    ha, monkeypatch, recovery
+):
+    from dataclasses import replace
+
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, gen)
+    key = ("station", ("Wallbox01", None, None), "physical_phases")
+    component = {"name": "Connector", "evse": {"id": 1, "connector_id": 1}}
+    start = datetime.now(UTC)
+
+    def report(raw, index, source="NotifyEvent"):
+        adapter.variable(
+            gen,
+            component,
+            {"name": "PhaseRotation"},
+            raw,
+            start + timedelta(microseconds=index),
+            source,
+        )
+
+    report("RST", 0)
+    phase = next(e for e in entities(ha, entry) if e.key == key)
+    original = state.observations[key]
+    published = ha.states.get(phase.entity_id)
+    write = Mock(wraps=phase.async_write_ha_state)
+    monkeypatch.setattr(phase, "async_write_ha_state", write)
+    changes, reports = [], []
+
+    @callback
+    def changed(event):
+        if event.data["entity_id"] == phase.entity_id:
+            changes.append(event)
+
+    @callback
+    def reported(event):
+        reports.append(event)
+
+    stop = ha.bus.async_listen("state_changed", changed)
+    stop_reports = async_track_state_report_event(ha, [phase.entity_id], reported)
+    report("", 1, "GetVariables")  # Invalid source does not replace valid provenance.
+    invalid = state.observations[key]
+    assert invalid == replace(
+        original, reported_at=start + timedelta(microseconds=1), invalid_count=1
+    )
+    assert phase.available and phase.native_value == 3
+    assert state.last_observed_value(key) == 3
+    assert state.value(key) is None
+    assert ha.states.get(phase.entity_id) is published
+    assert phase._expiry is None
+    report("RST" if recovery == 3 else "Rxx", 2)
+    assert state.value(key) == recovery
+    assert state.last_observed_value(key) == recovery
+    assert state.observations[key].invalid_count == 0
+    assert state.observations[key].observed_at == start + timedelta(microseconds=2)
+    await ha.async_block_till_done()
+    assert write.call_count == (0 if recovery == 3 else 1)
+    assert len(changes) == (0 if recovery == 3 else 1)
+    assert not reports
+    assert "observed_at" not in phase.extra_state_attributes
+    assert "received_at" not in phase.extra_state_attributes
+    stop()
+    stop_reports()
+
+
+async def test_phase_two_distinct_invalid_reports_only_publish_availability(ha, caplog):
+    from custom_components.wallbox_manager.ocpp import Adapter
+
+    entry = await ha.install()
+    ha.config_entries.async_update_entry(entry, options={"diagnostic_level": 2})
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    adapter = Adapter(Mock(), entry.runtime_data.server, gen)
+    key = ("station", ("Wallbox01", None, None), "physical_phases")
+    component = {"name": "Connector", "evse": {"id": 1, "connector_id": 1}}
+    start = datetime.now(UTC)
+
+    def report(raw, i):
+        adapter.variable(
+            gen,
+            component,
+            {"name": "PhaseRotation"},
+            raw,
+            start + timedelta(microseconds=i),
+            "NotifyEvent",
+        )
+
+    report("RST", 0)
+    phase = next(e for e in entities(ha, entry) if e.key == key)
+    changes, reports = [], []
+
+    @callback
+    def changed(event):
+        if event.data["entity_id"] == phase.entity_id:
+            changes.append(event.data["new_state"].state)
+
+    @callback
+    def reported(event):
+        reports.append(event)
+
+    stop = ha.bus.async_listen("state_changed", changed)
+    stop_reports = async_track_state_report_event(ha, [phase.entity_id], reported)
+    report("", 1)
+    assert phase.available and state.value(key) is None
+    report("unrecognized", 2)
+    assert not phase.available and phase.native_value is None
+    assert state.last_observed_value(key) is None
+    assert state.observations[key].value == 3
+    assert state.observations[key].observed_at == start
+    for i in range(3, 2003):
+        report("", i)
+    assert state.observations[key].invalid_count == 2
+    report("RST", 2003)
+    assert phase.available and state.value(key) == 3
+    await ha.async_block_till_done()
+    assert changes == ["unavailable", "3"]
+    assert not reports
+    logs = [
+        json.loads(record.message.split("WBMGR subsystem=ocpp ")[1])
+        for record in caplog.records
+        if "WBMGR subsystem=ocpp " in record.message
+    ]
+    assert [
+        record["value"]
+        for record in logs
+        if record["event"] == "transition_physical_phases"
+    ] == [3, None, 3]
+    stop()
+    stop_reports()
+
+
+def test_phase_report_watermark_duplicates_conflicts_and_ordering():
+    state = store.State(("Wallbox01", "1", "1"))
+    gen = state.reset(connected=True)
+    key = ("station", ("Wallbox01", None, None), "physical_phases")
+    start = datetime.now(UTC)
+
+    def observe(value, index):
+        at = start + timedelta(microseconds=index)
+        return state.observe(
+            gen, key, value, "phase", at, valid_until=at + timedelta(seconds=5)
+        )
+
+    assert observe(3, 0)
+    assert observe(None, 2)
+    first_invalid = state.observations[key]
+    assert not observe(None, 2)
+    assert not observe(3, 2)  # Equal-time recovery cannot restore proof.
+    assert not observe(None, 1)
+    assert not observe(1, 1)
+    assert state.observations[key] is first_invalid
+    assert state.last_observed_value(key) == 3 and state.value(key) is None
+    assert observe(None, 3)
+    assert state.last_observed_value(key) is None
+    assert not observe(3, 2)
+    assert not observe(None, 3)
+    assert observe(1, 4)
+    assert state.value(key) == 1
+    assert observe(3, 4)  # Conflicting values at one timestamp invalidate proof once.
+    assert state.last_observed_value(key) == 1 and state.value(key) is None
+    assert state.observations[key].invalid_count == 1
+    assert not observe(3, 4)
+    assert not observe(1, 4)
+    assert observe(1, 5)
+    assert state.value(key) == 1
+    assert observe(3, 6)  # Genuine changes are immediate in either direction.
+    assert state.value(key) == 3
+
+
+@pytest.mark.parametrize("boot", [False, True])
+async def test_phase_initial_invalid_and_generation_fencing(ha, boot):
+    entry = await ha.install()
+    state = entry.runtime_data.state
+    gen = state.reset(connected=True)
+    key = ("station", ("Wallbox01", None, None), "physical_phases")
+    phase = next(e for e in entities(ha, entry) if e.key == key)
+    assert not phase.available and phase.native_value is None
+    assert state.observe(gen, key, None, "invalid")
+    assert state.value(key) is None and state.last_observed_value(key) is None
+    assert state.observe(gen, key, 3, "phase")
+    valid = state.observations[key]
+    assert state.observe(gen, key, None, "invalid")
+    assert phase.available and state.value(key) is None
+    if not boot:
+        state.reset(connected=False)
+        assert not phase.available and phase.native_value is None
+        assert state.observations[key].value == 3
+    new = state.reset(connected=True, boot=boot)
+    assert not phase.available and state.value(key) is None
+    assert not state.observe(gen, key, 3, "late")
+    assert not state.observe(gen, key, None, "late")
+    assert not state.observe(new, key, 3, "old-source", valid.observed_at)
+    assert state.observe(new, key, None, "new-invalid")
+    assert not phase.available  # No valid phase sample in this generation.
+    assert state.observations[key].invalid_count == 1
+    assert state.observations[key].generation == valid.generation
+    assert state.observations[key].observed_at == valid.observed_at
+    assert state.observations[key].received_at == valid.received_at
+    assert state.observations[key].reported_generation == new
+    assert state.observe(new, key, 3, "new-valid")
+    assert phase.available and state.value(key) == 3
+    assert state.observations[key].invalid_count == 0
+
+
+async def test_phase_invalid_sequences_are_entry_local(ha):
+    from conftest import config
+
+    one, two = await ha.install(), await ha.install(config("Other"))
+    a, b = one.runtime_data.state, two.runtime_data.state
+    ga, gb = a.reset(connected=True), b.reset(connected=True)
+    ka = ("station", ("Wallbox01", None, None), "physical_phases")
+    kb = ("station", ("Other", None, None), "physical_phases")
+    a.observe(ga, ka, 3, "phase")
+    b.observe(gb, kb, 1, "phase")
+    original = b.observations[kb]
+    a.observe(ga, ka, None, "invalid")
+    a.observe(ga, ka, None, "invalid")
+    assert a.last_observed_value(ka) is None and a.value(ka) is None
+    assert b.observations[kb] is original
+    assert b.last_observed_value(kb) == b.value(kb) == 1
+    assert not b.observe(gb, ka, None, "foreign")
