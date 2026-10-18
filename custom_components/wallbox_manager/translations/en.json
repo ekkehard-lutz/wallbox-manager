@@ -274,30 +274,53 @@
   "selector": {
     "diagnostic_level": {
       "options": {
-        "0": "Off",
+        "0": "Errors only",
         "1": "Events and errors",
-        "2": "Events with relevant data",
-        "3": "Full diagnostic trace"
+        "2": "Relevant state transitions",
+        "3": "Detailed passive diagnostics"
       }
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Measurement mappings (stored only)",
+        "title": "Passive settings",
         "description": "No charging control in this passive version.",
         "data": {
-          "min_soc_speicher": "min soc speicher",
-          "soc_speicher_aktuell": "soc speicher aktuell",
-          "leistung_pv": "leistung pv",
-          "leistung_verbraucher": "leistung verbraucher",
-          "storage_discharge_power": "storage discharge power",
-          "storage_capacity": "storage capacity",
-          "remaining_pv_energy": "remaining pv energy",
-          "grid_import_power": "grid import power",
-          "grid_export_power": "grid export power"
+          "general": "Diagnostics and measurement sources",
+          "regulation": "Regulation parameters (stored only)"
+        },
+        "sections": {
+          "general": {
+            "name": "Diagnostics and measurement sources",
+            "data": {
+              "diagnostic_level": "Diagnostic level",
+              "min_soc_speicher": "min soc speicher",
+              "soc_speicher_aktuell": "soc speicher aktuell",
+              "leistung_pv": "leistung pv",
+              "leistung_verbraucher": "leistung verbraucher",
+              "storage_discharge_power": "storage discharge power",
+              "storage_capacity": "storage capacity",
+              "remaining_pv_energy": "remaining pv energy",
+              "grid_import_power": "grid import power",
+              "grid_export_power": "grid export power"
+            }
+          },
+          "regulation": {
+            "name": "Regulation parameters (stored only)",
+            "data": {
+              "regulation_interval": "Regulation interval",
+              "soc_hysterese": "SoC hysteresis and target safety margin",
+              "pv_start_delay": "PV start delay",
+              "pv_stop_delay": "PV stop delay",
+              "power_smoothing_window": "Power smoothing window (seconds)"
+            }
+          }
         }
       }
+    },
+    "error": {
+      "invalid_settings": "Invalid or inconsistent settings."
     }
   }
 }

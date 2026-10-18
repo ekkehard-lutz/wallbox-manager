@@ -1,5 +1,7 @@
 # Wallbox Manager diagnostic logging
 
+For the passive v0.4 runtime, see [current diagnostics, availability and Recorder semantics](v0.4/recorder-availability-report.md). The sections below describe the historical v0.3 regulator and do not imply active functionality in v0.4.
+
 Open **Settings → Devices & services → Wallbox Manager → Configure** and choose
 **Diagnostic level** (German: **Diagnosestufe**).
 

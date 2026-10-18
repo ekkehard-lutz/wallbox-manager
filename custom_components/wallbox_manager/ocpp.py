@@ -14,6 +14,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from . import session
+from .config_flow import diagnostic_level
 from .meter import CHARGING, CONNECTOR, reported_time, samples
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,12 +34,50 @@ READ_ONLY = {"GetBaseReport", "GetVariables"}
 
 
 class Listener:
-    def __init__(self, state, host, port, update_device=lambda: None, *, timeout=10):
+    def __init__(
+        self,
+        state,
+        host,
+        port,
+        update_device=lambda: None,
+        *,
+        timeout=10,
+        options=lambda: {},
+    ):
         self.state, self.host, self.port = state, host, port
         self.update_device, self.timeout = update_device, timeout
         self.server = self.adapter = None
         self._initialization = "disconnected"
         self.lock = asyncio.Lock()
+        self.options = options
+        self._logged = {}
+
+    def diagnostic(self, level, event, *, reason="none", **fields):
+        """Bounded by event families; diagnostics can never break the protocol."""
+        try:
+            selected = diagnostic_level(self.options())
+            if selected < level:
+                return
+            record = dict(
+                station=self.state.binding[0],
+                generation=self.state.generation,
+                event=event,
+                reason=reason,
+                **fields,
+            )
+            identity = (selected, record)
+            if self._logged.get(event) == identity:
+                return
+            self._logged[event] = identity
+            # Explicit opt-in traces must be visible with HA's default WARNING
+            # filter. Level 0 still emits only genuine errors.
+            _LOGGER.log(
+                logging.ERROR if level == 0 else logging.WARNING,
+                "WBMGR subsystem=ocpp %s",
+                json.dumps(record, sort_keys=True),
+            )
+        except Exception:
+            pass
 
     @property
     def initialization(self):
@@ -80,7 +119,13 @@ class Listener:
         async with self.lock:
             if self.adapter:
                 await self.adapter.close()
+            reconnect = self.state.generation[0] > 0
             generation = self.state.reset(connected=True)
+            self.diagnostic(
+                1,
+                "reconnect" if reconnect else "connection_accepted",
+                reason="transport_accepted",
+            )
             adapter = Adapter(connection, self, generation)
             self.adapter = adapter
             self._initialization = "awaiting_registration"
@@ -88,12 +133,13 @@ class Listener:
             await adapter.start()
         except ConnectionClosed:
             pass
-        except Exception:
-            _LOGGER.exception("Passive OCPP connection failed")
+        except Exception as exc:
+            self.diagnostic(0, "connection_failed", reason=type(exc).__name__)
         finally:
             await adapter.close()
             if self.adapter is adapter:
                 self.state.reset(connected=False)
+                self.diagnostic(1, "disconnected", reason="transport_closed")
                 self._initialization = "disconnected"
                 self.adapter = None
 
@@ -136,7 +182,9 @@ class Adapter(ChargePoint):
                 if error and not isinstance(
                     error, (TimeoutError, OSError, OCPPError, ConnectionClosed)
                 ):
-                    _LOGGER.error("Passive OCPP task failed", exc_info=error)
+                    self.listener.diagnostic(
+                        0, "task_failed", reason=type(error).__name__
+                    )
 
         task.add_done_callback(settled)
         return task
@@ -145,7 +193,19 @@ class Adapter(ChargePoint):
         # Don't release the library's serial response consumer while an obsolete
         # boot request is still in flight. Teardown owns and joins the pending call.
         pending = self.spawn(super().call(payload, suppress=False))
-        return await asyncio.shield(pending)
+        try:
+            response = await asyncio.shield(pending)
+        except (TimeoutError, OSError, OCPPError, ConnectionClosed) as exc:
+            self.listener.diagnostic(
+                0,
+                "communication_failed",
+                reason=type(exc).__name__,
+                operation=type(payload).__name__,
+            )
+            raise
+        self.listener._logged.pop("communication_failed", None)
+        self.listener.diagnostic(3, "read_completed", operation=type(payload).__name__)
+        return response
 
     async def _send(self, message):
         wire = json.loads(message)
@@ -169,8 +229,32 @@ class Adapter(ChargePoint):
             and self.state.current(generation)
         )
 
+    def observe(self, generation, key, value, source, *args, **kwargs):
+        previous = self.state.observations.get(key)
+        accepted = self.state.observe(generation, key, value, source, *args, **kwargs)
+        if (
+            accepted
+            and key[2]
+            in (
+                "connector_state",
+                "charging_state",
+                "control_authority",
+                "charging_enabled",
+                "physical_phases",
+            )
+            and (
+                not previous
+                or previous.value != value
+                or previous.generation != generation
+            )
+        ):
+            self.listener.diagnostic(
+                2, "transition_" + key[2], scope=key[1], value=value
+            )
+        return accepted
+
     def station(self, role, value, source="ocpp2.1:bootstrap"):
-        self.state.observe(
+        self.observe(
             self.generation,
             ("station", (self.state.binding[0], None, None), role),
             value,
@@ -189,6 +273,7 @@ class Adapter(ChargePoint):
             if task:
                 task.cancel()
         self.generation = self.state.reset(connected=True, boot=True)
+        self.listener.diagnostic(1, "boot_notification", reason=reason)
         self.state.identity = {
             k: charging_station[v]
             for k, v in {
@@ -240,7 +325,7 @@ class Adapter(ChargePoint):
         scope = self.scope(evse_id, connector_id)
         at = reported_time(timestamp, datetime.now(UTC))
         if at:
-            self.state.observe(
+            self.observe(
                 self.generation,
                 ("observation", scope, "connector_state"),
                 CONNECTOR.get(connector_status, "unknown"),
@@ -253,7 +338,12 @@ class Adapter(ChargePoint):
     def meters(self, evse_id, meter_value, **kwargs):
         scope = self.scope(evse_id)
         for role, value, at, unit in samples(meter_value):
-            if self.state.observe(
+            before = (
+                session.view(self.state, at)
+                if role == "power" and self.state.session
+                else None
+            )
+            if self.observe(
                 self.generation,
                 ("observation", scope, role),
                 value,
@@ -262,7 +352,12 @@ class Adapter(ChargePoint):
                 unit=unit,
             ):
                 session.meter(
-                    self.state, role, value, at, channel=("observation", scope, role)
+                    self.state,
+                    role,
+                    value,
+                    at,
+                    channel=("observation", scope, role),
+                    before=before,
                 )
         return call_result.MeterValues()
 
@@ -306,7 +401,7 @@ class Adapter(ChargePoint):
             )
         ):
             if "charging_state" in transaction_info:
-                self.state.observe(
+                self.observe(
                     self.generation,
                     ("observation", scope, "charging_state"),
                     CHARGING.get(transaction_info["charging_state"], "unknown"),
@@ -376,7 +471,7 @@ class Adapter(ChargePoint):
             and name == "ControlAuthority"
             and evse is None
         ):
-            self.state.observe(
+            self.observe(
                 generation,
                 ("station", scope, "control_authority"),
                 {"Local": "local", "OCPP": "remote"}.get(value, "unknown"),
@@ -384,7 +479,7 @@ class Adapter(ChargePoint):
                 at,
             )
         elif component.get("name") == "WallboxController" and name == "ChargingEnabled":
-            self.state.observe(
+            self.observe(
                 generation,
                 ("control", self.state.binding, "charging_enabled"),
                 {"true": True, "false": False}.get(value),
@@ -397,7 +492,7 @@ class Adapter(ChargePoint):
             and name == "PhaseRotation"
             and scope == self.state.binding
         ):
-            self.state.observe(
+            self.observe(
                 generation,
                 ("station", (scope[0], None, None), "physical_phases"),
                 {"Rxx": 1, "RST": 3}.get(value),
@@ -416,6 +511,15 @@ class Adapter(ChargePoint):
         if not self.live(generation):
             return
         rows = response.get_variable_result
+        self.listener.diagnostic(
+            3,
+            "readback_" + endpoint["variable"]["name"],
+            reason=rows[0].get("attribute_status", "unknown")
+            if len(rows) == 1
+            else "invalid_rows",
+            component=endpoint["component"]["name"],
+            evse=endpoint["component"].get("evse"),
+        )
         if len(rows) != 1:
             return
         row = rows[0]
@@ -543,7 +647,7 @@ class Adapter(ChargePoint):
                             value = None
                     except ValueError, TypeError, KeyError, AttributeError:
                         value = None
-                    self.state.observe(
+                    self.observe(
                         generation,
                         ("capability", scope, key),
                         value,
@@ -572,7 +676,7 @@ class Adapter(ChargePoint):
                     try:
                         await self.read(generation, endpoint)
                     except TimeoutError, OSError, OCPPError:
-                        pass
+                        self.listener.diagnostic(1, "optional_read_failed", reason=name)
                     if not self.live(generation):
                         return
             self.station("revision", self.request_id)
@@ -587,6 +691,17 @@ class Adapter(ChargePoint):
                 )
                 self.state.publish(
                     ("station", (self.state.binding[0], None, None), "discovery")
+                )
+                discovery = self.state.value(
+                    ("station", (self.state.binding[0], None, None), "discovery")
+                )
+                self.listener.diagnostic(
+                    1,
+                    "initialization_completed"
+                    if discovery == "verified" and not self.state.missing
+                    else "initialization_degraded",
+                    reason=discovery or "unknown",
+                    missing=sorted(self.state.missing),
                 )
                 if permission:
                     self.poll = self.spawn(self.poll_permission(generation, permission))

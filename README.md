@@ -59,3 +59,5 @@ call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
 Do not install this branch as a released beta. A real HA backup and separate
 review/release approval are required before the first live prerelease test.
+
+See [passive Recorder efficiency, availability and configuration](docs/v0.4/recorder-availability-report.md) for timestamp compatibility changes, diagnostics and measured before/after counts.

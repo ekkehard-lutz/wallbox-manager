@@ -90,7 +90,6 @@ class State:
                 "physical_phases",
             )
         )
-        self.observations.clear()
         # Last session remains historical; live activity must be re-established.
         self.publish(*tuple(self.listeners))
         return self.generation
@@ -117,9 +116,10 @@ class State:
         if at.utcoffset() is None or at < self.epoch or at > now + timedelta(seconds=5):
             return False
         previous = self.observations.get(key)
-        if previous and at < previous.observed_at:
+        same_generation = previous and previous.generation == generation
+        if same_generation and at < previous.observed_at:
             return False
-        if previous and at == previous.observed_at:
+        if same_generation and at == previous.observed_at:
             if previous.value == value:
                 return False
             value, status = None, "unknown"
@@ -139,15 +139,30 @@ class State:
             and key[0] in ("observation", "capability")
         ):
             self.add_sensor(key)
-        self.publish(key)
+        # Timestamp refreshes belong to the canonical store, not Recorder.
+        # Permission retains its one-shot expiry publication and exact deadline.
+        if (
+            not same_generation
+            or (previous.value, previous.source, previous.unit, previous.status)
+            != (value, source, unit, status)
+            or key[2] == "charging_enabled"
+        ):
+            self.publish(key)
         if key[2] in self.missing and value is not None:
             self.missing.discard(key[2])
             self.publish(("station", (self.binding[0], None, None), "discovery"))
         return True
 
+    def last_observed_value(self, key):
+        """Current-generation value, without asserting short-lived proof validity."""
+        observation = self.observations.get(key)
+        if not observation or not self.current(observation.generation):
+            return None
+        return observation.value
+
     def value(self, key):
         observation = self.observations.get(key)
-        if not self.connected or observation is None:
+        if observation is None or not self.current(observation.generation):
             return None
         if observation.valid_until and datetime.now(UTC) >= observation.valid_until:
             return None

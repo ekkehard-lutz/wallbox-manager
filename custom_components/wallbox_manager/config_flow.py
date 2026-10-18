@@ -5,9 +5,13 @@ import ipaddress
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
+from homeassistant.helpers import selector
+from homeassistant.helpers.storage import Store
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .migration import target
+from .settings import NUMBERS, REGULATION
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -52,39 +56,144 @@ class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
 
+SOURCES = (
+    "min_soc_speicher",
+    "soc_speicher_aktuell",
+    "leistung_pv",
+    "leistung_verbraucher",
+    "storage_discharge_power",
+    "storage_capacity",
+    "remaining_pv_energy",
+    "grid_import_power",
+    "grid_export_power",
+)
+
+
+REGULATION_FIELDS = {key: NUMBERS[key][1:] for key in REGULATION} | {
+    "power_smoothing_window": (5, 0, 300, 1, "s"),
+}
+
+
+def diagnostic_level(options):
+    """Explicit 0–3 wins; preserve beta.18's legacy boolean fallback."""
+    try:
+        return max(
+            0,
+            min(
+                3,
+                int(
+                    options.get(
+                        "diagnostic_level",
+                        3 if options.get("pv_diagnostic_logging") else 0,
+                    )
+                ),
+            ),
+        )
+    except ValueError, TypeError:
+        return 0
+
+
 class Options(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
-        # Source mappings remain editable for later regulation; no HA source
-        # subscription or polling is necessary while only storing preferences.
-        keys = (
-            "min_soc_speicher",
-            "soc_speicher_aktuell",
-            "leistung_pv",
-            "leistung_verbraucher",
-            "storage_discharge_power",
-            "storage_capacity",
-            "remaining_pv_energy",
-            "grid_import_power",
-            "grid_export_power",
-        )
+        options = dict(self.config_entry.options)
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        # Central options retain precedence over the existing profile settings.
+        if runtime:
+            values = runtime.settings.values
+        else:
+            profiles = (
+                await Store(
+                    self.hass,
+                    1,
+                    f"wallbox_manager.{self.config_entry.entry_id}.profiles",
+                ).async_load()
+                or {}
+            )
+            values = {}
+            for profile in reversed(sorted(profiles)):
+                values.update(profiles[profile])
+        general = {
+            vol.Optional(
+                "diagnostic_level", default=str(diagnostic_level(options))
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=["0", "1", "2", "3"],
+                    mode="dropdown",
+                    translation_key="diagnostic_level",
+                )
+            ),
+        }
+        for key in SOURCES:
+            domains = (
+                ["number", "input_number"]
+                if key == "min_soc_speicher"
+                else None
+                if key == "soc_speicher_aktuell"
+                else ["sensor"]
+            )
+            general[
+                vol.Optional(key, description={"suggested_value": options.get(key)})
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    **({"domain": domains} if domains else {})
+                )
+            )
+        regulation = {}
+        for key, (default, minimum, maximum, step, unit) in REGULATION_FIELDS.items():
+            regulation[
+                vol.Required(key, default=options.get(key, values.get(key, default)))
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=minimum,
+                    max=maximum,
+                    step=step,
+                    mode="box",
+                    unit_of_measurement=unit,
+                )
+            )
+        errors = {}
         if user_input is not None:
-            options = dict(self.config_entry.options)
-            for key in keys:
-                options.pop(key, None)
-                if user_input.get(key):
-                    options[key] = user_input[key]
-            return self.async_create_entry(title="", data=options)
+            data = {**user_input.get("general", {}), **user_input.get("regulation", {})}
+            # Support callers of the previous flat form as well.
+            data.update(
+                {
+                    k: v
+                    for k, v in user_input.items()
+                    if k not in ("general", "regulation")
+                }
+            )
+            try:
+                if "diagnostic_level" in data:
+                    level = int(data["diagnostic_level"])
+                    if str(level) not in ("0", "1", "2", "3"):
+                        raise ValueError("Invalid level")
+                    options["diagnostic_level"] = level
+                # Absent fields are preserved; an explicit empty selection clears.
+                for key in SOURCES:
+                    if key in data:
+                        if data[key]:
+                            options[key] = data[key]
+                        else:
+                            options.pop(key, None)
+                for key in REGULATION_FIELDS:
+                    if key in data:
+                        if runtime and key in NUMBERS:
+                            runtime.settings.validate(key, data[key])
+                        options[key] = regulation[
+                            next(
+                                marker for marker in regulation if marker.schema == key
+                            )
+                        ](data[key])
+                return self.async_create_entry(title="", data=options)
+            except ValueError, TypeError, vol.Invalid:
+                errors["base"] = "invalid_settings"
         return self.async_show_form(
             step_id="init",
+            errors=errors,
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
-                        key,
-                        description={
-                            "suggested_value": self.config_entry.options.get(key, "")
-                        },
-                    ): str
-                    for key in keys
+                    vol.Required("general"): section(vol.Schema(general)),
+                    vol.Required("regulation"): section(vol.Schema(regulation)),
                 }
             ),
         )

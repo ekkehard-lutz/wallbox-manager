@@ -3,7 +3,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 
-from conftest import config
+from conftest import config, entities
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_state_report_event
 
@@ -65,6 +65,8 @@ async def test_passive_workloads(ha, monkeypatch):
             "value_changes": state.changed - values,
             "ha_writes": len(changes) + len(reports),
             "ha_changes": len(changes),
+            "state_reported": len(reports),
+            "estimated_recorder_rows": len(changes),
             "unrelated_writes": len(unrelated),
             "control_commands": len(commands),
         }
@@ -124,22 +126,18 @@ async def test_passive_workloads(ha, monkeypatch):
                 generation,
                 ("observation", scope, "power"),
                 100,
-                "meter",
+                "initial",
                 base + timedelta(microseconds=i + 1),
             )
 
     await measure("same_value_reports", repeats)
     assert results["same_value_reports"]["accepted"] == 2000
     assert results["same_value_reports"]["value_changes"] == 0
-    assert results["same_value_reports"]["ha_writes"] == 2000
-    assert set(changes + reports) == {
-        next(
-            s.entity_id
-            for s in ha.states.async_all()
-            if s.attributes.get("wallbox_manager_entry") == one.entry_id
-            and s.attributes.get("wallbox_manager_role") == "power"
-        )
-    }
+    assert results["same_value_reports"]["ha_writes"] == 0
+    assert not changes and not reports
+    latest = state.observations[("observation", scope, "power")]
+    assert latest.observed_at == base + timedelta(microseconds=2000)
+    assert latest.received_at >= base
 
     async def changing():
         for i in range(100):
@@ -154,10 +152,54 @@ async def test_passive_workloads(ha, monkeypatch):
     await measure("changed_values", changing)
     assert results["changed_values"]["ha_writes"] == 100
 
+    async def fluctuations():
+        for i in range(2000):
+            state.observe(
+                generation,
+                ("observation", scope, "voltage_l1"),
+                230 + (i + 1) * 0.00000001,
+                "initial",
+                base + timedelta(microseconds=6000 + i),
+            )
+
+    await measure("exact_voltage_changes", fluctuations)
+    assert results["exact_voltage_changes"]["ha_changes"] == 2000
+
+    async def energy():
+        for i in range(1000):
+            state.observe(
+                generation,
+                ("observation", scope, "energy"),
+                100 + (i + 1) * 0.00000001,
+                "initial",
+                base + timedelta(microseconds=9000 + i),
+            )
+
+    await measure("exact_energy_changes", energy)
+    assert results["exact_energy_changes"]["ha_changes"] == 1000
+
+    # Alternative native HA semantics still execute a full HA write per report.
+    reading = next(
+        e for e in entities(ha, one) if e.key == ("observation", scope, "power")
+    )
+
+    async def native_reports():
+        for _ in range(2000):
+            reading.async_write_ha_state()
+
+    await measure("native_unchanged_writes", native_reports)
+    assert results["native_unchanged_writes"]["ha_changes"] == 0
+    assert results["native_unchanged_writes"]["state_reported"] == 2000
+    results["same_value_reports"]["timestamp_attributes"] = [
+        key
+        for key in ("observed_at", "received_at")
+        if key in ha.states.get(reading.entity_id).attributes
+    ]
+
     async def silent():
         # No periodic scanner or metering timer exists; time passage alone does
         # not change ordinary source values or schedule any policy work.
-        assert state.value(("observation", scope, "voltage_l1")) == 230
+        assert state.value(("observation", scope, "voltage_l1")) == 230.00002
 
     await measure("change_only_idle", silent)
     assert results["change_only_idle"]["ha_writes"] == 0

@@ -557,3 +557,58 @@ async def test_late_response_from_replaced_boot_is_not_current_evidence(ha):
         await send([3, current_request[1], {"status": "NotSupported"}])
         await eventually(lambda: listener.initialization["status"] == "missing")
         assert all(key[2] != "control_authority" for key in state.observations)
+
+
+@pytest.mark.parametrize("level", [1, 2, 3])
+async def test_lifecycle_diagnostics_on_real_reconnect_without_meter_spam(
+    ha, caplog, level
+):
+    entry = await ha.install()
+    ha.config_entries.async_update_entry(entry, options={"diagnostic_level": level})
+    state = entry.runtime_data.state
+    for _ in range(2):
+        async with peer(entry) as station:
+            await boot(station)
+            await eventually(lambda: entry.runtime_data.server.adapter.bootstrap.done())
+            before = sum("WBMGR subsystem=ocpp " in r.message for r in caplog.records)
+            for _ in range(10):
+                await station.call(
+                    call.MeterValues(
+                        evse_id=1,
+                        meter_value=[
+                            {
+                                "timestamp": datetime.now(UTC).isoformat(),
+                                "sampled_value": [
+                                    {
+                                        "measurand": "Power.Active.Import",
+                                        "value": 100,
+                                        "unit_of_measure": {"unit": "W"},
+                                    }
+                                ],
+                            }
+                        ],
+                    )
+                )
+            assert (
+                sum("WBMGR subsystem=ocpp " in r.message for r in caplog.records)
+                == before
+            )
+            assert set(station.operations) <= READ_ONLY
+        await eventually(lambda: not state.connected)
+    records = [
+        json.loads(record.message.split("WBMGR subsystem=ocpp ")[1])
+        for record in caplog.records
+        if "WBMGR subsystem=ocpp " in record.message
+    ]
+    events = [record["event"] for record in records]
+    assert events.count("connection_accepted") == 1
+    assert events.count("reconnect") == 1
+    assert events.count("disconnected") == 2
+    assert events.count("boot_notification") == 2
+    assert events.count("initialization_degraded") == 2
+    if level == 1:
+        assert len(events) == 8
+    else:
+        assert "transition_control_authority" in events
+    if level == 3:
+        assert "readback_PhaseRotation" in events
