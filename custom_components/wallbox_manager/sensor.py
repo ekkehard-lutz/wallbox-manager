@@ -137,10 +137,15 @@ class Reading(WallboxEntity, SensorEntity):
     @property
     def available(self):
         if self.family == "session":
-            return bool(
-                self.observed.session
-                and tuple(self.observed.session["scope"]) == self.scope
-            )
+            session = self.observed.session
+            if not session or tuple(session["scope"]) != self.scope:
+                return False
+            if session["ended_at"] is not None or self.role not in (
+                "power",
+                "duration",
+            ):
+                return True
+            return view(self.observed, datetime.now(UTC))[self.role] is not None
         if self.family == "station" and self.role in (
             "protocol_version",
             "connection_generation",
@@ -149,6 +154,8 @@ class Reading(WallboxEntity, SensorEntity):
             "discovery",
         ):
             return True
+        if self.role == "physical_phases":
+            return self.observed.last_observed_value(self.key) is not None
         return super().available
 
     @property
@@ -164,6 +171,8 @@ class Reading(WallboxEntity, SensorEntity):
                     return state.generation[1]
                 case "protocol_version":
                     return "2.1" if state.connected else None
+        if self.role == "physical_phases":
+            return state.last_observed_value(self.key)
         return state.value(self.key)
 
     @property
@@ -205,22 +214,15 @@ class Reading(WallboxEntity, SensorEntity):
                     (channel[0], tuple(channel[1]), channel[2])
                 )
                 if observation:
-                    attrs.update(
-                        observed_at=observation.observed_at.isoformat(),
-                        received_at=observation.received_at.isoformat(),
-                        source=observation.source,
-                    )
-            elif self.role == "energy" and session.get("energy_at"):
-                attrs.update(
-                    observed_at=session["energy_at"],
-                    received_at=session.get("energy_received_at"),
-                    source=session.get("energy_source"),
-                )
+                    attrs["source"] = observation.source
+            elif self.role == "energy":
+                attrs["source"] = session.get("energy_source")
             if self.role == "duration":
                 attrs.update(
-                    duration_sampled_at=datetime.now(UTC).isoformat(),
-                    duration_valid_until=None,
+                    started_at=session["started_at"], duration_valid_until=None
                 )
+        if self.role == "physical_phases":
+            attrs["state_represents"] = "last_known_observation"
         if self.role == "discovery":
             attrs["initialization"] = self.entry.runtime_data.server.initialization
         return attrs
@@ -239,7 +241,7 @@ class Reading(WallboxEntity, SensorEntity):
             and self.observed.connected
         ):
             self._refresh = async_track_time_interval(
-                self.hass, self.tick, timedelta(seconds=1)
+                self.hass, self.tick, timedelta(seconds=60)
             )
         self.async_write_ha_state()
 

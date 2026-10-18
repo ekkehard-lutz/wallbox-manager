@@ -12,7 +12,7 @@ from .const import DEFAULT_HOST, DEFAULT_PORT, PLATFORMS
 from .entity import device_info
 from .migration import migrate
 from .session import document
-from .settings import Settings
+from .settings import REGULATION, Settings
 from .store import State
 
 
@@ -54,6 +54,7 @@ async def async_setup_entry(hass, entry):
         entry.data.get("host", DEFAULT_HOST),
         entry.data.get("port", DEFAULT_PORT),
         update_device,
+        options=lambda: entry.options,
     )
     entry.runtime_data = EntryRuntime(state, settings, server, session_store)
     try:
@@ -67,6 +68,18 @@ async def async_setup_entry(hass, entry):
         await server.stop()
         await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         raise
+
+    async def options_updated(hass, updated_entry):
+        # Options are passive preferences; no reload, reconnect or control timer.
+        for key in REGULATION:
+            if key in updated_entry.options:
+                value = updated_entry.options[key]
+                if settings.values.get(key) != value:
+                    settings.values[key] = value
+                    for listener in tuple(settings.listeners.get(key, ())):
+                        listener()
+
+    entry.async_on_unload(entry.add_update_listener(options_updated))
 
     async def stop(event):
         await server.stop()

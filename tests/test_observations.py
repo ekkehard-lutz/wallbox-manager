@@ -85,7 +85,7 @@ async def test_narrow_writes_provenance_and_no_measurement_timeout(ha, monkeypat
     state.observe(gen, power, 1500, "meter", unit="W")
     await ha.async_block_till_done()
     reading = next(e for e in all_entities if e.key == power)
-    assert writes[reading.unique_id].call_count == 1
+    assert writes[reading.unique_id].call_count == 0
     assert all(
         w.call_count == 0 for uid, w in writes.items() if uid != reading.unique_id
     )

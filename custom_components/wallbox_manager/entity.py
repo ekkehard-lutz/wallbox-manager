@@ -81,14 +81,21 @@ class WallboxEntity(Entity):
         if observation := self.observed.observations.get(self.key):
             attrs.update(
                 source=observation.source,
-                observed_at=observation.observed_at.isoformat(),
-                received_at=observation.received_at.isoformat(),
-                valid_until=observation.valid_until.isoformat()
-                if observation.valid_until
-                else None,
                 connection_generation=observation.generation[0],
                 boot_generation=observation.generation[1],
             )
+            # Measurement acquisition times remain exact internally. Public
+            # timestamps are intentionally absent rather than frozen at a change.
+            if self.role == "charging_enabled":
+                attrs.update(
+                    observed_at=observation.observed_at.isoformat(),
+                    received_at=observation.received_at.isoformat(),
+                    valid_until=observation.valid_until.isoformat()
+                    if observation.valid_until
+                    else None,
+                )
+            else:
+                attrs["valid_until"] = None
         return attrs
 
     def cancel_expiry(self):
@@ -100,7 +107,10 @@ class WallboxEntity(Entity):
         self.cancel_expiry()
         observation = self.observed.observations.get(self.key)
         if (
-            observation
+            self.role == "charging_enabled"
+            and self.observed.connected
+            and observation
+            and self.observed.current(observation.generation)
             and observation.valid_until
             and observation.valid_until > datetime.now(UTC)
         ):

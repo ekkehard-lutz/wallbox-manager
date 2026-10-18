@@ -117,7 +117,7 @@ def event(state, generation, scope, external_id, kind, at, sequence):
     return True
 
 
-def meter(state, quantity, value, at, *, boundary=False, channel=None):
+def meter(state, quantity, value, at, *, boundary=False, channel=None, before=None):
     session = state.session
     if (
         not session
@@ -130,7 +130,7 @@ def meter(state, quantity, value, at, *, boundary=False, channel=None):
         return
     if session["ended_at"] and at != datetime.fromisoformat(session["ended_at"]):
         return
-    before = view(state, at)
+    before = view(state, at) if before is None else before
     if quantity == "power":
         previous = session.get("power_channel")
         observation = (
@@ -200,15 +200,6 @@ def meter(state, quantity, value, at, *, boundary=False, channel=None):
         at,
         save=quantity == "energy" and before["end_meter"] != after["end_meter"],
     )
-    role = "power" if quantity == "power" else "energy"
-    if before[role] == after[role]:
-        state.publish(
-            (
-                "session",
-                tuple(session["scope"]),
-                "power" if quantity == "power" else "energy",
-            )
-        )
 
 
 async def load(hass, entry_id, state):
