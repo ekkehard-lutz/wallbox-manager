@@ -223,7 +223,8 @@ async def test_real_boot_readback_push_reconnect_and_no_control(ha):
         )
         assert state.value(("observation", ("Wallbox01", "1", None), "energy")) == 100
         assert "current_l2" not in listener.initialization["missing"]
-        assert "charging_state" in listener.initialization["missing"]
+        assert "charging_state" not in listener.initialization["missing"]
+        assert "charging_state" in state.missing  # Idle readiness invents no evidence.
         await station.call(
             call.TransactionEvent(
                 event_type="Started",

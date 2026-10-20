@@ -111,6 +111,7 @@ class State:
         *,
         unit=None,
         status="ready",
+        phase_unknown=False,
     ):
         if not self.current(generation) or not self.accepts(key[1]):
             return False
@@ -135,6 +136,7 @@ class State:
             if (phase and previous.invalid_count) or previous.value == value:
                 return False
             value, status = None, "unknown"
+            phase_unknown = False  # A same-time conflict is not a new transition.
         if value is None and status == "ready":
             status = "unknown"
         observation = Observation(
@@ -147,14 +149,16 @@ class State:
             status,
             reported_at=at if phase else None,
             reported_generation=generation if phase else None,
-            invalid_count=1 if phase and value is None else 0,
+            invalid_count=(2 if phase_unknown else 1) if phase and value is None else 0,
         )
         if phase and value is None and previous:
             observation = replace(
                 previous,
                 reported_at=at,
                 reported_generation=generation,
-                invalid_count=min(2, previous.invalid_count + 1)
+                invalid_count=2
+                if phase_unknown
+                else min(2, previous.invalid_count + 1)
                 if same_report_generation
                 else 1,
             )

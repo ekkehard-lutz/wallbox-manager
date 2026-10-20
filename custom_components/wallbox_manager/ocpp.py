@@ -82,11 +82,18 @@ class Listener:
     @property
     def initialization(self):
         status = self._initialization
+        missing = self.state.missing
+        if (
+            self.state.value(("observation", self.state.binding, "connector_state"))
+            == "available"
+            and session.view(self.state, datetime.now(UTC))["active"] is not True
+        ):
+            missing = missing - {"charging_state"}
         if status in ("ready", "missing"):
-            status = "missing" if self.state.missing else "ready"
+            status = "missing" if missing else "ready"
         return {
             "status": status,
-            "missing": sorted(self.state.missing),
+            "missing": sorted(missing),
             "push_only": True,
         }
 
@@ -250,6 +257,8 @@ class Adapter(ChargePoint):
                 scope=key[1],
                 value=self.state.value(key),
             )
+            if key[2] == "connector_state":
+                self.state.publish(("station", (key[1][0], None, None), "discovery"))
         return accepted
 
     def station(self, role, value, source="ocpp2.1:bootstrap"):
@@ -375,6 +384,7 @@ class Adapter(ChargePoint):
         **kwargs,
     ):
         known = self.state.session
+        missing = self.listener.initialization["missing"]
         external_id = transaction_info["transaction_id"]
         if evse:
             scope = self.scope(evse["id"], evse.get("connector_id"))
@@ -411,6 +421,11 @@ class Adapter(ChargePoint):
                 # Transaction boundary energy is session-only, never lifetime energy.
                 if observed <= at:
                     session.meter(self.state, role, value, observed, boundary=True)
+            if (
+                "charging_state" in self.state.missing
+                and missing != self.listener.initialization["missing"]
+            ):
+                self.state.publish(("station", (scope[0], None, None), "discovery"))
         return call_result.TransactionEvent(
             id_token_info={"status": "Unknown"} if id_token else None
         )
@@ -452,10 +467,13 @@ class Adapter(ChargePoint):
                         event.get("actual_value"),
                         at,
                         "NotifyEvent",
+                        trigger=event.get("trigger"),
                     )
         return call_result.NotifyEvent()
 
-    def variable(self, generation, component, variable, value, at, source):
+    def variable(
+        self, generation, component, variable, value, at, source, *, trigger=None
+    ):
         if not self.live(generation):
             return
         name = variable.get("name")
@@ -496,6 +514,13 @@ class Adapter(ChargePoint):
                 {"Rxx": 1, "RST": 3}.get(value),
                 "ocpp2.1:" + source,
                 at,
+                phase_unknown=(
+                    source == "NotifyEvent"
+                    and trigger == "Delta"
+                    and value == ""
+                    and "instance" not in component
+                    and "instance" not in variable
+                ),
             )
 
     async def read(self, generation, endpoint):
@@ -703,10 +728,11 @@ class Adapter(ChargePoint):
                 self.listener.diagnostic(
                     1,
                     "initialization_completed"
-                    if discovery == "verified" and not self.state.missing
+                    if discovery == "verified"
+                    and not self.listener.initialization["missing"]
                     else "initialization_degraded",
                     reason=discovery or "unknown",
-                    missing=sorted(self.state.missing),
+                    missing=self.listener.initialization["missing"],
                 )
                 if permission:
                     self.poll = self.spawn(self.poll_permission(generation, permission))
