@@ -35,6 +35,7 @@ class State:
         self.add_active = lambda scope: None
         self.connected = False
         self.registered_generation = None
+        self.idle_barrier = None
         self.identity = {}
         self.observations = {}
         self.listeners = {}
@@ -77,6 +78,7 @@ class State:
             else self.generation
         )
         self.epoch = datetime.now(UTC)
+        self.idle_barrier = None
         self.connected = connected
         self.missing = set(
             (
@@ -123,6 +125,10 @@ class State:
         charging_before = (
             self.charging_value(self.binding) if key[2] == "connector_state" else None
         )
+        idle_before = (
+            self.authentic_idle_current(key[1]) if key[2] == "charging_state" else False
+        )
+        connector_before = self.value(key) if key[2] == "connector_state" else None
         previous = self.observations.get(key)
         same_generation = previous and previous.generation == generation
         phase = key[0] == "station" and key[2] == "physical_phases"
@@ -171,6 +177,8 @@ class State:
         self.accepted += 1
         self.changed += previous is None or previous.value != observation.value
         self.observations[key] = observation
+        if connector_before == "available" and self.value(key) != "available":
+            self.invalidate_idle(at)
         if (
             previous is None
             and self.add_sensor
@@ -189,6 +197,10 @@ class State:
                 observation.status,
             )
             or (phase and before != self.last_observed_value(key))
+            or (
+                key[2] == "charging_state"
+                and idle_before != self.authentic_idle_current(key[1])
+            )
         ):
             self.publish(key)
         if key[2] == "connector_state":
@@ -202,11 +214,35 @@ class State:
             self.publish(("station", (self.binding[0], None, None), "discovery"))
         return True
 
+    def invalidate_idle(self, at):
+        """Keep the evidence, but require Idle newer than this lifecycle boundary."""
+        self.idle_barrier = max(self.idle_barrier, at) if self.idle_barrier else at
+
+    def authentic_idle_current(self, scope):
+        observation = self.observations.get(
+            ("observation", tuple(scope), "charging_state")
+        )
+        return bool(
+            observation
+            and self.current(observation.generation)
+            and observation.value == "idle"
+            and (
+                self.idle_barrier is None or observation.observed_at > self.idle_barrier
+            )
+            and (self.session is None or self.session["ended_at"] is not None)
+            and self.value(("observation", self.binding, "connector_state"))
+            in ("available", "occupied")
+        )
+
     def charging_value(self, scope):
         """Display projection only; never insert a synthetic observation."""
         key = ("observation", tuple(scope), "charging_state")
         observation = self.observations.get(key)
-        if observation and self.current(observation.generation):
+        if (
+            observation
+            and self.current(observation.generation)
+            and (observation.value != "idle" or self.authentic_idle_current(scope))
+        ):
             # An explicit unknown/conflict must not be disguised as idle.
             return self.value(key)
         if (

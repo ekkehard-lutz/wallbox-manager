@@ -196,7 +196,7 @@ class Reading(WallboxEntity, SensorEntity):
             self.family == "observation"
             and self.role == "charging_state"
             and self.native_value == "idle"
-            and self.observed.value(self.key) is None
+            and not self.observed.authentic_idle_current(self.scope)
         ):
             attrs.update(
                 source="wbm:registered_available",

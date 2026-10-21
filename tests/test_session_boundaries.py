@@ -406,3 +406,141 @@ def test_projection_attributes_use_current_generation_and_discovery_agrees():
     state.reset(connected=False)
     assert not reading.available and reading.native_value is None
     assert "charging_state" in adapter.listener.initialization["missing"]
+
+
+@pytest.mark.parametrize("transition", ["occupied", "started", "started_unknown"])
+def test_previous_session_idle_is_not_current_after_reconnect(transition):
+    state, adapter = setup()
+    supported(state)
+    at = datetime.now(UTC) - timedelta(seconds=20)
+    adapter.status(1, 1, "Occupied", at.isoformat())
+    transaction(adapter, "Started", at, 0)
+    adapter.transaction(
+        "Ended",
+        (at + timedelta(seconds=1)).isoformat(),
+        "RemoteStop",
+        1,
+        {"transaction_id": "a", "charging_state": "Idle"},
+        evse={"id": 1, "connector_id": 1},
+    )
+    key = ("observation", state.binding, "charging_state")
+    idle = state.observations[key]
+    adapter.status(1, 1, "Available", (at + timedelta(seconds=2)).isoformat())
+    entry = Mock(entry_id="entry")
+    entry.runtime_data.state = state
+    reading = Reading(entry, "observation", state.binding, "charging_state")
+    assert reading.available and reading.native_value == "idle"
+    assert (
+        reading.extra_state_attributes["state_represents"] == "last_known_observation"
+    )
+    changed = Mock()
+    state.watch(key, changed)
+    if transition == "occupied":
+        adapter.status(1, 1, "Occupied", (at + timedelta(seconds=3)).isoformat())
+    else:
+        info = {"transaction_id": "b"}
+        if transition == "started_unknown":
+            info["charging_state"] = "Invalid"
+        adapter.transaction(
+            "Started",
+            (at + timedelta(seconds=3)).isoformat(),
+            "CablePluggedIn",
+            0,
+            info,
+            evse={"id": 1, "connector_id": 1},
+        )
+    assert reading.native_value != "idle"
+    assert changed.called
+    if transition != "started_unknown":
+        assert not reading.available
+        assert state.observations[key] is idle  # Keep the authentic evidence intact.
+
+
+def test_remote_stop_idle_survives_occupied_refresh_without_reconnect():
+    state, adapter = setup()
+    supported(state)
+    at = datetime.now(UTC) - timedelta(seconds=10)
+    adapter.status(1, 1, "Occupied", at.isoformat())
+    transaction(adapter, "Started", at, 0)
+    adapter.transaction(
+        "Ended",
+        (at + timedelta(seconds=1)).isoformat(),
+        "RemoteStop",
+        1,
+        {"transaction_id": "a", "charging_state": "Idle"},
+        evse={"id": 1, "connector_id": 1},
+    )
+    adapter.status(1, 1, "Occupied", (at + timedelta(seconds=2)).isoformat())
+    assert state.charging_value(state.binding) == "idle"
+    assert state.value(("observation", state.binding, "charging_state")) == "idle"
+
+
+def test_stale_idle_recovers_as_projection_then_authentic_with_publication():
+    state, adapter = setup()
+    supported(state)
+    at = datetime.now(UTC) - timedelta(seconds=10)
+    adapter.status(1, 1, "Available", at.isoformat())
+    key = ("observation", state.binding, "charging_state")
+    state.observe(state.generation, key, "idle", "ocpp2.1:TransactionEvent", at)
+    adapter.status(1, 1, "Occupied", (at + timedelta(seconds=1)).isoformat())
+    assert state.charging_value(state.binding) is None
+    adapter.status(1, 1, "Available", (at + timedelta(seconds=2)).isoformat())
+    entry = Mock(entry_id="entry")
+    entry.runtime_data.state = state
+    reading = Reading(entry, "observation", state.binding, "charging_state")
+    assert reading.native_value == "idle"
+    assert reading.extra_state_attributes["state_represents"] == "display_projection"
+    changed = Mock()
+    state.watch(key, changed)
+    # Same raw value/source, but new authentic evidence changes the provenance.
+    state.observe(
+        state.generation,
+        key,
+        "idle",
+        "ocpp2.1:TransactionEvent",
+        at + timedelta(seconds=3),
+    )
+    assert changed.called
+    assert (
+        reading.extra_state_attributes["state_represents"] == "last_known_observation"
+    )
+
+
+def test_active_idle_contradiction_and_replays_cannot_restore_old_idle():
+    state, adapter = setup()
+    supported(state)
+    at = datetime.now(UTC) - timedelta(seconds=10)
+    adapter.status(1, 1, "Occupied", at.isoformat())
+    adapter.transaction(
+        "Started",
+        at.isoformat(),
+        "CablePluggedIn",
+        0,
+        {"transaction_id": "a", "charging_state": "Idle"},
+        evse={"id": 1, "connector_id": 1},
+    )
+    assert state.charging_value(state.binding) is None
+    adapter.transaction(
+        "Ended",
+        (at + timedelta(seconds=1)).isoformat(),
+        "RemoteStop",
+        1,
+        {"transaction_id": "a", "charging_state": "Idle"},
+        evse={"id": 1, "connector_id": 1},
+    )
+    assert state.charging_value(state.binding) == "idle"
+    adapter.status(1, 1, "Available", (at + timedelta(seconds=2)).isoformat())
+    adapter.status(1, 1, "Occupied", (at + timedelta(seconds=3)).isoformat())
+    barrier = state.idle_barrier
+    adapter.status(1, 1, "Available", (at + timedelta(seconds=2)).isoformat())
+    # A closed transaction's replayed Idle must not renew its evidence either.
+    adapter.transaction(
+        "Ended",
+        (at + timedelta(seconds=4)).isoformat(),
+        "RemoteStop",
+        2,
+        {"transaction_id": "a", "charging_state": "Idle"},
+        evse={"id": 1, "connector_id": 1},
+    )
+    assert state.idle_barrier == barrier
+    assert state.charging_value(state.binding) is None

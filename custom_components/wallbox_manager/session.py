@@ -83,6 +83,7 @@ def event(state, generation, scope, external_id, kind, at, sequence):
     before = view(state, at)
     charging_before = state.charging_value(state.binding)
     if old is None or old["external_transaction_id"] != external_id:
+        state.invalidate_idle(at)
         if old:
             state.closed_transactions.add(old["external_transaction_id"])
         # Updated without Started must not invent the start timestamp or meter.

@@ -9,7 +9,8 @@ Basis: WBM `v0.4.0-beta.5` (`b1c663a`), Feature-Branch
 BootNotification-Registrierung, aktuelles `StatusNotification(Available)` am gebundenen
 Connector und keine offene Session. Eine nach Neustart/Reconnect ungeklärte Session
 verhindert die Projektion ebenfalls. Eine echte ChargingState-Beobachtung der aktuellen
-Generation hat Vorrang; auch ein explizites Unknown oder ein Konflikt wird nicht
+Generation hat Vorrang, sofern Idle noch zum Connector-/Sessionkontext passt;
+auch ein explizites Unknown oder ein Konflikt wird nicht
 überschrieben. Disconnect und Generationswechsel entziehen die Grundlage sofort.
 
 Die Projektion erzeugt weder Observation noch TransactionEvent noch Timer. Der
@@ -128,3 +129,36 @@ Abschließendes Ergebnis: `python -m pytest -q`: **152 bestanden** (5 bestehende
 Deprecation-Warnungen aus HA/Abhängigkeiten). `ruff check .`,
 `ruff format --check .`, JavaScript-Syntaxprüfung und alle **8 Frontend-Tests**
 bestanden ebenfalls. Keine Hardwarevalidierung oder Produktivänderung durchgeführt.
+
+
+## Follow-up: altes authentisches Idle bei Wiederanschluss
+
+Auf Basis `7004510259c01378b9d48b9de45601c5dcf96a72` reproduzierten zwei neue
+Regressionen altes Idle nach `Available → Occupied` bzw. einem akzeptierten neuen
+Started ohne ChargingState. Started mit ungültigem ChargingState und RemoteStop-Idle
+waren bereits konservativ bzw. korrekt.
+
+Die Korrektur hält eine rein interne Zeitgrenze: Beim Verlassen von Available oder
+einer akzeptierten neuen Session muss authentisches Idle künftig **neuer** als diese
+Grenze sein. Idle während einer offenen/ungeklärten Session oder bei unbekanntem bzw.
+widersprüchlichem Connectorstatus wird nicht als aktueller Zustand präsentiert.
+Die originale Observation wird weder gelöscht noch verändert. Ein RemoteStop-Ended
+mit neuem authentischem Idle bleibt bei Occupied erhalten, auch bei weiteren
+Occupied-Meldungen ohne dazwischenliegendes Available. Andere echte ChargingStates
+werden durch diese gezielte Idle-Prüfung nicht umgedeutet.
+
+Falls später wieder Available vorliegt und keine offene Session existiert, darf die
+bestehende registrierungsabhängige Anzeigeprojektion idle anzeigen. Ihre Attribute
+bleiben von authentischem Idle unterscheidbar; neuere authentische Evidenz publiziert
+auch einen reinen Provenienzwechsel bei gleichem Enum-Wert. Die vorhandenen Connector-
+und Session-Publikationen behandeln Änderungen des effektiven Werts. Generationswechsel
+verwerfen die interne Grenze zusammen mit der Gültigkeit alter Live-Beobachtungen;
+eine Speichermigration ist nicht erforderlich.
+
+Grenzen: Occupied wird niemals zu Charging umgedeutet. Ohne neues passendes Status-
+oder Transaktionsereignis kann WBM einen physischen Wiederanschluss nicht erkennen.
+Idle genau auf der internen Zeitgrenze bleibt konservativ unbelegt. Es gibt keine
+Timer, künstlichen OCPP-Beobachtungen oder Änderungen an Session-Zählern.
+
+Follow-up-Validierung: **158 Python-Tests**, **8 Frontend-Tests**, Ruff, Formatprüfung
+und JavaScript-Syntaxprüfung bestanden; weiterhin 5 bestehende Deprecation-Warnungen.
