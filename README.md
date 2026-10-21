@@ -1,11 +1,13 @@
-# Wallbox Manager — passive v0.4 development branch
+# Wallbox Manager — passive v0.4 prerelease
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This branch is a clean passive rebuild for OCPP **2.1**, initially targeting the
-existing wallbox-stationary interface. It has not been released or deployed.
-The manifest intentionally still says `0.3.2-beta.18`; the usable reference and
-rollback code is the immutable [`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18).
+This prerelease is the passive rebuild for OCPP **2.1**, targeting the supported
+wallbox-stationary interface. The integration version is **0.4.0-beta.6**;
+see the [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) for Idle display,
+session meter corrections and migration details. The immutable
+[`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
+remains the historical v0.3 reference and rollback source.
 
 Each config entry has exactly one explicitly bound station/EVSE/connector and
 one listener port. Multiple wallboxes require separate independent entries and
@@ -57,7 +59,9 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-Do not install this branch as a released beta. A real HA backup and separate
-review/release approval are required before the first live prerelease test.
+For separately authorized testing, select **v0.4.0-beta.6** through the HACS
+prerelease versions and verify integration version **0.4.0-beta.6** after the
+operator performs installation and the Home Assistant restart. Publication does
+not include installation or physical validation.
 
 See [passive Recorder efficiency, availability and configuration](docs/v0.4/recorder-availability-report.md) for timestamp compatibility changes, diagnostics and measured before/after counts.
