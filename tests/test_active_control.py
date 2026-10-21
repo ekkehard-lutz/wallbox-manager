@@ -567,3 +567,223 @@ async def test_set_communication_error_is_explicit(ha, monkeypatch):
             await control.request("ControlAuthority", "OCPP") == "communication_failure"
         )
         assert observed(entry, "ControlAuthority") == "local"
+
+
+async def unconfirmed_takeover(entry, station):
+    control = await ready(entry, station)
+    station.fail_reads.add("ControlAuthority")
+    assert await control.request("ControlAuthority", "OCPP") == "accepted_unconfirmed"
+    assert observed(entry, "ControlAuthority") == "local"
+    assert station.values["ControlAuthority"] == "OCPP"
+    return control
+
+
+async def test_explicit_takeover_recovery_reads_without_another_write(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        intent = control.intents["ControlAuthority"]
+        poll = entry.runtime_data.server.adapter.poll
+        reads = len(station.reads)
+        button = TakeControl(
+            entry, "station", ("Wallbox01", None, None), "take_control"
+        )
+        await button.async_press()
+        assert control.intents["ControlAuthority"] is intent
+        assert intent.status == "confirmed" and intent.reason is None
+        assert observed(entry, "ControlAuthority") == "remote"
+        assert len(station.reads) == reads + 1
+        assert len(station.writes) == 1
+        assert entry.runtime_data.server.adapter.poll is poll
+        await button.async_press()
+        assert len(station.reads) == reads + 1
+        assert len(station.writes) == 1
+
+
+async def test_recovery_local_readback_is_unchanged_and_not_confirmation(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        station.values["ControlAuthority"] = "Local"
+        publications = []
+        state = entry.runtime_data.state
+        key = control.key("ControlAuthority")
+        state.watch(key, lambda: publications.append(state.value(key)))
+        reads = len(station.reads)
+        for _ in range(2):
+            assert (
+                await control.request("ControlAuthority", "OCPP")
+                == "accepted_unconfirmed"
+            )
+        assert len(station.reads) == reads + 2
+        assert not publications
+        assert len(station.writes) == 1
+        assert observed(entry, "ControlAuthority") == "local"
+        assert control.attributes("ControlAuthority")["command_reason"] is None
+
+
+@pytest.mark.parametrize("failure", ["timeout", "rejected", "mismatched", "unknown"])
+async def test_failed_recovery_read_never_changes_canonical_authority(
+    ha, monkeypatch, failure
+):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        state = entry.runtime_data.state
+        key = control.key("ControlAuthority")
+        observation = state.observations[key]
+        reads = []
+
+        async def failed(payload):
+            assert isinstance(payload, call.GetVariables)
+            reads.append(payload)
+            if failure == "timeout":
+                raise TimeoutError
+            return SimpleNamespace(
+                get_variable_result=[
+                    {
+                        **endpoint(
+                            "ChargingEnabled"
+                            if failure == "mismatched"
+                            else "ControlAuthority"
+                        ),
+                        "attribute_status": "Rejected"
+                        if failure == "rejected"
+                        else "Accepted",
+                        "attribute_value": "invalid"
+                        if failure == "unknown"
+                        else "OCPP",
+                    }
+                ]
+            )
+
+        monkeypatch.setattr(entry.runtime_data.server.adapter, "request", failed)
+        assert (
+            await control.request("ControlAuthority", "OCPP") == "accepted_unconfirmed"
+        )
+        assert len(reads) == 1 and len(station.writes) == 1
+        assert state.observations[key] is observation
+        assert control.attributes("ControlAuthority")["command_reason"] == (
+            "readback_timeout" if failure == "timeout" else "readback_unknown"
+        )
+
+
+async def test_concurrent_explicit_recovery_requests_share_one_read(ha, monkeypatch):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        adapter = entry.runtime_data.server.adapter
+        read = adapter.read
+        started, release = asyncio.Event(), asyncio.Event()
+        count = 0
+
+        async def delayed(*args, **kwargs):
+            nonlocal count
+            count += 1
+            started.set()
+            await release.wait()
+            return await read(*args, **kwargs)
+
+        monkeypatch.setattr(adapter, "read", delayed)
+        one = asyncio.create_task(control.request("ControlAuthority", "OCPP"))
+        await started.wait()
+        task = control.intents["ControlAuthority"].task
+        two = asyncio.create_task(control.request("ControlAuthority", "OCPP"))
+        await asyncio.sleep(0)
+        assert control.intents["ControlAuthority"].task is task
+        release.set()
+        assert await asyncio.gather(one, two) == ["confirmed", "confirmed"]
+        assert count == 1 and len(station.writes) == 1
+
+
+async def test_newer_local_notification_wins_over_recovery_read(ha, monkeypatch):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        adapter = entry.runtime_data.server.adapter
+        request = adapter.request
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed(payload):
+            assert isinstance(payload, call.GetVariables)
+            response = await request(payload)
+            started.set()
+            await release.wait()
+            return response
+
+        monkeypatch.setattr(adapter, "request", delayed)
+        recovery = asyncio.create_task(control.request("ControlAuthority", "OCPP"))
+        await started.wait()
+        event(entry, "ControlAuthority", "Local")
+        release.set()
+        assert await recovery == "accepted_unconfirmed"
+        assert observed(entry, "ControlAuthority") == "local"
+        assert control.blocked("ChargingEnabled") == "no_authority"
+        assert len(station.writes) == 1
+
+
+async def test_boot_fences_delayed_recovery_read(ha, monkeypatch):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        adapter = entry.runtime_data.server.adapter
+        request = adapter.request
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed(payload):
+            response = await request(payload)
+            started.set()
+            await release.wait()
+            return response
+
+        monkeypatch.setattr(adapter, "request", delayed)
+        recovery = asyncio.create_task(control.request("ControlAuthority", "OCPP"))
+        await started.wait()
+        adapter.boot({"vendor_name": "Test", "model": "reboot"}, "PowerUp")
+        release.set()
+        assert await recovery == "superseded"
+        assert observed(entry, "ControlAuthority") is None
+        assert len(station.writes) == 1
+
+
+async def test_reconnect_cancels_recovery_and_never_replays_it(ha, monkeypatch):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        adapter = entry.runtime_data.server.adapter
+        started = asyncio.Event()
+
+        async def delayed(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(adapter, "read", delayed)
+        recovery = asyncio.create_task(control.request("ControlAuthority", "OCPP"))
+        await started.wait()
+        await adapter.close()
+        with pytest.raises(asyncio.CancelledError):
+            await recovery
+        assert control.attributes("ControlAuthority")["command_status"] == "superseded"
+        assert len(station.writes) == 1
+    async with peer(entry, station_type=Controllable) as station:
+        await ready(entry, station)
+        assert observed(entry, "ControlAuthority") == "local"
+        assert control.attributes("ControlAuthority")["command_status"] == "superseded"
+        assert not station.writes
+        assert station.reads.count("ControlAuthority") == 1  # Bootstrap only.
+
+
+async def test_confirmed_command_is_history_after_external_loss_and_reconnect(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=Controllable) as station:
+        control = await unconfirmed_takeover(entry, station)
+        assert await control.request("ControlAuthority", "OCPP") == "confirmed"
+        event(entry, "ControlAuthority", "Local")
+        assert observed(entry, "ControlAuthority") == "local"
+        assert control.attributes("ControlAuthority")["command_status"] == "confirmed"
+        assert control.blocked("ChargingEnabled") == "no_authority"
+    async with peer(entry, station_type=Controllable) as station:
+        await ready(entry, station)
+        assert observed(entry, "ControlAuthority") == "local"
+        assert control.attributes("ControlAuthority")["command_status"] == "confirmed"
+        assert not station.writes

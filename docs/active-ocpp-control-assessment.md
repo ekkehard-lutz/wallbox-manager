@@ -142,7 +142,7 @@ Normal metering does not enter control reconciliation.
 
 ## Automated validation and performance assessment
 
-Final local checks: **194 Python tests passed**, **10 frontend tests passed**,
+Initial foundation local checks at `7c807fd`: **194 Python tests passed**, **10 frontend tests passed**,
 `ruff check .`, `ruff format --check .`, JavaScript syntax and `git diff --check`
 passed. Five dependency deprecation warnings are unrelated to this change. The
 36 added Python cases include actual OCPP WebSocket/schema exchanges and narrow
@@ -184,3 +184,54 @@ The initial workspace already contained eight untracked investigation/log files:
 `git status` would require moving/removing user files; this task leaves them intact.
 Tracked implementation changes are committed and pushed. See the final delivery
 message for the exact head SHA and remote CI state; merge/release/deploy are separate.
+
+
+## Explicit unconfirmed takeover recovery correction (21 October 2026)
+
+Baseline: `7c807fd743427651fa8b80b5dcf65198c8591394`. The initial foundation
+coalesced completed accepted-unconfirmed requests by returning their old result.
+After an accepted takeover and failed confirmation, this could strand WBM's Local
+observation even though the station had changed to Remote. WBM-CTRL-07/09/11 now
+clarify the explicit recovery and historical-result presentation; approved
+observation, authority and no-automatic-retry behavior is unchanged.
+
+A repeated explicit Take Control action now runs one `GetVariables` through the
+existing canonical read path. It retains the intent, adapter, connection/boot
+generation and dispatch watermark. Existing intent-current checks fence the
+response; `State.observe` preserves source ordering and only valid authoritative
+observations can confirm Remote. Concurrent requests share the existing intent's
+short-lived owner task. The original write path calls the same extracted
+confirmation function, avoiding duplicate readback/error logic. A failed recovery
+leaves the observation intact and the command accepted_unconfirmed; a valid Local
+read leaves it unconfirmed and clears any obsolete read-failure reason. No second
+SetVariables, automatic polling/retry, timer, listener or state store is added.
+
+The card labels **Last takeover command**, **Observed authority** and execution
+availability separately in English/German. A later Local event can coexist with a
+historical confirmed result; permission remains blocked. Offline authority is
+shown unavailable even if UI data retains Remote, and command diagnostics expose
+disconnection independently of historical success. Unconfirmed intents remain
+superseded across reconnect; bootstrap does not replay recovery or takeover.
+
+Historical/source cross-check: beta.18 `protocols/ocpp/v21/authority.py` confirms
+through exact Actual readback but provides no suitable explicit read-only recovery
+runtime to restore. Re-examined openWB `packages/control/chargepoint/chargepoint.py`
+and its previously assessed get/set split at the same pinned
+`849340ec8d91f4e7cca08a7664cf9ec0187fb496` revision: requested/last-result diagnostics
+must remain separate from observed state. No openWB polling or hardware interface
+is copied. No station source change or live hardware contact was made.
+
+Production delta for this correction: **27 lines added, 18 removed, net +9**
+(Python + JavaScript, including comments/blank lines). The Python confirmation body
+is extracted rather than duplicated; task and observation ownership are unchanged.
+The steady-state permission poll and passive publication paths are unchanged.
+
+Verification: **205 Python tests and 11 frontend tests pass**, including 11 new
+Python cases for first-read failure, explicit recovery, unchanged Local reads,
+invalid/rejected/mismatched/timed-out recovery, concurrent callers, newer Local
+notification, boot fencing, cancellation on reconnect, and historical success
+versus current Local authority. The frontend addition tests English/German labels,
+external Local transitions, offline retained data, reconnect and superseded
+outcomes. Full lint, format, JavaScript syntax and diff checks pass. The five
+existing dependency deprecation warnings remain. Live CPU and the hardware
+acceptance procedure above remain separate; no new hardware approval is implied.

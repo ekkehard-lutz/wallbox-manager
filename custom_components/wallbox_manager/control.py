@@ -145,6 +145,9 @@ class Control:
             and old.status == "accepted_unconfirmed"
             and self.valid(old)
         ):
+            if name == "ControlAuthority":
+                old.task = old.adapter.spawn(self.confirm(old))
+                return await asyncio.shield(old.task)
             return old.status
         unresolved_opposite = bool(
             old
@@ -244,21 +247,7 @@ class Control:
             self.observed(intent.name)
             if intent.status == "confirmed":
                 return intent.status
-            try:
-                read = await intent.adapter.read(
-                    intent.generation,
-                    endpoint(intent.name),
-                    current=lambda: self.valid(intent),
-                )
-                if not read and intent.status == "accepted_unconfirmed":
-                    self.update(intent, intent.status, "readback_unknown")
-            except TimeoutError:
-                self.update(intent, intent.status, "readback_timeout")
-            except OSError, OCPPError, ConnectionClosed:
-                self.update(intent, intent.status, "readback_communication_failure")
-            if not self.valid(intent):
-                self.update(intent, "superseded", "authority_or_intent_changed")
-            return intent.status
+            return await self.confirm(intent)
         except Refused:
             self.update(intent, "superseded", "dispatch_refused")
         except TimeoutError:
@@ -270,4 +259,24 @@ class Control:
             raise
         finally:
             DISPATCH.reset(token)
+        return intent.status
+
+    async def confirm(self, intent):
+        """Read once for an acknowledged intent; only observations confirm it."""
+        if not self.valid(intent):
+            return "superseded"
+        try:
+            read = await intent.adapter.read(
+                intent.generation,
+                endpoint(intent.name),
+                current=lambda: self.valid(intent),
+            )
+            if intent.status == "accepted_unconfirmed":
+                self.update(intent, intent.status, None if read else "readback_unknown")
+        except TimeoutError:
+            self.update(intent, intent.status, "readback_timeout")
+        except OSError, OCPPError, ConnectionClosed:
+            self.update(intent, intent.status, "readback_communication_failure")
+        if not self.valid(intent):
+            self.update(intent, "superseded", "authority_or_intent_changed")
         return intent.status

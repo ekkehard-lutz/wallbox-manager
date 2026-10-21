@@ -319,8 +319,8 @@ class WallboxManagerCard extends HTMLElement {
     }
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
-    get("actual").textContent = [["voltage_l1","U L1"],["voltage_l2","U L2"],["voltage_l3","U L3"],["current_l1","I L1"],["current_l2","I L2"],["current_l3","I L3"],["control_authority",de ? "Steuerung" : "Authority"]].map(([role,label]) => {
-      const s=state(role); const value = role === "control_authority" ? ({local:de ? "Lokal" : "Local",remote:"OCPP",unknown:"—"}[s?.state] || "—") : available(s) ? s.state + " " + (s.attributes.unit_of_measurement || "") : "—";
+    get("actual").textContent = [["voltage_l1","U L1"],["voltage_l2","U L2"],["voltage_l3","U L3"],["current_l1","I L1"],["current_l2","I L2"],["current_l3","I L3"],["control_authority",de ? "Beobachtete Steuerung" : "Observed authority"]].map(([role,label]) => {
+      const s=state(role); const value = role === "control_authority" ? (connected && available(s) ? ({local:de ? "Lokal" : "Local",remote:"OCPP",unknown:"—"}[s?.state] || "—") : "—") : available(s) ? s.state + " " + (s.attributes.unit_of_measurement || "") : "—";
       return `${label}: ${value}`;
     }).join(" · ");
     const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Sitzungsenergie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Session energy",power:"Power",duration:"Duration"};
@@ -341,7 +341,7 @@ class WallboxManagerCard extends HTMLElement {
       (de ? "Übernahme und Ladefreigabe sind explizite Aktionen. Profileinstellungen werden ausschließlich lokal gespeichert." : "Takeover and charging permission require explicit actions. Profile settings are saved locally only.") +
       ["take_control","charging_enabled"].map(role => {
         const a = state(role)?.attributes;
-        return a ? ` ${role === "take_control" ? (de ? "Übernahme" : "Takeover") : (de ? "Ladefreigabe" : "Permission")}: ${a.command_status || a.execution_blocked_reason || (de ? "bereit" : "ready")}${a.command_reason ? ` (${a.command_reason})` : ""}.` : "";
+        return a ? ` ${role === "take_control" ? (de ? "Letzter Übernahmebefehl" : "Last takeover command") : (de ? "Letzter Freigabebefehl" : "Last permission command")}: ${a.command_status || "—"}${a.command_reason ? ` (${a.command_reason})` : ""}. ${de ? "Steuerung" : "Control"}: ${a.execution_blocked_reason || (de ? "bereit" : "ready")}.` : "";
       }).join("");
   }
   options(select, options) {

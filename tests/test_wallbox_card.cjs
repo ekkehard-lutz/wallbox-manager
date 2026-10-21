@@ -162,3 +162,34 @@ test('pending, unsupported and service failures remain visible without optimisti
   c.hass=c._hass;
   assert.equal(get('permission').disabled,true);
 });
+
+test('last takeover result stays separate from observed authority and reconnect availability',()=>{
+  for (const language of ['en','de']) {
+    const data=states();
+    data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true,command_status:'confirmed'}};
+    data['E.control_authority']={state:'remote',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'control_authority'}};
+    const {card:c,get}=card(data,{},language);
+    const commandLabel=language==='en' ? /Last takeover command: confirmed/ : /Letzter Übernahmebefehl: confirmed/;
+    assert.match(get('status').textContent,commandLabel);
+    assert.match(get('actual').textContent,language==='en' ? /Observed authority: OCPP/ : /Beobachtete Steuerung: OCPP/);
+    data['E.control_authority'].state='local'; c.hass=c._hass;
+    assert.match(get('actual').textContent,language==='en' ? /Observed authority: Local/ : /Beobachtete Steuerung: Lokal/);
+    assert.match(get('status').textContent,commandLabel);
+    data['E.connected'].state='off';
+    data['E.control_authority'].state='remote'; // Retained data is not current while offline.
+    Object.assign(data['E.take_control'].attributes,{execution_ready:false,execution_blocked_reason:'disconnected'});
+    c.hass=c._hass;
+    assert.match(get('actual').textContent,language==='en' ? /Observed authority: —/ : /Beobachtete Steuerung: —/);
+    assert.match(get('status').textContent,commandLabel);
+    assert.match(get('status').textContent,/disconnected/);
+    assert.equal(get('takeover').disabled,true);
+    data['E.connected'].state='on'; data['E.control_authority'].state='local';
+    Object.assign(data['E.take_control'].attributes,{execution_ready:true,execution_blocked_reason:null});
+    c.hass=c._hass;
+    assert.match(get('status').textContent,commandLabel);
+    assert.match(get('actual').textContent,language==='en' ? /Observed authority: Local/ : /Beobachtete Steuerung: Lokal/);
+    data['E.take_control'].attributes.command_status='superseded'; c.hass=c._hass;
+    assert.match(get('status').textContent,/superseded/);
+    assert.doesNotMatch(get('status').textContent,commandLabel);
+  }
+});
