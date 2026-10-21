@@ -136,6 +136,8 @@ class Reading(WallboxEntity, SensorEntity):
 
     @property
     def available(self):
+        if self.family == "observation" and self.role == "charging_state":
+            return self.observed.charging_value(self.scope) is not None
         if self.family == "session":
             session = self.observed.session
             if not session or tuple(session["scope"]) != self.scope:
@@ -161,6 +163,8 @@ class Reading(WallboxEntity, SensorEntity):
     @property
     def native_value(self):
         state = self.observed
+        if self.family == "observation" and self.role == "charging_state":
+            return state.charging_value(self.scope)
         if self.family == "session":
             return view(state, datetime.now(UTC))[self.role] if self.available else None
         if self.family == "station":
@@ -187,6 +191,19 @@ class Reading(WallboxEntity, SensorEntity):
                 else "awaiting_observation",
                 cp_observability="unverified",
                 physical_limit_since=None,
+            )
+        if (
+            self.family == "observation"
+            and self.role == "charging_state"
+            and self.native_value == "idle"
+            and not self.observed.authentic_idle_current(self.scope)
+        ):
+            attrs.update(
+                source="wbm:registered_available",
+                connection_generation=self.observed.generation[0],
+                boot_generation=self.observed.generation[1],
+                state_represents="display_projection",
+                physical_observability="inferred_from_connector_status",
             )
         if self.family == "capability":
             observation = self.observed.observations.get(self.key)
@@ -217,6 +234,18 @@ class Reading(WallboxEntity, SensorEntity):
                     attrs["source"] = observation.source
             elif self.role == "energy":
                 attrs["source"] = session.get("energy_source")
+            if self.role in ("start_meter", "end_meter"):
+                acquired = session.get(self.role + "_at")
+                event_at = session.get(
+                    "started_at" if self.role == "start_meter" else "ended_at"
+                )
+                attrs.update(
+                    measured_at=acquired,
+                    event_at=event_at,
+                    boundary_approximation=(acquired != event_at)
+                    if acquired and event_at
+                    else None,
+                )
             if self.role == "duration":
                 attrs.update(
                     started_at=session["started_at"], duration_valid_until=None

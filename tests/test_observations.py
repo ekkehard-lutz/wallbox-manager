@@ -297,7 +297,7 @@ async def test_session_energy_streams_and_final_endpoint_are_not_invented(ha):
         channel=("observation", ("Wallbox01", "1", None), "energy"),
     )
     assert session.view(state, start)["energy"] == 0
-    session.meter(state, "energy", 1.2, datetime.now(UTC), boundary=True)
+    session.meter(state, "energy", 1.2, datetime.now(UTC))
     assert session.view(state, start)["energy"] == 1.2
     end = datetime.now(UTC)
     session.event(state, gen, state.binding, "real", "Ended", end, 1)
@@ -312,7 +312,7 @@ async def test_session_energy_streams_and_final_endpoint_are_not_invented(ha):
     start = datetime.now(UTC)
     session.event(state, gen, state.binding, "reset", "Started", start, 0)
     session.meter(state, "energy", 0, start, boundary=True)
-    session.meter(state, "energy", 2, datetime.now(UTC), boundary=True)
+    session.meter(state, "energy", 2, datetime.now(UTC))
     end = datetime.now(UTC)
     session.event(state, gen, state.binding, "reset", "Ended", end, 1)
     session.meter(state, "energy", 1, end, boundary=True)
