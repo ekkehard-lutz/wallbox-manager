@@ -80,7 +80,7 @@ class WallboxManagerCard extends HTMLElement {
       <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><div class="reading" id="no-messages">-</div><p id="status" class="notice" role="status" hidden></p><p id="error" class="notice" role="alert" hidden></p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
-    get("takeover").disabled = true;
+    get("takeover").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.take_control});
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
     get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.pv_approximation, option:e.target.value});
     for (const id of ["grid_start_delay", "grid_duration"]) {
@@ -129,7 +129,7 @@ class WallboxManagerCard extends HTMLElement {
         this.call("number", "set_value", {entity_id:this.discovery.roles[id], value});
       };
     }
-    get("permission").disabled = true;
+    get("permission").onclick = () => this.call("switch", this._hass.states[this.discovery.roles.charging_enabled]?.state === "on" ? "turn_off" : "turn_on", {entity_id:this.discovery.roles.charging_enabled});
     if (this._hass) this.hass = this._hass;
   }
   connectedCallback() {
@@ -240,7 +240,11 @@ class WallboxManagerCard extends HTMLElement {
     finally { this.hass = this._hass; }
   }
   async call(domain, service, data) {
-    if (!["number", "select", "text"].includes(domain) || !Object.values(this.discovery.roles).includes(data.entity_id)) return;
+    const action = domain === "button" && service === "press" ? "take_control" : domain === "switch" && ["turn_on", "turn_off"].includes(service) ? "charging_enabled" : null;
+    if (action) {
+      const state = this._hass.states[this.discovery.roles[action]];
+      if (this.busy || !state || state.state === "unavailable" || state.attributes.execution_ready !== true || data.entity_id !== this.discovery.roles[action]) return;
+    } else if (!["number", "select", "text"].includes(domain) || !Object.values(this.discovery.roles).includes(data.entity_id)) return;
     const error = this.shadowRoot.getElementById("error");
     error.textContent = ""; error.hidden = true;
     this.busy = true; this.hass = this._hass;
@@ -260,8 +264,10 @@ class WallboxManagerCard extends HTMLElement {
     get("title").textContent = this.config.name || "Wallbox Manager";
     get("station").textContent = state("connected")?.attributes.station_id || "—";
     get("takeover").textContent = de ? "Steuerung übernehmen" : "Take control";
-    get("takeover").disabled = true;
-    get("permission").disabled = true;
+    for (const [id,role] of [["takeover","take_control"],["permission","charging_enabled"]]) {
+      const s = state(role);
+      get(id).disabled = busy || !connected || !s || s.state === "unavailable" || s.attributes.execution_ready !== true;
+    }
     const permission = state("charging_enabled");
     const permissionText = permission?.state === "on" ? (de ? "aktiv" : "enabled") : permission?.state === "off" ? (de ? "inaktiv" : "disabled") : (de ? "unbekannt" : "unknown");
     get("permission").textContent = `${de ? "Ladefreigabe" : "Charging permission"}: ${permissionText}`;
@@ -313,8 +319,8 @@ class WallboxManagerCard extends HTMLElement {
     }
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
-    get("actual").textContent = [["voltage_l1","U L1"],["voltage_l2","U L2"],["voltage_l3","U L3"],["current_l1","I L1"],["current_l2","I L2"],["current_l3","I L3"],["control_authority",de ? "Steuerung" : "Authority"]].map(([role,label]) => {
-      const s=state(role); const value = role === "control_authority" ? ({local:de ? "Lokal" : "Local",remote:"OCPP",unknown:"—"}[s?.state] || "—") : available(s) ? s.state + " " + (s.attributes.unit_of_measurement || "") : "—";
+    get("actual").textContent = [["voltage_l1","U L1"],["voltage_l2","U L2"],["voltage_l3","U L3"],["current_l1","I L1"],["current_l2","I L2"],["current_l3","I L3"],["control_authority",de ? "Beobachtete Steuerung" : "Observed authority"]].map(([role,label]) => {
+      const s=state(role); const value = role === "control_authority" ? (connected && available(s) ? ({local:de ? "Lokal" : "Local",remote:"OCPP",unknown:"—"}[s?.state] || "—") : "—") : available(s) ? s.state + " " + (s.attributes.unit_of_measurement || "") : "—";
       return `${label}: ${value}`;
     }).join(" · ");
     const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Sitzungsenergie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Session energy",power:"Power",duration:"Duration"};
@@ -332,7 +338,11 @@ class WallboxManagerCard extends HTMLElement {
     }
     get("status").hidden = false;
     get("status").textContent = (d.ambiguous ? (de ? "Mehrere Instanzen: entry_id in der Kartenkonfiguration angeben. " : "Multiple instances: configure this card's entry_id. ") : "") +
-      (de ? "Nur Beobachtung. Aktive Ladesteuerung ist noch nicht implementiert. Einstellungen werden ausschließlich lokal gespeichert." : "Observation only. Active charging control is not implemented. Settings are saved locally only.");
+      (de ? "Übernahme und Ladefreigabe sind explizite Aktionen. Profileinstellungen werden ausschließlich lokal gespeichert." : "Takeover and charging permission require explicit actions. Profile settings are saved locally only.") +
+      ["take_control","charging_enabled"].map(role => {
+        const a = state(role)?.attributes;
+        return a ? ` ${role === "take_control" ? (de ? "Letzter Übernahmebefehl" : "Last takeover command") : (de ? "Letzter Freigabebefehl" : "Last permission command")}: ${a.command_status || "—"}${a.command_reason ? ` (${a.command_reason})` : ""}. ${de ? "Steuerung" : "Control"}: ${a.execution_blocked_reason || (de ? "bereit" : "ready")}.` : "";
+      }).join("");
   }
   options(select, options) {
     const signature = JSON.stringify(options);
@@ -345,6 +355,6 @@ class WallboxManagerCard extends HTMLElement {
 }
 if (!customElements.get("wallbox-manager-card")) customElements.define("wallbox-manager-card",WallboxManagerCard);
 window.customCards = window.customCards || [];
-if (!window.customCards.some(c => c.type === "wallbox-manager-card")) window.customCards.push({type:"wallbox-manager-card",name:"Wallbox Manager",description:"Single-wallbox passive observations and local profile settings"});
+if (!window.customCards.some(c => c.type === "wallbox-manager-card")) window.customCards.push({type:"wallbox-manager-card",name:"Wallbox Manager",description:"Single-wallbox observations, explicit control and local profile settings"});
 
 })();

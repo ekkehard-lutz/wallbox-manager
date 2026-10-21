@@ -248,3 +248,14 @@ limits, command sequencing and session/business timers remain independently vali
 **Authorized scope:** Small passive WBM runtime and specification change; full
 maintained tests, feature-branch commit/push. No active regulation, station change,
 main change, merge, tag, release or deployment. No hardware acceptance is claimed.
+
+## 21 October 2026 – Explicit active OCPP foundation [USER-REQUESTED SCOPE]
+
+The implementation task authorizes the narrow [WBM-CTRL-01–12 successor](active-ocpp-control.md):
+explicit station authority acquisition and independent charging permission through
+verified writable OCPP 2.1 endpoints. It supersedes passive V04-03/06 only for these
+two actions; the passive milestone's historical approval remains intact.
+WBM-ARCH-01–12 remain overarching, profile settings remain local, and PV V3 remains
+a draft. No operating-point control, wake-up, current/phase preparation, automatic
+takeover/retry/replay or deployment is authorized. Commit/push is separate from
+independent review, merge, release and user-controlled hardware acceptance.

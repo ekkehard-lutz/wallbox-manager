@@ -104,12 +104,12 @@ class Station(ChargePoint):
 
 
 @asynccontextmanager
-async def peer(entry, *, unsupported=False):
+async def peer(entry, *, unsupported=False, station_type=Station):
     async with connect(
         f"ws://127.0.0.1:{entry.runtime_data.server.port}/Wallbox01",
         subprotocols=["ocpp2.1"],
     ) as socket:
-        station = Station(socket, unsupported=unsupported)
+        station = station_type(socket, unsupported=unsupported)
         reader = asyncio.create_task(station.start())
         try:
             yield station
