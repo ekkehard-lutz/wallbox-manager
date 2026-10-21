@@ -12,6 +12,7 @@ V3 remains DRAFT overall.
 | Document | Purpose | Status |
 | --- | --- | --- |
 | [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, with explicit supersession register | **APPROVED independently** |
+| [Active OCPP control foundation](active-ocpp-control.md) | Explicit takeover and independent charging permission; successor milestone | **User-authorized implementation scope; hardware acceptance separate** |
 | [Passive v0.4](passive-v0.4.md) | Current passive milestone | **APPROVED, subject to WBM-ARCH-01–12** |
 | [PV regulation – Requirements baseline V3](pv-regulation.md) | Current consolidated target specification draft with stable requirement IDs, acceptance criteria, sources and open issues | **DRAFT – overall subject-matter approval pending** |
 | [Decision history, October 2026](decision-history.md) | NON-NORMATIVE history: approved decisions, superseded interim solutions and explicitly rejected approaches | Reference / history |
@@ -27,7 +28,8 @@ V3 remains DRAFT overall.
 
 **Source status:** These Markdown files do not import the PDFs or historical hardware logs into the repository. Page references refer to the externally retained 619-page discussion printout. Links to tagged repository documents are listed in the requirements baseline. The original discussion document's filename and technical identifiers are retained verbatim for traceability.
 
-The current implementation milestone is the individually approved
-[passive v0.4 architecture](passive-v0.4.md). Regulation requirements above are
+The active successor milestone is [the OCPP control foundation](active-ocpp-control.md).
+It narrowly supersedes V04-03/06 for two explicit user operations and preserves
+the approval and historical scope of [passive v0.4](passive-v0.4.md). Regulation requirements above are
 preserved for subsequent work; they do not require implementing regulation in the
 passive milestone. Historical implementation reports are not specifications.

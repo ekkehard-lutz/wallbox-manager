@@ -1,8 +1,8 @@
-# Wallbox Manager — passive v0.4 prerelease
+# Wallbox Manager — OCPP control foundation
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This prerelease is the passive rebuild for OCPP **2.1**, targeting the supported
+This development branch extends the passive rebuild for OCPP **2.1**, targeting the supported
 wallbox-stationary interface. The integration version is **0.4.0-beta.6**;
 see the [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) for Idle display,
 session meter corrections and migration details. The immutable
@@ -21,9 +21,13 @@ identities. Ordinary measurements remain valid until explicit invalidation or a
 connection/boot generation change. Silent, unchanged values do not expire.
 
 Profile, Number, Select and Text entities persist local configuration. They do
-not regulate charging or control the battery. Permission and authority remain
-observable; takeover and permission actions are explicitly unavailable. The
-card retains its familiar appearance, with both control buttons disabled.
+not regulate charging or control the battery. The existing Take Control button
+explicitly acquires OCPP authority; the permission switch independently requests
+ON/OFF only under observed Remote authority and supported writable endpoints.
+Switch state always reflects station observations, never an acknowledgement alone.
+See the [active successor requirements](docs/specifications/active-ocpp-control.md)
+and [source assessment / separate hardware procedure](docs/active-ocpp-control-assessment.md).
+There is no automatic takeover, command replay, current/phase or profile control.
 
 ```yaml
 type: custom:wallbox-manager-card
@@ -59,7 +63,9 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-For separately authorized testing, select **v0.4.0-beta.6** through the HACS
+The active foundation on this branch is unreleased; the manifest version remains
+unchanged. For separately authorized testing of the released passive baseline,
+select **v0.4.0-beta.6** through the HACS
 prerelease versions and verify integration version **0.4.0-beta.6** after the
 operator performs installation and the Home Assistant restart. Publication does
 not include installation or physical validation.
