@@ -1,4 +1,4 @@
-"""Single-station, read-only OCPP2.1 listener and generation-scoped bootstrap."""
+"""Single-station OCPP2.1 listener and generation-scoped bootstrap."""
 
 import asyncio
 import json
@@ -15,6 +15,8 @@ from websockets.exceptions import ConnectionClosed
 
 from . import session
 from .config_flow import diagnostic_level
+from .control import DISPATCH, ROLES, Control, Refused
+from .control import endpoint as control_endpoint
 from .meter import CHARGING, CONNECTOR, reported_time, samples
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ class Listener:
         self.lock = asyncio.Lock()
         self.options = options
         self._logged = {}
+        self.control = Control(self)
 
     def diagnostic(self, level, event, *, reason="none", **fields):
         """Bounded by event families; diagnostics can never break the protocol."""
@@ -171,6 +174,7 @@ class Adapter(ChargePoint):
         self.request_id = 0
         self.after_boot = False
         self.closed = False
+        self.writable = set()
 
     def spawn(self, coro):
         task = asyncio.create_task(coro)
@@ -183,7 +187,7 @@ class Adapter(ChargePoint):
             if not done.cancelled():
                 error = done.exception()
                 if error and not isinstance(
-                    error, (TimeoutError, OSError, OCPPError, ConnectionClosed)
+                    error, (TimeoutError, OSError, OCPPError, ConnectionClosed, Refused)
                 ):
                     self.listener.diagnostic(
                         0, "task_failed", reason=type(error).__name__
@@ -213,12 +217,16 @@ class Adapter(ChargePoint):
     async def _send(self, message):
         wire = json.loads(message)
         if wire[0] == 2 and wire[2] not in READ_ONLY:
-            raise RuntimeError("Passive OCPP boundary forbids charging commands")
+            guard = DISPATCH.get()
+            if wire[2] != "SetVariables" or guard is None:
+                raise RuntimeError("OCPP boundary forbids unsupported control commands")
+            guard(wire[3])
         await super()._send(message)
 
     async def close(self):
         if self.closed:
             return
+        self.listener.control.invalidate()
         self.closed = True
         await self._connection.close()
         for task in tuple(self.tasks):
@@ -255,6 +263,24 @@ class Adapter(ChargePoint):
             )
             if key[2] == "connector_state":
                 self.state.publish(("station", (key[1][0], None, None), "discovery"))
+        if accepted and key[2] in ("control_authority", "charging_enabled"):
+            for name in ROLES:
+                if key == self.listener.control.key(name):
+                    if name == "ControlAuthority" and previous != self.state.value(key):
+                        self.listener.control.authority_revision += 1
+                        permission = self.listener.control.intents.get(
+                            "ChargingEnabled"
+                        )
+                        if permission and permission.status in (
+                            "pending",
+                            "accepted_unconfirmed",
+                        ):
+                            self.listener.control.update(
+                                permission, "superseded", "authority_changed"
+                            )
+                        else:
+                            self.listener.control.publish("ChargingEnabled")
+                    self.listener.control.observed(name)
         return accepted
 
     def station(self, role, value, source="ocpp2.1:bootstrap"):
@@ -276,6 +302,8 @@ class Adapter(ChargePoint):
         for task in (self.bootstrap, self.poll):
             if task:
                 task.cancel()
+        self.listener.control.invalidate()
+        self.writable.clear()
         self.generation = self.state.reset(connected=True, boot=True)
         self.listener.diagnostic(1, "boot_notification", reason=reason)
         self.state.identity = {
@@ -493,11 +521,9 @@ class Adapter(ChargePoint):
             if evse
             else (self.state.binding[0], None, None)
         )
-        if (
-            component.get("name") == "WallboxController"
-            and name == "ControlAuthority"
-            and evse is None
-        ):
+        if component == {"name": "WallboxController"} and variable == {
+            "name": "ControlAuthority"
+        }:
             self.observe(
                 generation,
                 ("station", scope, "control_authority"),
@@ -505,7 +531,9 @@ class Adapter(ChargePoint):
                 "ocpp2.1:" + source,
                 at,
             )
-        elif component.get("name") == "WallboxController" and name == "ChargingEnabled":
+        elif component == {"name": "WallboxController"} and variable == {
+            "name": "ChargingEnabled"
+        }:
             self.observe(
                 generation,
                 ("control", self.state.binding, "charging_enabled"),
@@ -533,7 +561,7 @@ class Adapter(ChargePoint):
                 ),
             )
 
-    async def read(self, generation, endpoint):
+    async def read(self, generation, endpoint, *, current=lambda: True):
         at = datetime.now(UTC)
         response = await self.request(
             call.GetVariables(
@@ -541,6 +569,8 @@ class Adapter(ChargePoint):
             )
         )
         if not self.live(generation):
+            return
+        if not current():
             return
         rows = getattr(response, "get_variable_result", None)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
@@ -579,6 +609,7 @@ class Adapter(ChargePoint):
             at,
             "GetVariables",
         )
+        return True
 
     async def initialize(self, generation):
         self.listener._initialization = "initializing"
@@ -620,6 +651,26 @@ class Adapter(ChargePoint):
                     permissions.append(row)
             if len(permissions) > 1:
                 raise ValueError("Ambiguous permission inventory")
+            # Unique station-scoped Actual ReadWrite endpoints authorize writes.
+            for name in ROLES:
+                matches = [
+                    r
+                    for r in report["rows"]
+                    if r.get("component") == control_endpoint(name)["component"]
+                    and r.get("variable") == control_endpoint(name)["variable"]
+                ]
+                attrs = [
+                    a
+                    for r in matches
+                    for a in r.get("variable_attribute", [])
+                    if a.get("type", "Actual") == "Actual"
+                ]
+                if (
+                    len(matches) == len(attrs) == 1
+                    and attrs[0].get("mutability") == "ReadWrite"
+                ):
+                    self.writable.add(name)
+                self.listener.control.publish(name)
             inventory_at = datetime.now(UTC)
             for row in report["rows"]:
                 component, variable = row.get("component", {}), row.get("variable", {})

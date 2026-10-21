@@ -1,4 +1,4 @@
-"""Read-only physical permission retains the original switch identity."""
+"""Independent charging permission; only station observations set switch state."""
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.exceptions import HomeAssistantError
@@ -31,16 +31,26 @@ class Permission(WallboxEntity, SwitchEntity):
             **super().extra_state_attributes,
             "state_represents": "confirmed_hardware",
             "enabled_valid_until": None,
-            "execution_ready": False,
-            "execution_blocked_reason": "passive_only",
+            **self.entry.runtime_data.server.control.attributes("ChargingEnabled"),
         }
 
-    async def async_turn_on(self, **kwargs):
-        raise HomeAssistantError(
-            "Active charging control is unavailable in passive v0.4"
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.observed.watch(
+                ("command", self.scope, "charging_enabled"), self.changed
+            )
         )
 
-    async def async_turn_off(self, **kwargs):
-        raise HomeAssistantError(
-            "Active charging control is unavailable in passive v0.4"
+    async def set_permission(self, enabled):
+        result = await self.entry.runtime_data.server.control.request(
+            "ChargingEnabled", "true" if enabled else "false"
         )
+        if result != "confirmed":
+            raise HomeAssistantError(f"Charging permission: {result}")
+
+    async def async_turn_on(self, **kwargs):
+        await self.set_permission(True)
+
+    async def async_turn_off(self, **kwargs):
+        await self.set_permission(False)

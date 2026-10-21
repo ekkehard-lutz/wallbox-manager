@@ -51,10 +51,10 @@ test('familiar layout, read-only permission and no multi-wallbox UI',()=>{
   assert.doesNotMatch(c.shadowRoot.html,/id="wallbox"/);
   assert.equal(get('takeover').disabled,true);
   assert.equal(get('permission').disabled,true);
-  assert.equal(get('takeover').onclick,undefined);
-  assert.equal(get('permission').onclick,undefined);
+  assert.equal(typeof get('takeover').onclick,'function');
+  assert.equal(typeof get('permission').onclick,'function');
   assert.match(get('permission').textContent,/enabled/);
-  assert.match(get('status').textContent,/not implemented/);
+  assert.match(get('status').textContent,/explicit actions/);
   assert.equal(get('connection').textContent,'Available');
   assert.equal(get('live-power').textContent,'1.5 kW');
   assert.equal(get('energy').textContent,'1.2 kWh');
@@ -123,4 +123,42 @@ test('unavailable measurement and permission are never fabricated as zero or OFF
   const {get}=card(data);
   assert.equal(get('live-power').textContent,'—');
   assert.match(get('permission').textContent,/unknown/);
+});
+
+test('explicit authority and permission actions stay scoped and observed',async()=>{
+  const data=states();
+  data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
+  data['E.charging_enabled'].attributes.execution_ready=true;
+  const {card:c,get,calls}=card(data);
+  assert.equal(get('takeover').disabled,false);
+  assert.equal(get('permission').disabled,false);
+  await get('takeover').onclick();
+  await get('permission').onclick();
+  assert.equal(calls[0][0],'button'); assert.equal(calls[0][1],'press');
+  assert.equal(calls[0][2].entity_id,'E.take_control');
+  assert.equal(calls[1][0],'switch'); assert.equal(calls[1][1],'turn_off');
+  assert.equal(data['E.charging_enabled'].state,'on');
+  data['E.charging_enabled'].state='off'; c.hass=c._hass;
+  await get('permission').onclick();
+  assert.equal(calls[2][1],'turn_on');
+  await c.call('switch','turn_on',{entity_id:'OTHER.charging_enabled'});
+  await c.call('button','press',{entity_id:'E.charging_enabled'});
+  assert.equal(calls.length,3);
+});
+
+test('pending, unsupported and service failures remain visible without optimistic state',async()=>{
+  const data=states();
+  data['E.take_control']={state:'unavailable',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:false,execution_blocked_reason:'unsupported'}};
+  Object.assign(data['E.charging_enabled'].attributes,{execution_ready:true,command_status:'accepted_unconfirmed',command_reason:'readback_timeout'});
+  const {card:c,get}=card(data);
+  assert.equal(get('takeover').disabled,true);
+  assert.match(get('status').textContent,/unsupported/);
+  assert.match(get('status').textContent,/accepted_unconfirmed.*readback_timeout/);
+  c._hass.callService=async()=>{throw new Error('Station rejected');};
+  await get('permission').onclick();
+  assert.match(get('error').textContent,/Station rejected/);
+  assert.equal(data['E.charging_enabled'].state,'on');
+  data['E.charging_enabled'].attributes.execution_ready=false;
+  c.hass=c._hass;
+  assert.equal(get('permission').disabled,true);
 });

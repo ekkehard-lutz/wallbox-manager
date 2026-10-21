@@ -97,3 +97,90 @@ Automated tests cannot establish hardware safety, installed firmware behavior,
 complete initial telemetry pushes or the live CPU target. Station main has no
 positive-authority notification guarantee; authority changes other than reported
 loss need supported readback. No additional authority polling loop was introduced.
+
+## Implementation review and footprint
+
+Production delta against the pinned develop baseline: **391 lines added, 29
+removed, net +362** (Python and card JavaScript, including comments/blank lines).
+The only new production module is `control.py` (273 lines). No unused future
+operating-point or wake-up framework is included.
+
+Reused: `State.observe/value/watch/publish/reset`, entity identity construction,
+`Listener.accept`, `Adapter.request/spawn/close/live/read`, inventory bootstrap,
+notification parsing, OCPP library serialization/schema validation/CALL matching,
+and `poll_permission`. Simplified: disabled HA service methods become two explicit
+request paths; `read` takes an optional intent-validity predicate and reports
+whether its response was valid. Removed: blanket passive physical-command ban
+(replaced by exact wire authorization), passive service errors and hard-disabled
+card actions. An unnecessary authority subscription on Take Control and a duplicate
+permission publication during authority loss were removed during implementation.
+No existing station safety or telemetry/session code was restored or duplicated.
+
+New state is bounded per entry:
+
+- `Control.intents`: at most the latest authority and permission intent, including
+  desired wire value and status/reason; identity itself is the intent-generation
+  fence, avoiding a redundant numeric counter or outcome store.
+- Each intent retains its owning adapter/connection/boot and permission authority
+  revision to fence queued work and late results; its private `dispatched_at`
+  prevents an older observation from confirming a write. None is a public timestamp.
+- The intent task reference coalesces callers and keeps ownership through caller
+  cancellation. Superseded in-flight calls settle through existing transport tasks.
+- `Control.authority_revision` fences loss followed by reacquisition even when the
+  observed authority has returned to Remote by the time a queued write can run.
+- `Adapter.writable`: at most two unique verified endpoint names, cleared on boot
+  and recreated on connection. This is capability authorization, not observed state.
+- One task-local ContextVar carries the exact wire guard through schema validation
+  and library lock waits; it grants no general SetVariables capability.
+
+Tasks/listeners: one short-lived owner task per explicit new user command, using
+the existing adapter task set and existing request-consumer tasks. Identical
+concurrent callers share it. Two new keyed HA subscriptions (one per control) expose
+command/readiness diagnostics and are removed on entity teardown. No periodic
+command task, expiry timer, second queue, regulator or additional polling loop.
+Normal metering does not enter control reconciliation.
+
+## Automated validation and performance assessment
+
+Final local checks: **194 Python tests passed**, **10 frontend tests passed**,
+`ruff check .`, `ruff format --check .`, JavaScript syntax and `git diff --check`
+passed. Five dependency deprecation warnings are unrelated to this change. The
+36 added Python cases include actual OCPP WebSocket/schema exchanges and narrow
+fault injection; the original 158 Python cases remain green.
+
+For comparison, the existing passive benchmark was also run against a pristine
+`git archive` of develop in a temporary directory, using the same Python/HA runtime:
+
+| Workload | Develop | Active foundation |
+| --- | --- | --- |
+| 2,000 identical observations | 0 HA writes / 0 commands | 0 / 0 |
+| 2,000 normalized unchanged voltage reports | 0 HA writes / 0 commands | 0 / 0 |
+| Change-only idle / other entry activity | 0 HA writes / 0 commands | 0 / 0 |
+| Initial sync | 39 writes / 39 state changes | 39 / 39 |
+| Disconnect/reconnect lifecycle | 75 writes / 52 state changes | 77 / 52 |
+
+The two additional lifecycle-only writes are bounded publication of the new
+command-diagnostic subscriptions on generation reset; steady observation traffic
+has no additional HA publication. The unchanged phase benchmark reports 2,000
+identical reports, zero writes and zero expiry timers. Exact-energy changes remain
+published without quantization loss. Five-second permission polling remains one
+task and repeated same-value reads have no public timestamp churn.
+
+These are event-count/performance-regression observations, not live CPU acceptance.
+No claim is made that unit tests establish the <=0.1 percentage-point live target.
+
+## Delivery and retained workspace files
+
+Changes are confined to `feature/active-ocpp-control-foundation`. Changed files:
+`AGENTS.md`, `README.md`; specifications `README.md`, `decision-history.md`,
+`active-ocpp-control.md`; this assessment; production `control.py`, `ocpp.py`,
+`button.py`, `switch.py`, `www/wallbox-manager-card.js`; tests
+`test_active_control.py`, `test_protocol.py`, `test_wallbox_card.cjs`.
+
+The initial workspace already contained eight untracked investigation/log files:
+`docs/ocpp-meter-values-interval-investigation.md`, `docs/pv-decision-logic-audit.md`,
+`docs/pv7-beta14-investigation.md`, four `docs/validation/beta9-*` files and
+`pv2.log`. They remain untouched and excluded from commits. A completely empty
+`git status` would require moving/removing user files; this task leaves them intact.
+Tracked implementation changes are committed and pushed. See the final delivery
+message for the exact head SHA and remote CI state; merge/release/deploy are separate.
