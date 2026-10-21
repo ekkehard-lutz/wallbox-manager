@@ -83,11 +83,7 @@ class Listener:
     def initialization(self):
         status = self._initialization
         missing = self.state.missing
-        if (
-            self.state.value(("observation", self.state.binding, "connector_state"))
-            == "available"
-            and session.view(self.state, datetime.now(UTC))["active"] is not True
-        ):
+        if self.state.charging_value(self.state.binding) == "idle":
             missing = missing - {"charging_state"}
         if status in ("ready", "missing"):
             status = "missing" if missing else "ready"
@@ -292,6 +288,7 @@ class Adapter(ChargePoint):
             }.items()
             if charging_station.get(v)
         }
+        self.state.registered_generation = self.generation
         self.listener.update_device()
         self.after_boot = True
         return call_result.BootNotification(
@@ -417,10 +414,23 @@ class Adapter(ChargePoint):
                     "ocpp2.1:TransactionEvent",
                     at,
                 )
-            for role, value, observed, _unit in samples(meter_value, session=True):
+            readings = sorted(
+                samples(meter_value, session=True), key=lambda sample: sample[2]
+            )
+            if event_type in ("Started", "Ended"):
+                energies = [r for r in readings if r[0] == "energy" and r[2] <= at]
+                latest = energies[-1] if energies else None
+                readings = [r for r in readings if r[0] != "energy" or r == latest]
+            for role, value, observed, _unit in readings:
                 # Transaction boundary energy is session-only, never lifetime energy.
                 if observed <= at:
-                    session.meter(self.state, role, value, observed, boundary=True)
+                    session.meter(
+                        self.state,
+                        role,
+                        value,
+                        observed,
+                        boundary=event_type in ("Started", "Ended"),
+                    )
             if (
                 "charging_state" in self.state.missing
                 and missing != self.listener.initialization["missing"]

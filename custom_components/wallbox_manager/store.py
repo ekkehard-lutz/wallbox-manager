@@ -34,6 +34,7 @@ class State:
         self.add_session = lambda scope: None
         self.add_active = lambda scope: None
         self.connected = False
+        self.registered_generation = None
         self.identity = {}
         self.observations = {}
         self.listeners = {}
@@ -119,6 +120,9 @@ class State:
         at = at or now
         if at.utcoffset() is None or at < self.epoch or at > now + timedelta(seconds=5):
             return False
+        charging_before = (
+            self.charging_value(self.binding) if key[2] == "connector_state" else None
+        )
         previous = self.observations.get(key)
         same_generation = previous and previous.generation == generation
         phase = key[0] == "station" and key[2] == "physical_phases"
@@ -187,10 +191,33 @@ class State:
             or (phase and before != self.last_observed_value(key))
         ):
             self.publish(key)
+        if key[2] == "connector_state":
+            charging = ("observation", self.binding, "charging_state")
+            if self.add_sensor:
+                self.add_sensor(charging)
+            if charging_before != self.charging_value(self.binding):
+                self.publish(charging)
         if key[2] in self.missing and value is not None:
             self.missing.discard(key[2])
             self.publish(("station", (self.binding[0], None, None), "discovery"))
         return True
+
+    def charging_value(self, scope):
+        """Display projection only; never insert a synthetic observation."""
+        key = ("observation", tuple(scope), "charging_state")
+        observation = self.observations.get(key)
+        if observation and self.current(observation.generation):
+            # An explicit unknown/conflict must not be disguised as idle.
+            return self.value(key)
+        if (
+            tuple(scope) == self.binding
+            and self.current(self.registered_generation)
+            and self.value(("observation", self.binding, "connector_state"))
+            == "available"
+            and (self.session is None or self.session["ended_at"] is not None)
+        ):
+            return "idle"
+        return None
 
     def value(self, key):
         """Current-generation last value, tolerating one invalid phase report."""

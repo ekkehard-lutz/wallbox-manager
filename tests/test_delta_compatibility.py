@@ -167,6 +167,7 @@ async def test_idle_initialization_is_contextual_without_synthetic_observations(
     entry = await ha.install()
     state, listener = entry.runtime_data.state, entry.runtime_data.server
     generation = state.reset(connected=True)
+    state.registered_generation = generation
     listener._initialization = "missing"
     adapter = Adapter(Mock(), listener, generation)
     # Supply all other supported fields through their real adapter paths.
@@ -303,7 +304,7 @@ async def test_changed_transaction_energy_needs_no_periodic_refresh(ha):
     transaction("Updated", 1, 1001)
     assert session.view(state, datetime.now(UTC))["energy"] == pytest.approx(0.001)
     transaction("Updated", 2)  # Omitted unchanged energy retains the last value.
-    assert state.session["end_meter"] == 1.001
+    assert state.session["current_meter"] == 1.001
     assert not state.session["energy_invalid"]
     transaction("Updated", 3, 1001)  # A repeated value is harmless.
     # Lifetime energy must not enter the transaction-scoped stream.
@@ -318,7 +319,7 @@ async def test_changed_transaction_energy_needs_no_periodic_refresh(ha):
             }
         ],
     )
-    assert state.session["end_meter"] == 1.001
+    assert state.session["current_meter"] == 1.001
     assert state.value(("observation", ("Wallbox01", "1", None), "energy")) == 999.999
     # Reconnect/TxResumed retains the same session and its energy baseline.
     previous_generation = generation
@@ -329,7 +330,7 @@ async def test_changed_transaction_energy_needs_no_periodic_refresh(ha):
     assert state.session["generation"] == list(generation)
     assert state.session["start_meter"] == 1
     transaction("Updated", 5, 1001.00001)
-    assert state.session["end_meter"] == 1.00100001
+    assert state.session["current_meter"] == 1.00100001
     assert session.view(state, datetime.now(UTC))["energy"] == pytest.approx(0.00100001)
     before = deepcopy(state.session)
     transaction("Updated", 5, 2000)  # Replayed sequence cannot change session energy.
@@ -400,7 +401,8 @@ async def test_transaction_energy_cannot_replace_a_lifetime_session_stream(ha):
             }
         ],
     )
-    assert state.session["end_meter"] == 100
+    assert state.session["current_meter"] == 100
+    assert state.session["end_meter"] is None
     stream = deepcopy(state.session["energy_channel"])
     at = datetime.now(UTC).isoformat()
     adapter.transaction(
@@ -418,7 +420,8 @@ async def test_transaction_energy_cannot_replace_a_lifetime_session_stream(ha):
         ],
     )
     assert state.session["energy_channel"] == stream
-    assert state.session["end_meter"] == 100
+    assert state.session["current_meter"] == 100
+    assert state.session["end_meter"] is None
     assert state.session["start_meter"] is None
     assert state.session["energy"] is None
     assert not state.session["energy_invalid"]
