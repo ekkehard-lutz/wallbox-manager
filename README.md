@@ -2,10 +2,12 @@
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This development branch extends the passive rebuild for OCPP **2.1**, targeting the supported
-wallbox-stationary interface. The integration version is **0.4.0-beta.6**;
-see the [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) for Idle display,
-session meter corrections and migration details. The immutable
+This prerelease extends the passive rebuild for OCPP **2.1**, targeting the
+supported wallbox-stationary interface. The integration version is
+**0.4.0-beta.7**; see the [beta.7 release notes](docs/v0.4/release-notes-beta.7.md)
+for explicit authority takeover, independent charging permission and recovery.
+The [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) retain the historical
+Idle display, session meter corrections and migration details. The immutable
 [`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
 remains the historical v0.3 reference and rollback source.
 
@@ -63,11 +65,12 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-The active foundation on this branch is unreleased; the manifest version remains
-unchanged. For separately authorized testing of the released passive baseline,
-select **v0.4.0-beta.6** through the HACS
-prerelease versions and verify integration version **0.4.0-beta.6** after the
+For separately authorized testing, select **v0.4.0-beta.7** through the HACS
+prerelease versions and verify integration version **0.4.0-beta.7** after the
 operator performs installation and the Home Assistant restart. Publication does
-not include installation or physical validation.
+not include installation or physical validation. Charging profiles remain
+configuration-only: NETZ/PV regulation, vehicle wake-up and current/phase control
+are not included. If an accepted takeover is unconfirmed, another explicit
+Take Control action reads authority again without repeating the write.
 
 See [passive Recorder efficiency, availability and configuration](docs/v0.4/recorder-availability-report.md) for timestamp compatibility changes, diagnostics and measured before/after counts.
