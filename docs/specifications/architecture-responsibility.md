@@ -12,7 +12,7 @@ reject or safely handle unacceptable requests. WBM cannot certify hardware safet
 | Stable ID | Approved requirement |
 | --- | --- |
 | WBM-ARCH-01 | The station owns all hardware protection, physical current/phase limits, electrical fault handling, charging interlocks, CP operation and safe phase switching, including meter checks, relay sequencing and safe restoration. WBM does not duplicate these protections. |
-| WBM-ARCH-02 | WBM owns profiles, desired charging points, optimization, diagnostics and truthful user presentation. |
+| WBM-ARCH-02 | WBM owns profiles, desired charging points, optimization, diagnostics and truthful user presentation. AUTO-WAKE-01–10 assign automatic vehicle wake-up detection/delay/execution to Stationary; WBM supplies only the enable switch. |
 | WBM-ARCH-03 | Every WBM charging command is a proposal to the station, not an independently safety-certified instruction. Incomplete or old observations may yield suboptimal proposals; station enforcement remains mandatory. |
 | WBM-ARCH-04 | Station rejection, delay or adjustment is normal. WBM handles outcomes, retains requested/applied distinctions and must not claim success, invent a response or replay obsolete intent. |
 | WBM-ARCH-05 | All ordinary measurements and reported states are last-value-held within their observation generation, without TTL or age-based expiry. This includes voltage, current, power, energy, phases, permission, authority, connector/charging status and ordinary HA/forecast inputs. |

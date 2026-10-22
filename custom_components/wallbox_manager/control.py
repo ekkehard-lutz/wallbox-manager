@@ -13,13 +13,8 @@ DISPATCH = ContextVar("wbm_control_dispatch", default=None)
 ROLES = {
     "ControlAuthority": "control_authority",
     "ChargingEnabled": "charging_enabled",
-    "WakeUpVehicle": "wake_up_vehicle",
+    "AutoWakeUpEnabled": "auto_wakeup_enabled",
 }
-WAKEUP_VENDOR = "wallbox-stationary"
-WAKEUP_MESSAGE = "WakeUpVehicle"
-# Maximum configured hold (300 s), CP feedback (4 s) and hardware/transport margin.
-WAKEUP_TIMEOUT = 360
-WAKEUP_DATA = {"evseId": 1}
 
 
 def endpoint(name):
@@ -51,8 +46,8 @@ class Control:
 
     def key(self, name):
         state = self.listener.state
-        if name == "WakeUpVehicle":
-            return ("station", (state.binding[0], None, None), "wake_up_vehicle")
+        if name == "AutoWakeUpEnabled":
+            return ("station", (state.binding[0], None, None), "auto_wakeup_enabled")
         return (
             ("station", (state.binding[0], None, None), "control_authority")
             if name == "ControlAuthority"
@@ -65,13 +60,10 @@ class Control:
             return "disconnected"
         if not self.listener.state.current(self.listener.state.registered_generation):
             return "not_registered"
-        if name == "WakeUpVehicle":
-            if self.listener.state.binding[1] != "1":
-                return "unsupported_evse"
-        elif name not in adapter.writable:
+        if name not in adapter.writable:
             return "unsupported"
         if (
-            name in ("ChargingEnabled", "WakeUpVehicle")
+            name in ("ChargingEnabled", "AutoWakeUpEnabled")
             and self.listener.state.value(self.key("ControlAuthority")) != "remote"
         ):
             return "no_authority"
@@ -143,7 +135,7 @@ class Control:
         allowed = {
             "ControlAuthority": ("OCPP",),
             "ChargingEnabled": ("true", "false"),
-            "WakeUpVehicle": ("1",),
+            "AutoWakeUpEnabled": ("true", "false"),
         }
         if value not in allowed.get(name, ()):
             raise ValueError("Unsupported control intent")
@@ -192,8 +184,7 @@ class Control:
         expected = "remote" if name == "ControlAuthority" else value == "true"
         # An opposite in-flight write may still take effect: send corrective intent.
         if (
-            name != "WakeUpVehicle"
-            and not unresolved_opposite
+            not unresolved_opposite
             and (not old or not old.task or old.task.done())
             and self.listener.state.value(self.key(name)) == expected
         ):
@@ -203,8 +194,6 @@ class Control:
         return await asyncio.shield(intent.task)
 
     async def execute(self, intent):
-        if intent.name == "WakeUpVehicle":
-            return await self.execute_wakeup(intent)
         item = {
             **endpoint(intent.name),
             "attribute_type": "Actual",
@@ -304,88 +293,4 @@ class Control:
             self.update(intent, intent.status, "readback_communication_failure")
         if not self.valid(intent):
             self.update(intent, "superseded", "authority_or_intent_changed")
-        return intent.status
-
-    async def execute_wakeup(self, intent):
-        def guard(action, wire):
-            if (
-                action != "DataTransfer"
-                or not self.valid(intent)
-                or wire
-                != {
-                    "vendorId": WAKEUP_VENDOR,
-                    "messageId": WAKEUP_MESSAGE,
-                    "data": WAKEUP_DATA,
-                }
-                or type(wire["data"]["evseId"]) is not int
-            ):
-                raise Refused("Unsupported or superseded wake-up command")
-            intent.dispatched_at = datetime.now(UTC)
-
-        token = DISPATCH.set(guard)
-        try:
-            response = await intent.adapter.request(
-                call.DataTransfer(
-                    vendor_id=WAKEUP_VENDOR,
-                    message_id=WAKEUP_MESSAGE,
-                    data={"evse_id": 1},
-                ),
-                response_timeout=WAKEUP_TIMEOUT,
-            )
-            if not self.valid(intent):
-                self.update(intent, "superseded", "authority_or_intent_changed")
-                return intent.status
-            status, data = response.status, response.data
-            if (
-                status == "Accepted"
-                and data == {"result": "completed", "cp_restored": True}
-                and data["cp_restored"] is True
-            ):
-                # Confirm the CP operation, never an awakened/charging vehicle.
-                self.update(intent, "confirmed", "cp_restored")
-            elif (status, data) in (
-                ("UnknownVendorId", {"result": "unsupported_vendor"}),
-                ("UnknownMessageId", {"result": "unsupported_message"}),
-            ):
-                self.update(intent, "unsupported", data["result"])
-            elif (
-                status == "Rejected"
-                and isinstance(data, dict)
-                and (
-                    (
-                        set(data) == {"result"}
-                        and data["result"]
-                        in (
-                            "invalid_request",
-                            "unsupported_evse",
-                            "not_registered",
-                            "no_authority",
-                            "unsupported",
-                            "busy",
-                            "unsafe_pause",
-                            "unsafe_evidence",
-                            "hardware_failure",
-                        )
-                    )
-                    or (
-                        data.get("result") in ("wakeup_failed", "restoration_unknown")
-                        and set(data) == {"result", "cp_restored"}
-                        and data["cp_restored"] is (data["result"] == "wakeup_failed")
-                    )
-                )
-            ):
-                self.update(intent, "rejected", data["result"])
-            else:
-                self.update(intent, "communication_failure", "mismatched_response")
-        except Refused:
-            self.update(intent, "superseded", "dispatch_refused")
-        except TimeoutError:
-            self.update(intent, "timeout", "response_timeout")
-        except OSError, OCPPError, ConnectionClosed:
-            self.update(intent, "communication_failure", "transport_failure")
-        except asyncio.CancelledError:
-            self.update(intent, "superseded", "cancelled")
-            raise
-        finally:
-            DISPATCH.reset(token)
         return intent.status

@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import math
-from contextvars import ContextVar
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
 
@@ -34,7 +33,6 @@ CAPABILITIES = {
     "ChargingEnableDisableSupported": "enable_disable",
 }
 READ_ONLY = {"GetBaseReport", "GetVariables"}
-RESPONSE_TIMEOUT = ContextVar("wbm_response_timeout", default=None)
 
 
 class Listener:
@@ -198,25 +196,9 @@ class Adapter(ChargePoint):
         task.add_done_callback(settled)
         return task
 
-    async def _get_specific_response(self, unique_id, response_timeout):
-        extended = RESPONSE_TIMEOUT.get()
-        token = RESPONSE_TIMEOUT.set(None)
-        try:
-            # The library recurses with its remaining budget for unrelated IDs.
-            return await super()._get_specific_response(
-                unique_id, extended or response_timeout
-            )
-        finally:
-            RESPONSE_TIMEOUT.reset(token)
-
-    async def request(self, payload, *, response_timeout=None):
-        # Don't release the library's serial response consumer while an obsolete
-        # boot request is still in flight. Teardown owns and joins the pending call.
-        token = RESPONSE_TIMEOUT.set(response_timeout)
-        try:
-            pending = self.spawn(super().call(payload, suppress=False))
-        finally:
-            RESPONSE_TIMEOUT.reset(token)
+    async def request(self, payload):
+        # The adapter owns the response consumer even when its caller is cancelled.
+        pending = self.spawn(super().call(payload, suppress=False))
         try:
             response = await asyncio.shield(pending)
         except (TimeoutError, OSError, OCPPError, ConnectionClosed) as exc:
@@ -235,7 +217,7 @@ class Adapter(ChargePoint):
         wire = json.loads(message)
         if wire[0] == 2 and wire[2] not in READ_ONLY:
             guard = DISPATCH.get()
-            if wire[2] not in ("SetVariables", "DataTransfer") or guard is None:
+            if wire[2] != "SetVariables" or guard is None:
                 raise RuntimeError("OCPP boundary forbids unsupported control commands")
             guard(wire[2], wire[3])
         await super()._send(message)
@@ -268,6 +250,7 @@ class Adapter(ChargePoint):
                 "charging_state",
                 "control_authority",
                 "charging_enabled",
+                "auto_wakeup_enabled",
                 "physical_phases",
             )
             and previous != self.state.value(key)
@@ -280,12 +263,16 @@ class Adapter(ChargePoint):
             )
             if key[2] == "connector_state":
                 self.state.publish(("station", (key[1][0], None, None), "discovery"))
-        if accepted and key[2] in ("control_authority", "charging_enabled"):
+        if accepted and key[2] in (
+            "control_authority",
+            "charging_enabled",
+            "auto_wakeup_enabled",
+        ):
             for name in ROLES:
                 if key == self.listener.control.key(name):
                     if name == "ControlAuthority" and previous != self.state.value(key):
                         self.listener.control.authority_revision += 1
-                        for dependent in ("ChargingEnabled", "WakeUpVehicle"):
+                        for dependent in ("ChargingEnabled", "AutoWakeUpEnabled"):
                             intent = self.listener.control.intents.get(dependent)
                             if intent and intent.status in (
                                 "pending",
@@ -547,12 +534,14 @@ class Adapter(ChargePoint):
                 "ocpp2.1:" + source,
                 at,
             )
-        elif component == {"name": "WallboxController"} and variable == {
-            "name": "ChargingEnabled"
-        }:
+        elif component == {"name": "WallboxController"} and variable in (
+            {"name": "ChargingEnabled"},
+            {"name": "AutoWakeUpEnabled"},
+        ):
+            key = self.listener.control.key(variable["name"])
             self.observe(
                 generation,
-                ("control", self.state.binding, "charging_enabled"),
+                key,
                 {"true": True, "false": False}.get(value),
                 "ocpp2.1:" + source,
                 at,
@@ -609,6 +598,7 @@ class Adapter(ChargePoint):
             or row.get("attribute_value")
             not in {
                 "ChargingEnabled": ("true", "false"),
+                "AutoWakeUpEnabled": ("true", "false"),
                 "ControlAuthority": ("Local", "OCPP"),
                 "PhaseRotation": ("Rxx", "RST"),
             }.get(endpoint["variable"]["name"], ())
@@ -668,7 +658,7 @@ class Adapter(ChargePoint):
             if len(permissions) > 1:
                 raise ValueError("Ambiguous permission inventory")
             # Unique station-scoped Actual ReadWrite endpoints authorize writes.
-            for name in ("ControlAuthority", "ChargingEnabled"):
+            for name in ROLES:
                 matches = [
                     r
                     for r in report["rows"]
@@ -768,6 +758,7 @@ class Adapter(ChargePoint):
                     in (
                         "ControlAuthority",
                         "ChargingEnabled",
+                        "AutoWakeUpEnabled",
                         "PhaseRotation",
                     )
                     and attr.get("mutability", "ReadOnly") in ("ReadOnly", "ReadWrite")

@@ -1,382 +1,268 @@
-"""Explicit HA wake-up entity, exact OCPP frames, outcomes and generation fences."""
+"""Confirmed persistent station enable switch; WBM never detects or times wake-up."""
 
 import asyncio
 import json
-from unittest.mock import AsyncMock
 
 import pytest
 from conftest import config, entities, eventually
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
-from ocpp.routing import on
-from ocpp.v21 import call, call_result
+from ocpp.v21 import call
 from test_active_control import Controllable, event, observed, ready
-from test_protocol import peer
+from test_protocol import peer, row
 
-from custom_components.wallbox_manager.control import (
-    DISPATCH,
-    WAKEUP_MESSAGE,
-    WAKEUP_TIMEOUT,
-    WAKEUP_VENDOR,
-)
-from custom_components.wallbox_manager.ocpp import Adapter
+from custom_components.wallbox_manager import async_unload_entry
+from custom_components.wallbox_manager.control import endpoint
 
 
-class WakeupStation(Controllable):
+class AutomaticStation(Controllable):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.values["ControlAuthority"] = "OCPP"
-        self.wake_requests = []
-        self.wake_status = "Accepted"
-        self.wake_data = {"result": "completed", "cp_restored": True}
-
-    @on("DataTransfer")
-    async def wake(self, vendor_id, message_id, data):
-        self.wake_requests.append((vendor_id, message_id, data))
-        self.started.set()
-        if self.release:
-            await self.release.wait()
-        return call_result.DataTransfer(status=self.wake_status, data=self.wake_data)
+        self.values["AutoWakeUpEnabled"] = "false"
+        automatic = row("WallboxController", "AutoWakeUpEnabled", "false")
+        automatic["variable_attribute"][0].update(
+            mutability="ReadWrite", persistent=True
+        )
+        self.rows.append(automatic)
 
 
-def button(ha, entry):
-    return next(e for e in entities(ha, entry) if e.role == "wake_up_vehicle")
+class PersistedOnStation(AutomaticStation):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.values["AutoWakeUpEnabled"] = "true"
 
 
-async def test_button_registration_identity_and_no_optimistic_vehicle_state(ha):
+def switch(ha, entry):
+    return next(e for e in entities(ha, entry) if e.role == "auto_wakeup_enabled")
+
+
+async def test_switch_identity_device_names_and_no_manual_button(ha):
     entry = await ha.install()
-    wake = button(ha, entry)
-    assert wake.unique_id == f"{entry.entry_id}:Wallbox01:wake_up_vehicle"
-    assert wake.translation_key == "wake_up_vehicle"
-    assert not wake.available
-    assert wake.should_poll is False
-    assert wake.entity_category is None
-    registry = er.async_get(ha).async_get(wake.entity_id)
-    assert registry.config_entry_id == entry.entry_id
-    assert registry.device_id
-    assert registry.hidden_by is None and registry.disabled_by is None
-    takeover = next(e for e in entities(ha, entry) if e.role == "take_control")
+    automatic = switch(ha, entry)
+    assert automatic.unique_id == f"{entry.entry_id}:Wallbox01:auto_wakeup_enabled"
+    assert automatic.translation_key == "auto_wakeup_enabled"
+    assert automatic.should_poll is False
+    assert not automatic.available
+    assert automatic.is_on is None
     assert (
-        er.async_get(ha).async_get(takeover.entity_id).device_id == registry.device_id
+        automatic.extra_state_attributes["state_represents"]
+        == "confirmed_station_setting"
     )
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        assert wake.available
-        state = entry.runtime_data.state
-        before = dict(state.observations), state.session
-        await wake.async_press()
-        assert station.wake_requests == [
-            (WAKEUP_VENDOR, WAKEUP_MESSAGE, {"evse_id": 1})
-        ]
-        assert not station.writes
-        assert (dict(state.observations), state.session) == before
-        assert observed(entry, "ChargingEnabled") is True
-        assert wake.extra_state_attributes["command_status"] == "confirmed"
-        assert wake.extra_state_attributes["command_reason"] == "cp_restored"
-        # A later explicit press is a new operation, never skipped as already observed.
-        await wake.async_press()
-        assert len(station.wake_requests) == 2
-        assert control.intents["WakeUpVehicle"].dispatched_at is not None
+    assert not any(e.role == "wake_up_vehicle" for e in entities(ha, entry))
+    registry = er.async_get(ha)
+    item = registry.async_get(automatic.entity_id)
+    takeover = next(e for e in entities(ha, entry) if e.role == "take_control")
+    assert item.device_id == registry.async_get(takeover.entity_id).device_id
+    assert item.disabled_by is None and item.hidden_by is None
+    for filename, label in [
+        ("en.json", "Automatic vehicle wake-up"),
+        ("de.json", "Automatisches Aufwecken"),
+    ]:
+        from pathlib import Path
 
-
-@pytest.mark.parametrize(
-    "status,data,expected,reason",
-    [
-        ("Rejected", {"result": "busy"}, "rejected", "busy"),
-        ("Rejected", {"result": "unsafe_pause"}, "rejected", "unsafe_pause"),
-        ("Rejected", {"result": "unsafe_evidence"}, "rejected", "unsafe_evidence"),
-        ("Rejected", {"result": "no_authority"}, "rejected", "no_authority"),
-        ("Rejected", {"result": "hardware_failure"}, "rejected", "hardware_failure"),
-        (
-            "Rejected",
-            {"result": "wakeup_failed", "cp_restored": True},
-            "rejected",
-            "wakeup_failed",
-        ),
-        (
-            "Rejected",
-            {"result": "restoration_unknown", "cp_restored": False},
-            "rejected",
-            "restoration_unknown",
-        ),
-        (
-            "UnknownVendorId",
-            {"result": "unsupported_vendor"},
-            "unsupported",
-            "unsupported_vendor",
-        ),
-        (
-            "UnknownMessageId",
-            {"result": "unsupported_message"},
-            "unsupported",
-            "unsupported_message",
-        ),
-        ("Accepted", None, "communication_failure", "mismatched_response"),
-        (
-            "Accepted",
-            {"result": "completed", "cp_restored": False},
-            "communication_failure",
-            "mismatched_response",
-        ),
-        (
-            "Accepted",
-            {"result": "completed", "cp_restored": 1},
-            "communication_failure",
-            "mismatched_response",
-        ),
-        (
-            "Rejected",
-            {"result": "arbitrary backend exception"},
-            "communication_failure",
-            "mismatched_response",
-        ),
-        (
-            "Rejected",
-            {"result": "restoration_unknown", "cp_restored": True},
-            "communication_failure",
-            "mismatched_response",
-        ),
-    ],
-)
-async def test_bounded_outcomes_are_exposed_without_claiming_vehicle_awake(
-    ha, status, data, expected, reason
-):
-    entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        station.wake_status, station.wake_data = status, data
-        wake = button(ha, entry)
-        with pytest.raises(HomeAssistantError):
-            await wake.async_press()
-        assert control.attributes("WakeUpVehicle")["command_status"] == expected
-        assert control.attributes("WakeUpVehicle")["command_reason"] == reason
-        assert observed(entry, "ChargingEnabled") is True
-
-
-@pytest.mark.parametrize("authority", ["Local", None])
-async def test_local_and_unknown_authority_never_dispatch(ha, authority):
-    entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        event(entry, "ControlAuthority", authority)
-        assert not button(ha, entry).available
-        assert await control.request("WakeUpVehicle", "1") == "rejected"
-        assert not station.wake_requests
-
-
-async def test_disconnected_unregistered_and_unsupported_evse_never_dispatch(ha):
-    entry = await ha.install()
-    control = entry.runtime_data.server.control
-    assert await control.request("WakeUpVehicle", "1") == "rejected"
-    async with peer(entry, station_type=WakeupStation) as station:
-        await ready(entry, station)
-        state = entry.runtime_data.state
-        state.registered_generation = None
-        assert await control.request("WakeUpVehicle", "1") == "rejected"
-        state.registered_generation = state.generation
-        state.binding = (state.binding[0], "2", "1")
-        assert await control.request("WakeUpVehicle", "1") == "rejected"
-        assert (
-            control.attributes("WakeUpVehicle")["execution_blocked_reason"]
-            == "unsupported_evse"
-        )
-        assert not station.wake_requests
-
-
-async def test_concurrent_presses_and_cancelled_caller_share_owned_request(ha):
-    entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        station.release = asyncio.Event()
-        first = asyncio.create_task(control.request("WakeUpVehicle", "1"))
-        await station.started.wait()
-        second = asyncio.create_task(control.request("WakeUpVehicle", "1"))
-        await asyncio.sleep(0)
-        first.cancel()
-        await asyncio.gather(first, return_exceptions=True)
-        assert control.intents["WakeUpVehicle"].status == "pending"
-        station.release.set()
-        assert await second == "confirmed"
-        assert len(station.wake_requests) == 1
-
-
-async def test_authority_loss_and_reacquisition_supersede_response(ha):
-    entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        station.release = asyncio.Event()
-        pending = asyncio.create_task(control.request("WakeUpVehicle", "1"))
-        await station.started.wait()
-        event(entry, "ControlAuthority", "Local")
-        assert control.attributes("WakeUpVehicle")["command_status"] == "superseded"
-        assert not button(ha, entry).available
-        event(entry, "ControlAuthority", "OCPP")
-        station.release.set()
-        assert await pending == "superseded"
-        assert len(station.wake_requests) == 1
-
-
-@pytest.mark.parametrize("evse", [2, True])
-async def test_dispatch_revalidates_authority_and_exact_payload(ha, monkeypatch, evse):
-    entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        adapter = entry.runtime_data.server.adapter
-        original = adapter._send
-        mutate = True
-
-        async def altered(message):
-            nonlocal mutate
-            frame = json.loads(message)
-            if frame[0] == 2 and frame[2] == "DataTransfer" and mutate:
-                mutate = False
-                frame[3]["data"]["evseId"] = evse
-                message = json.dumps(frame)
-            await original(message)
-
-        monkeypatch.setattr(adapter, "_send", altered)
-        assert await control.request("WakeUpVehicle", "1") == "superseded"
-        assert not station.wake_requests
-        # Wait under the existing transport lock, then lose authority before dispatch.
-        async with adapter._call_lock:
-            pending = asyncio.create_task(control.request("WakeUpVehicle", "1"))
-            await eventually(lambda: control.intents["WakeUpVehicle"].task is not None)
-            await asyncio.sleep(0)
-            event(entry, "ControlAuthority", "Local")
-        assert await pending == "superseded"
-        assert not station.wake_requests
-
-
-@pytest.mark.parametrize(
-    "failure,expected", [(TimeoutError, "timeout"), (OSError, "communication_failure")]
-)
-async def test_transport_failure_is_reported(ha, monkeypatch, failure, expected):
-    entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        monkeypatch.setattr(
-            entry.runtime_data.server.adapter, "request", AsyncMock(side_effect=failure)
-        )
-        assert await control.request("WakeUpVehicle", "1") == expected
-        assert not station.wake_requests
-
-
-async def test_only_wakeup_extends_response_wait_and_preserves_general_timeout(
-    ha, monkeypatch
-):
-    entry = await ha.install()
-    waits = []
-    original = Adapter._get_specific_response
-
-    async def record(adapter, unique_id, response_timeout):
-        from custom_components.wallbox_manager.ocpp import RESPONSE_TIMEOUT
-
-        waits.append(RESPONSE_TIMEOUT.get() or response_timeout)
-        return await original(adapter, unique_id, response_timeout)
-
-    monkeypatch.setattr(Adapter, "_get_specific_response", record)
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        general = entry.runtime_data.server.adapter._response_timeout
-        waits.clear()
-        assert await control.request("WakeUpVehicle", "1") == "confirmed"
-        assert waits == [WAKEUP_TIMEOUT]
-        waits.clear()
-        assert await control.request("ChargingEnabled", "false") == "confirmed"
-        assert waits and all(wait == general for wait in waits)
-        assert entry.runtime_data.server.adapter._response_timeout == general
-        assert WAKEUP_TIMEOUT >= 300 + 4
-
-
-@pytest.mark.parametrize("change", ["disconnect", "boot"])
-async def test_disconnect_and_boot_supersede_without_replay(ha, change):
-    entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        control = await ready(entry, station)
-        adapter = entry.runtime_data.server.adapter
-        station.release = asyncio.Event()
-        pending = asyncio.create_task(control.request("WakeUpVehicle", "1"))
-        await station.started.wait()
-        if change == "disconnect":
-            await station._connection.close()
-            await eventually(lambda: adapter.closed)
-            station.release.set()
-            await asyncio.gather(pending, return_exceptions=True)
-        else:
-            generation = adapter.generation
-            await station._connection.send(
-                json.dumps(
-                    [
-                        2,
-                        "reboot",
-                        "BootNotification",
-                        {
-                            "chargingStation": {
-                                "vendorName": "Test",
-                                "model": "Wakeup",
-                            },
-                            "reason": "PowerUp",
-                        },
-                    ]
-                )
+        labels = json.loads(
+            await asyncio.to_thread(
+                Path(
+                    "custom_components/wallbox_manager/translations", filename
+                ).read_text
             )
-            await eventually(lambda: adapter.generation != generation)
-            station.release.set()
-            assert await pending == "superseded"
-        assert control.intents["WakeUpVehicle"].status == "superseded"
-        assert len(station.wake_requests) == 1
-    async with peer(entry, station_type=WakeupStation) as station:
+        )
+        assert labels["entity"]["switch"]["auto_wakeup_enabled"]["name"] == label
+        assert "wake_up_vehicle" not in labels["entity"]["button"]
+    async with peer(entry, station_type=AutomaticStation) as station:
         await ready(entry, station)
-        assert not station.wake_requests
+        assert automatic.available and automatic.is_on is False
+        await automatic.async_turn_on()
+        assert automatic.is_on is True
+        assert station.writes == [
+            {
+                **endpoint("AutoWakeUpEnabled"),
+                "attribute_type": "Actual",
+                "attribute_value": "true",
+            }
+        ]
+        await automatic.async_turn_off()
+        assert automatic.is_on is False
+        assert observed(entry, "ChargingEnabled") is True
+        assert observed(entry, "ControlAuthority") == "remote"
+
+
+async def test_ack_without_confirmed_setting_is_not_optimistic(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=AutomaticStation) as station:
+        control = await ready(entry, station)
+        station.apply = False
+        with pytest.raises(HomeAssistantError, match="accepted_unconfirmed"):
+            await switch(ha, entry).async_turn_on()
+        assert switch(ha, entry).is_on is False
+        assert (
+            control.attributes("AutoWakeUpEnabled")["command_status"]
+            == "accepted_unconfirmed"
+        )
+        event(entry, "AutoWakeUpEnabled", "true")
+        assert switch(ha, entry).is_on is True
+        assert control.attributes("AutoWakeUpEnabled")["command_status"] == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "result,status", [("Rejected", "rejected"), ("UnknownVariable", "unsupported")]
+)
+async def test_persistence_or_unsupported_rejection_preserves_observed_setting(
+    ha, result, status
+):
+    entry = await ha.install()
+    async with peer(entry, station_type=AutomaticStation) as station:
+        control = await ready(entry, station)
+        station.result = result
+        with pytest.raises(HomeAssistantError):
+            await switch(ha, entry).async_turn_on()
+        assert switch(ha, entry).is_on is False
+        assert control.attributes("AutoWakeUpEnabled")["command_status"] == status
+
+
+async def test_authority_changes_preserve_setting_and_disable_control(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=PersistedOnStation) as station:
+        control = await ready(entry, station)
+        automatic = switch(ha, entry)
+        assert automatic.is_on is True and automatic.available
+        event(entry, "ControlAuthority", "Local")
+        assert automatic.is_on is True and not automatic.available
+        assert await control.request("AutoWakeUpEnabled", "false") == "rejected"
         assert not station.writes
-        assert control.intents["WakeUpVehicle"].status == "superseded"
+        event(entry, "ControlAuthority", "OCPP")
+        assert automatic.is_on is True and automatic.available
+        assert not station.writes
 
 
-async def test_multiple_entries_and_direct_datatransfer_restriction(ha):
+async def test_bootstrap_and_reconnect_read_persisted_on_without_default_write(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=PersistedOnStation) as station:
+        await ready(entry, station)
+        assert switch(ha, entry).is_on is True
+        assert "AutoWakeUpEnabled" in station.reads
+        assert not station.writes
+    await eventually(lambda: not entry.runtime_data.state.connected)
+    assert switch(ha, entry).is_on is None
+    assert not switch(ha, entry).available
+    async with peer(entry, station_type=PersistedOnStation) as station:
+        await ready(entry, station)
+        assert switch(ha, entry).is_on is True
+        assert not station.writes
+    await async_unload_entry(ha, entry)
+    await ha.install(entry)
+    async with peer(entry, station_type=PersistedOnStation) as station:
+        await ready(entry, station)
+        assert switch(ha, entry).is_on is True
+        assert not station.writes
+
+
+async def test_concurrent_writes_coalesce_and_authority_loss_fences_confirmation(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=AutomaticStation) as station:
+        control = await ready(entry, station)
+        station.release = asyncio.Event()
+        first = asyncio.create_task(control.request("AutoWakeUpEnabled", "true"))
+        await station.started.wait()
+        second = asyncio.create_task(control.request("AutoWakeUpEnabled", "true"))
+        await asyncio.sleep(0)
+        event(entry, "ControlAuthority", "Local")
+        station.release.set()
+        assert await first == await second == "superseded"
+        assert len(station.writes) == 1
+        assert not switch(ha, entry).available
+
+
+async def test_notifications_are_scoped_and_unchanged_values_do_not_publish(ha):
     one, two = await ha.install(), await ha.install(config())
     async with (
-        peer(one, station_type=WakeupStation) as a,
-        peer(two, station_type=WakeupStation) as b,
+        peer(one, station_type=AutomaticStation) as a,
+        peer(two, station_type=AutomaticStation) as b,
     ):
         ca, cb = await ready(one, a), await ready(two, b)
-        assert await ca.request("WakeUpVehicle", "1") == "confirmed"
-        assert not b.wake_requests
-        assert cb.intents == {}
+        writes = []
+        remove = one.runtime_data.state.watch(
+            ca.key("AutoWakeUpEnabled"), lambda: writes.append(True)
+        )
+        event(one, "AutoWakeUpEnabled", "true")
+        assert switch(ha, one).is_on is True and switch(ha, two).is_on is False
+        event(one, "AutoWakeUpEnabled", "true")
+        assert len(writes) == 1
+        event(
+            one,
+            "AutoWakeUpEnabled",
+            "false",
+            component={"name": "WallboxController", "evse": {"id": 1}},
+        )
+        assert switch(ha, one).is_on is True
+        assert cb.intents == {} and not b.writes
+        remove()
+
+
+async def test_legacy_registry_button_is_retired_without_foreign_removal(ha):
+    entry = await ha.install()
+    registry = er.async_get(ha)
+    legacy = registry.async_get_or_create(
+        "button",
+        "wallbox_manager",
+        f"{entry.entry_id}:Wallbox01:wake_up_vehicle",
+        config_entry=entry,
+    )
+    foreign = registry.async_get_or_create(
+        "button",
+        "wallbox_manager",
+        "foreign:Wallbox01:wake_up_vehicle",
+        config_entry=entry,
+    )
+    await async_unload_entry(ha, entry)
+    await ha.install(entry)
+    assert registry.async_get(legacy.entity_id) is None
+    assert registry.async_get(foreign.entity_id) is not None
+    assert not any(e.role == "wake_up_vehicle" for e in entities(ha, entry))
+
+
+@pytest.mark.parametrize("writable", [False, True])
+async def test_exact_authorization_and_legacy_datatransfer_stays_blocked(ha, writable):
+    entry = await ha.install()
+    async with peer(entry, station_type=AutomaticStation) as station:
+        control = await ready(entry, station)
+        adapter = entry.runtime_data.server.adapter
+        if not writable:
+            adapter.writable.discard("AutoWakeUpEnabled")
+            assert await control.request("AutoWakeUpEnabled", "true") == "unsupported"
         for payload in [
             call.DataTransfer(
-                vendor_id=WAKEUP_VENDOR, message_id=WAKEUP_MESSAGE, data={"evse_id": 1}
+                vendor_id="wallbox-stationary",
+                message_id="WakeUpVehicle",
+                data={"evse_id": 1},
             ),
-            call.DataTransfer(vendor_id="arbitrary", data={}),
+            call.SetVariables(
+                set_variable_data=[
+                    {**endpoint("AutoWakeUpEnabled"), "attribute_value": "true"}
+                ]
+            ),
         ]:
             with pytest.raises(RuntimeError, match="boundary"):
-                await two.runtime_data.server.adapter.request(payload)
-        assert not b.wake_requests
-        assert DISPATCH.get() is None
+                await adapter.request(payload)
+        assert not station.writes
 
 
-async def test_unmatched_responses_do_not_restart_extended_deadline(ha, monkeypatch):
-    from ocpp.v21 import ChargePoint
-
-    from custom_components.wallbox_manager.ocpp import RESPONSE_TIMEOUT
-
+async def test_pending_write_disconnect_is_superseded_and_never_replayed(ha):
     entry = await ha.install()
-    async with peer(entry, station_type=WakeupStation) as station:
-        await ready(entry, station)
+    async with peer(entry, station_type=AutomaticStation) as station:
+        control = await ready(entry, station)
         adapter = entry.runtime_data.server.adapter
-        waits = []
-
-        async def library_wait(self, unique_id, response_timeout):
-            waits.append(response_timeout)
-            if len(waits) == 1:
-                return await self._get_specific_response(
-                    unique_id, response_timeout - 1
-                )
-            return "matched"
-
-        monkeypatch.setattr(ChargePoint, "_get_specific_response", library_wait)
-        token = RESPONSE_TIMEOUT.set(WAKEUP_TIMEOUT)
-        try:
-            assert await adapter._get_specific_response("expected", 10) == "matched"
-        finally:
-            RESPONSE_TIMEOUT.reset(token)
-        assert waits == [WAKEUP_TIMEOUT, WAKEUP_TIMEOUT - 1]
+        station.release = asyncio.Event()
+        pending = asyncio.create_task(control.request("AutoWakeUpEnabled", "true"))
+        await station.started.wait()
+        await station._connection.close()
+        await eventually(lambda: adapter.closed)
+        station.release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        assert control.intents["AutoWakeUpEnabled"].status == "superseded"
+    async with peer(entry, station_type=PersistedOnStation) as station:
+        await ready(entry, station)
+        assert switch(ha, entry).is_on is True
+        assert not station.writes
+        assert control.intents["AutoWakeUpEnabled"].status == "superseded"

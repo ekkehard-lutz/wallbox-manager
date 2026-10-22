@@ -31,11 +31,15 @@ See the [active successor requirements](docs/specifications/active-ocpp-control.
 and [source assessment / separate hardware procedure](docs/active-ocpp-control-assessment.md).
 There is no automatic takeover, command replay, current/phase or profile control.
 
-This version also adds **Wake up vehicle / Fahrzeug aufwecken**
-on the existing HA device/integration page, outside the custom Lovelace card.
-It requires observed Remote authority; success confirms the station's CP cycle,
-not vehicle wake-up or charging. See the [manual wake-up contract](docs/specifications/manual-vehicle-wakeup.md)
-and [implementation assessment](docs/manual-vehicle-wakeup-assessment.md).
+The unreleased automatic wake-up feature replaces the manual HA button with
+**Automatic vehicle wake-up / Automatisches Aufwecken** on the existing device
+page, outside Lovelace. Stationary detects a genuine 0 A-to-positive CP B episode,
+waits its configured delay and attempts one CP interruption. WBM only reads and
+changes the station's confirmed persistent enable setting. First commissioning
+defaults OFF; restarts, reconnects and authority changes preserve the saved value.
+Enabling or restoring ON never arms an existing positive-current episode.
+See the [approved contract](docs/specifications/automatic-vehicle-wakeup.md) and
+[implementation assessment](docs/automatic-vehicle-wakeup-assessment.md).
 
 ```yaml
 type: custom:wallbox-manager-card
@@ -76,9 +80,9 @@ prerelease versions and verify integration version **0.4.0-beta.8** after the
 operator performs installation and the Home Assistant restart. Publication does
 not include installation or physical validation. Charging profiles remain
 configuration-only: NETZ/PV regulation and current/phase control are not included.
-Manual wake-up requires the separately deployed, approved Stationary OCPP adapter;
-wake-up hardware acceptance remains outstanding. Optional automatic wake-up is
-documented for future approval and is not implemented. If an accepted takeover is
+Automatic wake-up requires the matching Stationary feature implementation; it is
+not part of the published beta.8. Simulated sleeping-vehicle tests are the acceptance
+basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is
 unconfirmed, another explicit Take Control action reads authority again without repeating the write.
 
 See [passive Recorder efficiency, availability and configuration](docs/v0.4/recorder-availability-report.md) for timestamp compatibility changes, diagnostics and measured before/after counts.
