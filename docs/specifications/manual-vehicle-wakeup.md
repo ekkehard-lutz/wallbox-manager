@@ -23,6 +23,24 @@ Model value establishes support. The 360-second wire wait retains the existing
 outbound serialization; other WBM CALLs can wait behind it, while incoming
 telemetry and protocol responses continue. Hardware acquisition still has its
 backend timeouts; an exceptionally slow backend/transport may exceed the margin.
+
+## Optional future WBM policy
+
+**WBM-WAKE-FUTURE-01 — Optional automatic vehicle wake-up after a 0 A pause**
+
+**Status: PLANNED / OPTIONAL — NOT APPROVED FOR IMPLEMENTATION.**
+
+When the Wallbox Manager later implements positive-current charging transitions,
+it may optionally trigger the existing vehicle wake-up operation if the vehicle
+does not begin drawing charging power within a configurable delay after
+transitioning from a 0 A pause to a positive charging operating point.
+
+The exact delay, required observations, conditions, abort criteria and repetition
+policy remain subject to separate approval. This is a WBM policy responsibility.
+Stationary continues to own CP actuation and safety. This requirement authorizes
+no executable logic, settings, timers, retries, polling or automatic triggers;
+manual wake-up remains the only implemented initiation path.
+
 ## OCPP 2.1 wire contract
 
 One CSMS-to-station `DataTransfer` CALL, through the existing OCPP connection:
