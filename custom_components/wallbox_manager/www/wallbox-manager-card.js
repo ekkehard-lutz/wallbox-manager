@@ -261,13 +261,16 @@ class WallboxManagerCard extends HTMLElement {
     if (previous !== d.entry) { this.stopHold(); this.edits = {}; this.durationEdits = {}; get("error").hidden = true; }
     const state = role => hass.states[d.roles[role]], busy = !!this.busy;
     const connected = state("connected")?.state === "on";
+    const authority = connected && available(state("control_authority")) ? state("control_authority").state : null;
     get("title").textContent = this.config.name || "Wallbox Manager";
     get("station").textContent = state("connected")?.attributes.station_id || "—";
     get("takeover").textContent = de ? "Steuerung übernehmen" : "Take control";
+    get("takeover").hidden = authority === "remote";
     for (const [id,role] of [["takeover","take_control"],["permission","charging_enabled"]]) {
       const s = state(role);
       get(id).disabled = busy || !connected || !s || s.state === "unavailable" || s.attributes.execution_ready !== true;
     }
+    get("takeover").disabled ||= !["local", "remote"].includes(authority);
     const permission = state("charging_enabled");
     const permissionText = permission?.state === "on" ? (de ? "aktiv" : "enabled") : permission?.state === "off" ? (de ? "inaktiv" : "disabled") : (de ? "unbekannt" : "unknown");
     get("permission").textContent = `${de ? "Ladefreigabe" : "Charging permission"}: ${permissionText}`;

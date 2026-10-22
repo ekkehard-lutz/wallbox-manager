@@ -235,3 +235,44 @@ external Local transitions, offline retained data, reconnect and superseded
 outcomes. Full lint, format, JavaScript syntax and diff checks pass. The five
 existing dependency deprecation warnings remain. Live CPU and the hardware
 acceptance procedure above remain separate; no new hardware approval is implied.
+
+## Take Control visibility correction (22 October 2026)
+
+Baseline: released `v0.4.0-beta.7`, `b8befd28610a76d06f50c3843ead45e92e6e5f62`.
+User-reported first hardware acceptance succeeded for explicit takeover and repeated
+ChargingEnabled ON/OFF, but the card retained Take Control after observed Remote.
+This task performs no additional hardware acceptance.
+
+WBM-CTRL-11 now specifies visibility from the bound entry's connected, available
+`control_authority` observation. Remote hides Take Control; Local shows it again,
+including external Local transitions. Missing/unknown/unavailable authority and
+offline retained Remote show a disabled button. Historical command outcomes never
+decide visibility. Existing readiness, busy and service/entry protections remain;
+ChargingEnabled visibility and the underlying HA button identity, attributes and
+service are unchanged. Related requirements: WBM-CTRL-01/07/12,
+V04-01/02/04 and WBM-ARCH-05/07/10/12. Held current-generation observations do not
+expire by age; the card relies on backend generation availability as before.
+
+Historical cross-check: inspected beta.18
+`custom_components/wallbox_manager/www/wallbox-manager-card.js` at
+`4c9a13b812792aa3eb245f4e2aa9c8c6cd29c090`. Its `hass` setter hides takeover using
+profile readiness and the selected wallbox. Reuse only reactive `hidden` assignment;
+its profile gate and multi-wallbox discovery are inapplicable here.
+Re-fetched and inspected actual openWB `packages/control/chargepoint/chargepoint_data.py`
+at `849340ec8d91f4e7cca08a7664cf9ec0187fb496`: `Get` observations remain separate
+from `Set` targets, previous values and `manual_lock`. This supports separating
+observations from commands; it supplies no OCPP authority visibility contract.
+No openWB runtime or hardware interface is imported.
+
+Production delta: **3 JavaScript lines added, none removed**. The existing `hass`
+setter and `[hidden]` CSS handle rendering; no polling, timers, subscriptions,
+backend changes or frontend infrastructure are added. Four new frontend tests
+cover English/German Local → Remote → Local updates, permission visibility,
+readiness/busy protection, missing/unknown/unavailable/disconnected observations,
+command-history independence, independent entries, ambiguous binding and rebinding.
+
+Validation: **205 Python tests and 15 frontend tests pass**. Full Ruff lint and
+format checks, JavaScript syntax and `git diff --check` pass. The five existing
+dependency deprecation warnings remain. Python's local WebSocket simulator suite
+requires execution outside the restricted network sandbox; no live hardware was
+contacted. Merge, versioning, release and deployment remain separate.

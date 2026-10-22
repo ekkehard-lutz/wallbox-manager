@@ -29,7 +29,7 @@ function load() {
 }
 function states(entry='E') {
   const result = {};
-  for (const [role,value] of Object.entries({connected:'on',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',pv_approximation:'down',
+  for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',pv_approximation:'down',
     charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
     grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',optimum_max_discharge_w:'3000',estimated_daily_house_consumption_kwh:'12'})) {
     result[`${entry}.${role}`] = {state:value,attributes:{wallbox_manager_entry:entry,wallbox_manager_role:role,wallbox_manager_scope:'connector',station_id:`station-${entry}`,
@@ -192,4 +192,98 @@ test('last takeover result stays separate from observed authority and reconnect 
     assert.match(get('status').textContent,/superseded/);
     assert.doesNotMatch(get('status').textContent,commandLabel);
   }
+});
+
+test('takeover follows Local to Remote to external Local through HA updates',async()=>{
+  for (const language of ['en','de']) {
+    const data=states();
+    data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
+    data['E.charging_enabled'].attributes.execution_ready=true;
+    const {card:c,get,calls}=card(data,{},language);
+    assert.equal(get('takeover').hidden,false);
+    assert.equal(get('takeover').disabled,false);
+    await get('takeover').onclick();
+    assert.equal(get('takeover').hidden,false); // Sending a command is no observation.
+    data['E.control_authority'].state='remote'; c.hass=c._hass;
+    assert.equal(get('takeover').hidden,true);
+    assert.notEqual(get('permission').hidden,true);
+    assert.equal(get('permission').disabled,false);
+    await get('permission').onclick();
+    data['E.control_authority'].state='local'; c.hass=c._hass;
+    assert.equal(get('takeover').hidden,false);
+    assert.equal(get('takeover').disabled,false);
+    c.busy=true; c.hass=c._hass;
+    assert.equal(get('takeover').disabled,true);
+    c.busy=false;
+    data['E.take_control'].attributes.execution_ready=false; c.hass=c._hass;
+    assert.equal(get('takeover').disabled,true);
+    await get('takeover').onclick();
+    assert.equal(calls.length,2);
+    assert.equal(calls[0][2].entity_id,'E.take_control');
+    assert.equal(calls[1][2].entity_id,'E.charging_enabled');
+  }
+});
+
+test('missing, unknown, unavailable and disconnected authority keeps takeover visible and disabled',()=>{
+  for (const connection of ['on','off','unknown','unavailable']) {
+    for (const authority of [null,'unknown','unavailable','','local','remote']) {
+      if (connection==='on' && ['local','remote'].includes(authority)) continue;
+      const data=states();
+      data['E.connected'].state=connection;
+      if (authority===null) delete data['E.control_authority'];
+      else data['E.control_authority'].state=authority;
+      // Even optimistic readiness and historical success cannot establish authority.
+      data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true,command_status:'confirmed'}};
+      const {get}=card(data);
+      assert.equal(get('takeover').hidden,false,`${connection}/${authority}`);
+      assert.equal(get('takeover').disabled,true,`${connection}/${authority}`);
+      assert.notEqual(get('permission').hidden,true);
+    }
+  }
+});
+
+test('takeover visibility depends on observations independently of command history',()=>{
+  const data=states();
+  data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
+  const {card:c,get}=card(data);
+  for (const status of [undefined,'pending','accepted_unconfirmed','confirmed','rejected','unsupported','timeout','communication_failure','superseded']) {
+    data['E.take_control'].attributes.command_status=status;
+    for (const authority of ['remote','local']) {
+      data['E.control_authority'].state=authority; c.hass=c._hass;
+      assert.equal(get('takeover').hidden,authority==='remote',`${status}/${authority}`);
+      assert.notEqual(get('permission').hidden,true);
+    }
+  }
+});
+
+test('authority visibility stays isolated across entries and card rebinding',()=>{
+  const data={...states('A'),...states('B')};
+  for (const entry of ['A','B']) data[`${entry}.take_control`]={state:'unknown',attributes:{wallbox_manager_entry:entry,wallbox_manager_role:'take_control',execution_ready:true}};
+  data['A.control_authority'].state='remote';
+  const a=card(data,{entry_id:'A'}), b=card(data,{entry_id:'B'}), ambiguous=card(data);
+  assert.equal(a.get('takeover').hidden,true);
+  assert.equal(b.get('takeover').hidden,false);
+  assert.equal(b.get('takeover').disabled,false);
+  assert.equal(ambiguous.get('takeover').hidden,false);
+  assert.equal(ambiguous.get('takeover').disabled,true);
+  data['B.control_authority'].state='remote';
+  a.card.hass=a.card._hass; b.card.hass=b.card._hass;
+  assert.equal(a.get('takeover').hidden,true);
+  assert.equal(b.get('takeover').hidden,true);
+  data['A.control_authority'].state='local';
+  a.card.hass=a.card._hass; b.card.hass=b.card._hass;
+  assert.equal(a.get('takeover').hidden,false);
+  assert.equal(b.get('takeover').hidden,true);
+  b.card.setConfig({entry_id:'A'}); b.card.hass=b.card._hass;
+  assert.equal(b.get('takeover').hidden,false);
+  assert.equal(b.get('takeover').disabled,false);
+});
+
+test('device wake-up button is excluded from card rendering and service actions',async()=>{
+  const data=states();
+  data['E.wake_up_vehicle']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'wake_up_vehicle',execution_ready:true}};
+  const {card:c,calls}=card(data);
+  assert.doesNotMatch(c.shadowRoot.html,/wake_up_vehicle|Wake up vehicle|Fahrzeug aufwecken/);
+  await c.call('button','press',{entity_id:'E.wake_up_vehicle'});
+  assert.equal(calls.length,0);
 });
