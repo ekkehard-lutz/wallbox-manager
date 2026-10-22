@@ -179,6 +179,9 @@
     "switch": {
       "charging_enabled": {
         "name": "{scope} Laden erlaubt"
+      },
+      "auto_wakeup_enabled": {
+        "name": "Automatisches Aufwecken"
       }
     },
     "number": {
@@ -260,9 +263,6 @@
     "button": {
       "take_control": {
         "name": "Steuerung übernehmen"
-      },
-      "wake_up_vehicle": {
-        "name": "Fahrzeug aufwecken"
       }
     },
     "text": {

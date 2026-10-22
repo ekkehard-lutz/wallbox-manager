@@ -13,7 +13,8 @@ V3 remains DRAFT overall.
 | --- | --- | --- |
 | [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, with explicit supersession register | **APPROVED independently** |
 | [Active OCPP control foundation](active-ocpp-control.md) | Explicit takeover and independent charging permission; successor milestone | **User-authorized implementation scope; hardware acceptance separate** |
-| [Manual vehicle wake-up](manual-vehicle-wakeup.md) | One explicit device-page button and narrow DataTransfer extension | **User-authorized implementation scope; review/hardware acceptance separate** |
+| [Automatic vehicle wake-up](automatic-vehicle-wakeup.md) | Station-owned detection/delay/CP; WBM enable switch only | **APPROVED for implementation** |
+| [Legacy manual compatibility](manual-vehicle-wakeup.md) | Station DataTransfer only; no manual HA button | Superseded UI scope |
 | [Passive v0.4](passive-v0.4.md) | Current passive milestone | **APPROVED, subject to WBM-ARCH-01–12** |
 | [PV regulation – Requirements baseline V3](pv-regulation.md) | Current consolidated target specification draft with stable requirement IDs, acceptance criteria, sources and open issues | **DRAFT – overall subject-matter approval pending** |
 | [Decision history, October 2026](decision-history.md) | NON-NORMATIVE history: approved decisions, superseded interim solutions and explicitly rejected approaches | Reference / history |

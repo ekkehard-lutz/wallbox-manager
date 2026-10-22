@@ -287,3 +287,13 @@ test('device wake-up button is excluded from card rendering and service actions'
   await c.call('button','press',{entity_id:'E.wake_up_vehicle'});
   assert.equal(calls.length,0);
 });
+
+test('automatic wake-up switch has no card markup or authorized card action',async()=>{
+  const data=states();
+  data['E.auto_wakeup_enabled']={state:'on',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'auto_wakeup_enabled',execution_ready:true}};
+  const {card:c,calls}=card(data);
+  assert.doesNotMatch(c.shadowRoot.html,/auto_wakeup_enabled|Automatic vehicle wake-up|Automatisches Aufwecken/);
+  await c.call('switch','turn_on',{entity_id:'E.auto_wakeup_enabled'});
+  await c.call('switch','turn_off',{entity_id:'E.auto_wakeup_enabled'});
+  assert.equal(calls.length,0);
+});

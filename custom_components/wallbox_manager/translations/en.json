@@ -179,6 +179,9 @@
     "switch": {
       "charging_enabled": {
         "name": "{scope} Charging enabled"
+      },
+      "auto_wakeup_enabled": {
+        "name": "Automatic vehicle wake-up"
       }
     },
     "number": {
@@ -260,9 +263,6 @@
     "button": {
       "take_control": {
         "name": "Take control"
-      },
-      "wake_up_vehicle": {
-        "name": "Wake up vehicle"
       }
     },
     "text": {

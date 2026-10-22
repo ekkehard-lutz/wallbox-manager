@@ -2,63 +2,53 @@
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
 
-from .entity import WallboxEntity
+from .entity import WallboxEntity, unique_id
 
 
 async def async_setup_entry(hass, entry, add):
     state = entry.runtime_data.state
-    scope = (state.binding[0], None, None)
-    add(
-        [
-            TakeControl(entry, "station", scope, "take_control"),
-            WakeUpVehicle(entry, "station", scope, "wake_up_vehicle"),
-        ]
+    # Retire only this integration's exact legacy button, not other devices/entities.
+    registry = er.async_get(hass)
+    legacy = registry.async_get_entity_id(
+        "button",
+        "wallbox_manager",
+        unique_id(
+            entry.entry_id, "station", (state.binding[0], None, None), "wake_up_vehicle"
+        ),
     )
+    if legacy and registry.async_get(legacy).config_entry_id == entry.entry_id:
+        registry.async_remove(legacy)
+    add([TakeControl(entry, "station", (state.binding[0], None, None), "take_control")])
 
 
 class TakeControl(WallboxEntity, ButtonEntity):
-    command = "ControlAuthority"
-    requested = "OCPP"
-    error_label = "Takeover"
-
     @property
     def available(self):
-        return self.entry.runtime_data.server.control.blocked(self.command) is None
+        return (
+            self.entry.runtime_data.server.control.blocked("ControlAuthority") is None
+        )
 
     @property
     def extra_state_attributes(self):
         return {
             **super().extra_state_attributes,
-            **self.entry.runtime_data.server.control.attributes(self.command),
+            **self.entry.runtime_data.server.control.attributes("ControlAuthority"),
         }
 
     async def async_added_to_hass(self):
         await Entity.async_added_to_hass(self)
         self.async_on_remove(
             self.observed.watch(
-                (
-                    "command",
-                    self.scope,
-                    self.entry.runtime_data.server.control.key(self.command)[2],
-                ),
-                self.changed,
+                ("command", self.scope, "control_authority"), self.changed
             )
         )
 
     async def async_press(self):
         result = await self.entry.runtime_data.server.control.request(
-            self.command, self.requested
+            "ControlAuthority", "OCPP"
         )
         if result != "confirmed":
-            raise HomeAssistantError(f"{self.error_label}: {result}")
-
-
-class WakeUpVehicle(TakeControl):
-    """An explicit CP cycle; success does not assert that charging has started."""
-
-    command = "WakeUpVehicle"
-    requested = "1"
-    error_label = "Wake-up"
-    _attr_icon = "mdi:car-connected"
+            raise HomeAssistantError(f"Takeover: {result}")
