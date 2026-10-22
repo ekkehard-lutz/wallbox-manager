@@ -4,8 +4,9 @@ Home Assistant integration domain: `wallbox_manager`.
 
 This prerelease extends the passive rebuild for OCPP **2.1**, targeting the
 supported wallbox-stationary interface. The integration version is
-**0.4.0-beta.8**; see the [beta.8 release notes](docs/v0.4/release-notes-beta.8.md)
-for manual vehicle wake-up, authority takeover and independent charging permission.
+**0.4.0-beta.9**; see the [beta.9 release notes](docs/v0.4/release-notes-beta.9.md)
+for persistent automatic vehicle wake-up, authority takeover and independent
+charging permission.
 The [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) retain the historical
 Idle display, session meter corrections and migration details. The immutable
 [`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
@@ -31,7 +32,7 @@ See the [active successor requirements](docs/specifications/active-ocpp-control.
 and [source assessment / separate hardware procedure](docs/active-ocpp-control-assessment.md).
 There is no automatic takeover, command replay, current/phase or profile control.
 
-The unreleased automatic wake-up feature replaces the manual HA button with
+Automatic wake-up replaces the manual HA button with
 **Automatic vehicle wake-up / Automatisches Aufwecken** on the existing device
 page, outside Lovelace. Stationary detects a genuine 0 A-to-positive CP B episode,
 waits its configured delay and attempts one CP interruption. WBM only reads and
@@ -75,13 +76,13 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-For separately authorized testing, select **v0.4.0-beta.8** through the HACS
-prerelease versions and verify integration version **0.4.0-beta.8** after the
+For separately authorized testing, select **v0.4.0-beta.9** through the HACS
+prerelease versions and verify integration version **0.4.0-beta.9** after the
 operator performs installation and the Home Assistant restart. Publication does
 not include installation or physical validation. Charging profiles remain
 configuration-only: NETZ/PV regulation and current/phase control are not included.
-Automatic wake-up requires the matching Stationary feature implementation; it is
-not part of the published beta.8. Simulated sleeping-vehicle tests are the acceptance
+Automatic wake-up requires the matching Stationary implementation to be separately
+installed. Simulated sleeping-vehicle tests are the acceptance
 basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is
 unconfirmed, another explicit Take Control action reads authority again without repeating the write.
 
