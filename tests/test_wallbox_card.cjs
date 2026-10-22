@@ -278,3 +278,12 @@ test('authority visibility stays isolated across entries and card rebinding',()=
   assert.equal(b.get('takeover').hidden,false);
   assert.equal(b.get('takeover').disabled,false);
 });
+
+test('device wake-up button is excluded from card rendering and service actions',async()=>{
+  const data=states();
+  data['E.wake_up_vehicle']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'wake_up_vehicle',execution_ready:true}};
+  const {card:c,calls}=card(data);
+  assert.doesNotMatch(c.shadowRoot.html,/wake_up_vehicle|Wake up vehicle|Fahrzeug aufwecken/);
+  await c.call('button','press',{entity_id:'E.wake_up_vehicle'});
+  assert.equal(calls.length,0);
+});

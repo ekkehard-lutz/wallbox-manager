@@ -31,6 +31,12 @@ See the [active successor requirements](docs/specifications/active-ocpp-control.
 and [source assessment / separate hardware procedure](docs/active-ocpp-control-assessment.md).
 There is no automatic takeover, command replay, current/phase or profile control.
 
+This unreleased feature branch also adds **Wake up vehicle / Fahrzeug aufwecken**
+on the existing HA device/integration page, outside the custom Lovelace card.
+It requires observed Remote authority; success confirms the station's CP cycle,
+not vehicle wake-up or charging. See the [manual wake-up contract](docs/specifications/manual-vehicle-wakeup.md)
+and [implementation assessment](docs/manual-vehicle-wakeup-assessment.md).
+
 ```yaml
 type: custom:wallbox-manager-card
 # Optional with one WBM entry; required with multiple entries:

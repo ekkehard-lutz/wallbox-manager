@@ -260,6 +260,9 @@
     "button": {
       "take_control": {
         "name": "Steuerung übernehmen"
+      },
+      "wake_up_vehicle": {
+        "name": "Fahrzeug aufwecken"
       }
     },
     "text": {

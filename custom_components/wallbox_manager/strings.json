@@ -260,6 +260,9 @@
     "button": {
       "take_control": {
         "name": "Take control"
+      },
+      "wake_up_vehicle": {
+        "name": "Wake up vehicle"
       }
     },
     "text": {

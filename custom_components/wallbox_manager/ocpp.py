@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
 
@@ -33,6 +34,7 @@ CAPABILITIES = {
     "ChargingEnableDisableSupported": "enable_disable",
 }
 READ_ONLY = {"GetBaseReport", "GetVariables"}
+RESPONSE_TIMEOUT = ContextVar("wbm_response_timeout", default=None)
 
 
 class Listener:
@@ -196,10 +198,25 @@ class Adapter(ChargePoint):
         task.add_done_callback(settled)
         return task
 
-    async def request(self, payload):
+    async def _get_specific_response(self, unique_id, response_timeout):
+        extended = RESPONSE_TIMEOUT.get()
+        token = RESPONSE_TIMEOUT.set(None)
+        try:
+            # The library recurses with its remaining budget for unrelated IDs.
+            return await super()._get_specific_response(
+                unique_id, extended or response_timeout
+            )
+        finally:
+            RESPONSE_TIMEOUT.reset(token)
+
+    async def request(self, payload, *, response_timeout=None):
         # Don't release the library's serial response consumer while an obsolete
         # boot request is still in flight. Teardown owns and joins the pending call.
-        pending = self.spawn(super().call(payload, suppress=False))
+        token = RESPONSE_TIMEOUT.set(response_timeout)
+        try:
+            pending = self.spawn(super().call(payload, suppress=False))
+        finally:
+            RESPONSE_TIMEOUT.reset(token)
         try:
             response = await asyncio.shield(pending)
         except (TimeoutError, OSError, OCPPError, ConnectionClosed) as exc:
@@ -218,9 +235,9 @@ class Adapter(ChargePoint):
         wire = json.loads(message)
         if wire[0] == 2 and wire[2] not in READ_ONLY:
             guard = DISPATCH.get()
-            if wire[2] != "SetVariables" or guard is None:
+            if wire[2] not in ("SetVariables", "DataTransfer") or guard is None:
                 raise RuntimeError("OCPP boundary forbids unsupported control commands")
-            guard(wire[3])
+            guard(wire[2], wire[3])
         await super()._send(message)
 
     async def close(self):
@@ -268,18 +285,17 @@ class Adapter(ChargePoint):
                 if key == self.listener.control.key(name):
                     if name == "ControlAuthority" and previous != self.state.value(key):
                         self.listener.control.authority_revision += 1
-                        permission = self.listener.control.intents.get(
-                            "ChargingEnabled"
-                        )
-                        if permission and permission.status in (
-                            "pending",
-                            "accepted_unconfirmed",
-                        ):
-                            self.listener.control.update(
-                                permission, "superseded", "authority_changed"
-                            )
-                        else:
-                            self.listener.control.publish("ChargingEnabled")
+                        for dependent in ("ChargingEnabled", "WakeUpVehicle"):
+                            intent = self.listener.control.intents.get(dependent)
+                            if intent and intent.status in (
+                                "pending",
+                                "accepted_unconfirmed",
+                            ):
+                                self.listener.control.update(
+                                    intent, "superseded", "authority_changed"
+                                )
+                            else:
+                                self.listener.control.publish(dependent)
                     self.listener.control.observed(name)
         return accepted
 
@@ -652,7 +668,7 @@ class Adapter(ChargePoint):
             if len(permissions) > 1:
                 raise ValueError("Ambiguous permission inventory")
             # Unique station-scoped Actual ReadWrite endpoints authorize writes.
-            for name in ROLES:
+            for name in ("ControlAuthority", "ChargingEnabled"):
                 matches = [
                     r
                     for r in report["rows"]
