@@ -360,7 +360,10 @@ async def test_observation_metadata_and_all_local_setting_roles(ha):
     for item in er.async_entries_for_config_entry(er.async_get(ha), entry.entry_id):
         if ":control:" in item.unique_id:
             roles.add(json.loads(item.unique_id.split(":control:", 1)[1])[3])
-    assert set(NUMBERS) | set(SELECTS) | set(TIMES) <= roles
+    assert {r for r in NUMBERS if not r.startswith("allowed_current_")} | set(
+        SELECTS
+    ) | set(TIMES) <= roles
+    assert not {r for r in roles if r.startswith("allowed_current_")}
     assert "active_wallbox" not in roles
     assert (
         next(e for e in entities(ha, entry) if e.role == "discovery").device_class
@@ -803,8 +806,8 @@ async def test_session_and_ordinary_power_share_normalization_and_safety_is_unch
         "GetVariables",
     )
     assert state.value(("control", state.binding, "charging_enabled")) is False
-    await entry.runtime_data.settings.set("allowed_current_1p", "19/3")
-    assert entry.runtime_data.settings.get("allowed_current_1p") == float(19 / 3)
+    with pytest.raises(ValueError, match="whole amperes"):
+        await entry.runtime_data.settings.set("allowed_current_1p", "19/3")
 
 
 async def test_failed_actual_reads_leave_initial_and_confirmed_fields_untouched(ha):

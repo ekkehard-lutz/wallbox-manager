@@ -1,4 +1,4 @@
-"""Local numeric preferences; editing never starts physical control."""
+"""Numeric preferences; eligible NETZ changes reconcile a fixed offered point."""
 
 import math
 from fractions import Fraction
@@ -8,11 +8,33 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import SettingEntity
+from .grid_point import capabilities, envelope
 from .settings import NUMBERS
 
 
 async def async_setup_entry(hass, entry, add):
-    add([SettingNumber(entry, role) for role in NUMBERS])
+    state = entry.runtime_data.state
+    seen = set()
+
+    def discover():
+        try:
+            modes = capabilities(state)["modes"]
+        except ValueError, TypeError:
+            modes = ()
+        roles = [
+            role
+            for role in NUMBERS
+            if not role.startswith("allowed_current_") or int(role[-2]) in modes
+        ]
+        new = [role for role in roles if role not in seen]
+        seen.update(new)
+        add([SettingNumber(entry, role) for role in new])
+
+    discover()
+    station, evse, _ = state.binding
+    entry.async_on_unload(
+        state.watch(("capability", (station, evse, None), "supported_phases"), discover)
+    )
 
 
 class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
@@ -24,7 +46,6 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
         self._attr_native_min_value, self._attr_native_max_value = minimum, maximum
         self._attr_native_step, self._attr_native_unit_of_measurement = step, unit
         if role.startswith("allowed_current_") or role in (
-            "phase_switch_deviation_pct",
             "soc_hysterese",
             "regulation_interval",
             "pv_start_delay",
@@ -42,6 +63,13 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
     @property
     def native_value(self):
         value = self.settings.get(self.role)
+        if self.role.startswith("allowed_current_"):
+            try:
+                ranges = envelope(self.observed, self.settings)
+                mode = int(self.role[-2])
+                return int(ranges.ranges[mode][3]) if mode in ranges.ranges else 0
+            except ValueError, TypeError:
+                return None
         try:
             number = float(Fraction(value)) if value is not None else None
             return number if number is not None and math.isfinite(number) else None
@@ -49,9 +77,38 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
             return None
 
     @property
+    def available(self):
+        if self.role.startswith("allowed_current_"):
+            try:
+                return int(self.role[-2]) in capabilities(self.observed)["modes"]
+            except ValueError, TypeError:
+                return False
+        return True
+
+    @property
+    def native_max_value(self):
+        if self.role.startswith("allowed_current_"):
+            try:
+                caps = capabilities(self.observed)
+                return int(
+                    caps["maximum"]
+                    if int(self.role[-2]) == 3
+                    else min(caps["maximum"], caps["asymmetry"])
+                )
+            except ValueError, TypeError:
+                return 0
+        return self._attr_native_max_value
+
+    @property
     def extra_state_attributes(self):
         attrs = super().extra_state_attributes
         if self.role.startswith("allowed_current_"):
+            try:
+                attrs["legacy_limit_migration"] = envelope(
+                    self.observed, self.settings
+                ).migration.get(int(self.role[-2]))
+            except ValueError, TypeError:
+                attrs["legacy_limit_migration"] = None
             attrs["exact_current_limit_a"] = (
                 str(self.settings.get(self.role))
                 if self.native_value is not None
@@ -63,9 +120,24 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
+        if self.role.startswith("allowed_current_"):
+            station, evse, _ = self.observed.binding
+            for scope, roles in (
+                (
+                    (station, evse, None),
+                    ("supported_phases", "minimum_current", "current_step"),
+                ),
+                (
+                    self.observed.binding,
+                    ("maximum_current", "maximum_asymmetry_current"),
+                ),
+            ):
+                for role in roles:
+                    self.async_on_remove(
+                        self.observed.watch(("capability", scope, role), self.changed)
+                    )
         if self.role in (
             "desired_charging_power",
-            "phase_switch_deviation_pct",
             "allowed_current_1p",
             "allowed_current_2p",
             "allowed_current_3p",
@@ -78,6 +150,12 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
                 not in self.settings.profiles.get(self.settings.key, {})
             ):
                 try:
+                    if self.role.startswith("allowed_current_"):
+                        self.settings.values[NUMBERS[self.role][0]] = (
+                            previous.attributes.get("exact_current_limit_a")
+                            or previous.state
+                        )
+                        return
                     value = self.settings.validate(
                         self.role,
                         previous.attributes.get("exact_current_limit_a")

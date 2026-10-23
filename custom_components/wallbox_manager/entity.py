@@ -104,31 +104,17 @@ class SettingEntity(WallboxEntity):
 
     @property
     def extra_state_attributes(self):
+        grid = self.entry.runtime_data.grid
         return {
             **super().extra_state_attributes,
             "state_represents": "desired_intent",
-            "connected": None,  # Local settings do not mirror live hardware state.
-            "execution_ready": False,
-            "execution_blocked_reason": "passive_only",
-            "control_status": "passive_only",
-            "profile_status": "passive_only",
-            "profile_control_ready": False,
-            "applied_current_a": None,
-            "applied_phase_count": None,
-            "applied_offered_power_w": None,
-            "command_status": None,
-            "command_reason": None,
-            "solver_reason": None,
-            "electrical_recovery_status": None,
-            "physical_phase_mode": None,
-            "physical_phase_valid_until": None,
-            "actual_enabled": None,
-            "control_authority": "unknown",
-            "grid_request_armed": False,
-            "grid_timing_state": "unavailable",
+            **grid.attributes(),
         }
 
     async def async_added_to_hass(self):
         # Settings never subscribe to telemetry or generation publications.
         await Entity.async_added_to_hass(self)
         self.async_on_remove(self.settings.watch(self.role, self.async_write_ha_state))
+        self.async_on_remove(
+            self.observed.watch(("grid", self.scope, self.role), self.changed)
+        )

@@ -26,13 +26,11 @@ CAPABILITIES = {
     "CurrentStep": "current_step",
     "PhaseSwitchingSupported": "phase_switching",
     "MaximumCurrent": "maximum_current",
-    "MaximumCurrent1Phase": "maximum_current_1",
-    "MaximumCurrent2Phase": "maximum_current_2",
-    "MaximumCurrent3Phase": "maximum_current_3",
+    "MaximumAsymmetryCurrent": "maximum_asymmetry_current",
     "ZeroCurrentSupported": "zero_current",
     "ChargingEnableDisableSupported": "enable_disable",
 }
-READ_ONLY = {"GetBaseReport", "GetVariables"}
+READ_ONLY = {"GetBaseReport", "GetVariables", "GetCompositeSchedule"}
 
 
 class Listener:
@@ -54,6 +52,7 @@ class Listener:
         self.options = options
         self._logged = {}
         self.control = Control(self)
+        self.grid = None
 
     def diagnostic(self, level, event, *, reason="none", **fields):
         """Bounded by event families; diagnostics can never break the protocol."""
@@ -217,7 +216,7 @@ class Adapter(ChargePoint):
         wire = json.loads(message)
         if wire[0] == 2 and wire[2] not in READ_ONLY:
             guard = DISPATCH.get()
-            if wire[2] != "SetVariables" or guard is None:
+            if wire[2] not in ("SetVariables", "SetChargingProfile") or guard is None:
                 raise RuntimeError("OCPP boundary forbids unsupported control commands")
             guard(wire[2], wire[3])
         await super()._send(message)

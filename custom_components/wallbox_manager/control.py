@@ -176,11 +176,23 @@ class Control:
         )
         self.intents[name] = intent
         self.publish(name)
+        if name == "ChargingEnabled" and value == "false" and self.listener.grid:
+            await self.listener.grid.permission_requested(False)
         if reason := self.blocked(name):
             self.update(
                 intent, "unsupported" if reason == "unsupported" else "rejected", reason
             )
             return intent.status
+        if (
+            name == "ChargingEnabled"
+            and self.listener.grid
+            and value == "true"
+            and self.blocked(name) is None
+        ):
+            await self.listener.grid.permission_requested(value == "true")
+        if not self.valid(intent):
+            self.update(intent, "superseded", "authority_or_intent_changed")
+            return "superseded"
         expected = "remote" if name == "ControlAuthority" else value == "true"
         # An opposite in-flight write may still take effect: send corrective intent.
         if (
@@ -189,6 +201,9 @@ class Control:
             and self.listener.state.value(self.key(name)) == expected
         ):
             self.update(intent, "confirmed", "already_observed")
+            if self.listener.grid:
+                self.listener.grid.signature = None
+                self.listener.grid.changed()
             return intent.status
         intent.task = adapter.spawn(self.execute(intent))
         return await asyncio.shield(intent.task)

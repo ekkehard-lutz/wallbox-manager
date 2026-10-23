@@ -13,6 +13,7 @@ V3 remains DRAFT overall.
 | --- | --- | --- |
 | [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, with explicit supersession register | **APPROVED independently** |
 | [Active OCPP control foundation](active-ocpp-control.md) | Explicit takeover and independent charging permission; successor milestone | **User-authorized implementation scope; hardware acceptance separate** |
+| [NETZ / Grid fixed-point profile](grid-profile.md) | Next event-driven NETZ control, phase range/limits, recognized lockout retry, battery reserve | **APPROVED target; not yet implemented** |
 | [Automatic vehicle wake-up](automatic-vehicle-wakeup.md) | Station-owned detection/delay/CP; WBM enable switch only | **APPROVED for implementation** |
 | [Legacy manual compatibility](manual-vehicle-wakeup.md) | Station DataTransfer only; no manual HA button | Superseded UI scope |
 | [Passive v0.4](passive-v0.4.md) | Current passive milestone | **APPROVED, subject to WBM-ARCH-01–12** |
@@ -29,6 +30,8 @@ V3 remains DRAFT overall.
 6. Codex tasks are written in English; implementation, review, merge, GitHub prerelease and hardware test are separate steps. Documentation does not automatically authorize changes to `main`, wallbox firmware or a Home Assistant installation.
 
 **Source status:** These Markdown files do not import the PDFs or historical hardware logs into the repository. Page references refer to the externally retained 619-page discussion printout. Links to tagged repository documents are listed in the requirements baseline. The original discussion document's filename and technical identifiers are retained verbatim for traceability.
+
+The next separately approved NETZ implementation target is [WBM-GRID-01–16](grid-profile.md); the existing active OCPP control foundation remains its prerequisite.
 
 The active successor milestone is [the OCPP control foundation](active-ocpp-control.md).
 It narrowly supersedes V04-03/06 for two explicit user operations and preserves

@@ -1,4 +1,4 @@
-"""Profile and approximation preferences, persisted without execution."""
+"""Persistent profile and approximation preferences for guarded NETZ execution."""
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.helpers.restore_state import RestoreEntity

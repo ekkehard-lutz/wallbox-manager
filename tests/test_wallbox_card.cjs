@@ -107,7 +107,7 @@ test('German controls stay disabled and physical OFF stays visible',()=>{
   assert.match(get('permission').textContent,/inaktiv/);
   assert.equal(get('permission').disabled,true);
   assert.equal(get('connection').textContent,'Frei');
-  assert.match(get('status').textContent,/ausschließlich lokal/);
+  assert.match(get('status').textContent,/festes Leistungsangebot/);
 });
 
 test('card action boundary refuses charging domains and foreign entity IDs',async()=>{
@@ -296,4 +296,20 @@ test('automatic wake-up switch has no card markup or authorized card action',asy
   await c.call('switch','turn_on',{entity_id:'E.auto_wakeup_enabled'});
   await c.call('switch','turn_off',{entity_id:'E.auto_wakeup_enabled'});
   assert.equal(calls.length,0);
+});
+
+
+test('Grid approximation and confirmed offer stay distinct from measured power',async()=>{
+  const data=states();
+  data['E.power_approximation']={state:'nearest',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'power_approximation'}};
+  Object.assign(data['E.soll_power'].attributes,{profile_status:'rejected',command_reason:'PhaseSwitchLockout',applied_phase_count:3,applied_current_a:6,applied_offered_power_w:4140});
+  const {get,calls}=card(data);
+  assert.equal(get('approximation').value,'nearest');
+  assert.equal(get('approximation-row').hidden,false);
+  assert.match(get('actual').textContent,/Confirmed offer: 3p × 6 A/);
+  assert.equal(get('live-power').textContent,'1.5 kW');
+  assert.match(get('status').textContent,/NETZ: rejected \(PhaseSwitchLockout\)/);
+  await get('approximation').onchange({target:{value:'down'}});
+  assert.equal(calls[0][2].entity_id,'E.power_approximation');
+  assert.equal(calls[0][2].option,'down');
 });

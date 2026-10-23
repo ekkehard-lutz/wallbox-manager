@@ -149,17 +149,8 @@
       "enable_disable": {
         "name": "{scope} Ladefreigabe unterstützt"
       },
-      "maximum_current_1": {
-        "name": "{scope} Maximaler Strom 1p"
-      },
-      "maximum_current_2": {
-        "name": "{scope} Maximaler Strom 2p"
-      },
-      "maximum_current_3": {
-        "name": "{scope} Maximaler Strom 3p"
-      },
       "maximum_current": {
-        "name": "{scope} Maximaler Strom"
+        "name": "Maximaler Strom"
       },
       "control_authority": {
         "name": "Steuerungsautorität",
@@ -174,6 +165,9 @@
       },
       "physical_phases": {
         "name": "Zuletzt beobachtete Phasen"
+      },
+      "maximum_asymmetry_current": {
+        "name": "Maximaler Strom Schieflast"
       }
     },
     "switch": {
@@ -187,9 +181,6 @@
     "number": {
       "desired_charging_power": {
         "name": "{scope} Gewünschte Leistung"
-      },
-      "phase_switch_deviation_pct": {
-        "name": "{scope} Max. Abweichung ohne Phasenumschaltung"
       },
       "allowed_current_1p": {
         "name": "{scope} Zulässiger Strom 1p"

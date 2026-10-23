@@ -23,14 +23,15 @@ read-only discovery/readbacks, and retains cumulative imported energy/statistics
 identities. Ordinary measurements remain valid until explicit invalidation or a
 connection/boot generation change. Silent, unchanged values do not expire.
 
-Profile, Number, Select and Text entities persist local configuration. They do
-not regulate charging or control the battery. The existing Take Control button
+Profile, Number, Select and Text entities persist local configuration. Eligible
+NETZ sessions apply a fixed offered point and an optional battery reserve. The existing Take Control button
 explicitly acquires OCPP authority; the permission switch independently requests
 ON/OFF only under observed Remote authority and supported writable endpoints.
 Switch state always reflects station observations, never an acknowledgement alone.
 See the [active successor requirements](docs/specifications/active-ocpp-control.md)
 and [source assessment / separate hardware procedure](docs/active-ocpp-control-assessment.md).
-There is no automatic takeover, command replay, current/phase or profile control.
+There is no automatic takeover or unconditional command replay. The NETZ successor
+adds guarded fixed operating points; PV execution remains deferred.
 
 Automatic wake-up replaces the manual HA button with
 **Automatic vehicle wake-up / Automatisches Aufwecken** on the existing device
@@ -79,8 +80,9 @@ complete immediate initial telemetry snapshot; missing fields remain explicit.
 For separately authorized testing, select **v0.4.0-beta.9** through the HACS
 prerelease versions and verify integration version **0.4.0-beta.9** after the
 operator performs installation and the Home Assistant restart. Publication does
-not include installation or physical validation. Charging profiles remain
-configuration-only: NETZ/PV regulation and current/phase control are not included.
+not include installation or physical validation. NETZ now executes an event-driven fixed offered point under confirmed Remote
+authority and charging permission. PV profiles remain configuration-only. See the
+[NETZ implementation and validation boundary](docs/grid-fixed-profile-implementation.md).
 Automatic wake-up requires the matching Stationary implementation to be separately
 installed. Simulated sleeping-vehicle tests are the acceptance
 basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is

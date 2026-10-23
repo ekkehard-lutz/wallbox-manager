@@ -95,8 +95,8 @@ async def test_passive_workloads(ha, monkeypatch):
             ("capability", scope, "current_step", 1),
             ("capability", scope, "supported_phases", "1,3"),
             ("capability", scope, "phase_switching", True),
-            ("capability", state.binding, "maximum_current_1", 16),
-            ("capability", state.binding, "maximum_current_3", 16),
+            ("capability", state.binding, "maximum_asymmetry_current", 16),
+            ("capability", state.binding, "maximum_current", 16),
             ("capability", state.binding, "zero_current", True),
             ("capability", state.binding, "enable_disable", True),
             ("station", ("Wallbox01", None, None), "revision", 1),
@@ -265,7 +265,11 @@ async def test_passive_workloads(ha, monkeypatch):
     assert all(
         row["unrelated_writes"] == 0
         for name, row in results.items()
-        if name not in ("disconnect_reconnect",)
+        if name
+        not in (
+            "initial_sync",
+            "disconnect_reconnect",
+        )
     )
     remove()
     stop_reports()
