@@ -107,7 +107,9 @@ class SettingEntity(WallboxEntity):
         grid = self.entry.runtime_data.grid
         return {
             **super().extra_state_attributes,
-            "state_represents": "desired_intent",
+            "state_represents": "draft"
+            if self.role in ("soll_power", "grid_start_delay", "grid_duration")
+            else "desired_intent",
             **grid.attributes(),
         }
 

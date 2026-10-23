@@ -39,6 +39,7 @@ class WallboxManagerCard extends HTMLElement {
     this.config = config;
     this.edits = {};
     this.durationEdits = {};
+    this.draftWrites = new Set();
     if (!this.shadowRoot) this.attachShadow({mode: "open"});
     this.shadowRoot.innerHTML = `<style>
       :host {display:block;color:var(--primary-text-color)}
@@ -74,12 +75,14 @@ class WallboxManagerCard extends HTMLElement {
       <div class="row" id="soll_soc_speicher-row"><label id="soll_soc_speicher-label" for="soll_soc_speicher"></label><div class="numeric"><button id="soll_soc_speicher-down" class="step" type="button">−</button><input id="soll_soc_speicher" type="text" inputmode="numeric" autocomplete="off"><button id="soll_soc_speicher-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
       ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="—"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="—"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
       ${Object.entries(optimumFields).map(([id,labels]) => `<div class="row" id="${id}-row"><label id="${id}-label" for="${id}"></label><div class="numeric"><input id="${id}" type="number" min="0" step="${id === "estimated_daily_house_consumption_kwh" ? "0.1" : "1"}"><span class="unit">${labels[2]}</span></div></div>`).join("")}
+      <button id="grid-set" type="button" aria-label="Approve NETZ request">SET</button>
       <button id="permission"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
       <section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section>
       <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><div class="reading" id="no-messages">-</div><p id="status" class="notice" role="status" hidden></p><p id="error" class="notice" role="alert" hidden></p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
+    get("grid-set").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.grid_set});
     get("takeover").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.take_control});
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
     get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles[this._hass.states[this.discovery.roles.charging_profile]?.state === "NETZ" ? "power_approximation" : "pv_approximation"], option:e.target.value});
@@ -200,7 +203,8 @@ class WallboxManagerCard extends HTMLElement {
     input.value = this.format(value);
     const entity = this.discovery.roles[numberRole(id)];
     if ((!this.edits[id] && available(this._hass.states[entity]) && Number(this._hass.states[entity].state) === value) || (this.edits[id]?.entity === entity && this.edits[id].value === value)) return;
-    const edit = this.edits[id] = {entity,value};
+    const edit = this.edits[id] = {entity,value,revision:this._hass.states[entity]?.attributes.grid_draft_revision ?? 0};
+    if (id === "power") this.draftWrites.add(edit);
     input.value = this.format(value);
     get("error").hidden = true;
     this.hass = this._hass;
@@ -212,7 +216,7 @@ class WallboxManagerCard extends HTMLElement {
         get("error").textContent = err.message || String(err); get("error").hidden = false;
       }
     }
-    finally { this.hass = this._hass; }
+    finally { edit.complete = true; this.draftWrites.delete(edit); this.hass = this._hass; }
   }
   async editDuration(id) {
     const get = key => this.shadowRoot.getElementById(key);
@@ -227,7 +231,8 @@ class WallboxManagerCard extends HTMLElement {
     }
     const value = hours.value === "" && minutes.value === "" ? "" : `${String(Number(hours.value || 0)).padStart(2,"0")}:${String(Number(minutes.value || 0)).padStart(2,"0")}`;
     const entity = this.discovery.roles[id];
-    const edit = this.durationEdits[id] = {entity,value};
+    const edit = this.durationEdits[id] = {entity,value,revision:this._hass.states[entity]?.attributes.grid_draft_revision ?? 0};
+    this.draftWrites.add(edit);
     get("error").hidden = true;
     this.hass = this._hass;
     try { await this._hass.callService("text","set_value",{entity_id:entity,value}); }
@@ -237,13 +242,13 @@ class WallboxManagerCard extends HTMLElement {
         get("error").textContent = err.message || String(err); get("error").hidden = false;
       }
     }
-    finally { this.hass = this._hass; }
+    finally { edit.complete = true; this.draftWrites.delete(edit); this.hass = this._hass; }
   }
   async call(domain, service, data) {
-    const action = domain === "button" && service === "press" ? "take_control" : domain === "switch" && ["turn_on", "turn_off"].includes(service) ? "charging_enabled" : null;
+    const action = domain === "button" && service === "press" ? (data.entity_id === this.discovery.roles.grid_set ? "grid_set" : "take_control") : domain === "switch" && ["turn_on", "turn_off"].includes(service) ? "charging_enabled" : null;
     if (action) {
       const state = this._hass.states[this.discovery.roles[action]];
-      if (this.busy || !state || state.state === "unavailable" || state.attributes.execution_ready !== true || data.entity_id !== this.discovery.roles[action]) return;
+      if (this.busy || !state || state.state === "unavailable" || (action === "grid_set" ? (state.attributes.grid_set_ready !== true || state.attributes.grid_set_required !== true || this.draftWrites.size > 0 || this.edits.power || Object.keys(this.durationEdits).length > 0) : state.attributes.execution_ready !== true) || data.entity_id !== this.discovery.roles[action]) return;
     } else if (!["number", "select", "text"].includes(domain) || !Object.values(this.discovery.roles).includes(data.entity_id)) return;
     const error = this.shadowRoot.getElementById("error");
     error.textContent = ""; error.hidden = true;
@@ -283,7 +288,7 @@ class WallboxManagerCard extends HTMLElement {
     get("profile").disabled = busy || !available(state("charging_profile"));
     for (const [id,role] of [["power","soll_power"],["reserve","min_soc"],["soll_soc_speicher","soll_soc_speicher"]]) {
       const s = state(role), edit = this.edits[id];
-      if (edit && (edit.entity !== d.roles[role] || (available(s) && Number(s.state) === edit.value))) delete this.edits[id];
+      if (edit && (edit.entity !== d.roles[role] || (available(s) && (Number(s.state) === edit.value || (edit.complete && s.attributes.grid_draft_revision > edit.revision))))) delete this.edits[id];
       if (previous !== d.entry || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value) : available(s) ? this.format(Number(s.state)) : "";
       const disabled = busy || !available(s), value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
       get(id).disabled = disabled;
@@ -311,7 +316,7 @@ class WallboxManagerCard extends HTMLElement {
       get(`${id}-row`).hidden = pv;
       get(`${id}-label`).textContent = label;
       const s = state(id), edit = this.durationEdits[id];
-      if (edit && (edit.entity !== d.roles[id] || s?.state === edit.value)) delete this.durationEdits[id];
+      if (edit && (edit.entity !== d.roles[id] || s?.state === edit.value || (edit.complete && s?.attributes.grid_draft_revision > edit.revision))) delete this.durationEdits[id];
       const value = this.durationEdits[id]?.value ?? (durationAvailable(s) ? s.state : "");
       const parts = value === "" ? ["",""] : value.split(":");
       for (const [index,part] of ["hours","minutes"].entries()) {
@@ -321,6 +326,10 @@ class WallboxManagerCard extends HTMLElement {
       }
       get(`${id}-clear`).disabled = busy || !durationAvailable(s);
     }
+    const approval = state("grid_set");
+    get("grid-set").hidden = profile !== "NETZ" || approval?.attributes.grid_set_required !== true;
+    get("grid-set").disabled = busy || !approval || approval.state === "unavailable" || approval.attributes.grid_set_ready !== true || this.draftWrites.size > 0 || !!this.edits.power || Object.keys(this.durationEdits).length > 0;
+    get("grid-set").ariaLabel = de ? "NETZ-Anforderung bestätigen" : "Approve NETZ request";
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
     const point = state("soll_power")?.attributes;
@@ -353,6 +362,7 @@ class WallboxManagerCard extends HTMLElement {
     get("status").textContent = (d.ambiguous ? (de ? "Mehrere Instanzen: entry_id in der Kartenkonfiguration angeben. " : "Multiple instances: configure this card's entry_id. ") : "") +
       (de ? "Übernahme und Ladefreigabe sind explizite Aktionen. Netzprofil: festes Leistungsangebot bei Ladefreigabe." : "Takeover and charging permission require explicit actions. Grid applies a fixed offered point while charging is permitted.") +
       (profile === "NETZ" && point ? ` NETZ: ${point.profile_status || "—"}${point.command_reason ? ` (${point.command_reason})` : ""}.` : "") +
+      (profile === "NETZ" && approval?.attributes.grid_approval_error ? ` SET: ${approval.attributes.grid_approval_error}.` : "") +
       ["take_control","charging_enabled"].map(role => {
         const a = state(role)?.attributes;
         return a ? ` ${role === "take_control" ? (de ? "Letzter Übernahmebefehl" : "Last takeover command") : (de ? "Letzter Freigabebefehl" : "Last permission command")}: ${a.command_status || "—"}${a.command_reason ? ` (${a.command_reason})` : ""}. ${de ? "Steuerung" : "Control"}: ${a.execution_blocked_reason || (de ? "bereit" : "ready")}.` : "";

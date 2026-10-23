@@ -30,17 +30,17 @@ class Grid:
         self.listener, self.state, self.settings = listener, listener.state, settings
         self.epoch = 0
         self.closed = False
-        self.task = self.timer = self.debounce = self.schedule_timer = None
+        self.task = self.timer = self.schedule_timer = None
         self.task_epoch = None
         self.operator_off = False
         self.allow_issue = False
-        self.known_transaction = None
+        self.known_transaction = self.start_transaction = None
         self.signature = None
         self.status, self.reason = "waiting", None
         self.requested = self.confirmed = self.acknowledged = None
         self.confirmed_transaction = None
         self.point_uncertain = False
-        self.retry_at = None
+        self.retry_at = self.retry_deadline = None
         self.wall_time = time.time
         self.call_later = lambda delay, callback: asyncio.get_running_loop().call_later(
             delay, callback
@@ -78,7 +78,6 @@ class Grid:
                     )
                 )
         for role in (
-            "soll_power",
             "charging_profile",
             "power_approximation",
             "allowed_current_1p",
@@ -89,10 +88,84 @@ class Grid:
                 settings.watch(role, lambda role=role: self.edited(role))
             )
 
+        self.removers.append(
+            self.state.watch(
+                ("command", self.state.binding, "charging_enabled"),
+                self.permission_completed,
+            )
+        )
+        settings.grid_equivalent = self.equivalent
+        self.removers.append(
+            settings.watch("grid_approved", lambda: self.committed(False))
+        )
+        self.removers.append(
+            settings.watch("grid_equivalent", lambda: self.committed(True))
+        )
+        self.removers.append(
+            settings.watch(
+                "grid_timing", lambda: self.committed(True, timing_only=True)
+            )
+        )
+
+    def permission_completed(self):
+        intent = self.listener.control.intents.get("ChargingEnabled")
+        if intent and intent.status == "confirmed" and intent.value == "true":
+            # A superseded OFF may never publish false. An explicit confirmed ON
+            # still starts its newly armed schedule even if held permission is true.
+            self.signature = None
+            self.changed()
+
+    def equivalent(self, values):
+        """Compare approved desired points, never the temporary physical offer."""
+        desired = self.requested
+        if (
+            not desired
+            or not self.current_point()
+            or self.point_uncertain
+            or (self.task and not self.task.done())
+        ):
+            return False
+        try:
+            ranges = envelope(self.state, self.settings)
+            ongoing = desired.phases if desired.amps > 0 else None
+            direction = self.settings.get("power_approximation")
+            approved = ranges.resolve(
+                self.settings.approved("soll_power") * 1000, direction, ongoing
+            )
+            draft = ranges.resolve(values["power_kw"] * 1000, direction, ongoing)
+            return (
+                (approved.amps, approved.phases)
+                == (desired.amps, desired.phases)
+                == (draft.amps, draft.phases)
+            )
+        except ValueError, TypeError, OverflowError:
+            return False
+
+    def committed(self, equivalent, *, timing_only=False):
+        if (
+            not equivalent
+            or (self.task and not self.task.done())
+            or (not timing_only and not self.equivalent(self.settings.values))
+        ):
+            self.edited("grid_approved")
+            return
+        deadline = self.retry_deadline
+        self.invalidate()
+        self.schedule()
+        if deadline is not None and self.eligible():
+            self.retry(max(0, deadline - self.wall_time()))
+        self.publish()
+
+    def retry(self, delay):
+        self.retry_at = delay
+        self.retry_deadline = self.wall_time() + delay
+        self.timer = self.call_later(delay, self.intent_callback())
+
     def attributes(self):
         point = None if self.point_uncertain else self.current_point()
         physical = self.state.value(("station", self.station_scope, "physical_phases"))
         return {
+            **self.settings.approval_attributes(),
             "execution_ready": self.eligible(),
             "execution_blocked_reason": self.reason,
             "profile_status": self.status,
@@ -130,7 +203,12 @@ class Grid:
         if attributes == self._published:
             return
         self._published = attributes
-        for role in ("soll_power", "charging_profile", "power_approximation"):
+        for role in (
+            "soll_power",
+            "charging_profile",
+            "power_approximation",
+            "grid_set",
+        ):
             self.state.publish(("grid", self.state.binding, role))
 
     def transaction(self):
@@ -176,12 +254,12 @@ class Grid:
         )
 
     def cancel_timers(self):
-        for name in ("timer", "debounce", "schedule_timer"):
+        for name in ("timer", "schedule_timer"):
             handle = getattr(self, name)
             if handle:
                 handle.cancel()
                 setattr(self, name, None)
-        self.retry_at = None
+        self.retry_at = self.retry_deadline = None
 
     def invalidate(self):
         self.epoch += 1
@@ -196,7 +274,7 @@ class Grid:
         transaction = self.transaction()
         if transaction and transaction != self.known_transaction:
             self.allow_issue = True
-            self.known_transaction = transaction
+            self.known_transaction = self.start_transaction = transaction
         self.signature = signature
         self.invalidate()
         self.schedule()
@@ -220,11 +298,8 @@ class Grid:
             self.signature = None
             self.changed()
         elif self.eligible():
-            if role == "soll_power":
-                self.status = "pending"
-                self.debounce = self.call_later(1, self.intent_callback())
-            else:
-                self.launch()
+            self.status, self.reason = "pending", None
+            self.launch()
         self.publish()
 
     def intent_callback(self):
@@ -245,12 +320,10 @@ class Grid:
             return
         if self.task and not self.task.done() and self.task_epoch == self.epoch:
             return
-        for name in ("debounce", "timer"):
-            handle = getattr(self, name)
-            if handle:
-                handle.cancel()
-                setattr(self, name, None)
-        self.retry_at = None
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
+        self.retry_at = self.retry_deadline = None
         adapter = self.listener.adapter
         epoch = self.task_epoch = self.epoch
         self.task = adapter.spawn(
@@ -331,6 +404,7 @@ class Grid:
         )
 
     async def permission_requested(self, enabled):
+        was_operator_off = self.operator_off
         self.operator_off = not enabled
         self.allow_issue = enabled
         self.invalidate()
@@ -338,29 +412,15 @@ class Grid:
             if self.settings.values.get("grid_request"):
                 await self.settings.save_runtime({"grid_request": None})
             return
-        if self.settings.get("charging_profile") != "NETZ":
-            return
-        delay, duration = (
-            self.settings.get(k) for k in ("grid_start_delay", "grid_duration")
-        )
-        if delay is None and duration is None:
-            return
-        now = self.wall_time()
-        start = now + (delay or 0)
-        await self.settings.save_runtime(
-            {
-                "grid_start_delay": None,
-                "grid_duration": None,
-                "grid_request": {
-                    "start_at": start,
-                    "end_at": now
-                    if duration == 0
-                    else start + duration
-                    if duration is not None
-                    else None,
-                },
-            }
-        )
+        if self.settings.get("charging_profile") == "NETZ" and (
+            was_operator_off
+            or self.state.value(self.listener.control.key("ChargingEnabled"))
+            is not True
+        ):
+            await self.arm_timing()
+
+    async def arm_timing(self):
+        await self.settings.arm_grid(self.wall_time())
 
     async def read_point(self, adapter, epoch, transaction, ranges):
         response = await adapter.request(
@@ -465,6 +525,12 @@ class Grid:
         try:
             if not self.valid(epoch, adapter, transaction):
                 return
+            if self.start_transaction == transaction:
+                await self.arm_timing()
+                if not self.valid(epoch, adapter, transaction):
+                    return
+                self.start_transaction = None
+                self.schedule()
             ranges = envelope(self.state, self.settings)
             phase, _ = self.phase()
             if phase == "expired":
@@ -480,7 +546,9 @@ class Grid:
                 self.status, self.reason = "unconfirmed", "readback_unknown"
                 self.publish()
                 return
-            watts = self.settings.get("soll_power") * 1000 if phase == "active" else 0
+            watts = (
+                self.settings.approved("soll_power") * 1000 if phase == "active" else 0
+            )
             ongoing = held.phases if held and held.amps > 0 else None
             desired = ranges.resolve(
                 watts, self.settings.get("power_approximation"), ongoing
@@ -504,7 +572,7 @@ class Grid:
                 if self.timer:
                     self.timer.cancel()
                     self.timer = None
-                self.retry_at = None
+                self.retry_at = self.retry_deadline = None
                 self.allow_issue = False
                 self.status, self.reason = "confirmed", limitation
             elif confirm_only:
@@ -584,8 +652,7 @@ class Grid:
                                 else "rejected"
                             )
                             self.allow_issue = True
-                            self.retry_at = delay
-                            self.timer = self.call_later(delay, self.intent_callback())
+                            self.retry(delay)
                     self.publish()
                     return
                 self.acknowledged = desired

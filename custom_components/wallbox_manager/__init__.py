@@ -37,11 +37,14 @@ async def async_setup_entry(hass, entry):
     from . import session
     from .frontend import async_setup_assets
 
-    profiles_store = Store(hass, 1, f"wallbox_manager.{entry.entry_id}.profiles")
+    profiles_store = Store(
+        hass, 1, f"wallbox_manager.{entry.entry_id}.profiles", atomic_writes=True
+    )
     profiles = await profiles_store.async_load() or {}
     binding = migrate(hass, entry, profiles)
     state = State(binding)
     settings = Settings(hass, entry, binding, profiles_store, profiles)
+    await settings.initialize_grid()
     session_store = await session.load(hass, entry.entry_id, state)
     transport = await hass.async_add_executor_job(import_module, ".ocpp", __package__)
 

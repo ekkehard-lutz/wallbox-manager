@@ -203,7 +203,9 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
     settings = entry.runtime_data.settings
     assert settings.get("charging_profile") == "PV_OPTIMUM"
     assert settings.get("soll_power") == 7.2
-    assert await store.async_load() == saved
+    migrated = await store.async_load()
+    assert {k: migrated[key][k] for k in saved[key]} == saved[key]
+    assert migrated[key]["grid_approved"]["power_kw"] == 7.2
     await settings.set("soll_power", 6.8)
     await settings.set("charging_profile", "NETZ")
     await settings.set("grid_duration", "12:34")

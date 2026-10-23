@@ -181,7 +181,7 @@ async def start_grid(entry, station, transaction="net-test"):
     return entry.runtime_data.grid
 
 
-async def test_complete_profile_confirmation_no_telemetry_repeat_and_debounce(ha):
+async def test_complete_profile_confirmation_no_telemetry_repeat_and_set(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
@@ -217,6 +217,7 @@ async def test_complete_profile_confirmation_no_telemetry_repeat_and_debounce(ha
         for value in (8, 7, 6):
             await settings.set("soll_power", value)
         assert len(station.profiles) == 1
+        await settings.approve_grid()
         await eventually(lambda: len(station.profiles) == 2)
         await eventually(lambda: grid.status == "confirmed")
         assert grid.confirmed.phases == 3 and grid.confirmed.amps == 9
@@ -259,9 +260,9 @@ async def test_lockout_retry_recomputes_and_off_cancels(ha, monkeypatch):
         count = len(station.profiles)
         assert count >= 2
         await entry.runtime_data.settings.set("soll_power", 5)
-        assert grid.debounce
+        await entry.runtime_data.settings.approve_grid()
         await entry.runtime_data.server.control.request("ChargingEnabled", "false")
-        assert grid.timer is grid.debounce is None
+        assert grid.timer is None
         await asyncio.sleep(1.1)
         assert len(station.profiles) == count
 
@@ -277,6 +278,7 @@ async def test_generic_rejection_and_accepted_unconfirmed_never_retry(ha):
         station.profile_result = "Accepted"
         station.apply_profile = False
         await entry.runtime_data.settings.set("soll_power", 8)
+        await entry.runtime_data.settings.approve_grid()
         await eventually(lambda: grid.status == "accepted_unconfirmed")
         assert grid.confirmed.amps == 0
         assert grid.acknowledged.amps == 12
@@ -321,12 +323,17 @@ async def test_start_delay_explicit_zero_duration_and_expiration_without_vehicle
         grid.wall_time, grid.call_later = lambda: clock.now, clock.later
         await settings.set("grid_start_delay", "00:02")
         await settings.set("grid_duration", "00:03")
+        await settings.approve_grid()
         await control.request("ChargingEnabled", "true")
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 0
         )
         assert grid.phase()[0] == "waiting"
-        assert settings.get("grid_duration") is None
+        assert settings.approved("grid_duration") == 180
+        assert settings.values["grid_next_timing"] == {
+            "grid_start_delay": None,
+            "grid_duration": None,
+        }
         await clock.advance(120)
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 16
@@ -335,10 +342,12 @@ async def test_start_delay_explicit_zero_duration_and_expiration_without_vehicle
         await eventually(lambda: station.values["ChargingEnabled"] == "false")
         assert settings.values["grid_request"] is None
         await settings.set("grid_duration", "00:00")
+        await settings.approve_grid()
         await control.request("ChargingEnabled", "true")
         await clock.advance(0)
         await eventually(lambda: station.values["ChargingEnabled"] == "false")
         await settings.set("grid_duration", "00:01")
+        await settings.approve_grid()
         await control.request("ChargingEnabled", "true")
         state = entry.runtime_data.state
         state.session["ended_at"] = datetime.now(UTC).isoformat()
@@ -368,6 +377,7 @@ async def test_fallback_retry_deadline_and_generation_fence(ha, reason):
         assert len(station.profiles) == initial_count + 1
         station.profile_result = "Rejected"
         await entry.runtime_data.settings.set("soll_power", 5)
+        await entry.runtime_data.settings.approve_grid()
         await clock.advance(1)
         await eventually(lambda: grid.retry_at == 60)
         state = entry.runtime_data.state
@@ -470,6 +480,7 @@ async def test_grid_down_below_minimum_sends_zero_offer(ha):
         await eventually(lambda: grid.status == "confirmed")
         await entry.runtime_data.settings.set("power_approximation", "down")
         await entry.runtime_data.settings.set("soll_power", 0.1)
+        await entry.runtime_data.settings.approve_grid()
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 0
         )
@@ -516,6 +527,7 @@ async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
         station.locked = True
         await entry.runtime_data.settings.set("power_approximation", direction)
         await entry.runtime_data.settings.set("soll_power", requested)
+        await entry.runtime_data.settings.approve_grid()
         await eventually(lambda: grid.timer is not None and grid.retry_at == 6)
         assert grid.requested.phases == 1
         assert grid.requested.amps == final_amps
@@ -576,6 +588,7 @@ async def pending_interim(entry, station, direction="down", power=1.5):
     await entry.runtime_data.settings.set("power_approximation", direction)
     await eventually(lambda: grid.task.done())
     await entry.runtime_data.settings.set("soll_power", power)
+    await entry.runtime_data.settings.approve_grid()
     await clock.advance(1)
     await eventually(lambda: grid.task.done())
     return grid, clock
@@ -660,19 +673,22 @@ async def test_failed_interim_confirmation_preserves_recognized_retry(ha, monkey
         await eventually(lambda: grid.status == "confirmed")
 
 
-async def test_cancelled_retry_callback_cannot_skip_new_power_debounce(ha):
+async def test_cancelled_retry_callback_cannot_escape_new_set_revision(ha):
     entry = await ha.install()
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
-        grid, clock = await pending_interim(entry, station)
+        grid, _ = await pending_interim(entry, station)
         stale = grid.timer.callback
         count = len(station.profiles)
         station.locked = False
-        await entry.runtime_data.settings.set("soll_power", 2)
+        settings = entry.runtime_data.settings
+        await settings.set("soll_power", 2)
+        assert len(station.profiles) == count
+        await settings.approve_grid()
+        await eventually(lambda: grid.status == "confirmed")
+        count = len(station.profiles)
         stale()
         await asyncio.sleep(0.05)
         assert len(station.profiles) == count
-        await clock.advance(1)
-        await eventually(lambda: grid.status == "confirmed")
 
 
 @pytest.mark.parametrize("mode", [1, 2, 3])
@@ -712,7 +728,8 @@ async def test_failed_read_retains_confirmed_positive_phase_for_new_intent(ha):
         await eventually(lambda: grid.status == "confirmed")
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 4.2)
-        await eventually(lambda: grid.task.done() and grid.debounce is None)
+        await entry.runtime_data.settings.approve_grid()
+        await eventually(lambda: grid.task.done())
         period = station.profiles[-1][1]["charging_schedule"][0][
             "charging_schedule_period"
         ][0]
@@ -790,7 +807,8 @@ async def test_held_matching_offer_does_not_retransmit_after_failed_read(ha):
         count = len(station.profiles)
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 11.04)
-        await eventually(lambda: grid.debounce is None and grid.task.done())
+        await entry.runtime_data.settings.approve_grid()
+        await eventually(lambda: grid.task.done())
         assert grid.status == "confirmed"
         assert len(station.profiles) == count
 
@@ -826,10 +844,12 @@ async def test_superseded_interim_cannot_dispatch_after_new_intent(ha, monkeypat
         await entry.runtime_data.settings.set("power_approximation", "down")
         await eventually(lambda: grid.task.done())
         await entry.runtime_data.settings.set("soll_power", 1.5)
+        await entry.runtime_data.settings.approve_grid()
         await asyncio.wait_for(waiting.wait(), 5)
         old_task = grid.task
         station.locked = False
         await entry.runtime_data.settings.set("soll_power", 2)
+        await entry.runtime_data.settings.approve_grid()
         release.set()
         await old_task
         await eventually(lambda: grid.status == "confirmed")
@@ -864,12 +884,14 @@ async def test_held_match_cannot_hide_superseded_inflight_opposite_write(ha):
         await eventually(lambda: grid.status == "confirmed")
         station.delay = True
         await entry.runtime_data.settings.set("soll_power", 5)
+        await entry.runtime_data.settings.approve_grid()
         await asyncio.wait_for(station.waiting.wait(), 5)
         assert station.amps == 7
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 11)
+        await entry.runtime_data.settings.approve_grid()
         station.profile_release.set()
-        await eventually(lambda: grid.debounce is None and grid.task.done())
+        await eventually(lambda: grid.task.done())
         assert station.amps == 16
         assert grid.status == "accepted_unconfirmed"
         assert grid.acknowledged.amps == 16
@@ -882,13 +904,14 @@ async def test_duplicate_launches_coalesce_inflight_reconciliation(ha):
         await eventually(lambda: grid.status == "confirmed")
         count = len(station.profiles)
         await entry.runtime_data.settings.set("soll_power", 5)
+        await entry.runtime_data.settings.approve_grid()
         grid.launch()
         task = grid.task
         grid.launch()
         assert grid.task is task
         await eventually(lambda: grid.status == "confirmed")
         assert len(station.profiles) == count + 1
-        assert grid.timer is None and grid.debounce is None
+        assert grid.timer is None
 
 
 async def test_uncertain_interim_hides_actual_until_supported_confirmation(ha):
@@ -1017,12 +1040,14 @@ async def test_superseded_response_cannot_restore_stale_actual(
         count = len(station.profiles)
         station.profile_result = old_result
         await entry.runtime_data.settings.set("soll_power", 5)
+        await entry.runtime_data.settings.approve_grid()
         await asyncio.wait_for(waiting.wait(), 5)
         old_task = grid.task
         station.profile_result = "Accepted"
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 8)
-        await eventually(lambda: grid.debounce is None and grid.task.done())
+        await entry.runtime_data.settings.approve_grid()
+        await eventually(lambda: grid.task.done())
         assert grid.status == "accepted_unconfirmed"
         uncertainty = grid.point_uncertain
         assert uncertainty and grid.confirmed.amps == 16
@@ -1066,10 +1091,12 @@ async def test_overlapping_atomic_rejections_restore_prior_actual(ha, monkeypatc
         count = len(station.profiles)
         station.profile_result = "Rejected"
         await entry.runtime_data.settings.set("soll_power", 5)
+        await entry.runtime_data.settings.approve_grid()
         await asyncio.wait_for(waiting[0].wait(), 5)
         old_task = grid.task
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 8)
+        await entry.runtime_data.settings.approve_grid()
         await asyncio.wait_for(waiting[1].wait(), 5)
         release[0].set()
         await old_task
