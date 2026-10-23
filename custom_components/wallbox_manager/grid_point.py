@@ -81,7 +81,28 @@ class Envelope:
                 if watts <= (self.ranges[low][2] + self.ranges[high][1]) / 2:
                     mode = low
                     break
+        return self.on_phase(watts, mode, direction)
+
+    def on_phase(self, watts, mode, direction="nearest"):
+        """Round on a chosen phase, treating 0 A as a real, separate candidate.
+
+        A positive requested power below the minimum is not automatically
+        promoted to the minimum: DOWN must pause and NEAREST may pause.
+        This is also the phase-lockout fallback calculator.
+        """
+        watts = number(watts)
+        if watts < 0 or direction not in ("down", "nearest", "up"):
+            raise ValueError("Unsupported power request")
+        if mode not in self.ranges:
+            raise ValueError("Phase mode disabled or unsupported")
         voltage, _, _, cap = self.ranges[mode]
+        minimum_power = self.minimum * voltage
+        if (
+            watts == 0
+            or (direction == "down" and watts < minimum_power)
+            or (direction == "nearest" and watts * 2 < minimum_power)
+        ):
+            return Point(0, None, Fraction(0))
         index = (watts / voltage - self.minimum) / self.step
         index = (
             math.floor(index)
