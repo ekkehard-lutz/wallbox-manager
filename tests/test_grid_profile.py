@@ -247,7 +247,7 @@ async def test_lockout_retry_recomputes_and_off_cancels(ha, monkeypatch):
         }
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.timer is not None)
-        assert grid.retry_at == 18 and grid.status == "rejected"
+        assert grid.retry_at == 18 and grid.status == "phase_lockout_pending"
         assert grid.confirmed.amps == 0 and grid.requested.amps == 16
         grid.timer.cancel()
         grid.timer = None
