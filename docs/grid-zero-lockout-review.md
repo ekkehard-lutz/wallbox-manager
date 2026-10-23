@@ -120,3 +120,42 @@ Stationary was unchanged. No version change, merge, tag, release, deployment,
 service restart, actual Home Assistant or hardware interaction was performed.
 Only the existing fix branch is committed and pushed. Pre-existing untracked
 workstation files remain; tracked changes are clean after the commit.
+
+## Follow-up: uncertain actual-point presentation
+
+Independent review of `21534eb0ef5d59297502d1ce75f154354c6a4462` identified
+one remaining WBM-GRID-21 defect. A schema-valid OCPP peer reproduced confirmed
+3p/16 A -> PhaseSwitchLockout -> interim 0 A Accepted -> rejected composite
+readback. Internal `confirmed` correctly remained 3p/16 A, but public
+`applied_current_a`/`applied_phase_count` incorrectly remained 16/3 as well.
+A second reproduction showed that atomic rejection unnecessarily left the
+uncertainty marker set. Both tests failed before this follow-up production fix.
+
+`attributes()` now suppresses the applied point (including derived offered
+watts) while a dispatched proposal may have superseded it. The existing held
+point and `current_point()` remain intact for generation-scoped planning.
+Wire dispatch publishes unknown actual immediately. Each proposal records its
+prior uncertainty; atomic Rejected unwinds only rejected proposals, preserving
+prior accepted/uncertain proposals. Late superseded rejection cannot overwrite
+newer dispatch or supported readback. Overlapping rejections also unwind
+correctly when their callers resume in a different order. An Accepted proposal
+no longer needs to retain its predecessor chain. Supported current-generation
+readback clears uncertainty through the existing path; no additional read,
+profile command, timer, retry loop or frontend runtime change was introduced.
+
+Seven added Python cases cover accepted interim/readback failure, later 3p/0 A
+confirmation with desired 1p/6 A still pending, atomic rejection, rejection after
+prior accepted uncertainty, reconnect with incomplete/current-generation reads,
+superseded Accepted/Rejected responses, and overlapping atomic rejections.
+Command counts and unchanged/no retry handles are asserted. A new card test
+verifies `— → 1-phasig 6A` becomes `3-phasig 0A → 1-phasig 6A` after confirmation.
+
+Follow-up validation: complete Python suite **322 passed** (five existing
+dependency warnings); frontend **21 passed**; Ruff lint and format, Python
+compilation, JavaScript syntax, unchanged beta.10 manifest metadata/dependencies,
+English/German translation key parity, HACS JSON and Git whitespace checks pass.
+Historical/openWB source comparisons above remain applicable; the actual
+openWB `evse.py` and tagged `solver/operating_point.py` were rechecked for their
+offer/measurement distinction. Stationary, versions and release state remain
+unchanged. No merge, deployment, service restart or hardware interaction occurred.
+The eight pre-existing untracked workstation files remain preserved.

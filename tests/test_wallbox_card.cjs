@@ -341,3 +341,13 @@ test('Grid actual requires a complete confirmed point; unknown and offline stay 
   data['E.connected'].state='off'; c.hass=c._hass;
   assert.equal(get('actual').textContent,'—');
 });
+
+test('unconfirmed interim actual stays unknown until zero-current readback',()=>{
+  const data=states();
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:null,applied_current_a:null,acknowledged_current_a:0,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'— → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
+});

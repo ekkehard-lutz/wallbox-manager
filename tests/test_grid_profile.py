@@ -889,3 +889,194 @@ async def test_duplicate_launches_coalesce_inflight_reconciliation(ha):
         await eventually(lambda: grid.status == "confirmed")
         assert len(station.profiles) == count + 1
         assert grid.timer is None and grid.debounce is None
+
+
+async def test_uncertain_interim_hides_actual_until_supported_confirmation(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        station.fail_interim_read = True
+        grid, clock = await pending_interim(entry, station)
+        assert station.amps == 0 and station.phases == 3
+        assert grid.confirmed.amps == 16 and grid.current_point().phases == 3
+        assert grid.point_uncertain
+        assert grid.attributes()["applied_current_a"] is None
+        assert grid.attributes()["applied_phase_count"] is None
+        assert grid.attributes()["applied_offered_power_w"] is None
+        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert grid.acknowledged.amps == 0
+        timer, count = grid.timer, len(station.profiles)
+        station.readback = True
+        await grid.reconcile(
+            grid.epoch, entry.runtime_data.server.adapter, confirm_only=True
+        )
+        assert grid.attributes()["applied_current_a"] == 0
+        assert grid.attributes()["applied_phase_count"] == 3
+        assert not grid.point_uncertain
+        assert grid.status == "phase_lockout_pending"
+        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert grid.timer is timer and grid.retry_at == 6
+        assert len(station.profiles) == count
+        await clock.advance(5)
+        assert len(station.profiles) == count
+
+
+async def test_atomic_interim_rejection_preserves_confirmed_actual(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        station.interim_result = "Rejected"
+        station.interim_reason = {"reason_code": "Busy"}
+        grid, clock = await pending_interim(entry, station)
+        assert grid.reason == "Busy" and grid.timer is None
+        assert not grid.point_uncertain
+        assert grid.attributes()["applied_current_a"] == 16
+        assert grid.attributes()["applied_phase_count"] == 3
+        count = len(station.profiles)
+        await clock.advance(600)
+        assert len(station.profiles) == count
+
+
+async def test_rejected_retry_cannot_clear_prior_accepted_uncertainty(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        station.fail_interim_read = True
+        grid, clock = await pending_interim(entry, station)
+        uncertainty = grid.point_uncertain
+        assert uncertainty
+        station.interim_result = "Rejected"
+        station.interim_reason = {"reason_code": "Busy"}
+        await clock.advance(6)
+        await eventually(lambda: grid.task.done())
+        assert grid.reason == "Busy" and grid.timer is None
+        assert grid.point_uncertain is uncertainty
+        assert grid.confirmed.amps == 16
+        assert grid.attributes()["applied_current_a"] is None
+        assert grid.attributes()["applied_phase_count"] is None
+
+
+async def test_uncertain_actual_reconnect_requires_new_generation_confirmation(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        station.fail_interim_read = True
+        grid, _ = await pending_interim(entry, station)
+        assert grid.attributes()["applied_current_a"] is None
+    assert grid.attributes()["applied_phase_count"] is None
+    async with peer(entry, station_type=GridStation) as station:
+        station.values.update(ControlAuthority="OCPP", PhaseRotation="RST")
+        station.phases, station.amps, station.readback = 3, 0, False
+        await ready(entry, station)
+        await station.call(
+            call.TransactionEvent(
+                event_type="Updated",
+                timestamp=datetime.now(UTC).isoformat(),
+                trigger_reason="TxResumed",
+                seq_no=1,
+                transaction_info={
+                    "transaction_id": "net-test",
+                    "charging_state": "EVConnected",
+                },
+                evse={"id": 1, "connector_id": 1},
+            )
+        )
+        await eventually(lambda: grid.status == "unconfirmed")
+        assert grid.attributes()["applied_current_a"] is None
+        assert grid.attributes()["applied_phase_count"] is None
+        assert not station.profiles and grid.timer is None
+        station.readback = True
+        await grid.reconcile(
+            grid.epoch, entry.runtime_data.server.adapter, confirm_only=True
+        )
+        assert grid.attributes()["applied_current_a"] == 0
+        assert grid.attributes()["applied_phase_count"] == 3
+        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert not station.profiles and grid.timer is None
+
+
+@pytest.mark.parametrize("old_result", ["Accepted", "Rejected"])
+async def test_superseded_response_cannot_restore_stale_actual(
+    ha, monkeypatch, old_result
+):
+    entry = await ha.install()
+    async with peer(entry, station_type=GridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        adapter = entry.runtime_data.server.adapter
+        original = adapter.request
+        waiting, release = asyncio.Event(), asyncio.Event()
+        delayed = False
+
+        async def request(payload):
+            nonlocal delayed
+            response = await original(payload)
+            if isinstance(payload, call.SetChargingProfile) and not delayed:
+                delayed = True
+                waiting.set()
+                await release.wait()
+            return response
+
+        monkeypatch.setattr(adapter, "request", request)
+        count = len(station.profiles)
+        station.profile_result = old_result
+        await entry.runtime_data.settings.set("soll_power", 5)
+        await asyncio.wait_for(waiting.wait(), 5)
+        old_task = grid.task
+        station.profile_result = "Accepted"
+        station.readback = False
+        await entry.runtime_data.settings.set("soll_power", 8)
+        await eventually(lambda: grid.debounce is None and grid.task.done())
+        assert grid.status == "accepted_unconfirmed"
+        uncertainty = grid.point_uncertain
+        assert uncertainty and grid.confirmed.amps == 16
+        assert grid.attributes()["applied_current_a"] is None
+        assert grid.attributes()["applied_phase_count"] is None
+        release.set()
+        await old_task
+        assert grid.point_uncertain is uncertainty
+        assert grid.attributes()["applied_current_a"] is None
+        assert grid.attributes()["applied_phase_count"] is None
+        station.readback = True
+        await grid.reconcile(grid.epoch, adapter, confirm_only=True)
+        assert grid.status == "confirmed"
+        assert grid.attributes()["applied_current_a"] == 12
+        assert grid.attributes()["applied_phase_count"] == 3
+        assert len(station.profiles) == count + 2 and grid.timer is None
+
+
+async def test_overlapping_atomic_rejections_restore_prior_actual(ha, monkeypatch):
+    entry = await ha.install()
+    async with peer(entry, station_type=GridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        adapter = entry.runtime_data.server.adapter
+        original = adapter.request
+        waiting = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+        calls = 0
+
+        async def request(payload):
+            nonlocal calls
+            response = await original(payload)
+            if isinstance(payload, call.SetChargingProfile):
+                index = calls
+                calls += 1
+                waiting[index].set()
+                await release[index].wait()
+            return response
+
+        monkeypatch.setattr(adapter, "request", request)
+        count = len(station.profiles)
+        station.profile_result = "Rejected"
+        await entry.runtime_data.settings.set("soll_power", 5)
+        await asyncio.wait_for(waiting[0].wait(), 5)
+        old_task = grid.task
+        station.readback = False
+        await entry.runtime_data.settings.set("soll_power", 8)
+        await asyncio.wait_for(waiting[1].wait(), 5)
+        release[0].set()
+        await old_task
+        assert grid.attributes()["applied_current_a"] is None
+        release[1].set()
+        await grid.task
+        assert not grid.point_uncertain
+        assert grid.attributes()["applied_current_a"] == 16
+        assert grid.attributes()["applied_phase_count"] == 3
+        assert grid.timer is None and len(station.profiles) == count + 2

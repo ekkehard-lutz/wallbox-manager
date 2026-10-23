@@ -90,7 +90,7 @@ class Grid:
             )
 
     def attributes(self):
-        point = self.current_point()
+        point = None if self.point_uncertain else self.current_point()
         physical = self.state.value(("station", self.station_scope, "physical_phases"))
         return {
             "execution_ready": self.eligible(),
@@ -429,6 +429,8 @@ class Grid:
         expected = snake_to_camel_case(payload.__dict__)
         expected = {k: v for k, v in expected.items() if v is not None}
 
+        uncertainty = {"previous": None, "rejected": False}
+
         def guard(action, wire):
             if (
                 action != "SetChargingProfile"
@@ -436,15 +438,26 @@ class Grid:
                 or not self.valid(epoch, adapter, transaction)
             ):
                 raise Refused("Superseded NETZ intent")
-            # A sent proposal can supersede the held point even if its response
-            # belongs to an obsolete intent. Only supported readback resolves it.
-            self.point_uncertain = True
+            # Preserve the held planning point, but do not present it as actual
+            # while this proposal may supersede it, including after intent changes.
+            uncertainty["previous"] = self.point_uncertain
+            self.point_uncertain = uncertainty
+            self.publish()
 
         token = DISPATCH.set(guard)
         try:
             response = await adapter.request(payload)
         finally:
             DISPATCH.reset(token)
+        if response.status == "Accepted":
+            uncertainty["previous"] = False
+        elif response.status == "Rejected":
+            # Atomic rejection did not apply. Unwind only rejected proposals;
+            # retain prior accepted uncertainty and newer dispatch/readback state.
+            uncertainty["rejected"] = True
+            while self.point_uncertain and self.point_uncertain["rejected"]:
+                self.point_uncertain = self.point_uncertain["previous"]
+            self.publish()
         return response
 
     async def reconcile(self, epoch, adapter, *, confirm_only=False):
