@@ -30,11 +30,12 @@ function load() {
 function states(entry='E') {
   const result = {};
   for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',pv_approximation:'down',
-    charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
+    grid_set:'unknown',charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
     grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',optimum_max_discharge_w:'3000',estimated_daily_house_consumption_kwh:'12'})) {
     result[`${entry}.${role}`] = {state:value,attributes:{wallbox_manager_entry:entry,wallbox_manager_role:role,wallbox_manager_scope:'connector',station_id:`station-${entry}`,
       options:role==='charging_profile'?['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']:undefined,min:0,max:100}};
   }
+  Object.assign(result[`${entry}.grid_set`].attributes,{grid_set_ready:true,grid_set_required:false});
   return result;
 }
 function card(data=states(), config={}, language='en') {
@@ -171,15 +172,15 @@ test('last takeover result stays separate from observed authority and reconnect 
     const {card:c,get}=card(data,{},language);
     const commandLabel=language==='en' ? /Last takeover command: confirmed/ : /Letzter Übernahmebefehl: confirmed/;
     assert.match(get('status').textContent,commandLabel);
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: OCPP/ : /Beobachtete Steuerung: OCPP/);
+    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung|U L1|I L1/);
     data['E.control_authority'].state='local'; c.hass=c._hass;
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: Local/ : /Beobachtete Steuerung: Lokal/);
+    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung/);
     assert.match(get('status').textContent,commandLabel);
     data['E.connected'].state='off';
     data['E.control_authority'].state='remote'; // Retained data is not current while offline.
     Object.assign(data['E.take_control'].attributes,{execution_ready:false,execution_blocked_reason:'disconnected'});
     c.hass=c._hass;
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: —/ : /Beobachtete Steuerung: —/);
+    assert.equal(get('actual').textContent,'—');
     assert.match(get('status').textContent,commandLabel);
     assert.match(get('status').textContent,/disconnected/);
     assert.equal(get('takeover').disabled,true);
@@ -187,7 +188,7 @@ test('last takeover result stays separate from observed authority and reconnect 
     Object.assign(data['E.take_control'].attributes,{execution_ready:true,execution_blocked_reason:null});
     c.hass=c._hass;
     assert.match(get('status').textContent,commandLabel);
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: Local/ : /Beobachtete Steuerung: Lokal/);
+    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung/);
     data['E.take_control'].attributes.command_status='superseded'; c.hass=c._hass;
     assert.match(get('status').textContent,/superseded/);
     assert.doesNotMatch(get('status').textContent,commandLabel);
@@ -306,10 +307,150 @@ test('Grid approximation and confirmed offer stay distinct from measured power',
   const {get,calls}=card(data);
   assert.equal(get('approximation').value,'nearest');
   assert.equal(get('approximation-row').hidden,false);
-  assert.match(get('actual').textContent,/Confirmed offer: 3p × 6 A/);
+  assert.equal(get('actual').textContent,'3-phase 6A');
   assert.equal(get('live-power').textContent,'1.5 kW');
   assert.match(get('status').textContent,/NETZ: rejected \(PhaseSwitchLockout\)/);
   await get('approximation').onchange({target:{value:'down'}});
   assert.equal(calls[0][2].entity_id,'E.power_approximation');
   assert.equal(calls[0][2].option,'down');
+});
+
+
+test('Grid parameters show actual and requested modes only, including pending pauses',()=>{
+  const data=states();
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_current_a:6,requested_current_a:7});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'3-phasig 6A → 1-phasig 7A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:7});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'1-phasig 7A');
+  assert.doesNotMatch(get('actual').textContent,/Voltage|Strom|U L1|I L1|Beobachtete Steuerung|Bestätigtes Angebot/);
+});
+
+test('Grid actual requires a complete confirmed point; unknown and offline stay unknown',()=>{
+  const data=states();
+  data['E.physical_phases']={state:'3',attributes:{...data['E.soll_power'].attributes,wallbox_manager_role:'physical_phases'}};
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:null,applied_current_a:7,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'— → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:6});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'1-phasig 6A');
+  data['E.connected'].state='off'; c.hass=c._hass;
+  assert.equal(get('actual').textContent,'—');
+});
+
+test('unconfirmed interim actual stays unknown until zero-current readback',()=>{
+  const data=states();
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:null,applied_current_a:null,acknowledged_current_a:0,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'— → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
+});
+
+
+test('SET visibility is backend-approved intent, independent of physical point',()=>{
+  const data=states();
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('grid-set').hidden,true);
+  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
+  data['E.grid_set'].attributes.grid_set_required=true; c.hass=c._hass;
+  assert.equal(get('grid-set').hidden,false);
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:6}); c.hass=c._hass;
+  assert.equal(get('grid-set').hidden,false);
+  data['E.grid_set'].attributes.grid_set_required=false; c.hass=c._hass;
+  assert.equal(get('grid-set').hidden,true);
+  assert.match(c.shadowRoot.html, /id="grid-set" type="button" aria-label=/);
+});
+
+test('SET remains available offline and Local and is isolated across cards',async()=>{
+  const data={...states('A'),...states('B')};
+  for (const entry of ['A','B']) data[`${entry}.grid_set`].attributes.grid_set_required=true;
+  data['A.connected'].state='off';
+  const a=card(data,{entry_id:'A'}), b=card(data,{entry_id:'B'});
+  assert.equal(a.get('grid-set').disabled,false);
+  assert.equal(b.get('grid-set').disabled,false);
+  await a.get('grid-set').onclick(); await b.get('grid-set').onclick();
+  assert.equal(JSON.stringify(a.calls[0]),JSON.stringify(['button','press',{entity_id:'A.grid_set'}]));
+  assert.equal(JSON.stringify(b.calls[0]),JSON.stringify(['button','press',{entity_id:'B.grid_set'}]));
+  await a.card.call('button','press',{entity_id:'B.grid_set'});
+  assert.equal(a.calls.length,1);
+});
+
+test('SET suppresses duplicate presses and keeps failed drafts editable',async()=>{
+  const data=states(); data['E.grid_set'].attributes.grid_set_required=true;
+  const {card:c,get}=card(data);
+  let reject, calls=0;
+  c._hass.callService=()=>{calls++; return new Promise((resolve,fail)=>{reject=fail;});};
+  const pending=get('grid-set').onclick();
+  assert.equal(get('grid-set').disabled,true);
+  await get('grid-set').onclick();
+  assert.equal(calls,1);
+  reject(new Error('Persistence failed')); await pending;
+  assert.equal(get('grid-set').hidden,false);
+  assert.equal(get('grid-set').disabled,false);
+  assert.equal(get('power').value,'7.2');
+  assert.match(get('error').textContent,/Persistence failed/);
+  c._hass.callService=async()=>{};
+  await get('grid-set').onclick();
+  assert.equal(get('grid-set').hidden,false); // Service return alone is no approval observation.
+  data['E.grid_set'].attributes.grid_set_required=false; c.hass=c._hass;
+  assert.equal(get('grid-set').hidden,true);
+});
+
+test('locale numeric steps and time clearing stage drafts and wait for backend acknowledgement',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4';
+  data['E.grid_set'].attributes.grid_set_required=true;
+  const {card:c,get,calls}=card(data,{},'de');
+  assert.equal(get('power').value,'1,4');
+  await c.stepNumber('power',1); await c.stepNumber('power',1);
+  assert.equal(get('power').value,'1,6');
+  assert.deepEqual(calls.map(call=>call[2].value),[1.5,1.6]);
+  assert.equal(get('grid-set').disabled,true);
+  await get('grid-set').onclick(); assert.equal(calls.length,2);
+  data['E.soll_power'].state='1.6'; c.hass=c._hass;
+  assert.equal(get('grid-set').disabled,false);
+  get('grid_duration-clear').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls[2][0],'text'); assert.equal(calls[2][2].value,'');
+  assert.equal(get('grid-set').disabled,true);
+  data['E.grid_duration'].state=''; c.hass=c._hass;
+  assert.equal(get('grid-set').disabled,false);
+});
+
+test('power long press still stages repeated numeric edits without pressing SET',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4';
+  const {card:c,get,calls}=card(data,{},'de');
+  const button=get('power-up');
+  button.setPointerCapture=()=>{}; button.hasPointerCapture=()=>true; button.releasePointerCapture=()=>{};
+  c.startHold(button,'power',1,{button:0,isPrimary:true,pointerId:1,preventDefault(){}});
+  await new Promise(resolve=>setTimeout(resolve,500));
+  c.stopHold();
+  assert.ok(calls.length>=2);
+  assert.ok(calls.every(call=>call[0]==='number' && call[2].entity_id==='E.soll_power'));
+  assert.equal(get('grid-set').hidden,true); // Only a backend change can reveal it.
+  const count=calls.length; await new Promise(resolve=>setTimeout(resolve,175));
+  assert.equal(calls.length,count);
+});
+
+test('newer backend draft revisions supersede another card optimistic edit',async()=>{
+  const data=states(); data['E.soll_power'].attributes.grid_draft_revision=0;
+  data['E.grid_set'].attributes.grid_set_required=true;
+  const a=card(data), b=card(data);
+  a.get('power').value='3'; await a.card.editNumber('power');
+  assert.equal(a.get('power').value,'3');
+  // Another card wins; the first card never observes an intermediate 3 kW state.
+  b.get('power').value='4'; await b.card.editNumber('power');
+  data['E.soll_power'].state='4'; data['E.soll_power'].attributes.grid_draft_revision=2;
+  a.card.hass=a.card._hass; b.card.hass=b.card._hass;
+  assert.equal(a.get('power').value,'4'); assert.equal(b.get('power').value,'4');
+  assert.equal(a.get('grid-set').disabled,false);
+  data['E.grid_set'].attributes.grid_approval_error='Disk full'; a.card.hass=a.card._hass;
+  assert.match(a.get('status').textContent,/SET: Disk full/);
 });

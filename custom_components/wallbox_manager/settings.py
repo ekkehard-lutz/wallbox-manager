@@ -6,6 +6,8 @@ import math
 import re
 from fractions import Fraction
 
+from homeassistant.core import CoreState
+
 # Public roles -> legacy storage field, default, minimum, maximum, step, unit.
 NUMBERS = {
     "desired_charging_power": ("target_w", 0, 0, 100000, 100, "W"),
@@ -38,6 +40,7 @@ SELECTS = {
     "power_approximation": ("direction", ["up", "down", "nearest"]),
 }
 TIMES = ("grid_start_delay", "grid_duration")
+GRID_FIELDS = ("power_kw", *TIMES)
 REGULATION = ("soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay")
 
 
@@ -97,6 +100,132 @@ class Settings:
         self.state = None
         self.listeners = {}
         self.lock = asyncio.Lock()
+        self.values.setdefault("grid_draft_revision", 0)
+        self.values.setdefault("grid_approved", {**self.grid_draft(), "revision": 0})
+        self.values.setdefault(
+            "grid_next_timing", {k: self.values.get(k) for k in TIMES}
+        )
+        self.grid_equivalent = lambda values: False
+        self.approval_error = None
+
+    async def initialize_grid(self):
+        """Migrate active beta.10 settings once, before entities/transport start."""
+        if "grid_approved" not in self.profiles.get(self.key, {}):
+            profiles = {
+                **self.profiles,
+                self.key: {
+                    **self.profiles.get(self.key, {}),
+                    "grid_draft_revision": self.values["grid_draft_revision"],
+                    "grid_approved": self.values["grid_approved"],
+                    "grid_next_timing": self.values["grid_next_timing"],
+                },
+            }
+            await self.persist(profiles)
+            self.profiles = profiles
+
+    def grid_draft(self, values=None):
+        values = self.values if values is None else values
+        return {key: values.get(key) for key in GRID_FIELDS}
+
+    def approved(self, role):
+        key = NUMBERS[role][0] if role in NUMBERS else role
+        return self.values["grid_approved"].get(key)
+
+    def approval_attributes(self):
+        approved = self.values.get("grid_approved", self.grid_draft())
+        pending = self.grid_draft() != {key: approved.get(key) for key in GRID_FIELDS}
+        try:
+            self.validate("soll_power", self.get("soll_power"))
+            for role in TIMES:
+                self.validate(role, duration_text(self.get(role)))
+            ready = True
+        except ValueError, TypeError, OverflowError:
+            ready = False
+        return {
+            "grid_draft_revision": self.values["grid_draft_revision"],
+            "grid_set_required": pending,
+            "grid_set_ready": ready,
+            "grid_approved_power_kw": approved["power_kw"],
+            "grid_approved_start_delay": approved.get("grid_start_delay"),
+            "grid_approved_duration": approved.get("grid_duration"),
+            "grid_approved_revision": approved.get("revision", 0),
+            "grid_approval_error": self.approval_error,
+        }
+
+    def equivalent_grid_draft(self, values):
+        if values["power_kw"] == self.approved("soll_power") or any(
+            values.get(k) != self.approved(k) for k in TIMES
+        ):
+            return False
+        try:
+            self.validate("soll_power", values["power_kw"])
+            return self.grid_equivalent(values)
+        except ValueError, TypeError, OverflowError:
+            return False
+
+    async def approve_equivalent_grid(self):
+        """Recheck the latest draft/context after an affected decision settles."""
+        async with self.lock:
+            if not self.equivalent_grid_draft(self.values):
+                return
+            updated = dict(self.values)
+            self.approve_values(updated)
+            try:
+                await self._save(updated)
+            except (ValueError, TypeError, OSError) as exc:
+                self.approval_error = str(exc)
+                self.notify_grid()
+                return
+            self.approval_error = None
+            self.notify("grid_equivalent")
+            self.notify_grid()
+
+    def approve_values(self, updated):
+        previous = self.values["grid_approved"]
+        updated["grid_approved"] = {
+            **self.grid_draft(updated),
+            "revision": previous["revision"] + 1,
+        }
+        pending = dict(updated["grid_next_timing"])
+        for key in TIMES:
+            if updated.get(key) != previous.get(key):
+                pending[key] = updated.get(key)
+        updated["grid_next_timing"] = pending
+
+    async def approve_grid(self):
+        async with self.lock:
+            if not self.approval_attributes()["grid_set_required"]:
+                return
+            try:
+                self.validate("soll_power", self.get("soll_power"))
+                for role in TIMES:
+                    self.validate(role, duration_text(self.get(role)))
+                updated = dict(self.values)
+                power_changed = updated["power_kw"] != self.approved("soll_power")
+                equivalent = not power_changed or self.grid_equivalent(updated)
+                self.approve_values(updated)
+                await self._save(updated)
+            except (ValueError, TypeError, OSError) as exc:
+                self.approval_error = str(exc)
+                self.notify_grid()
+                raise
+            self.approval_error = None
+            self.notify(
+                "grid_timing"
+                if not power_changed
+                else "grid_equivalent"
+                if equivalent
+                else "grid_approved"
+            )
+            self.notify_grid()
+
+    def notify(self, role):
+        for listener in tuple(self.listeners.get(role, ())):
+            listener()
+
+    def notify_grid(self):
+        for role in ("soll_power", *TIMES, "grid_set"):
+            self.notify(role)
 
     def watch(self, role, listener):
         self.listeners.setdefault(role, set()).add(listener)
@@ -193,9 +322,45 @@ class Settings:
         if self.values.get(field) == value:
             return
         updated = {**self.values, field: value}
+        if role in ("soll_power", *TIMES):
+            updated["grid_draft_revision"] = self.values["grid_draft_revision"] + 1
         if role == "charging_profile":
             updated["grid_request"] = None
-        # Preserve foreign targets/fields verbatim; beta.18's own loader remains usable.
+        equivalent = role in ("soll_power", *TIMES) and self.equivalent_grid_draft(
+            updated
+        )
+        if equivalent:
+            self.approve_values(updated)
+        await self._save(updated)
+        if role in REGULATION:
+            self.hass.config_entries.async_update_entry(
+                self.entry, options={**self.entry.options, role: value}
+            )
+        if role in ("soll_power", *TIMES):
+            self.approval_error = None
+            if equivalent:
+                self.notify("grid_equivalent")
+            self.notify_grid()
+        else:
+            self.notify(role)
+
+    async def persist(self, profiles):
+        # HA Store logs and swallows WriteError. Its shutdown-deferred data and
+        # cached loads cannot establish that a new approval reached disk.
+        if self.hass.state is CoreState.stopping:
+            raise OSError("Cannot approve settings while Home Assistant is stopping")
+        await self.store.async_save(profiles)
+
+        def verify():
+            with open(self.store.path, encoding="utf-8") as handle:
+                stored = json.load(handle)
+            if stored.get("key") != self.store.key or stored.get("data") != profiles:
+                raise OSError("Profile settings were not durably stored")
+
+        await self.hass.async_add_executor_job(verify)
+
+    async def _save(self, updated):
+        # Keep drafts, approval and foreign profile data in one atomic document.
         profiles = {
             **self.profiles,
             self.key: {
@@ -203,28 +368,36 @@ class Settings:
                 **{k: v for k, v in updated.items() if k not in REGULATION},
             },
         }
-        await self.store.async_save(profiles)
-        if role in REGULATION:
-            self.hass.config_entries.async_update_entry(
-                self.entry, options={**self.entry.options, role: value}
-            )
+        await self.persist(profiles)
         self.profiles, self.values = profiles, updated
-        for listener in tuple(self.listeners.get(role, ())):
-            listener()
+
+    async def arm_grid(self, now):
+        """Capture and consume approved one-shot timing under the SET/edit lock."""
+        async with self.lock:
+            if self.values.get("grid_request"):
+                return
+            delay, duration = (self.values["grid_next_timing"].get(k) for k in TIMES)
+            if delay is None and duration is None:
+                return
+            start = now + (delay or 0)
+            await self._save(
+                {
+                    **self.values,
+                    "grid_next_timing": dict.fromkeys(TIMES),
+                    "grid_request": {
+                        "start_at": start,
+                        "end_at": now
+                        if duration == 0
+                        else start + duration
+                        if duration is not None
+                        else None,
+                    },
+                }
+            )
 
     async def save_runtime(self, fields):
-        """Persist scheduling state in the canonical profile document."""
+        """Persist scheduling state without modifying approved/draft configuration."""
         async with self.lock:
-            updated = {**self.values, **fields}
-            profiles = {
-                **self.profiles,
-                self.key: {
-                    **self.profiles.get(self.key, {}),
-                    **{k: v for k, v in updated.items() if k not in REGULATION},
-                },
-            }
-            await self.store.async_save(profiles)
-            self.profiles, self.values = profiles, updated
+            await self._save({**self.values, **fields})
             for role in fields:
-                for listener in tuple(self.listeners.get(role, ())):
-                    listener()
+                self.notify(role)

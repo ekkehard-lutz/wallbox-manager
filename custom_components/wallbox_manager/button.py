@@ -5,7 +5,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
 
-from .entity import WallboxEntity, unique_id
+from .entity import SettingEntity, WallboxEntity, unique_id
 
 
 async def async_setup_entry(hass, entry, add):
@@ -21,7 +21,14 @@ async def async_setup_entry(hass, entry, add):
     )
     if legacy and registry.async_get(legacy).config_entry_id == entry.entry_id:
         registry.async_remove(legacy)
-    add([TakeControl(entry, "station", (state.binding[0], None, None), "take_control")])
+    add(
+        [
+            TakeControl(
+                entry, "station", (state.binding[0], None, None), "take_control"
+            ),
+            GridSet(entry, "grid_set"),
+        ]
+    )
 
 
 class TakeControl(WallboxEntity, ButtonEntity):
@@ -52,3 +59,13 @@ class TakeControl(WallboxEntity, ButtonEntity):
         )
         if result != "confirmed":
             raise HomeAssistantError(f"Takeover: {result}")
+
+
+class GridSet(SettingEntity, ButtonEntity):
+    """Durable connector-scoped approval, independent of station eligibility."""
+
+    async def async_press(self):
+        try:
+            await self.settings.approve_grid()
+        except (ValueError, TypeError, OSError) as exc:
+            raise HomeAssistantError(f"NETZ SET: {exc}") from exc

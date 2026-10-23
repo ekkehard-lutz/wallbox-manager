@@ -252,6 +252,7 @@
       }
     },
     "button": {
+      "grid_set": {"name": "{scope} Approve NETZ request (SET)"},
       "take_control": {
         "name": "Take control"
       }
