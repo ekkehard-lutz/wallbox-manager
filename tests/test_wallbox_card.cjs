@@ -171,15 +171,15 @@ test('last takeover result stays separate from observed authority and reconnect 
     const {card:c,get}=card(data,{},language);
     const commandLabel=language==='en' ? /Last takeover command: confirmed/ : /Letzter Übernahmebefehl: confirmed/;
     assert.match(get('status').textContent,commandLabel);
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: OCPP/ : /Beobachtete Steuerung: OCPP/);
+    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung|U L1|I L1/);
     data['E.control_authority'].state='local'; c.hass=c._hass;
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: Local/ : /Beobachtete Steuerung: Lokal/);
+    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung/);
     assert.match(get('status').textContent,commandLabel);
     data['E.connected'].state='off';
     data['E.control_authority'].state='remote'; // Retained data is not current while offline.
     Object.assign(data['E.take_control'].attributes,{execution_ready:false,execution_blocked_reason:'disconnected'});
     c.hass=c._hass;
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: —/ : /Beobachtete Steuerung: —/);
+    assert.equal(get('actual').textContent,'—');
     assert.match(get('status').textContent,commandLabel);
     assert.match(get('status').textContent,/disconnected/);
     assert.equal(get('takeover').disabled,true);
@@ -187,7 +187,7 @@ test('last takeover result stays separate from observed authority and reconnect 
     Object.assign(data['E.take_control'].attributes,{execution_ready:true,execution_blocked_reason:null});
     c.hass=c._hass;
     assert.match(get('status').textContent,commandLabel);
-    assert.match(get('actual').textContent,language==='en' ? /Observed authority: Local/ : /Beobachtete Steuerung: Lokal/);
+    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung/);
     data['E.take_control'].attributes.command_status='superseded'; c.hass=c._hass;
     assert.match(get('status').textContent,/superseded/);
     assert.doesNotMatch(get('status').textContent,commandLabel);
@@ -306,10 +306,25 @@ test('Grid approximation and confirmed offer stay distinct from measured power',
   const {get,calls}=card(data);
   assert.equal(get('approximation').value,'nearest');
   assert.equal(get('approximation-row').hidden,false);
-  assert.match(get('actual').textContent,/Confirmed offer: 3p × 6 A/);
+  assert.equal(get('actual').textContent,'3-phase 6A');
   assert.equal(get('live-power').textContent,'1.5 kW');
   assert.match(get('status').textContent,/NETZ: rejected \(PhaseSwitchLockout\)/);
   await get('approximation').onchange({target:{value:'down'}});
   assert.equal(calls[0][2].entity_id,'E.power_approximation');
   assert.equal(calls[0][2].option,'down');
+});
+
+
+test('Grid parameters show actual and requested modes only, including pending pauses',()=>{
+  const data=states();
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_current_a:6,requested_current_a:7});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'3-phasig 6A → 1-phasig 7A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:7});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'1-phasig 7A');
+  assert.doesNotMatch(get('actual').textContent,/Voltage|Strom|U L1|I L1|Beobachtete Steuerung|Bestätigtes Angebot/);
 });
