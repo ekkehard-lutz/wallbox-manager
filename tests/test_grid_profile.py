@@ -474,3 +474,57 @@ async def test_grid_down_below_minimum_sends_zero_offer(ha):
         count = len(station.profiles)
         await asyncio.sleep(0)
         assert len(station.profiles) == count
+
+
+class TemporaryPhaseLockoutStation(GridStation):
+    locked = False
+
+    @on("SetChargingProfile")
+    def profile(self, evse_id, charging_profile):
+        period = charging_profile["charging_schedule"][0]["charging_schedule_period"][0]
+        requested_mode = period.get("number_phases", self.phases)
+        if self.locked and requested_mode != self.phases:
+            self.profile_result = "Rejected"
+            self.profile_info = {
+                "reason_code": "PhaseSwitchLockout",
+                "additional_info": "remainingSeconds=1",
+            }
+        else:
+            self.profile_result = "Accepted"
+            self.profile_info = None
+        return super().profile(evse_id, charging_profile)
+
+
+@pytest.mark.parametrize(
+    "direction,requested,interim_amps,final_amps",
+    [("down", 1.5, 0, 6), ("up", 1.4, 6, 7)],
+)
+async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
+    ha, direction, requested, interim_amps, final_amps
+):
+    entry = await ha.install()
+    async with peer(entry, station_type=TemporaryPhaseLockoutStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        assert station.phases == 3
+        station.locked = True
+        await entry.runtime_data.settings.set("power_approximation", direction)
+        await entry.runtime_data.settings.set("soll_power", requested)
+        await eventually(lambda: grid.timer is not None and grid.retry_at == 6)
+        assert grid.requested.phases == 1
+        assert grid.requested.amps == final_amps
+        assert grid.confirmed.phases == 3
+        assert grid.confirmed.amps == interim_amps
+        assert grid.status == "phase_lockout_pending"
+        last = station.profiles[-1][1]["charging_schedule"][0]["charging_schedule_period"][0]
+        assert last["limit"] == interim_amps
+        assert "number_phases" not in last if interim_amps == 0 else last["number_phases"] == 3
+
+        # Trigger the scheduled attempt explicitly without six real seconds.
+        grid.timer.cancel()
+        grid.timer = None
+        station.locked = False
+        grid.launch()
+        await eventually(lambda: grid.status == "confirmed")
+        assert grid.confirmed.phases == 1
+        assert grid.confirmed.amps == final_amps
