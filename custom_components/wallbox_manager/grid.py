@@ -363,6 +363,49 @@ class Grid:
         self.publish()
         return point
 
+    async def dispatch_point(self, point, epoch, adapter, transaction):
+        """Send a bounded TxProfile with the same wire-generation guard for all points."""
+        period = {"start_period": 0, "limit": point.amps}
+        if point.phases is not None:
+            period["number_phases"] = point.phases
+        profile = {
+            "id": 1,
+            "stack_level": 0,
+            "charging_profile_kind": "Absolute",
+            "charging_profile_purpose": "TxProfile",
+            "transaction_id": transaction,
+            "charging_schedule": [
+                {
+                    "id": 1,
+                    "charging_rate_unit": "A",
+                    "charging_schedule_period": [period],
+                }
+            ],
+        }
+        payload = call.SetChargingProfile(
+            evse_id=int(self.state.binding[1]), charging_profile=profile
+        )
+        # Compare the complete request at the actual wire boundary.
+        from ocpp.charge_point import camel_to_snake_case, snake_to_camel_case
+
+        expected = snake_to_camel_case(payload.__dict__)
+        expected = {k: v for k, v in expected.items() if v is not None}
+
+        def guard(action, wire):
+            if (
+                action != "SetChargingProfile"
+                or wire != expected
+                or not self.valid(epoch, adapter, transaction)
+            ):
+                raise Refused("Superseded NETZ intent")
+
+        token = DISPATCH.set(guard)
+        try:
+            response = await adapter.request(payload)
+        finally:
+            DISPATCH.reset(token)
+        return response
+
     async def reconcile(self, epoch, adapter, *, confirm_only=False):
         transaction = self.transaction()
         try:
@@ -404,45 +447,9 @@ class Grid:
             else:
                 self.status, self.reason = "pending", None
                 self.publish()
-                period = {"start_period": 0, "limit": desired.amps}
-                if desired.phases is not None:
-                    period["number_phases"] = desired.phases
-                profile = {
-                    "id": 1,
-                    "stack_level": 0,
-                    "charging_profile_kind": "Absolute",
-                    "charging_profile_purpose": "TxProfile",
-                    "transaction_id": transaction,
-                    "charging_schedule": [
-                        {
-                            "id": 1,
-                            "charging_rate_unit": "A",
-                            "charging_schedule_period": [period],
-                        }
-                    ],
-                }
-                payload = call.SetChargingProfile(
-                    evse_id=int(self.state.binding[1]), charging_profile=profile
+                response = await self.dispatch_point(
+                    desired, epoch, adapter, transaction
                 )
-                # Compare the complete request at the actual wire boundary.
-                from ocpp.charge_point import camel_to_snake_case, snake_to_camel_case
-
-                expected = snake_to_camel_case(payload.__dict__)
-                expected = {k: v for k, v in expected.items() if v is not None}
-
-                def guard(action, wire):
-                    if (
-                        action != "SetChargingProfile"
-                        or wire != expected
-                        or not self.valid(epoch, adapter, transaction)
-                    ):
-                        raise Refused("Superseded NETZ intent")
-
-                token = DISPATCH.set(guard)
-                try:
-                    response = await adapter.request(payload)
-                finally:
-                    DISPATCH.reset(token)
                 if not self.valid(epoch, adapter, transaction):
                     return
                 self.allow_issue = False
@@ -455,6 +462,63 @@ class Grid:
                         (info or {}).get("reason_code", response.status),
                     )
                     if delay is not None:
+                        # On a phase-change lockout, apply at most one admissible
+                        # temporary point on the *confirmed present* phases.
+                        # It never replaces the desired target or its retry.
+                        if (
+                            (info or {}).get("reason_code") == "PhaseSwitchLockout"
+                            and observed is not None
+                        ):
+                            try:
+                                if observed.phases in ranges.ranges:
+                                    temporary = ranges.on_phase(
+                                        watts, observed.phases,
+                                        self.settings.get("power_approximation"),
+                                    )
+                                else:
+                                    # A phase mode disabled by the user must
+                                    # never receive a new positive fallback.
+                                    temporary = Point(0, None, 0)
+                                fallback_same = (
+                                    temporary.amps == observed.amps
+                                    and (
+                                        temporary.phases is None
+                                        or temporary.phases == observed.phases
+                                    )
+                                )
+                                if not fallback_same:
+                                    fallback_response = await self.dispatch_point(
+                                        temporary, epoch, adapter, transaction
+                                    )
+                                    if not self.valid(epoch, adapter, transaction):
+                                        return
+                                    if fallback_response.status == "Accepted":
+                                        # Confirm the temporary operating point,
+                                        # but never mark the desired one fulfilled.
+                                        await self.read_point(
+                                            adapter, epoch, transaction, ranges
+                                        )
+                                    else:
+                                        fallback_info = getattr(
+                                            fallback_response, "status_info", None
+                                        )
+                                        fallback_info = (
+                                            camel_to_snake_case(fallback_info)
+                                            if isinstance(fallback_info, dict)
+                                            else fallback_info
+                                        )
+                                        fallback_delay = retry_delay(fallback_info)
+                                        if fallback_delay is not None:
+                                            delay = fallback_delay
+                                        # Any other rejection preserves the
+                                        # original phase-lockout retry deadline.
+                            except (ValueError, TypeError):
+                                pass
+                        if not self.valid(epoch, adapter, transaction):
+                            return
+                        self.status = "phase_lockout_pending" if (
+                            (info or {}).get("reason_code") == "PhaseSwitchLockout"
+                        ) else "rejected"
                         self.allow_issue = True
                         self.retry_at = delay
                         self.timer = self.call_later(delay, self.launch)
