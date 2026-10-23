@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 
+from ocpp.charge_point import camel_to_snake_case, snake_to_camel_case
 from ocpp.exceptions import OCPPError
 from ocpp.v21 import call
 from websockets.exceptions import ConnectionClosed
@@ -386,8 +387,6 @@ class Grid:
             evse_id=int(self.state.binding[1]), charging_profile=profile
         )
         # Compare the complete request at the actual wire boundary.
-        from ocpp.charge_point import camel_to_snake_case, snake_to_camel_case
-
         expected = snake_to_camel_case(payload.__dict__)
         expected = {k: v for k, v in expected.items() if v is not None}
 
