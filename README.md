@@ -4,9 +4,9 @@ Home Assistant integration domain: `wallbox_manager`.
 
 This prerelease extends the passive rebuild for OCPP **2.1**, targeting the
 supported wallbox-stationary interface. The integration version is
-**0.4.0-beta.10**; see the [beta.10 release notes](docs/v0.4/release-notes-beta.10.md)
-for the first executable NETZ/Grid fixed-power profile, battery-reserve recovery
-and the required matching Stationary NETZ implementation. The old Stationary
+**0.4.0-beta.11**; see the [beta.11 release notes](docs/v0.4/release-notes-beta.11.md)
+for zero-current approximation, lockout handling, explicit SET approval and
+the required matching Stationary NETZ implementation. The old Stationary
 capability inventory cannot satisfy the new NETZ execution requirements.
 Publication alone deploys neither component.
 The [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) retain the historical
@@ -26,7 +26,10 @@ identities. Ordinary measurements remain valid until explicit invalidation or a
 connection/boot generation change. Silent, unchanged values do not expire.
 
 Profile, Number, Select and Text entities persist local configuration. Eligible
-NETZ sessions apply a fixed offered point and an optional battery reserve. The existing Take Control button
+NETZ sessions apply an approved fixed offered point and an optional battery reserve.
+Power, start delay and duration are persistent drafts until SET approves them
+together. Electrically equivalent power edits can be approved automatically;
+discharge reserve and approximation remain immediate. The existing Take Control button
 explicitly acquires OCPP authority; the permission switch independently requests
 ON/OFF only under observed Remote authority and supported writable endpoints.
 Switch state always reflects station observations, never an acknowledgement alone.
@@ -79,8 +82,8 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-For separately authorized testing, select **v0.4.0-beta.10** through the HACS
-prerelease versions and verify integration version **0.4.0-beta.10** after the
+For separately authorized testing, select **v0.4.0-beta.11** through the HACS
+prerelease versions and verify integration version **0.4.0-beta.11** after the
 operator performs installation and the Home Assistant restart. Publication does
 not include installation or physical validation. NETZ now executes an event-driven fixed offered point under confirmed Remote
 authority and charging permission. PV profiles remain configuration-only. See the
