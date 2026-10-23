@@ -32,3 +32,33 @@ This document supersedes the NETZ-specific *implementation approach* in the hist
 **Comparison note (non-normative):** openWB documents a minimum five-minute buffer between automatic phase switches (typical 7–15 minutes); the go-e API publishes minimum phase-toggle wait and minimum phase-wish timing keys and a reason for minimum charging pause. Such firmware behavior is not a WBM safety substitute. See [openWB](https://wiki.openwb.de/doku.php?id=openwb%3Avc%3A2.1.9%3Asoftware%3Aeinstell-konfig%3Aladeeinstellungen%3Auebergreifendes%3Aallgemein) and [go-e API](https://github.com/goecharger/go-eCharger-API-v2/blob/main/API_KEYS_FIRMWARE/apikeys-de.md).
 
 No production implementation is claimed by this specification.
+
+
+## Amendment — zero-current quantization and lockout fallbacks (23 October 2026)
+
+The following approved requirements **WBM-GRID-17–21** clarify and supersede
+WBM-GRID-05/06/10–13 wherever older wording implied that every positive
+requested power must be rounded up to a positive minimum-current point.
+No Stationary protocol change is required for this amendment.
+
+| ID | Requirement |
+| --- | --- |
+| WBM-GRID-17 | **0 A is an executable, true candidate** whenever the requested power cannot be met on a supported positive-current step. DOWN (Nicht über Soll) chooses the greatest allowed offered power **not exceeding** the requested power, including 0 A. UP (Nicht unter Soll) chooses the smallest positive allowed offer **not below** a positive request; any strictly positive request below the minimum immediately chooses the positive minimum. NEAREST (Nächster Wert) chooses the smallest absolute difference among zero and positive whole-step candidates, with ties at a positive/zero boundary resolved toward the positive offer. A **0 W request always means 0 A** under all directions. For an impossible upper/lower bound at physical maxima, clamp to an executable limit and show the limitation rather than claiming that the direction's inequality can be met. |
+| WBM-GRID-18 | Each positive whole-ampere offering and 0 A must be evaluated against the **actual configured minimum and step**, applicable mode, allowed-current caps and consistent voltage basis. At illustrative 230 V and 1p minimum 6 A, DOWN offers 0 A below 1,380 W; 6 A from 1,380 W, 7 A from 1,610 W. UP offers 6 A for every positive request through 1,380 W and 7 A above 1,380 W. NEAREST uses the zero/6 A midpoint 690 W and the 6/7 A midpoint 1,495 W (the card's 0.1-kW setpoint increments mean first transitions at 0.7 and 1.5 kW respectively). These thresholds are illustrative calculations, **never constants**. |
+| WBM-GRID-19 | When the desired new phase is **temporarily blocked by Stationary PhaseSwitchLockout**, compute a **single interim offer** on the *physically confirmed current phase mode*, using the same direction-aware nearest permitted current (including 0 A). An interim point may deliberately diverge from the nominal desired point but must respect station limits, allowed-current mode caps, and direction policy. If the present mode is disabled/unsupported by WBM, only an interim **0 A** may be sent. A successfully confirmed interim point is displayed as **actual**, never treated as fulfillment of the original desired different-phase point. If the interim point is already applied, do not resend it. |
+| WBM-GRID-20 | Keep the desired new-phase request outstanding and retry after Stationary's remaining lockout plus 5 s or after 60 s when no valid remaining duration was supplied. If a temporarily applied 0 A starts a Stationary re-enable lockout, handle its distinct ReenableLockout in exactly the same way; do not bypass or preempt physical Stationary timers. Every retry recalculates the current desired point against the latest valid observation and generation. Cancel stale retries on explicit operator OFF, authority/transaction change, profile change and new intent. If an interim dispatch is independently rejected, retain truthful status; a new recognized remaining lockout may determine the next retry, but unrelated errors do not authorize uncontrolled retries. |
+| WBM-GRID-21 | The WBM card's **Wallboxparameter** line contains only the concise physically confirmed actual phase/current and, **if different**, an arrow to the pending requested phase/current. German examples: `1-phasig 7A`, `3-phasig 0A → 1-phasig 6A`, `3-phasig 6A → 1-phasig 7A`. Show unknown actual as `—` rather than fabricating confirmation. Do not include voltages, individual phase currents, authority, confirmed-offer wattage or other diagnostics inside this line; existing Home Assistant entities and command-status diagnostics remain available elsewhere. |
+
+### Boundaries and test matrix
+
+Cover every mode offered (only 1p and 3p on the installed Stationary), 0 W
+request, just below/at/above zero/minimum midpoint, exact minimum, adjacent
+ampere midpoints, maximum, requests above maximum, changed voltage/current
+limits, 0 A user-disabled phase counts, overlap/disjoint mode ranges, ongoing
+phase retention, and each of DOWN/UP/NEAREST. For an active 3p station whose
+desired 1p switch is blocked, at nominal 230 V: DOWN and 1.5 kW requires interim
+**3p/0 A** before eventually 1p/6 A; UP and 1.4 kW requires interim **3p/6 A**
+before eventually 1p/7 A. A subsequent ReenableLockout may delay the final
+1p/6 A; never display the interim point as the completed goal. Test both
+with simulated OCPP rejections/readbacks and explicitly record physical
+acceptance as pending.
