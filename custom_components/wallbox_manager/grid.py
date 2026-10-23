@@ -464,26 +464,23 @@ class Grid:
                         # On a phase-change lockout, apply at most one admissible
                         # temporary point on the *confirmed present* phases.
                         # It never replaces the desired target or its retry.
-                        if (
-                            (info or {}).get("reason_code") == "PhaseSwitchLockout"
-                            and observed is not None
-                        ):
+                        if (info or {}).get(
+                            "reason_code"
+                        ) == "PhaseSwitchLockout" and observed is not None:
                             try:
                                 if observed.phases in ranges.ranges:
                                     temporary = ranges.on_phase(
-                                        watts, observed.phases,
+                                        watts,
+                                        observed.phases,
                                         self.settings.get("power_approximation"),
                                     )
                                 else:
                                     # A phase mode disabled by the user must
                                     # never receive a new positive fallback.
                                     temporary = Point(0, None, 0)
-                                fallback_same = (
-                                    temporary.amps == observed.amps
-                                    and (
-                                        temporary.phases is None
-                                        or temporary.phases == observed.phases
-                                    )
+                                fallback_same = temporary.amps == observed.amps and (
+                                    temporary.phases is None
+                                    or temporary.phases == observed.phases
                                 )
                                 if not fallback_same:
                                     fallback_response = await self.dispatch_point(
@@ -511,13 +508,15 @@ class Grid:
                                             delay = fallback_delay
                                         # Any other rejection preserves the
                                         # original phase-lockout retry deadline.
-                            except (ValueError, TypeError):
+                            except ValueError, TypeError:
                                 pass
                         if not self.valid(epoch, adapter, transaction):
                             return
-                        self.status = "phase_lockout_pending" if (
-                            (info or {}).get("reason_code") == "PhaseSwitchLockout"
-                        ) else "rejected"
+                        self.status = (
+                            "phase_lockout_pending"
+                            if ((info or {}).get("reason_code") == "PhaseSwitchLockout")
+                            else "rejected"
+                        )
                         self.allow_issue = True
                         self.retry_at = delay
                         self.timer = self.call_later(delay, self.launch)
