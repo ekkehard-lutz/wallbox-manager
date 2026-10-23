@@ -143,6 +143,22 @@ def migrate(hass, entry, profiles):
     # HA processes device moves immediately and removes entities still attached
     # to the old subentry. Move entities FIRST, then their existing device.
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
+        retired = False
+        for family, roles in (
+            ("control", {"phase_switch_deviation_pct"}),
+            (
+                "capability",
+                {"maximum_current_1", "maximum_current_2", "maximum_current_3"},
+            ),
+        ):
+            prefix = f"{entry.entry_id}:{family}:"
+            if entity.unique_id.startswith(prefix):
+                parts = json.loads(entity.unique_id[len(prefix) :])
+                retired = parts[3] in roles
+                break
+        if retired:
+            registry.async_remove(entity.entity_id)
+            continue
         if entity.config_subentry_id is not None:
             registry.async_update_entity(entity.entity_id, config_subentry_id=None)
     for device in dr.async_entries_for_config_entry(devices, entry.entry_id):

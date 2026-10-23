@@ -149,17 +149,8 @@
       "enable_disable": {
         "name": "{scope} Enable/disable supported"
       },
-      "maximum_current_1": {
-        "name": "{scope} Maximum current 1p"
-      },
-      "maximum_current_2": {
-        "name": "{scope} Maximum current 2p"
-      },
-      "maximum_current_3": {
-        "name": "{scope} Maximum current 3p"
-      },
       "maximum_current": {
-        "name": "{scope} Maximum current"
+        "name": "Maximum current"
       },
       "control_authority": {
         "name": "Control authority",
@@ -174,6 +165,9 @@
       },
       "physical_phases": {
         "name": "Last observed physical phases"
+      },
+      "maximum_asymmetry_current": {
+        "name": "Maximum asymmetry current"
       }
     },
     "switch": {
@@ -187,9 +181,6 @@
     "number": {
       "desired_charging_power": {
         "name": "{scope} Desired charging power"
-      },
-      "phase_switch_deviation_pct": {
-        "name": "{scope} Maximum deviation without phase switching"
       },
       "allowed_current_1p": {
         "name": "{scope} Allowed current 1p"

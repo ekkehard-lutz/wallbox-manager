@@ -9,9 +9,8 @@ from fractions import Fraction
 # Public roles -> legacy storage field, default, minimum, maximum, step, unit.
 NUMBERS = {
     "desired_charging_power": ("target_w", 0, 0, 100000, 100, "W"),
-    "phase_switch_deviation_pct": ("phase_switch_deviation_pct", 5, 0, 25, 1, "%"),
     **{
-        f"allowed_current_{n}p": (f"allowed_current_{n}p", None, 0, 100000, 0.001, "A")
+        f"allowed_current_{n}p": (f"allowed_current_{n}p", None, 0, 100000, 1, "A")
         for n in (1, 2, 3)
     },
     "soll_power": ("power_kw", 11, 0, 100, 0.1, "kW"),
@@ -66,11 +65,36 @@ class Settings:
         self.values.update(approximation="down", direction="nearest")
         self.values.update(dict.fromkeys(TIMES))
         self.values.update(saved)
+        # Restore caps before any connection/control task can use default maxima.
+        # Entities are added only after capability discovery, which is too late
+        # to make their RestoreEntity callback the sole migration boundary.
+        from homeassistant.helpers import entity_registry as er
+        from homeassistant.helpers import restore_state
+
+        from .const import DOMAIN
+        from .entity import unique_id
+
+        registry = er.async_get(hass)
+        restored = restore_state.async_get(hass).last_states
+        for mode in (1, 2, 3):
+            role = f"allowed_current_{mode}p"
+            if role in saved:
+                continue
+            entity_id = registry.async_get_entity_id(
+                "number", DOMAIN, unique_id(entry.entry_id, "control", binding, role)
+            )
+            previous = restored.get(entity_id)
+            if previous and previous.state.state not in ("unknown", "unavailable"):
+                self.values[role] = (
+                    previous.state.attributes.get("exact_current_limit_a")
+                    or previous.state.state
+                )
         # Old central options are authoritative for these fields. Preserve seconds-
         # based smoothing unchanged; future regulator must migrate its units.
         for key in REGULATION:
             if key in entry.options:
                 self.values[key] = entry.options[key]
+        self.state = None
         self.listeners = {}
         self.lock = asyncio.Lock()
 
@@ -98,6 +122,25 @@ class Settings:
                 raise ValueError("Number outside supported range")
             if role == "soll_soc_speicher" and not value.is_integer():
                 raise ValueError("Target SoC must be a whole percent")
+            if role.startswith("allowed_current_"):
+                from .grid_point import capabilities
+
+                if not value.is_integer():
+                    raise ValueError("Allowed current must be whole amperes")
+                if self.state is None:
+                    raise ValueError("Station capabilities unavailable")
+                caps = capabilities(self.state)
+                mode = int(role[-2])
+                if mode not in caps["modes"]:
+                    raise ValueError("Unsupported phase mode")
+                maximum = (
+                    caps["maximum"]
+                    if mode == 3
+                    else min(caps["maximum"], caps["asymmetry"])
+                )
+                if value != 0 and not caps["minimum"] <= value <= maximum:
+                    raise ValueError("Allowed current outside station range")
+                value = int(value)
             settings = {**self.values, NUMBERS[role][0]: value}
             if role in (
                 "soll_soc_speicher",
@@ -150,6 +193,8 @@ class Settings:
         if self.values.get(field) == value:
             return
         updated = {**self.values, field: value}
+        if role == "charging_profile":
+            updated["grid_request"] = None
         # Preserve foreign targets/fields verbatim; beta.18's own loader remains usable.
         profiles = {
             **self.profiles,
@@ -166,3 +211,20 @@ class Settings:
         self.profiles, self.values = profiles, updated
         for listener in tuple(self.listeners.get(role, ())):
             listener()
+
+    async def save_runtime(self, fields):
+        """Persist scheduling state in the canonical profile document."""
+        async with self.lock:
+            updated = {**self.values, **fields}
+            profiles = {
+                **self.profiles,
+                self.key: {
+                    **self.profiles.get(self.key, {}),
+                    **{k: v for k, v in updated.items() if k not in REGULATION},
+                },
+            }
+            await self.store.async_save(profiles)
+            self.profiles, self.values = profiles, updated
+            for role in fields:
+                for listener in tuple(self.listeners.get(role, ())):
+                    listener()

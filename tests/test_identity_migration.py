@@ -325,11 +325,29 @@ async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
     await ha.install(entry)
     settings = entry.runtime_data.settings
     assert settings.get("allowed_current_1p") == "19/3"
+    assert not any(e.role == "allowed_current_1p" for e in entities(ha, entry))
+    state = entry.runtime_data.state
+    generation = state.reset(connected=True)
+    for scope, role, value in (
+        (("Wallbox01", "1", None), "minimum_current", 6),
+        (state.binding, "maximum_current", 27),
+        (state.binding, "maximum_asymmetry_current", 20),
+        (("Wallbox01", "1", None), "current_step", 1),
+        (("Wallbox01", "1", None), "supported_phases", "1,3"),
+    ):
+        state.observe(generation, ("capability", scope, role), value, "inventory")
+    await ha.async_block_till_done()
+    assert settings.get("allowed_current_1p") == "19/3"
     assert settings.get("desired_charging_power") == 7200
     assert settings.get("power_approximation") == "up"
     current = next(e for e in entities(ha, entry) if e.role == "allowed_current_1p")
     assert current.entity_id == "number.historical_allowed_current_1p"
     assert current.extra_state_attributes["exact_current_limit_a"] == "19/3"
+    assert current.native_value == 6
+    assert current.extra_state_attributes["legacy_limit_migration"] == {
+        "stored": "19/3",
+        "effective": 6,
+    }
 
 
 async def test_failed_setting_save_does_not_commit_options_or_memory(ha, monkeypatch):
@@ -344,3 +362,33 @@ async def test_failed_setting_save_does_not_commit_options_or_memory(ha, monkeyp
     with pytest.raises(OSError, match="disk"):
         await settings.set("pv_stop_delay", 120)
     assert (dict(entry.options), settings.values, settings.profiles) == before
+
+
+async def test_grid_migration_retires_only_superseded_entities(ha):
+    entry = config()
+    ha.config_entries._entries[entry.entry_id] = entry
+    registry = er.async_get(ha)
+    scope = ("Wallbox01", "1", "1")
+    retired = []
+    for domain, family, role in (
+        ("number", "control", "phase_switch_deviation_pct"),
+        ("sensor", "capability", "maximum_current_1"),
+        ("sensor", "capability", "maximum_current_3"),
+    ):
+        retired.append(
+            registry.async_get_or_create(
+                domain,
+                "wallbox_manager",
+                unique_id(entry.entry_id, family, scope, role),
+                config_entry=entry,
+            ).entity_id
+        )
+    preserved = registry.async_get_or_create(
+        "number",
+        "wallbox_manager",
+        unique_id(entry.entry_id, "control", scope, "min_soc"),
+        config_entry=entry,
+    ).entity_id
+    await ha.install(entry)
+    assert all(registry.async_get(entity_id) is None for entity_id in retired)
+    assert registry.async_get(preserved) is not None

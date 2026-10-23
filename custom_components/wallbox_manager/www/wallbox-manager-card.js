@@ -82,7 +82,7 @@ class WallboxManagerCard extends HTMLElement {
     const get = id => this.shadowRoot.getElementById(id);
     get("takeover").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.take_control});
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
-    get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.pv_approximation, option:e.target.value});
+    get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles[this._hass.states[this.discovery.roles.charging_profile]?.state === "NETZ" ? "power_approximation" : "pv_approximation"], option:e.target.value});
     for (const id of ["grid_start_delay", "grid_duration"]) {
       for (const part of ["hours", "minutes"]) {
         get(`${id}-${part}`).onchange = () => this.editDuration(id);
@@ -293,7 +293,7 @@ class WallboxManagerCard extends HTMLElement {
     const optimum = profile === "PV_OPTIMUM", pv = ["PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"].includes(profile);
     get("power-row").hidden = pv; get("reserve-row").hidden = pv;
     get("soll_soc_speicher-row").hidden = profile !== "PV_SURPLUS";
-    get("approximation-row").hidden = !pv;
+    get("approximation-row").hidden = false;
     for (const [id,labels] of Object.entries(optimumFields)) {
       get(`${id}-row`).hidden = id === "optimum_max_discharge_w" ? !pv : !optimum;
       get(`${id}-label`).textContent = labels[de ? 1 : 0];
@@ -303,9 +303,10 @@ class WallboxManagerCard extends HTMLElement {
       if (this.shadowRoot.activeElement !== input) input.value = available(s) ? s.state : "";
     }
     get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
-    this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"]]);
-    get("approximation").value = state("pv_approximation")?.state || "down";
-    get("approximation").disabled = busy || !available(state("pv_approximation"));
+    const approximationRole = pv ? "pv_approximation" : "power_approximation";
+    this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"], ...(!pv ? [["nearest",de ? "Nächster Wert" : "Nearest"]] : [])]);
+    get("approximation").value = state(approximationRole)?.state || (pv ? "down" : "nearest");
+    get("approximation").disabled = busy || !available(state(approximationRole));
     for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
       get(`${id}-row`).hidden = pv;
       get(`${id}-label`).textContent = label;
@@ -326,6 +327,8 @@ class WallboxManagerCard extends HTMLElement {
       const s=state(role); const value = role === "control_authority" ? (connected && available(s) ? ({local:de ? "Lokal" : "Local",remote:"OCPP",unknown:"—"}[s?.state] || "—") : "—") : available(s) ? s.state + " " + (s.attributes.unit_of_measurement || "") : "—";
       return `${label}: ${value}`;
     }).join(" · ");
+    const point = state("soll_power")?.attributes;
+    if (profile === "NETZ" && point) get("actual").textContent += ` · ${de ? "Bestätigtes Angebot" : "Confirmed offer"}: ${connected && point.applied_current_a != null ? `${point.applied_phase_count}p × ${point.applied_current_a} A (${this.format(point.applied_offered_power_w / 1000)} kW)` : "—"}`;
     const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Sitzungsenergie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Session energy",power:"Power",duration:"Duration"};
     const connectorLabels = de ? {available:"Frei",occupied:"Belegt",reserved:"Reserviert",faulted:"Störung"} : {available:"Available",occupied:"Occupied",reserved:"Reserved",faulted:"Faulted"};
     const chargingLabels = de ? {idle:"Bereit",connected:"Verbunden",charging:"Lädt",suspended_vehicle:"Vom Fahrzeug pausiert",suspended_station:"Von Wallbox pausiert"} : {idle:"Idle",connected:"Connected",charging:"Charging",suspended_vehicle:"Paused by vehicle",suspended_station:"Paused by wallbox"};
@@ -341,7 +344,8 @@ class WallboxManagerCard extends HTMLElement {
     }
     get("status").hidden = false;
     get("status").textContent = (d.ambiguous ? (de ? "Mehrere Instanzen: entry_id in der Kartenkonfiguration angeben. " : "Multiple instances: configure this card's entry_id. ") : "") +
-      (de ? "Übernahme und Ladefreigabe sind explizite Aktionen. Profileinstellungen werden ausschließlich lokal gespeichert." : "Takeover and charging permission require explicit actions. Profile settings are saved locally only.") +
+      (de ? "Übernahme und Ladefreigabe sind explizite Aktionen. Netzprofil: festes Leistungsangebot bei Ladefreigabe." : "Takeover and charging permission require explicit actions. Grid applies a fixed offered point while charging is permitted.") +
+      (profile === "NETZ" && point ? ` NETZ: ${point.profile_status || "—"}${point.command_reason ? ` (${point.command_reason})` : ""}.` : "") +
       ["take_control","charging_enabled"].map(role => {
         const a = state(role)?.attributes;
         return a ? ` ${role === "take_control" ? (de ? "Letzter Übernahmebefehl" : "Last takeover command") : (de ? "Letzter Freigabebefehl" : "Last permission command")}: ${a.command_status || "—"}${a.command_reason ? ` (${a.command_reason})` : ""}. ${de ? "Steuerung" : "Control"}: ${a.execution_blocked_reason || (de ? "bereit" : "ready")}.` : "";
@@ -358,6 +362,6 @@ class WallboxManagerCard extends HTMLElement {
 }
 if (!customElements.get("wallbox-manager-card")) customElements.define("wallbox-manager-card",WallboxManagerCard);
 window.customCards = window.customCards || [];
-if (!window.customCards.some(c => c.type === "wallbox-manager-card")) window.customCards.push({type:"wallbox-manager-card",name:"Wallbox Manager",description:"Single-wallbox observations, explicit control and local profile settings"});
+if (!window.customCards.some(c => c.type === "wallbox-manager-card")) window.customCards.push({type:"wallbox-manager-card",name:"Wallbox Manager",description:"Single-wallbox observations, explicit control and Grid profile"});
 
 })();

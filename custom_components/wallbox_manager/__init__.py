@@ -1,4 +1,4 @@
-"""Minimal passive Wallbox Manager lifecycle, one independent entry per station."""
+"""Wallbox Manager lifecycle, one independent OCPP entry per station."""
 
 from dataclasses import dataclass
 from importlib import import_module
@@ -22,6 +22,8 @@ class EntryRuntime:
     settings: Settings
     server: object
     session_store: Store
+    grid: object
+    battery: object
 
 
 async def async_setup(hass, config):
@@ -56,7 +58,18 @@ async def async_setup_entry(hass, entry):
         update_device,
         options=lambda: entry.options,
     )
-    entry.runtime_data = EntryRuntime(state, settings, server, session_store)
+    from .grid import Grid
+    from .grid_battery import GridBattery
+
+    settings.state = state
+    grid = server.grid = Grid(server, settings)
+    if state.session:
+        grid.known_transaction = state.session.get("external_transaction_id")
+    battery = GridBattery(hass, entry, grid)
+    entry.runtime_data = EntryRuntime(
+        state, settings, server, session_store, grid, battery
+    )
+    await battery.start()
     try:
         await server.start()
     except OSError as exc:
@@ -65,12 +78,15 @@ async def async_setup_entry(hass, entry):
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         await async_setup_assets(hass)
     except BaseException:
+        await grid.close()
+        await battery.close()
         await server.stop()
         await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         raise
 
     async def options_updated(hass, updated_entry):
-        # Options are passive preferences; no reload, reconnect or control timer.
+        battery.changed()
+        # Options update held preferences without reconnecting the transport.
         for key in REGULATION:
             if key in updated_entry.options:
                 value = updated_entry.options[key]
@@ -82,6 +98,8 @@ async def async_setup_entry(hass, entry):
     entry.async_on_unload(entry.add_update_listener(options_updated))
 
     async def stop(event):
+        await grid.close()
+        await battery.close()
         await server.stop()
         if state.session:
             await session_store.async_save(session.document(state))
@@ -93,6 +111,8 @@ async def async_setup_entry(hass, entry):
 async def async_unload_entry(hass, entry):
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
+    await entry.runtime_data.grid.close()
+    await entry.runtime_data.battery.close()
     await entry.runtime_data.server.stop()
     if entry.runtime_data.state.session:
         await entry.runtime_data.session_store.async_save(
