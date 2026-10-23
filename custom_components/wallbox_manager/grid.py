@@ -31,6 +31,7 @@ class Grid:
         self.epoch = 0
         self.closed = False
         self.task = self.timer = self.debounce = self.schedule_timer = None
+        self.task_epoch = None
         self.operator_off = False
         self.allow_issue = False
         self.known_transaction = None
@@ -38,6 +39,7 @@ class Grid:
         self.status, self.reason = "waiting", None
         self.requested = self.confirmed = self.acknowledged = None
         self.confirmed_transaction = None
+        self.point_uncertain = False
         self.retry_at = None
         self.wall_time = time.time
         self.call_later = lambda delay, callback: asyncio.get_running_loop().call_later(
@@ -88,7 +90,7 @@ class Grid:
             )
 
     def attributes(self):
-        point = self.confirmed
+        point = self.current_point()
         physical = self.state.value(("station", self.station_scope, "physical_phases"))
         return {
             "execution_ready": self.eligible(),
@@ -119,9 +121,9 @@ class Grid:
         }
 
     def phase_changed(self):
+        self.publish()
         if self.status == "accepted_unconfirmed" and self.eligible():
-            adapter = self.listener.adapter
-            adapter.spawn(self.reconcile(self.epoch, adapter, confirm_only=True))
+            self.launch(confirm_only=True)
 
     def publish(self):
         attributes = self.attributes()
@@ -220,18 +222,54 @@ class Grid:
         elif self.eligible():
             if role == "soll_power":
                 self.status = "pending"
-                self.debounce = self.call_later(1, self.launch)
+                self.debounce = self.call_later(1, self.intent_callback())
             else:
                 self.launch()
         self.publish()
 
-    def launch(self):
-        self.debounce = self.timer = None
+    def intent_callback(self):
+        epoch, adapter, transaction = (
+            self.epoch,
+            self.listener.adapter,
+            self.transaction(),
+        )
+
+        def elapsed():
+            if self.valid(epoch, adapter, transaction):
+                self.launch()
+
+        return elapsed
+
+    def launch(self, *, confirm_only=False):
         if self.closed or not self.eligible():
             return
+        if self.task and not self.task.done() and self.task_epoch == self.epoch:
+            return
+        for name in ("debounce", "timer"):
+            handle = getattr(self, name)
+            if handle:
+                handle.cancel()
+                setattr(self, name, None)
+        self.retry_at = None
         adapter = self.listener.adapter
-        epoch = self.epoch
-        self.task = adapter.spawn(self.reconcile(epoch, adapter))
+        epoch = self.task_epoch = self.epoch
+        self.task = adapter.spawn(
+            self.reconcile(epoch, adapter, confirm_only=confirm_only)
+        )
+
+    def current_point(self):
+        """A failed read does not erase a held, correctly scoped observation."""
+        point = self.confirmed
+        if (
+            point
+            and getattr(self, "point_generation", None) == self.state.generation
+            and self.confirmed_transaction == self.transaction()
+            and self.state.current(self.state.registered_generation)
+            and self.state.value(("station", self.station_scope, "physical_phases"))
+            == point.phases
+        ):
+            return point
+        return None
 
     def valid(self, epoch, adapter, transaction):
         return (
@@ -361,6 +399,7 @@ class Grid:
         point = Point(int(amps), phases, amps * voltage)
         self.confirmed, self.confirmed_transaction = point, transaction
         self.point_generation = self.state.generation
+        self.point_uncertain = False
         self.publish()
         return point
 
@@ -397,6 +436,9 @@ class Grid:
                 or not self.valid(epoch, adapter, transaction)
             ):
                 raise Refused("Superseded NETZ intent")
+            # A sent proposal can supersede the held point even if its response
+            # belongs to an obsolete intent. Only supported readback resolves it.
+            self.point_uncertain = True
 
         token = DISPATCH.set(guard)
         try:
@@ -419,17 +461,24 @@ class Grid:
             observed = await self.read_point(adapter, epoch, transaction, ranges)
             if not self.valid(epoch, adapter, transaction):
                 return
+            held = observed or self.current_point()
             # Missing supported readback on reconnect cannot authorize blind replay.
-            if observed is None and not self.allow_issue:
+            if held is None and not self.allow_issue:
                 self.status, self.reason = "unconfirmed", "readback_unknown"
                 self.publish()
                 return
             watts = self.settings.get("soll_power") * 1000 if phase == "active" else 0
-            ongoing = observed.phases if observed and observed.amps > 0 else None
+            ongoing = held.phases if held and held.amps > 0 else None
             desired = ranges.resolve(
                 watts, self.settings.get("power_approximation"), ongoing
             )
             self.requested = desired
+            limitation = (
+                "power_above_mode_maximum"
+                if desired.phases is not None
+                and watts > ranges.ranges[desired.phases][2]
+                else None
+            )
 
             def matches(p):
                 return (
@@ -438,9 +487,13 @@ class Grid:
                     and (desired.phases is None or p.phases == desired.phases)
                 )
 
-            if matches(observed):
+            if matches(observed) or (matches(held) and not self.point_uncertain):
+                if self.timer:
+                    self.timer.cancel()
+                    self.timer = None
+                self.retry_at = None
                 self.allow_issue = False
-                self.status, self.reason = "confirmed", None
+                self.status, self.reason = "confirmed", limitation
             elif confirm_only:
                 return
             else:
@@ -461,65 +514,65 @@ class Grid:
                         (info or {}).get("reason_code", response.status),
                     )
                     if delay is not None:
-                        # On a phase-change lockout, apply at most one admissible
-                        # temporary point on the *confirmed present* phases.
-                        # It never replaces the desired target or its retry.
-                        if (info or {}).get(
-                            "reason_code"
-                        ) == "PhaseSwitchLockout" and observed is not None:
-                            try:
-                                if observed.phases in ranges.ranges:
-                                    temporary = ranges.on_phase(
-                                        watts,
-                                        observed.phases,
-                                        self.settings.get("power_approximation"),
-                                    )
-                                else:
-                                    # A phase mode disabled by the user must
-                                    # never receive a new positive fallback.
-                                    temporary = Point(0, None, 0)
-                                fallback_same = temporary.amps == observed.amps and (
-                                    temporary.phases is None
-                                    or temporary.phases == observed.phases
+                        if self.reason == "PhaseSwitchLockout" and held is not None:
+                            temporary = (
+                                ranges.on_phase(
+                                    watts,
+                                    held.phases,
+                                    self.settings.get("power_approximation"),
                                 )
-                                if not fallback_same:
-                                    fallback_response = await self.dispatch_point(
-                                        temporary, epoch, adapter, transaction
-                                    )
-                                    if not self.valid(epoch, adapter, transaction):
-                                        return
-                                    if fallback_response.status == "Accepted":
-                                        # Confirm the temporary operating point,
-                                        # but never mark the desired one fulfilled.
+                                if held.phases in ranges.ranges
+                                else Point(0, None, 0)
+                            )
+                            if temporary.amps != held.amps or (
+                                temporary.phases is not None
+                                and temporary.phases != held.phases
+                            ):
+                                fallback = await self.dispatch_point(
+                                    temporary, epoch, adapter, transaction
+                                )
+                                if not self.valid(epoch, adapter, transaction):
+                                    return
+                                if fallback.status == "Accepted":
+                                    self.acknowledged = temporary
+                                    # The original recognized lockout still owns
+                                    # its retry even if interim confirmation fails.
+                                    try:
                                         await self.read_point(
                                             adapter, epoch, transaction, ranges
                                         )
-                                    else:
-                                        fallback_info = getattr(
-                                            fallback_response, "status_info", None
-                                        )
-                                        fallback_info = (
-                                            camel_to_snake_case(fallback_info)
-                                            if isinstance(fallback_info, dict)
-                                            else fallback_info
-                                        )
-                                        fallback_delay = retry_delay(fallback_info)
-                                        if fallback_delay is not None:
-                                            delay = fallback_delay
-                                        # Any other rejection preserves the
-                                        # original phase-lockout retry deadline.
-                            except ValueError, TypeError:
-                                pass
+                                    except (
+                                        TimeoutError,
+                                        OSError,
+                                        OCPPError,
+                                        ConnectionClosed,
+                                    ):
+                                        self.reason = "interim_readback_failure"
+                                else:
+                                    fallback_info = getattr(
+                                        fallback, "status_info", None
+                                    )
+                                    fallback_info = (
+                                        camel_to_snake_case(fallback_info)
+                                        if isinstance(fallback_info, dict)
+                                        else {}
+                                    )
+                                    self.reason = fallback_info.get(
+                                        "reason_code", fallback.status
+                                    )
+                                    delay = retry_delay(fallback_info)
                         if not self.valid(epoch, adapter, transaction):
                             return
-                        self.status = (
-                            "phase_lockout_pending"
-                            if ((info or {}).get("reason_code") == "PhaseSwitchLockout")
-                            else "rejected"
-                        )
-                        self.allow_issue = True
-                        self.retry_at = delay
-                        self.timer = self.call_later(delay, self.launch)
+                        if delay is not None:
+                            self.status = (
+                                "phase_lockout_pending"
+                                if (info or {}).get("reason_code")
+                                == "PhaseSwitchLockout"
+                                else "rejected"
+                            )
+                            self.allow_issue = True
+                            self.retry_at = delay
+                            self.timer = self.call_later(delay, self.intent_callback())
                     self.publish()
                     return
                 self.acknowledged = desired
@@ -542,7 +595,7 @@ class Grid:
                 if not self.valid(epoch, adapter, transaction):
                     return
                 if matches(applied):
-                    self.status, self.reason = "confirmed", None
+                    self.status, self.reason = "confirmed", limitation
                 else:
                     self.reason = "readback_unknown_or_mismatch"
             self.publish()

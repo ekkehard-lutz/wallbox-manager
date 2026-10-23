@@ -324,12 +324,11 @@ class WallboxManagerCard extends HTMLElement {
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
     const point = state("soll_power")?.attributes;
-    const physical = state("physical_phases");
     const formatPoint = (phases, amps) => {
       if (![1,2,3].includes(phases) || !Number.isInteger(amps) || amps < 0) return "—";
       return `${de ? `${phases}-phasig` : `${phases}-phase`} ${amps}A`;
     };
-    const actualPhases = point?.applied_phase_count ?? (available(physical) ? Number(physical.state) : null);
+    const actualPhases = point?.applied_phase_count;
     const actualAmps = point?.applied_current_a;
     const wantedPhases = point?.requested_phase_count ?? actualPhases;
     const wantedAmps = point?.requested_current_a;

@@ -328,3 +328,16 @@ test('Grid parameters show actual and requested modes only, including pending pa
   assert.equal(get('actual').textContent,'1-phasig 7A');
   assert.doesNotMatch(get('actual').textContent,/Voltage|Strom|U L1|I L1|Beobachtete Steuerung|Bestätigtes Angebot/);
 });
+
+test('Grid actual requires a complete confirmed point; unknown and offline stay unknown',()=>{
+  const data=states();
+  data['E.physical_phases']={state:'3',attributes:{...data['E.soll_power'].attributes,wallbox_manager_role:'physical_phases'}};
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:null,applied_current_a:7,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'— → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:6});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'1-phasig 6A');
+  data['E.connected'].state='off'; c.hass=c._hass;
+  assert.equal(get('actual').textContent,'—');
+});

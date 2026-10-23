@@ -538,3 +538,354 @@ async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
         await eventually(lambda: grid.status == "confirmed")
         assert grid.confirmed.phases == 1
         assert grid.confirmed.amps == final_amps
+
+
+class ReviewedLockoutStation(TemporaryPhaseLockoutStation):
+    interim_result = "Accepted"
+    interim_reason = None
+    fail_interim_read = False
+    reenable = False
+
+    @on("SetChargingProfile")
+    def profile(self, evse_id, charging_profile):
+        period = charging_profile["charging_schedule"][0]["charging_schedule_period"][0]
+        mode = period.get("number_phases", self.phases)
+        if self.locked and mode == self.phases:
+            self.profile_result = self.interim_result
+            self.profile_info = self.interim_reason
+            result = GridStation.profile(self, evse_id, charging_profile)
+            if self.fail_interim_read and self.profile_result == "Accepted":
+                self.readback = False
+            return result
+        if self.reenable and self.amps == 0 and period["limit"] > 0:
+            self.profile_result = "Rejected"
+            self.profile_info = {
+                "reason_code": "ReenableLockout",
+                "additional_info": "remainingSeconds=9",
+            }
+            return GridStation.profile(self, evse_id, charging_profile)
+        return super().profile(evse_id, charging_profile)
+
+
+async def pending_interim(entry, station, direction="down", power=1.5):
+    grid = await start_grid(entry, station)
+    await eventually(lambda: grid.status == "confirmed")
+    clock = FakeClock()
+    grid.wall_time, grid.call_later = lambda: clock.now, clock.later
+    station.locked = True
+    await entry.runtime_data.settings.set("power_approximation", direction)
+    await eventually(lambda: grid.task.done())
+    await entry.runtime_data.settings.set("soll_power", power)
+    await clock.advance(1)
+    await eventually(lambda: grid.task.done())
+    return grid, clock
+
+
+async def test_interim_acknowledgement_and_retry_diagnostics(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        grid, clock = await pending_interim(entry, station)
+        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert grid.confirmed.amps == 0 and grid.confirmed.phases == 3
+        assert grid.acknowledged.amps == 0
+        count = len(station.profiles)
+        await clock.advance(6)
+        await eventually(lambda: grid.task.done())
+        # Already applied interim zero is not sent again.
+        assert len(station.profiles) == count + 1
+        station.locked = False
+        station.reenable = True
+        await clock.advance(6)
+        await eventually(lambda: grid.retry_at == 14)
+        assert grid.reason == "ReenableLockout"
+        assert grid.requested.amps == 6 and grid.confirmed.amps == 0
+        station.reenable = False
+        await clock.advance(13)
+        assert grid.confirmed.amps == 0
+        await clock.advance(1)
+        await eventually(lambda: grid.status == "confirmed")
+        assert grid.retry_at is None and grid.timer is None
+        assert grid.confirmed.phases == 1 and grid.confirmed.amps == 6
+        count = len(station.profiles)
+        await clock.advance(600)
+        assert len(station.profiles) == count
+
+
+@pytest.mark.parametrize("direction,power", [("down", 1.5), ("up", 1.4)])
+@pytest.mark.parametrize("reason,delay", [("Busy", None), ("ReenableLockout", 14)])
+async def test_interim_rejection_is_truthful_and_only_lockouts_retry(
+    ha, direction, power, reason, delay
+):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        station.interim_result = "Rejected"
+        station.interim_reason = {
+            "reason_code": reason,
+            "additional_info": "remainingSeconds=9",
+        }
+        grid, clock = await pending_interim(entry, station, direction, power)
+        assert grid.reason == reason
+        assert grid.retry_at == delay
+        assert grid.confirmed.phases == 3 and grid.confirmed.amps == 16
+        assert grid.acknowledged.amps == 16
+        count = len(station.profiles)
+        await clock.advance(60 if delay is None else delay - 1)
+        assert len(station.profiles) == count
+        if delay is not None:
+            station.locked = False
+            await clock.advance(1)
+            await eventually(lambda: grid.status == "confirmed")
+
+
+async def test_failed_interim_confirmation_preserves_recognized_retry(ha, monkeypatch):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        original = entry.runtime_data.grid.read_point
+
+        async def read(*args):
+            if station.fail_interim_read and station.locked and station.amps == 0:
+                raise TimeoutError
+            return await original(*args)
+
+        monkeypatch.setattr(entry.runtime_data.grid, "read_point", read)
+        station.fail_interim_read = True
+        grid, clock = await pending_interim(entry, station)
+        assert grid.timer is not None and grid.retry_at == 6
+        assert grid.acknowledged.amps == 0
+        assert grid.confirmed.amps == 16
+        station.fail_interim_read = False
+        station.readback = True
+        station.locked = False
+        await clock.advance(6)
+        await eventually(lambda: grid.status == "confirmed")
+
+
+async def test_cancelled_retry_callback_cannot_skip_new_power_debounce(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        grid, clock = await pending_interim(entry, station)
+        stale = grid.timer.callback
+        count = len(station.profiles)
+        station.locked = False
+        await entry.runtime_data.settings.set("soll_power", 2)
+        stale()
+        await asyncio.sleep(0.05)
+        assert len(station.profiles) == count
+        await clock.advance(1)
+        await eventually(lambda: grid.status == "confirmed")
+
+
+@pytest.mark.parametrize("mode", [1, 2, 3])
+@pytest.mark.parametrize("minimum,step,cap,volts", [(6, 1, 11, 230), (7, 2, 14, 217)])
+@pytest.mark.parametrize("direction", ["down", "up", "nearest"])
+def test_quantization_against_exhaustive_executable_candidates(
+    mode, minimum, step, cap, volts, direction
+):
+    e = ranges(minimum=minimum, step=step, modes=(mode,), caps={mode: cap}, volts=volts)
+    currents = [0, *range(minimum, cap + 1, step)]
+    offers = [(amps * mode * volts, amps) for amps in currents]
+    probes = {Fraction(0), Fraction(1), Fraction(offers[-1][0] + 1000)}
+    for (low, _), (high, _) in zip(offers, offers[1:], strict=False):
+        for boundary in (Fraction(low), Fraction(high), Fraction(low + high, 2)):
+            probes.update(
+                [
+                    max(0, boundary - Fraction(1, 100)),
+                    boundary,
+                    boundary + Fraction(1, 100),
+                ]
+            )
+    for watts in probes:
+        if direction == "down":
+            expected = max((p for p in offers if p[0] <= watts), default=offers[0])
+        elif direction == "up":
+            expected = min((p for p in offers if p[0] >= watts), default=offers[-1])
+        else:
+            expected = min(offers, key=lambda p: (abs(p[0] - watts), -p[0]))
+        point = e.resolve(watts, direction)
+        assert (point.watts, point.amps) == expected
+
+
+async def test_failed_read_retains_confirmed_positive_phase_for_new_intent(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=GridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        station.readback = False
+        await entry.runtime_data.settings.set("soll_power", 4.2)
+        await eventually(lambda: grid.task.done() and grid.debounce is None)
+        period = station.profiles[-1][1]["charging_schedule"][0][
+            "charging_schedule_period"
+        ][0]
+        assert period["number_phases"] == 3
+        assert period["limit"] == 6
+
+
+@pytest.mark.parametrize("change", ["off", "local", "end", "boot", "profile", "unload"])
+async def test_pending_interim_retry_fenced_by_lifecycle(ha, change):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        grid, clock = await pending_interim(entry, station)
+        stale = grid.timer.callback
+        count = len(station.profiles)
+        state = entry.runtime_data.state
+        if change == "off":
+            await entry.runtime_data.server.control.request("ChargingEnabled", "false")
+        elif change == "local":
+            key = entry.runtime_data.server.control.key("ControlAuthority")
+            state.observe(state.generation, key, "local", source="test")
+        elif change == "end":
+            await station.call(
+                call.TransactionEvent(
+                    event_type="Ended",
+                    timestamp=datetime.now(UTC).isoformat(),
+                    trigger_reason="EVDeparted",
+                    seq_no=1,
+                    transaction_info={
+                        "transaction_id": "net-test",
+                        "charging_state": "Idle",
+                    },
+                    evse={"id": 1, "connector_id": 1},
+                )
+            )
+        elif change == "boot":
+            state.reset(connected=True, boot=True)
+        elif change == "profile":
+            # The configured profile enum requires PV input mappings. The runtime
+            # callback is tested here without adding unrelated HA mappings.
+            entry.runtime_data.settings.values["profile"] = "PV_SURPLUS"
+            grid.edited("charging_profile")
+        else:
+            from custom_components.wallbox_manager import async_unload_entry
+
+            assert await async_unload_entry(ha, entry)
+            del entry.runtime_data
+        stale()
+        await clock.advance(600)
+        await asyncio.sleep(0.02)
+        assert len(station.profiles) == count
+        assert grid.timer is None
+
+
+async def test_disabled_current_mode_interim_is_zero_only(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        station.locked = True
+        await entry.runtime_data.settings.set("allowed_current_3p", 0)
+        await eventually(lambda: grid.timer is not None)
+        assert grid.confirmed.phases == 3 and grid.confirmed.amps == 0
+        assert grid.requested.phases == 1
+        period = station.profiles[-1][1]["charging_schedule"][0][
+            "charging_schedule_period"
+        ][0]
+        assert period == {"start_period": 0, "limit": 0}
+
+
+async def test_held_matching_offer_does_not_retransmit_after_failed_read(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=GridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        count = len(station.profiles)
+        station.readback = False
+        await entry.runtime_data.settings.set("soll_power", 11.04)
+        await eventually(lambda: grid.debounce is None and grid.task.done())
+        assert grid.status == "confirmed"
+        assert len(station.profiles) == count
+
+
+async def test_above_mode_maximum_reports_limitation(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=GridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        await entry.runtime_data.settings.set("allowed_current_3p", 6)
+        await eventually(
+            lambda: grid.status == "confirmed" and grid.confirmed.amps == 6
+        )
+        assert grid.reason == "power_above_mode_maximum"
+
+
+async def test_superseded_interim_cannot_dispatch_after_new_intent(ha, monkeypatch):
+    entry = await ha.install()
+    async with peer(entry, station_type=ReviewedLockoutStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        original = grid.dispatch_point
+        waiting, release = asyncio.Event(), asyncio.Event()
+
+        async def dispatch(point, *args):
+            if point.amps == 0:
+                waiting.set()
+                await release.wait()
+            return await original(point, *args)
+
+        monkeypatch.setattr(grid, "dispatch_point", dispatch)
+        station.locked = True
+        await entry.runtime_data.settings.set("power_approximation", "down")
+        await eventually(lambda: grid.task.done())
+        await entry.runtime_data.settings.set("soll_power", 1.5)
+        await asyncio.wait_for(waiting.wait(), 5)
+        old_task = grid.task
+        station.locked = False
+        await entry.runtime_data.settings.set("soll_power", 2)
+        release.set()
+        await old_task
+        await eventually(lambda: grid.status == "confirmed")
+        periods = [
+            p[1]["charging_schedule"][0]["charging_schedule_period"][0]
+            for p in station.profiles
+        ]
+        assert all(period["limit"] > 0 for period in periods)
+        assert grid.requested.amps == 8 and grid.confirmed.amps == 8
+
+
+class DelayedGridStation(GridStation):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delay = False
+        self.waiting, self.profile_release = asyncio.Event(), asyncio.Event()
+
+    @on("SetChargingProfile")
+    async def profile(self, evse_id, charging_profile):
+        response = super().profile(evse_id, charging_profile)
+        if self.delay:
+            self.delay = False
+            self.waiting.set()
+            await self.profile_release.wait()
+        return response
+
+
+async def test_held_match_cannot_hide_superseded_inflight_opposite_write(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=DelayedGridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        station.delay = True
+        await entry.runtime_data.settings.set("soll_power", 5)
+        await asyncio.wait_for(station.waiting.wait(), 5)
+        assert station.amps == 7
+        station.readback = False
+        await entry.runtime_data.settings.set("soll_power", 11)
+        station.profile_release.set()
+        await eventually(lambda: grid.debounce is None and grid.task.done())
+        assert station.amps == 16
+        assert grid.status == "accepted_unconfirmed"
+        assert grid.acknowledged.amps == 16
+
+
+async def test_duplicate_launches_coalesce_inflight_reconciliation(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=GridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        count = len(station.profiles)
+        await entry.runtime_data.settings.set("soll_power", 5)
+        grid.launch()
+        task = grid.task
+        grid.launch()
+        assert grid.task is task
+        await eventually(lambda: grid.status == "confirmed")
+        assert len(station.profiles) == count + 1
+        assert grid.timer is None and grid.debounce is None
