@@ -467,8 +467,8 @@ async def test_grid_down_below_minimum_sends_zero_offer(ha):
         await eventually(lambda: grid.status == "confirmed")
         await entry.runtime_data.settings.set("power_approximation", "down")
         await entry.runtime_data.settings.set("soll_power", 0.1)
-        await eventually(lambda: grid.status == "confirmed" and grid.confirmed.amps == 0)
-        last = station.profiles[-1][1]["charging_schedule"][0]["charging_schedule_period"][0]
+        await eventually(\n            lambda: grid.status == "confirmed" and grid.confirmed.amps == 0\n        )
+        schedule = station.profiles[-1][1]["charging_schedule"][0]\n        last = schedule["charging_schedule_period"][0]
         assert last["limit"] == 0
         assert "number_phases" not in last
         count = len(station.profiles)
@@ -516,9 +516,9 @@ async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
         assert grid.confirmed.phases == 3
         assert grid.confirmed.amps == interim_amps
         assert grid.status == "phase_lockout_pending"
-        last = station.profiles[-1][1]["charging_schedule"][0]["charging_schedule_period"][0]
+        schedule = station.profiles[-1][1]["charging_schedule"][0]\n        last = schedule["charging_schedule_period"][0]
         assert last["limit"] == interim_amps
-        assert "number_phases" not in last if interim_amps == 0 else last["number_phases"] == 3
+        if interim_amps == 0:\n            assert "number_phases" not in last\n        else:\n            assert last["number_phases"] == 3
 
         # Trigger the scheduled attempt explicitly without six real seconds.
         grid.timer.cancel()
