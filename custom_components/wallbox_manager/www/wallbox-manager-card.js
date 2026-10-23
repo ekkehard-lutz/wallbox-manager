@@ -323,12 +323,20 @@ class WallboxManagerCard extends HTMLElement {
     }
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
-    get("actual").textContent = [["voltage_l1","U L1"],["voltage_l2","U L2"],["voltage_l3","U L3"],["current_l1","I L1"],["current_l2","I L2"],["current_l3","I L3"],["control_authority",de ? "Beobachtete Steuerung" : "Observed authority"]].map(([role,label]) => {
-      const s=state(role); const value = role === "control_authority" ? (connected && available(s) ? ({local:de ? "Lokal" : "Local",remote:"OCPP",unknown:"—"}[s?.state] || "—") : "—") : available(s) ? s.state + " " + (s.attributes.unit_of_measurement || "") : "—";
-      return `${label}: ${value}`;
-    }).join(" · ");
     const point = state("soll_power")?.attributes;
-    if (profile === "NETZ" && point) get("actual").textContent += ` · ${de ? "Bestätigtes Angebot" : "Confirmed offer"}: ${connected && point.applied_current_a != null ? `${point.applied_phase_count}p × ${point.applied_current_a} A (${this.format(point.applied_offered_power_w / 1000)} kW)` : "—"}`;
+    const physical = state("physical_phases");
+    const formatPoint = (phases, amps) => {
+      if (![1,2,3].includes(phases) || !Number.isInteger(amps) || amps < 0) return "—";
+      return `${de ? `${phases}-phasig` : `${phases}-phase`} ${amps}A`;
+    };
+    const actualPhases = point?.applied_phase_count ?? (available(physical) ? Number(physical.state) : null);
+    const actualAmps = point?.applied_current_a;
+    const wantedPhases = point?.requested_phase_count ?? actualPhases;
+    const wantedAmps = point?.requested_current_a;
+    const actualPoint = connected ? formatPoint(actualPhases, actualAmps) : "—";
+    const wantedPoint = connected ? formatPoint(wantedPhases, wantedAmps) : "—";
+    get("actual").textContent = profile === "NETZ" && wantedAmps != null && actualPoint !== wantedPoint
+      ? `${actualPoint} → ${wantedPoint}` : actualPoint;
     const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Sitzungsenergie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Session energy",power:"Power",duration:"Duration"};
     const connectorLabels = de ? {available:"Frei",occupied:"Belegt",reserved:"Reserviert",faulted:"Störung"} : {available:"Available",occupied:"Occupied",reserved:"Reserved",faulted:"Faulted"};
     const chargingLabels = de ? {idle:"Bereit",connected:"Verbunden",charging:"Lädt",suspended_vehicle:"Vom Fahrzeug pausiert",suspended_station:"Von Wallbox pausiert"} : {idle:"Idle",connected:"Connected",charging:"Charging",suspended_vehicle:"Paused by vehicle",suspended_station:"Paused by wallbox"};
