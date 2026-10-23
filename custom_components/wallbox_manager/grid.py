@@ -365,7 +365,7 @@ class Grid:
         return point
 
     async def dispatch_point(self, point, epoch, adapter, transaction):
-        """Send a bounded TxProfile with the same wire-generation guard for all points."""
+        """Send a bounded TxProfile with the same wire-generation guard."""
         period = {"start_period": 0, "limit": point.amps}
         if point.phases is not None:
             period["number_phases"] = point.phases
