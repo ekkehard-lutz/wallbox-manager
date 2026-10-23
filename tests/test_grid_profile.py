@@ -410,3 +410,67 @@ def test_disjoint_and_non_monotonic_boundaries_are_deterministic():
     nonmonotonic = ranges(modes=(1, 2, 3), asymmetry=27, caps={1: 27, 2: 6, 3: 27})
     assert nonmonotonic.resolve(4000).phases == 1
     assert nonmonotonic.resolve(4486).phases == 3
+
+
+@pytest.mark.parametrize(
+    "direction,watts,amps",
+    [
+        ("down", 0, 0),
+        ("down", 100, 0),
+        ("down", 1379, 0),
+        ("down", 1380, 6),
+        ("down", 1500, 6),
+        ("down", 1609, 6),
+        ("down", 1610, 7),
+        ("up", 0, 0),
+        ("up", 100, 6),
+        ("up", 1380, 6),
+        ("up", 1400, 7),
+        ("up", 1610, 7),
+        ("nearest", 0, 0),
+        ("nearest", 689, 0),
+        ("nearest", 690, 6),
+        ("nearest", 1494, 6),
+        ("nearest", 1495, 7),
+        ("nearest", 1500, 7),
+    ],
+)
+def test_grid_zero_is_a_real_approximation_candidate(direction, watts, amps):
+    e = ranges(modes=(1,), caps={1: 20})
+    point = e.resolve(watts, direction)
+    assert point.amps == amps
+    assert point.phases == (1 if amps else None)
+    assert point.watts == amps * 230
+
+
+def test_phase_lockout_interim_point_uses_same_directional_approximation():
+    e = ranges()
+    assert e.resolve(1500, "down", ongoing=3).phases == 1
+    zero = e.on_phase(1500, 3, "down")
+    assert zero.amps == 0 and zero.phases is None
+    final = e.resolve(1500, "down")
+    assert final.phases == 1 and final.amps == 6
+
+    interim = e.on_phase(1400, 3, "up")
+    assert interim.phases == 3 and interim.amps == 6
+    final = e.resolve(1400, "up")
+    assert final.phases == 1 and final.amps == 7
+
+    # A mode disabled by configuration does not become an eligible fallback.
+    assert 3 not in ranges(caps={3: 0}).ranges
+
+
+async def test_grid_down_below_minimum_sends_zero_offer(ha):
+    entry = await ha.install()
+    async with peer(entry, station_type=GridStation) as station:
+        grid = await start_grid(entry, station)
+        await eventually(lambda: grid.status == "confirmed")
+        await entry.runtime_data.settings.set("power_approximation", "down")
+        await entry.runtime_data.settings.set("soll_power", 0.1)
+        await eventually(lambda: grid.status == "confirmed" and grid.confirmed.amps == 0)
+        last = station.profiles[-1][1]["charging_schedule"][0]["charging_schedule_period"][0]
+        assert last["limit"] == 0
+        assert "number_phases" not in last
+        count = len(station.profiles)
+        await asyncio.sleep(0)
+        assert len(station.profiles) == count
