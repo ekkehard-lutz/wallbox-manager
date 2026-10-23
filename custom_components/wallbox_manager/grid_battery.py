@@ -26,6 +26,7 @@ class GridBattery:
         for key in (
             ("observation", (station, evse, None), "power"),
             ("observation", state.binding, "charging_state"),
+            ("observation", state.binding, "connector_state"),
             ("session", state.binding, "power"),
             ("session", state.binding, "active"),
             ("station", (station, None, None), "control_authority"),
@@ -103,10 +104,24 @@ class GridBattery:
                 and power is not None
                 and power > 0
             )
+            # Only authoritative current-generation termination/absence releases
+            # startup recovery. A missing session or a charging pause proves neither.
+            session = state.session
+            session_over = state.current(state.registered_generation) and (
+                state.value(("observation", state.binding, "connector_state"))
+                == "available"
+                or (
+                    session is not None
+                    and session.get("generation") == list(state.generation)
+                    and tuple(session["scope"]) == state.binding
+                    and session["ended_at"] is not None
+                )
+            )
             # Startup ambiguity holds the journal; it grants no new write authority.
             if self.reserve.recovering:
                 if (
                     charging
+                    or session_over
                     or authority == "local"
                     or permission is False
                     or self.grid.settings.get("charging_profile") != "NETZ"
