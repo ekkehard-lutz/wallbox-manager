@@ -119,7 +119,8 @@ class Grid:
         """Compare approved desired points, never the temporary physical offer."""
         desired = self.requested
         if (
-            not desired
+            self.closed
+            or not desired
             or not self.current_point()
             or self.point_uncertain
             or (self.task and not self.task.done())
@@ -195,6 +196,7 @@ class Grid:
 
     def phase_changed(self):
         self.publish()
+        self.reevaluate_pending()
         if self.status == "accepted_unconfirmed" and self.eligible():
             self.launch(confirm_only=True)
 
@@ -329,6 +331,17 @@ class Grid:
         self.task = adapter.spawn(
             self.reconcile(epoch, adapter, confirm_only=confirm_only)
         )
+
+        def settled(task):
+            if not task.cancelled() and task.exception() is None:
+                self.reevaluate_pending()
+
+        self.task.add_done_callback(settled)
+
+    def reevaluate_pending(self):
+        adapter = self.listener.adapter
+        if not self.closed and adapter and adapter.live(adapter.generation):
+            adapter.spawn(self.settings.approve_equivalent_grid())
 
     def current_point(self):
         """A failed read does not erase a held, correctly scoped observation."""

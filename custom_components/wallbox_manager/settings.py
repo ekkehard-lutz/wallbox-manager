@@ -152,6 +152,34 @@ class Settings:
             "grid_approval_error": self.approval_error,
         }
 
+    def equivalent_grid_draft(self, values):
+        if values["power_kw"] == self.approved("soll_power") or any(
+            values.get(k) != self.approved(k) for k in TIMES
+        ):
+            return False
+        try:
+            self.validate("soll_power", values["power_kw"])
+            return self.grid_equivalent(values)
+        except ValueError, TypeError, OverflowError:
+            return False
+
+    async def approve_equivalent_grid(self):
+        """Recheck the latest draft/context after an affected decision settles."""
+        async with self.lock:
+            if not self.equivalent_grid_draft(self.values):
+                return
+            updated = dict(self.values)
+            self.approve_values(updated)
+            try:
+                await self._save(updated)
+            except (ValueError, TypeError, OSError) as exc:
+                self.approval_error = str(exc)
+                self.notify_grid()
+                return
+            self.approval_error = None
+            self.notify("grid_equivalent")
+            self.notify_grid()
+
     def approve_values(self, updated):
         previous = self.values["grid_approved"]
         updated["grid_approved"] = {
@@ -298,11 +326,8 @@ class Settings:
             updated["grid_draft_revision"] = self.values["grid_draft_revision"] + 1
         if role == "charging_profile":
             updated["grid_request"] = None
-        equivalent = (
-            role in ("soll_power", *TIMES)
-            and updated["power_kw"] != self.approved("soll_power")
-            and all(updated.get(k) == self.approved(k) for k in TIMES)
-            and self.grid_equivalent(updated)
+        equivalent = role in ("soll_power", *TIMES) and self.equivalent_grid_draft(
+            updated
         )
         if equivalent:
             self.approve_values(updated)
