@@ -46,7 +46,10 @@ atomically persists approved power/timing, release and one-shot schedule. Apply
 preserves release and existing absolute timing deadlines; OFF and actual profile
 changes fence old intents before asynchronous storage, and request zero only with
 Remote authority, registration and a valid transaction. Connection/authority loss
-invalidates release; reconnect never silently authorizes positive replay. Losing
+invalidates release; reconnect never silently authorizes positive replay. The
+[post-review correction](release-off-recovery-correction.md) reconciles a confirmed
+retained positive offer to 0 A while release is OFF, including after reload or
+explicit takeover; confirmed zero does not cause another write. Losing
 WBM release is not evidence that local charging physically stopped.
 
 The existing Grid epoch, transaction and adapter-generation guards fence every

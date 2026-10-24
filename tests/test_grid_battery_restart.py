@@ -127,7 +127,7 @@ async def test_restart_restores_reserve_after_authoritative_end(
         assert not station.profiles and not station.writes
 
 
-async def test_restart_preserves_reserve_for_confirmed_ongoing_charging(
+async def test_restart_pauses_retained_offer_and_restores_reserve_after_session_end(
     ha, restarted_grid
 ):
     entry, writes = restarted_grid
@@ -135,14 +135,23 @@ async def test_restart_preserves_reserve_for_confirmed_ongoing_charging(
         await initialize(entry, station)
         await connector(station, "Occupied")
         await transaction(station, "Updated", power=10000, sequence=2)
+        grid = entry.runtime_data.grid
+        await eventually(lambda: grid.task is not None and grid.task.done())
+        assert grid.status == "confirmed" and grid.confirmed.amps == 0
+        assert entry.runtime_data.settings.get("charge_release") is False
+        assert entry.runtime_data.state.session["ended_at"] is None
+        assert len(station.profiles) == 1 and not station.writes
+        assert station.profiles[0][1]["charging_schedule"][0][
+            "charging_schedule_period"
+        ] == [{"start_period": 0, "limit": 0}]
+        assert station.values["ChargingEnabled"] == "true"
+        # Preserve the existing reserve journal lifecycle and compare-before-restore
+        # behavior. Reconciliation itself must not fabricate a transaction end.
+        await transaction(station, "Ended", charging="Idle", power=0, sequence=3)
         reserve = entry.runtime_data.battery.reserve
-        await eventually(lambda: not reserve.recovering)
-        await ha.async_block_till_done()
-        assert writes == [40]  # No 40 -> 20 -> 40 recovery oscillation.
-        assert reserve.record["original"] == 20
-        assert reserve.record["temporary"] == 40
-        assert await reserve.store.async_load() == reserve.record
-        assert not station.profiles and not station.writes
+        await eventually(lambda: reserve.record is None)
+        assert writes == [40, 20]
+        assert await reserve.store.async_load() is None
 
 
 @pytest.mark.parametrize(

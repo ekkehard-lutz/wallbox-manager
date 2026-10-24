@@ -718,13 +718,8 @@ class Grid:
             if not self.valid(epoch, adapter, transaction):
                 return
             held = observed or self.current_point()
-            if not self.settings.get("charge_release") and not self.allow_issue:
-                self.status, self.reason = (
-                    ("waiting" if held else "unconfirmed"),
-                    "release_off",
-                )
-                self.publish()
-                return
+            # Release OFF still reconciles a confirmed retained positive offer
+            # to zero. allow_issue never authorizes replay of a positive target.
             # Missing supported readback on reconnect cannot authorize blind replay.
             if held is None and not self.allow_issue:
                 self.status, self.reason = "unconfirmed", "readback_unknown"

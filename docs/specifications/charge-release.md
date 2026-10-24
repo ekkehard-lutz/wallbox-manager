@@ -31,6 +31,18 @@ Changing the last distinction requires a coordinated Stationary update: Stationa
 | WBM-RELEASE-13 | Preserve existing one-shot NETZ start-delay/duration semantics and battery reserve ownership. A user stop supersedes pending delayed starts/retries. A new explicit start creates the next eligible schedule; applying parameters during an ongoing charge must not incorrectly restart duration/start-delay. |
 | WBM-RELEASE-14 | Automatic vehicle wake-up is **no longer part of WBM**. Remove the `auto_wakeup_enabled` HA switch, associated OCPP variable handling, startup subscriptions, translations, unique-entity exposure and related control paths in the future implementation. Stationary owns the optional local INI setting and the physical automatic wake-up algorithm. Preserve independent legacy manual DataTransfer only where separately specified; this change does not authorize arbitrary OCPP wake-up messages. |
 
+### Recovery clarification for WBM-RELEASE-03/04/08
+
+Release OFF remains an active zero-current intent after reload, reconnect, or an
+explicit Local-to-Remote takeover. Once Remote authority, registration and a valid
+transaction are established, an existing supported readback confirming a retained
+positive offer must reconcile to 0 A through the ordinary fenced TxProfile path.
+This is not authorization to replay the saved positive target. Confirmed zero
+requires no additional write. Local authority or a missing transaction forbids
+current/phase dispatch; unknown readback remains unconfirmed rather than implying
+zero or authorizing blind replay. No additional polling or recovery state is needed.
+See the [correction evidence](../release-off-recovery-correction.md).
+
 ## NETZ button state machine (WBM-NETZ-ACTION-01–13)
 
 **One button replaces BOTH the Lovelace hardware-permission button and the separate SET button.** Its action always relates to the internal WBM charge-release intent. The old station hardware-enabled switch remains visible **only** on the HA device/integration page.

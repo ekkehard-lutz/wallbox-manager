@@ -31,7 +31,9 @@ actual profile change, reload, reconnect or authority loss. The card has one cha
 action: **Start charging**, **Apply charging parameters** for meaningful pending NETZ
 drafts, or **Stop charging**. Applying consumes the first press; stopping takes the
 next press. Start atomically approves power/timing and creates the one-shot schedule.
-Stop requests **0 A** where Remote authority and a transaction permit it. A positive
+Stop requests **0 A** where Remote authority and a transaction permit it. After
+reload, reconnect or explicit takeover, release OFF also reconciles a confirmed
+retained positive offer to 0 A; confirmed zero is not resent. A positive
 slider value resolving to zero cannot start. The selector's positive technical
 range is calculated from current station diagnostics and enabled phase caps.
 

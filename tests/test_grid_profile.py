@@ -394,7 +394,7 @@ async def test_fallback_retry_deadline_and_generation_fence(ha, reason):
         assert grid.timer is None
 
 
-async def test_reconnect_reconciles_same_offer_without_replaying(ha):
+async def test_reconnect_reconciles_positive_offer_to_zero_without_positive_replay(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
@@ -417,10 +417,14 @@ async def test_reconnect_reconciles_same_offer_without_replaying(ha):
                 evse={"id": 1, "connector_id": 1},
             )
         )
-        await eventually(lambda: grid.status == "waiting" and grid.task.done())
+        await eventually(lambda: grid.status == "confirmed" and grid.task.done())
         assert entry.runtime_data.settings.get("charge_release") is False
-        assert not station.profiles
-        assert grid.confirmed.amps == 16
+        assert len(station.profiles) == 1
+        period = station.profiles[0][1]["charging_schedule"][0][
+            "charging_schedule_period"
+        ][0]
+        assert period == {"start_period": 0, "limit": 0}
+        assert grid.confirmed.amps == 0 and station.phases == 3
         assert control.attributes("ControlAuthority")["command_status"] == "confirmed"
 
 

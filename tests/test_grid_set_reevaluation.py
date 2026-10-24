@@ -281,7 +281,10 @@ async def test_restart_retains_draft_until_current_generation_point_is_confirmed
         await eventually(lambda: grid.task and grid.task.done())
         assert settings.get("charge_release") is False
         assert settings.approved("soll_power") == 1.4
-        assert grid.confirmed.amps == 6 and not station.profiles
+        assert grid.confirmed.amps == 0 and len(station.profiles) == 1
+        assert station.profiles[0][1]["charging_schedule"][0][
+            "charging_schedule_period"
+        ] == [{"start_period": 0, "limit": 0}]
         await grid.action()
         assert settings.approved("soll_power") == 1.6
         assert settings.get("charge_release") is True
