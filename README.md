@@ -37,6 +37,15 @@ retained positive offer to 0 A; confirmed zero is not resent. A positive
 slider value resolving to zero cannot start. The selector's positive technical
 range is calculated from current station diagnostics and enabled phase caps.
 
+NETZ power planning uses fixed 230 V per phase. The editor displays one decimal
+kW and its +/- controls traverse
+each enabled phase mode's legal current series to its capped endpoint before
+changing phases. Actual measured power may differ from this nominal request.
+Missing/legacy-zero drafts initialize to the positive technical minimum after
+capability discovery, without starting charging. Reserve and approximation remain
+configurable through their HA entities; their card editors are removed. See
+[nominal steps, migration and validation](docs/grid-nominal-power-steps.md).
+
 The independent hardware **Wallbox enabled / Wallbox aktiviert** switch remains on
 the integration/device page and works under Local or Remote authority, without
 Take Control or changing manager release. Its Actual state always comes from the

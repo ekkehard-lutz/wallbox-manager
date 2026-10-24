@@ -1,5 +1,9 @@
 # NETZ fixed operating point implementation
 
+Historical implementation report. Planning and UI clauses superseded by
+WBM-GRID-31–40 are described in the current
+[nominal-power implementation report](grid-nominal-power-steps.md).
+
 Implementation of WBM-GRID-01–16 on `feature/grid-fixed-profile`, based exactly
 on approved documentation commit `f1e24d69cf350cd93b2627521591d46360fccc2b`.
 Implementation, independent review, merge, release and deployment remain separate.

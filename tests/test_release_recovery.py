@@ -74,7 +74,12 @@ async def test_release_off_reconciles_recovered_offer_once(ha, recovery, offered
         assert station.amps == 0
         assert grid.confirmed.amps == 0 and grid.status == "confirmed"
         assert settings.get("charge_release") is False
-        assert settings.approved("soll_power") == 11
+        assert settings.approved("soll_power") == (
+            None if recovery == "takeover" else 11
+        )
+        if recovery == "takeover":
+            # Fresh discovery initializes only the draft, never an approval.
+            await eventually(lambda: settings.get("soll_power") == 1.4)
         assert station.values["ChargingEnabled"] == "true" and station.phases == 3
         assert grid.transaction() == "net-test" and state.session["ended_at"] is None
         assert periods(station) == (

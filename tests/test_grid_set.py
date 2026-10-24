@@ -20,12 +20,22 @@ from custom_components.wallbox_manager import async_setup_entry, async_unload_en
 from custom_components.wallbox_manager.settings import Settings
 
 
+async def legacy_install(ha, entry=None):
+    """Approval regressions retain an explicitly saved beta.12 11-kW setting."""
+    entry = entry or config()
+    key = json.dumps([entry.data[k] for k in ("station_id", "evse_id", "connector_id")])
+    await Store(ha, 1, f"wallbox_manager.{entry.entry_id}.profiles").async_save(
+        {key: {"power_kw": 11}}
+    )
+    return await ha.install(entry)
+
+
 def by_role(ha, entry, role):
     return next(e for e in entities(ha, entry) if e.role == role)
 
 
 async def test_draft_entity_steps_and_times_never_execute_until_set(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
@@ -65,59 +75,60 @@ async def test_draft_entity_steps_and_times_never_execute_until_set(ha):
 
 
 async def test_equivalent_numeric_power_is_durable_without_set_or_ocpp(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
         settings = entry.runtime_data.settings
         count = len(station.profiles)
-        await settings.set("soll_power", 11.04)
-        assert settings.approved("soll_power") == 11.04
+        await settings.set("soll_power", 11.1)
+        assert settings.approved("soll_power") == 11.1
         assert not settings.approval_attributes()["grid_set_required"]
         assert (await settings.store.async_load())[settings.key]["grid_approved"][
             "power_kw"
-        ] == 11.04
+        ] == 11.1
         assert len(station.profiles) == count
         await settings.set("grid_duration", "00:00")
-        await settings.set("soll_power", 11.05)
-        assert settings.approved("soll_power") == 11.04
+        await settings.set("soll_power", 11.2)
+        assert settings.approved("soll_power") == 11.1
         assert settings.approval_attributes()["grid_set_required"]
         await settings._approve_release()
         assert settings.approved("grid_duration") == 0
-        assert settings.approved("soll_power") == 11.05
+        assert settings.approved("soll_power") == 11.2
         assert len(station.profiles) == count
 
 
 async def test_reverted_timing_releases_equivalent_numeric_edit(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
         settings = entry.runtime_data.settings
         count = len(station.profiles)
         await settings.set("grid_start_delay", "00:01")
-        await settings.set("soll_power", 11.04)
+        await settings.set("soll_power", 11.1)
         assert settings.approval_attributes()["grid_set_required"]
         await settings.set("grid_start_delay", "")
-        assert settings.approved("soll_power") == 11.04
+        assert settings.approved("soll_power") == 11.1
         assert not settings.approval_attributes()["grid_set_required"]
         assert len(station.profiles) == count
 
 
 async def test_approximation_uses_approved_power_and_reserve_is_immediate(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
         settings = entry.runtime_data.settings
-        await settings.set("soll_power", 1.4)
+        await settings.set("power_approximation", "down")
+        await settings.set("soll_power", 1.5)
         await settings._approve_release()
         await eventually(lambda: grid.status == "confirmed")
         assert grid.requested.amps == 6 and grid.requested.phases == 1
         await settings.set("soll_power", 3)
         await settings.set("power_approximation", "up")
         await eventually(lambda: grid.status == "confirmed")
-        assert grid.requested.amps == 7 and settings.approved("soll_power") == 1.4
+        assert grid.requested.amps == 7 and settings.approved("soll_power") == 1.5
         assert settings.get("soll_power") == 3
         assert settings.approval_attributes()["grid_set_required"]
         count = len(station.profiles)
@@ -131,7 +142,7 @@ async def test_approximation_uses_approved_power_and_reserve_is_immediate(ha):
             lambda: grid.status == "confirmed" and grid.requested.amps == 6
         )
         assert (
-            settings.get("soll_power") == 3 and settings.approved("soll_power") == 1.4
+            settings.get("soll_power") == 3 and settings.approved("soll_power") == 1.5
         )
 
 
@@ -139,7 +150,7 @@ async def test_approximation_uses_approved_power_and_reserve_is_immediate(ha):
     "mode", ["offline", "local", "no_transaction", "permission_off"]
 )
 async def test_set_is_durable_without_execution_eligibility(ha, mode):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings = entry.runtime_data.settings
 
     async def approve(station=None):
@@ -179,7 +190,7 @@ async def test_set_is_durable_without_execution_eligibility(ha, mode):
 async def test_failed_set_keeps_durable_drafts_approved_values_and_execution(
     ha, monkeypatch
 ):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
@@ -215,7 +226,7 @@ async def test_failed_set_keeps_durable_drafts_approved_values_and_execution(
 async def test_concurrent_set_and_edit_are_serialized_at_durable_commit(
     ha, monkeypatch
 ):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings = entry.runtime_data.settings
     await settings.set("soll_power", 3)
     await settings.set("grid_duration", "00:05")
@@ -245,6 +256,7 @@ async def test_concurrent_set_and_edit_are_serialized_at_durable_commit(
         "grid_start_delay": None,
         "grid_duration": 300,
         "revision": 1,
+        "power_phases": None,
     }
     assert settings.approved("soll_power") == 3 and settings.get("soll_power") == 4
     assert settings.approval_attributes()["grid_set_required"]
@@ -297,7 +309,7 @@ async def test_migration_reload_and_foreign_profile_data_preserve_both_states(ha
 
 
 async def test_set_preserves_active_deadlines_and_consumed_delay(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
@@ -340,7 +352,7 @@ async def test_set_preserves_active_deadlines_and_consumed_delay(ha):
 
 
 async def test_set_visibility_uses_approved_desired_during_lockout(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         grid, clock = await pending_interim(entry, station)
         settings = entry.runtime_data.settings
@@ -348,8 +360,8 @@ async def test_set_visibility_uses_approved_desired_during_lockout(ha):
         assert not settings.approval_attributes()["grid_set_required"]
         deadline = grid.retry_deadline
         count = len(station.profiles)
-        await settings.set("soll_power", 1.51)
-        assert settings.approved("soll_power") == 1.51
+        await settings.set("soll_power", 1.4)
+        assert settings.approved("soll_power") == 1.4
         assert not settings.approval_attributes()["grid_set_required"]
         assert len(station.profiles) == count and grid.retry_deadline == deadline
         station.locked = False
@@ -365,13 +377,13 @@ async def test_set_visibility_uses_approved_desired_during_lockout(ha):
 
 
 async def test_missing_confirmation_cannot_autoapprove_numeric_draft(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         station.fail_interim_read = True
         grid, _ = await pending_interim(entry, station)
         settings = entry.runtime_data.settings
         assert grid.point_uncertain
-        await settings.set("soll_power", 1.51)
+        await settings.set("soll_power", 1.4)
         assert settings.approved("soll_power") == 1.5
         assert settings.approval_attributes()["grid_set_required"]
 
@@ -379,7 +391,7 @@ async def test_missing_confirmation_cannot_autoapprove_numeric_draft(ha):
 async def test_ha_number_text_and_button_services_share_approval_boundary(ha):
     from homeassistant.components import button, number, text
 
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         await start_grid(entry, station)
         # Register the real HA domain entity services against the test platforms.
@@ -443,7 +455,7 @@ async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_d
 
     from ocpp.v21 import call
 
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
@@ -494,7 +506,7 @@ async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_d
 
 
 async def test_invalid_entity_drafts_do_not_bypass_approval(ha):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings = entry.runtime_data.settings
     before = await settings.store.async_load()
     for role, value in [
@@ -509,7 +521,10 @@ async def test_invalid_entity_drafts_do_not_bypass_approval(ha):
 
 
 async def test_backend_entries_never_share_draft_or_approved_state(ha):
-    one, two = await ha.install(config("One")), await ha.install(config("Two"))
+    one, two = (
+        await legacy_install(ha, config("One")),
+        await legacy_install(ha, config("Two")),
+    )
     first, second = one.runtime_data.settings, two.runtime_data.settings
     await first.set("soll_power", 3)
     await second.set("soll_power", 4)
@@ -526,7 +541,7 @@ async def test_backend_entries_never_share_draft_or_approved_state(ha):
 async def test_capability_change_during_equivalent_save_uses_committed_numeric_power(
     ha, monkeypatch
 ):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
@@ -540,7 +555,7 @@ async def test_capability_change_during_equivalent_save_uses_committed_numeric_p
             await save(data)
 
         monkeypatch.setattr(settings.store, "async_save", delayed)
-        edit = asyncio.create_task(settings.set("soll_power", 11.04))
+        edit = asyncio.create_task(settings.set("soll_power", 11.1))
         await waiting.wait()
         for role, value in [("minimum_current", 7), ("current_step", 2)]:
             state.observe(
@@ -557,12 +572,12 @@ async def test_capability_change_during_equivalent_save_uses_committed_numeric_p
         await eventually(
             lambda: grid.status == "confirmed" and grid.requested.amps == 17
         )
-        assert settings.approved("soll_power") == 11.04
+        assert settings.approved("soll_power") == 11.1
         assert not settings.approval_attributes()["grid_set_required"]
 
 
 async def test_set_validation_failure_keeps_pending_draft_and_approval(ha, monkeypatch):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings = entry.runtime_data.settings
     await settings.set("soll_power", 3)
     original = settings.validate
@@ -584,7 +599,7 @@ async def test_set_validation_failure_keeps_pending_draft_and_approval(ha, monke
 
 
 async def test_start_consumes_timing_after_concurrent_set_commits(ha, monkeypatch):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings = entry.runtime_data.settings
     await settings.set("grid_start_delay", "00:01")
     await settings._approve_release()
@@ -610,7 +625,7 @@ async def test_start_consumes_timing_after_concurrent_set_commits(ha, monkeypatc
 
 
 async def test_failed_start_persistence_cannot_bypass_approved_delay(ha, monkeypatch):
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings, grid = entry.runtime_data.settings, entry.runtime_data.grid
     clock = FakeClock()
     grid.wall_time, grid.call_later = lambda: clock.now, clock.later
@@ -642,7 +657,7 @@ async def test_failed_start_persistence_cannot_bypass_approved_delay(ha, monkeyp
 async def test_real_ha_store_swallowed_write_error_does_not_approve(ha, monkeypatch):
     from homeassistant.util.file import WriteError
 
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings = entry.runtime_data.settings
     await settings.set("soll_power", 3)
     before = await settings.store.async_load()
@@ -661,7 +676,7 @@ async def test_real_ha_store_swallowed_write_error_does_not_approve(ha, monkeypa
 async def test_shutdown_deferred_store_write_cannot_approve(ha):
     from homeassistant.core import CoreState
 
-    entry = await ha.install()
+    entry = await legacy_install(ha)
     settings = entry.runtime_data.settings
     await settings.set("soll_power", 3)
     before = await settings.store.async_load()

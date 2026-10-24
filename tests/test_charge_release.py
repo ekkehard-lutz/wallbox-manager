@@ -181,23 +181,19 @@ async def test_failed_start_approval_never_releases_or_dispatches(ha, monkeypatc
 
 
 @pytest.mark.parametrize(
-    "modes,caps,minimum,step,volts,expected",
+    "modes,caps,minimum,step,expected",
     [
-        ((1, 3), {1: 20, 3: 27}, 6, 1, 230, (1.38, 18.63)),
-        ((1, 3), {1: 20, 3: 0}, 6, 1, 240, (1.44, 4.8)),
-        ((1, 2, 3), {1: 0, 2: 12, 3: 0}, 7, 2, 220, (3.08, 4.84)),
-        ((1, 2, 3), {1: 0, 2: 0, 3: 0}, 6, 1, 230, None),
+        ((1, 3), {1: 20, 3: 27}, 6, 1, (1.4, 18.6)),
+        ((1, 3), {1: 20, 3: 0}, 6, 1, (1.4, 4.6)),
+        ((1, 2, 3), {1: 0, 2: 12, 3: 0}, 7, 2, (3.2, 5.1)),
+        ((1, 2, 3), {1: 0, 2: 0, 3: 0}, 6, 1, None),
     ],
 )
-def test_editor_bounds_use_solver_envelopes(
-    modes, caps, minimum, step, volts, expected
-):
+def test_editor_bounds_use_solver_envelopes(modes, caps, minimum, step, expected):
     from test_grid_profile import ranges
 
     assert (
-        ranges(
-            modes=modes, caps=caps, minimum=minimum, step=step, volts=volts
-        ).power_bounds()
+        ranges(modes=modes, caps=caps, minimum=minimum, step=step).power_bounds()
         == expected
     )
 

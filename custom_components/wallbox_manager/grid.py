@@ -10,7 +10,7 @@ from ocpp.v21 import call
 from websockets.exceptions import ConnectionClosed
 
 from .control import DISPATCH, Refused
-from .grid_point import Point, envelope, voltage_basis
+from .grid_point import NOMINAL_VOLTAGE, Point, envelope, number, rounded_kw
 
 
 def retry_delay(info):
@@ -79,13 +79,6 @@ class Grid:
                         else self.changed,
                     )
                 )
-        for n in (1, 2, 3):
-            self.removers.append(
-                self.state.watch(
-                    ("observation", (station, evse, None), f"voltage_l{n}"),
-                    self.voltage_changed,
-                )
-            )
         for role in (
             "charging_profile",
             "power_approximation",
@@ -99,6 +92,7 @@ class Grid:
 
         self.removers.append(settings.watch("charge_release", self.release_changed))
         settings.grid_equivalent = self.equivalent
+        settings.grid_point = self.draft_point
         self.removers.append(
             settings.watch("grid_approved", lambda: self.committed(False))
         )
@@ -110,18 +104,6 @@ class Grid:
                 "grid_timing", lambda: self.committed(True, timing_only=True)
             )
         )
-
-    def voltage_changed(self):
-        # Voltage affects the editor bounds and potentially action eligibility,
-        # not unrelated settings or an already confirmed fixed offered point.
-        attributes = self.attributes()
-        previous = self._published
-        self._published = attributes
-        self.state.publish(("grid", self.state.binding, "soll_power"))
-        if previous is None or any(
-            previous.get(k) != attributes.get(k) for k in self.action_state()
-        ):
-            self.state.publish(("grid", self.state.binding, "charge_action"))
 
     def permission_changed(self):
         # Hardware permission has no profile/start/stop side effects.
@@ -174,12 +156,14 @@ class Grid:
             "charge_action_blocked_reason": reason,
         }
 
-    def draft_point(self):
+    def draft_point(self, values=None):
+        values = self.settings.values if values is None else values
         held = self.current_point()
         return envelope(self.state, self.settings).resolve(
-            self.settings.get("soll_power") * 1000,
+            number(rounded_kw(values["power_kw"])) * 1000,
             self.settings.get("power_approximation"),
             held.phases if held and held.amps > 0 else None,
+            selected=values.get("power_phases"),
         )
 
     async def action(self):
@@ -261,9 +245,17 @@ class Grid:
             ongoing = desired.phases if desired.amps > 0 else None
             direction = self.settings.get("power_approximation")
             approved = ranges.resolve(
-                self.settings.approved("soll_power") * 1000, direction, ongoing
+                number(rounded_kw(self.settings.approved("soll_power"))) * 1000,
+                direction,
+                ongoing,
+                selected=self.settings.approved("power_phases"),
             )
-            draft = ranges.resolve(values["power_kw"] * 1000, direction, ongoing)
+            draft = ranges.resolve(
+                number(rounded_kw(values["power_kw"])) * 1000,
+                direction,
+                ongoing,
+                selected=values.get("power_phases"),
+            )
             return (
                 (approved.amps, approved.phases)
                 == (desired.amps, desired.phases)
@@ -411,6 +403,9 @@ class Grid:
         signature = self.fingerprint()
         if signature == self.signature:
             return
+        adapter = self.listener.adapter
+        if not self.closed and adapter and adapter.live(adapter.generation):
+            adapter.spawn(self.settings.initialize_power())
         if self.signature and self.signature[0] != self.state.generation:
             self.allow_issue = False
         if self.settings.get("charge_release") and (
@@ -443,6 +438,10 @@ class Grid:
         self.launch()
 
     def edited(self, role):
+        if role.startswith("allowed_current_"):
+            adapter = self.listener.adapter
+            if adapter and adapter.live(adapter.generation):
+                adapter.spawn(self.settings.initialize_power())
         self.allow_issue = True
         self.invalidate()
         self.requested = None
@@ -450,9 +449,11 @@ class Grid:
         if role == "charging_profile":
             self.signature = None
             self.changed()
-        elif self.eligible():
-            self.status, self.reason = "pending", None
-            self.launch()
+        else:
+            self.signature = self.fingerprint()
+            if self.eligible():
+                self.status, self.reason = "pending", None
+                self.launch()
         self.publish()
 
     def intent_callback(self):
@@ -569,7 +570,7 @@ class Grid:
     async def arm_timing(self):
         await self.settings.arm_grid(self.wall_time())
 
-    async def read_point(self, adapter, epoch, transaction, ranges):
+    async def read_point(self, adapter, epoch, transaction):
         response = await adapter.request(
             call.GetCompositeSchedule(
                 evse_id=int(self.state.binding[1]), duration=60, charging_rate_unit="A"
@@ -602,9 +603,7 @@ class Grid:
         ):
             return None
         # Readback is an actual offer, including a mode disabled by the user.
-        voltage = sum(
-            (ranges.voltages if ranges else voltage_basis(self.state))[:phases]
-        )
+        voltage = phases * NOMINAL_VOLTAGE
         point = Point(int(amps), phases, amps * voltage)
         self.confirmed, self.confirmed_transaction = point, transaction
         self.point_generation = self.state.generation
@@ -697,7 +696,7 @@ class Grid:
                 await self.stop_release()
                 return
             watts = (
-                self.settings.approved("soll_power") * 1000
+                number(rounded_kw(self.settings.approved("soll_power"))) * 1000
                 if phase == "active"
                 and self.settings.get("charge_release")
                 and self.settings.get("charging_profile") == "NETZ"
@@ -714,7 +713,7 @@ class Grid:
                 # positive-current capability diagnostics or a phase selection.
                 ranges = None
             # Initial/reconnect read reconciles Stationary's independent recovery.
-            observed = await self.read_point(adapter, epoch, transaction, ranges)
+            observed = await self.read_point(adapter, epoch, transaction)
             if not self.valid(epoch, adapter, transaction):
                 return
             held = observed or self.current_point()
@@ -727,7 +726,12 @@ class Grid:
                 return
             ongoing = held.phases if held and held.amps > 0 else None
             desired = (
-                ranges.resolve(watts, self.settings.get("power_approximation"), ongoing)
+                ranges.resolve(
+                    watts,
+                    self.settings.get("power_approximation"),
+                    ongoing,
+                    selected=self.settings.approved("power_phases"),
+                )
                 if ranges
                 else Point(0, None, 0)
             )
@@ -775,7 +779,7 @@ class Grid:
                     if delay is not None:
                         if self.reason == "PhaseSwitchLockout" and held is not None:
                             temporary = (
-                                ranges.on_phase(
+                                ranges.interim(
                                     watts,
                                     held.phases,
                                     self.settings.get("power_approximation"),
@@ -798,7 +802,7 @@ class Grid:
                                     # its retry even if interim confirmation fails.
                                     try:
                                         await self.read_point(
-                                            adapter, epoch, transaction, ranges
+                                            adapter, epoch, transaction
                                         )
                                     except (
                                         TimeoutError,
@@ -849,7 +853,7 @@ class Grid:
                     },
                     current=lambda: self.valid(epoch, adapter, transaction),
                 )
-                applied = await self.read_point(adapter, epoch, transaction, ranges)
+                applied = await self.read_point(adapter, epoch, transaction)
                 if not self.valid(epoch, adapter, transaction):
                     return
                 if matches(applied):

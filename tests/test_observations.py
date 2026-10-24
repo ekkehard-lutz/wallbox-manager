@@ -125,7 +125,9 @@ async def test_two_instances_are_isolated(ha):
     a.observe(ga, key, 42, "meter")
     assert not b.observe(gb, key, 88, "foreign")
     await one.runtime_data.settings.set("soll_power", 4.2)
-    assert two.runtime_data.settings.get("soll_power") == 11
+    assert one.runtime_data.settings.get("soll_power") == 4.2
+    # This independent entry has no capabilities: no default usable power.
+    assert two.runtime_data.settings.get("soll_power") is None
     assert not b.observations
 
 

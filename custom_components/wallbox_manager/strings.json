@@ -316,5 +316,22 @@
     "error": {
       "invalid_settings": "Invalid or inconsistent settings."
     }
+  },
+  "services": {
+    "step_power": {
+      "name": "Step NETZ requested power",
+      "description": "Move the draft by one technical step without approval or charging release. Requires the current draft revision and runtime incarnation.",
+      "fields": {
+        "direction": {
+          "name": "Direction"
+        },
+        "revision": {
+          "name": "Expected draft revision"
+        },
+        "incarnation": {
+          "name": "Runtime incarnation"
+        }
+      }
+    }
   }
 }

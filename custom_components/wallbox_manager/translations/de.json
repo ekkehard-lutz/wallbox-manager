@@ -316,5 +316,22 @@
     "error": {
       "invalid_settings": "Ungültige oder widersprüchliche Einstellungen."
     }
+  },
+  "services": {
+    "step_power": {
+      "name": "NETZ-Sollleistung schrittweise ändern",
+      "description": "Ändert den Entwurf um einen technischen Schritt, ohne Freigabe oder Ladestart. Benötigt die aktuelle Entwurfsrevision und Laufzeitkennung.",
+      "fields": {
+        "direction": {
+          "name": "Richtung"
+        },
+        "revision": {
+          "name": "Erwartete Entwurfsrevision"
+        },
+        "incarnation": {
+          "name": "Laufzeitkennung"
+        }
+      }
+    }
   }
 }

@@ -17,13 +17,6 @@ function discoverWallboxManager(states, config = {}) {
   }
   return {entry, roles, ambiguous: !entry && ids.length > 1};
 }
-function powerStep(value, direction, maximum = null, minimum = 0) {
-  // Integer decimal arithmetic prevents 9.8 + 0.1 becoming 9.899999… .
-  const step = value < 10 || (value === 10 && direction < 0) ? 0.1 : 1;
-  let next = Math.round((value + direction * step) * 1e6) / 1e6;
-  if ((value < 10 && next > 10) || (value > 10 && next < 10)) next = 10;
-  return Math.max(minimum, maximum === null ? next : Math.min(maximum, next));
-}
 function parseInput(value, language) {
   const decimal = new Intl.NumberFormat(language).formatToParts(1.1).find(p => p.type === "decimal").value;
   const normalized = String(value).trim().replace(decimal, ".");
@@ -32,9 +25,11 @@ function parseInput(value, language) {
 function available(state) { return state && !["unknown", "unavailable", ""].includes(state.state); }
 function durationAvailable(state) { return state && typeof state.state === "string" && (state.state === "" || /^[0-9]{2,}:[0-5][0-9]$/.test(state.state)); }
 const optimumFields = {optimum_lower_soc:["Lower target SoC","Unterer Ziel-SoC","%"], optimum_upper_soc:["Upper target SoC","Oberer Ziel-SoC","%"], optimum_max_discharge_w:["Maximum storage discharge","Maximale Speicher-Entladeleistung","W"], estimated_daily_house_consumption_kwh:["Daily household consumption (without EV)","Täglicher Hausverbrauch (ohne EV)","kWh/d"]};
-function numberRole(id) { return id === "power" ? "soll_power" : id === "reserve" ? "min_soc" : id; }
+function numberRole(id) { return id === "power" ? "soll_power" : id; }
 class WallboxManagerCard extends HTMLElement {
   setConfig(config) {
+    if (this.powerQueue) this.powerQueue.cancelled = true;
+    if (this.powerStepPending) this.powerStepPending.reject(new Error("Card reconfigured"));
     this.stopHold();
     this.config = config;
     this.edits = {};
@@ -69,9 +64,7 @@ class WallboxManagerCard extends HTMLElement {
       <header><ha-icon icon="mdi:ev-station"></ha-icon><div class="heading"><h2 id="title"></h2><div id="station"></div></div></header>
       <button id="takeover"></button>
       <label class="row" id="profile-row"><span id="profile-label"></span><select id="profile"></select></label>
-      <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
-      <div class="row" id="reserve-row"><label id="reserve-label" for="reserve"></label><div class="numeric"><button id="reserve-down" class="step" type="button">−</button><input id="reserve" type="text" inputmode="numeric" autocomplete="off"><button id="reserve-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
-      <label class="row" id="approximation-row"><span id="approximation-label"></span><select id="approximation"></select></label>
+      <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" placeholder="—" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
       <div class="row" id="soll_soc_speicher-row"><label id="soll_soc_speicher-label" for="soll_soc_speicher"></label><div class="numeric"><button id="soll_soc_speicher-down" class="step" type="button">−</button><input id="soll_soc_speicher" type="text" inputmode="numeric" autocomplete="off"><button id="soll_soc_speicher-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
       ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="—"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="—"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
       ${Object.entries(optimumFields).map(([id,labels]) => `<div class="row" id="${id}-row"><label id="${id}-label" for="${id}"></label><div class="numeric"><input id="${id}" type="number" min="0" step="${id === "estimated_daily_house_consumption_kwh" ? "0.1" : "1"}"><span class="unit">${labels[2]}</span></div></div>`).join("")}
@@ -83,7 +76,6 @@ class WallboxManagerCard extends HTMLElement {
     const get = id => this.shadowRoot.getElementById(id);
     get("takeover").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.take_control});
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
-    get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles[this._hass.states[this.discovery.roles.charging_profile]?.state === "NETZ" ? "power_approximation" : "pv_approximation"], option:e.target.value});
     for (const id of ["grid_start_delay", "grid_duration"]) {
       for (const part of ["hours", "minutes"]) {
         get(`${id}-${part}`).onchange = () => this.editDuration(id);
@@ -97,7 +89,7 @@ class WallboxManagerCard extends HTMLElement {
         this.editDuration(id);
       };
     }
-    for (const id of ["power", "reserve", "soll_soc_speicher"]) {
+    for (const id of ["power", "soll_soc_speicher"]) {
       get(id).onchange = () => this.editNumber(id);
       get(id).onkeydown = e => {
         if (["ArrowUp", "ArrowDown"].includes(e.key)) { e.preventDefault(); this.stepNumber(id, e.key === "ArrowUp" ? 1 : -1); }
@@ -166,26 +158,79 @@ class WallboxManagerCard extends HTMLElement {
     clearTimeout(hold.timer);
     if (hold.button.hasPointerCapture(hold.pointerId)) hold.button.releasePointerCapture(hold.pointerId);
   }
-  format(value) { return new Intl.NumberFormat(this._hass.language, {maximumFractionDigits:6,useGrouping:false}).format(value); }
+  format(value, digits = null) {
+    return new Intl.NumberFormat(this._hass.language, digits === null ? {maximumFractionDigits:6,useGrouping:false} : {minimumFractionDigits:digits,maximumFractionDigits:digits,useGrouping:false}).format(value);
+  }
   minimum(id) {
     const value = id === "power" ? this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_min_kw : this._hass.states[this.discovery.roles[id]]?.attributes.min;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
   }
   maximum(id) {
-    if (id === "reserve") return 100;
     if (id === "soll_soc_speicher") return this._hass.states[this.discovery.roles[id]]?.attributes.max ?? 98;
     const value = this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_max_kw;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
   }
   stepNumber(id, direction) {
+    if (id === "power") return this.stepTechnical(direction);
     const input = this.shadowRoot.getElementById(id);
     if (input.disabled) return;
     const value = parseInput(input.value, this._hass.language);
     if (!Number.isFinite(value) || (id !== "power" && !Number.isInteger(value))) return;
-    const next = id === "power" ? powerStep(value,direction,this.maximum(id),this.minimum(id)) : Math.min(this.maximum(id),Math.max(this.minimum(id),Math.round(value) + direction));
+    const next = Math.min(this.maximum(id),Math.max(this.minimum(id),Math.round(value) + direction));
     if (next === value) return;
     input.value = this.format(next);
     return this.editNumber(id);
+  }
+  stepTechnical(direction) {
+    const entity = this.discovery.roles.soll_power;
+    if (this.shadowRoot.getElementById("power").disabled || this.edits.power) return Promise.resolve();
+    let queue = this.powerQueue;
+    if (!queue || queue.entity !== entity) queue = this.powerQueue = {entity,revision:this._hass.states[entity]?.attributes.grid_draft_revision,tail:Promise.resolve(),count:0,cancelled:false};
+    queue.count++;
+    queue.tail = queue.tail.then(async () => {
+      if (queue.cancelled || entity !== this.discovery.roles.soll_power) return;
+      const state = this._hass.states[entity], point = state?.attributes[direction > 0 ? "power_step_up" : "power_step_down"];
+      if (!point) return;
+      if (!available(state) || state.attributes.grid_draft_revision !== queue.revision) throw new Error("NETZ selection changed; try again");
+      let pending;
+      const acknowledged = new Promise((resolve,reject) => { pending = {entity,revision:queue.revision,point,incarnation:state.attributes.runtime_incarnation,resolve,reject}; });
+      // Attach a handler before the asynchronous service may reject or HA may rebind.
+      const outcome = acknowledged.then(() => null, error => error);
+      this.powerStepPending = pending;
+      this.draftWrites.add(pending);
+      this.hass = this._hass;
+      try {
+        await this._hass.callService("wallbox_manager","step_power",{entity_id:entity,direction,revision:queue.revision,incarnation:state.attributes.runtime_incarnation});
+        this.acknowledgePowerStep();
+        const error = await outcome;
+        if (error) throw error;
+        queue.revision++;
+      } catch (error) { pending.reject(error); throw error; } finally {
+        if (this.powerStepPending === pending) this.powerStepPending = null;
+        this.draftWrites.delete(pending);
+        this.hass = this._hass;
+      }
+    }).catch(error => {
+      queue.cancelled = true;
+      if (entity === this.discovery.roles.soll_power) {
+        const field = this.shadowRoot.getElementById("error");
+        field.textContent = error.message || String(error); field.hidden = false;
+      }
+    }).finally(() => { if (--queue.count === 0 && this.powerQueue === queue) this.powerQueue = null; });
+    return queue.tail;
+  }
+  acknowledgePowerStep() {
+    const pending = this.powerStepPending;
+    if (!pending) return;
+    const state = this._hass.states[pending.entity];
+    if (pending.entity !== this.discovery.roles.soll_power || !available(state) || state.attributes.runtime_incarnation !== pending.incarnation) {
+      pending.reject(new Error("NETZ selection unavailable or replaced")); return;
+    }
+    const revision = state.attributes.grid_draft_revision;
+    if (revision > pending.revision) {
+      if (revision === pending.revision + 1 && Number(state.state) === pending.point.power_kw && state.attributes.selected_phase_count === pending.point.power_phases) pending.resolve();
+      else pending.reject(new Error("NETZ selection changed; try again"));
+    }
   }
   async editNumber(id) {
     const input = this.shadowRoot.getElementById(id), get = key => this.shadowRoot.getElementById(key);
@@ -198,19 +243,19 @@ class WallboxManagerCard extends HTMLElement {
       if (id === "soll_soc_speicher") input.value = this.format(Math.round(Number(this._hass.states[this.discovery.roles[id]].state)));
       return;
     }
-    input.value = this.format(value);
+    input.value = this.format(value, id === "power" ? 1 : null);
     const entity = this.discovery.roles[numberRole(id)];
-    if ((!this.edits[id] && available(this._hass.states[entity]) && Number(this._hass.states[entity].state) === value) || (this.edits[id]?.entity === entity && this.edits[id].value === value)) return;
+    if ((!this.edits[id] && available(this._hass.states[entity]) && Number(this._hass.states[entity].state) === value && (id !== "power" || !this._hass.states[entity].attributes.draft_phase_hint)) || (this.edits[id]?.entity === entity && this.edits[id].value === value)) return;
     const edit = this.edits[id] = {entity,value,revision:this._hass.states[entity]?.attributes.grid_draft_revision ?? 0};
     if (id === "power") this.draftWrites.add(edit);
-    input.value = this.format(value);
+    input.value = this.format(value, id === "power" ? 1 : null);
     get("error").hidden = true;
     this.hass = this._hass;
     try { await this._hass.callService("number","set_value",{entity_id:entity,value}); }
     catch (err) {
       if (this.edits[id] === edit && this.discovery.roles[numberRole(id)] === entity) {
         delete this.edits[id];
-        input.value = this.format(id === "soll_soc_speicher" ? Math.round(Number(this._hass.states[entity].state)) : Number(this._hass.states[entity].state));
+        input.value = this.format(id === "soll_soc_speicher" ? Math.round(Number(this._hass.states[entity].state)) : Number(this._hass.states[entity].state), id === "power" ? 1 : null);
         get("error").textContent = err.message || String(err); get("error").hidden = false;
       }
     }
@@ -262,6 +307,7 @@ class WallboxManagerCard extends HTMLElement {
     const previous = this.discovery?.entry;
     const d = this.discovery = discoverWallboxManager(hass.states, this.config);
     if (previous !== d.entry) { this.stopHold(); this.edits = {}; this.durationEdits = {}; get("error").hidden = true; }
+    this.acknowledgePowerStep();
     const state = role => hass.states[d.roles[role]], busy = !!this.busy;
     const connected = state("connected")?.state === "on";
     const authority = connected && available(state("control_authority")) ? state("control_authority").state : null;
@@ -276,24 +322,22 @@ class WallboxManagerCard extends HTMLElement {
     get("takeover").disabled ||= !["local", "remote"].includes(authority);
     get("profile-label").textContent = de ? "Ladeprofil" : "Charging profile";
     get("power-label").textContent = de ? "Angeforderte Ladeleistung" : "Requested charging power";
-    get("reserve-label").textContent = de ? "Entladereserve" : "Discharge reserve";
     get("soll_soc_speicher-label").textContent = de ? "Speicher-Ziel-SoC" : "Battery target SoC";
     this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(v => [v, {NETZ:de ? "Netz" : "Grid", PV_SURPLUS:de ? "PV-Überschuss" : "PV Surplus",PV_OPTIMUM:"PV Optimum",PV_MAXIMUM:"PV Maximum"}[v] || v]));
     get("profile").value = state("charging_profile")?.state || "";
     get("profile").disabled = busy || !available(state("charging_profile"));
-    for (const [id,role] of [["power","soll_power"],["reserve","min_soc"],["soll_soc_speicher","soll_soc_speicher"]]) {
+    for (const [id,role] of [["power","soll_power"],["soll_soc_speicher","soll_soc_speicher"]]) {
       const s = state(role), edit = this.edits[id];
       if (edit && (edit.entity !== d.roles[role] || (available(s) && (Number(s.state) === edit.value || (edit.complete && s.attributes.grid_draft_revision > edit.revision))))) delete this.edits[id];
-      if (previous !== d.entry || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value) : available(s) ? this.format(Number(s.state)) : "";
+      if (previous !== d.entry || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value, id === "power" ? 1 : null) : available(s) ? this.format(Number(s.state), id === "power" ? 1 : null) : "";
       const disabled = busy || !available(s) || (id === "power" && this.maximum(id) === null), value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
       get(id).disabled = disabled;
-      for (const suffix of ["up","down"]) get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= this.minimum(id) : maximum !== null && value >= maximum);
+      for (const suffix of ["up","down"]) get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= this.minimum(id) : maximum !== null && value >= maximum) || (id === "power" && !s?.attributes[suffix === "down" ? "power_step_down" : "power_step_up"]);
     }
     const profile = state("charging_profile")?.state;
     const optimum = profile === "PV_OPTIMUM", pv = ["PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"].includes(profile);
-    get("power-row").hidden = pv; get("reserve-row").hidden = pv;
+    get("power-row").hidden = pv;
     get("soll_soc_speicher-row").hidden = profile !== "PV_SURPLUS";
-    get("approximation-row").hidden = false;
     for (const [id,labels] of Object.entries(optimumFields)) {
       get(`${id}-row`).hidden = id === "optimum_max_discharge_w" ? !pv : !optimum;
       get(`${id}-label`).textContent = labels[de ? 1 : 0];
@@ -302,11 +346,6 @@ class WallboxManagerCard extends HTMLElement {
       input.min = s?.attributes.min ?? 0; input.max = s?.attributes.max ?? 100;
       if (this.shadowRoot.activeElement !== input) input.value = available(s) ? s.state : "";
     }
-    get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
-    const approximationRole = pv ? "pv_approximation" : "power_approximation";
-    this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"], ...(!pv ? [["nearest",de ? "Nächster Wert" : "Nearest"]] : [])]);
-    get("approximation").value = state(approximationRole)?.state || (pv ? "down" : "nearest");
-    get("approximation").disabled = busy || !available(state(approximationRole));
     for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
       get(`${id}-row`).hidden = pv;
       get(`${id}-label`).textContent = label;
@@ -349,7 +388,7 @@ class WallboxManagerCard extends HTMLElement {
         if (id === "connection") text = connectorLabels[s.state] || s.state;
         else if (id === "charging") text = chargingLabels[s.state] || s.state;
         else if (id === "duration") { const minutes=Math.floor(Number(s.state)/60); text=`${Math.floor(minutes/60)}:${String(minutes%60).padStart(2,"0")}`; }
-        else text = `${this.format(id === "live-power" ? Number(s.state)/1000 : Number(s.state))} ${id === "live-power" ? "kW" : "kWh"}`;
+        else text = `${this.format(id === "live-power" ? Number(s.state)/1000 : Number(s.state), id === "live-power" ? 2 : null)} ${id === "live-power" ? "kW" : "kWh"}`;
       }
       get(id).textContent = text; get(`${id}-label`).textContent = labels[id === "live-power" ? "power" : id];
     }

@@ -15,37 +15,34 @@ from custom_components.wallbox_manager.grid import retry_delay
 from custom_components.wallbox_manager.grid_point import Envelope
 
 
-def ranges(
-    *, minimum=6, maximum=27, asymmetry=20, modes=(1, 3), caps=None, volts=230, step=1
-):
-    return Envelope(minimum, maximum, asymmetry, step, modes, caps or {}, [volts] * 3)
+def ranges(*, minimum=6, maximum=27, asymmetry=20, modes=(1, 3), caps=None, step=1):
+    return Envelope(minimum, maximum, asymmetry, step, modes, caps or {})
 
 
-@pytest.mark.parametrize(
-    "minimum,cap,volts", [(6, 20, 230), (7, 16, 240), (8, 24, 220)]
-)
-def test_dynamic_midpoints_and_exact_ties(minimum, cap, volts):
-    e = ranges(minimum=minimum, caps={1: cap}, volts=volts, asymmetry=27)
-    boundary = Fraction(cap * volts + minimum * volts * 3, 2)
+@pytest.mark.parametrize("minimum,cap", [(6, 20), (7, 16), (8, 24)])
+def test_dynamic_nominal_midpoints_and_exact_ties(minimum, cap):
+    e = ranges(minimum=minimum, caps={1: cap}, asymmetry=27)
+    low_max = ((cap * 230 + 50) // 100) * 100
+    high_min = ((minimum * 3 * 230 + 50) // 100) * 100
+    boundary = Fraction(low_max + high_min, 2)
     assert e.resolve(boundary).phases == 1
     assert e.resolve(boundary + Fraction(1, 100)).phases == 3
-    assert (
-        e.resolve(5000, ongoing=3).phases == 3 if 3 * volts * minimum <= 5000 else True
-    )
+    if high_min <= 5000:
+        assert e.resolve(5000, ongoing=3).phases == 3
 
 
 def test_generic_three_modes_disabled_modes_and_stable_overlap():
     e = ranges(modes=(1, 2, 3), caps={1: 20, 2: 12, 3: 27})
-    assert e.resolve((4600 + 2760) / 2).phases == 1
-    assert e.resolve((5520 + 4140) / 2).phases == 2
+    assert e.resolve((4600 + 2800) / 2).phases == 1
+    assert e.resolve((5500 + 4100) / 2).phases == 2
     assert e.resolve(5000).phases == 3
     e = ranges(caps={1: 20, 3: 0})
     assert set(e.ranges) == {1}
     assert e.resolve(11000).phases == 1
     e = ranges(modes=(1, 2, 3), caps={2: 0})
     assert set(e.ranges) == {1, 3}
-    assert e.resolve(4370).phases == 1
-    assert e.resolve(4371).phases == 3
+    assert e.resolve(4350).phases == 1
+    assert e.resolve(4351).phases == 3
     assert e.resolve(4200, ongoing=3).phases == 3
     assert e.resolve(4200, ongoing=1).phases == 1
     assert e.resolve(4000, ongoing=3).phases == 1
@@ -64,8 +61,8 @@ def test_quantization_legacy_migration_and_unequal_voltage():
     assert ranges(caps={1: 5}).ranges.keys() == {3}
     for direction, expected in [("down", 8), ("nearest", 9), ("up", 9)]:
         assert ranges(modes=(1,)).resolve(2000, direction).amps == expected
-    e = Envelope(6, 27, 20, 1, (1, 3), {}, [220, 230, 240])
-    assert e.ranges[3][1] == 4140
+    e = Envelope(6, 27, 20, 1, (1, 3), {})
+    assert e.ranges[3][1] == 4100
     assert ranges(step=2).resolve(11000).amps % 2 == 0
 
 
@@ -178,6 +175,8 @@ async def start_grid(entry, station, transaction="net-test"):
             evse={"id": 1, "connector_id": 1},
         )
     )
+    await entry.runtime_data.settings.initialize_power()
+    await entry.runtime_data.settings.set("soll_power", 11)
     try:
         await entry.runtime_data.grid.action()
     except ValueError:
@@ -434,7 +433,7 @@ def test_disjoint_and_non_monotonic_boundaries_are_deterministic():
     assert disjoint.resolve(4601).phases == 3
     nonmonotonic = ranges(modes=(1, 2, 3), asymmetry=27, caps={1: 27, 2: 6, 3: 27})
     assert nonmonotonic.resolve(4000).phases == 1
-    assert nonmonotonic.resolve(4486).phases == 3
+    assert nonmonotonic.resolve(4501).phases == 3
 
 
 @pytest.mark.parametrize(
@@ -442,21 +441,21 @@ def test_disjoint_and_non_monotonic_boundaries_are_deterministic():
     [
         ("down", 0, 0),
         ("down", 100, 0),
-        ("down", 1379, 0),
-        ("down", 1380, 6),
+        ("down", 1399, 0),
+        ("down", 1400, 6),
         ("down", 1500, 6),
-        ("down", 1609, 6),
-        ("down", 1610, 7),
+        ("down", 1599, 6),
+        ("down", 1600, 7),
         ("up", 0, 0),
         ("up", 100, 6),
         ("up", 1380, 6),
-        ("up", 1400, 7),
-        ("up", 1610, 7),
+        ("up", 1400, 6),
+        ("up", 1600, 7),
         ("nearest", 0, 0),
-        ("nearest", 689, 0),
-        ("nearest", 690, 6),
-        ("nearest", 1494, 6),
-        ("nearest", 1495, 7),
+        ("nearest", 699, 0),
+        ("nearest", 700, 6),
+        ("nearest", 1499, 6),
+        ("nearest", 1500, 7),
         ("nearest", 1500, 7),
     ],
 )
@@ -476,9 +475,9 @@ def test_phase_lockout_interim_point_uses_same_directional_approximation():
     final = e.resolve(1500, "down")
     assert final.phases == 1 and final.amps == 6
 
-    interim = e.on_phase(1400, 3, "up")
+    interim = e.on_phase(1500, 3, "up")
     assert interim.phases == 3 and interim.amps == 6
-    final = e.resolve(1400, "up")
+    final = e.resolve(1500, "up")
     assert final.phases == 1 and final.amps == 7
 
     # A mode disabled by configuration does not become an eligible fallback.
@@ -521,7 +520,7 @@ class TemporaryPhaseLockoutStation(GridStation):
 
 @pytest.mark.parametrize(
     "direction,requested,interim_amps,final_amps",
-    [("down", 1.5, 0, 6), ("up", 1.4, 6, 7)],
+    [("down", 1.5, 0, 6), ("up", 1.5, 6, 7)],
 )
 async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
     ha, direction, requested, interim_amps, final_amps
@@ -631,7 +630,7 @@ async def test_interim_acknowledgement_and_retry_diagnostics(ha):
         assert len(station.profiles) == count
 
 
-@pytest.mark.parametrize("direction,power", [("down", 1.5), ("up", 1.4)])
+@pytest.mark.parametrize("direction,power", [("down", 1.5), ("up", 1.5)])
 @pytest.mark.parametrize("reason,delay", [("Busy", None), ("ReenableLockout", 14)])
 async def test_interim_rejection_is_truthful_and_only_lockouts_retry(
     ha, direction, power, reason, delay
@@ -699,14 +698,14 @@ async def test_cancelled_retry_callback_cannot_escape_new_set_revision(ha):
 
 
 @pytest.mark.parametrize("mode", [1, 2, 3])
-@pytest.mark.parametrize("minimum,step,cap,volts", [(6, 1, 11, 230), (7, 2, 14, 217)])
+@pytest.mark.parametrize("minimum,step,cap", [(6, 1, 11), (7, 2, 14)])
 @pytest.mark.parametrize("direction", ["down", "up", "nearest"])
 def test_quantization_against_exhaustive_executable_candidates(
-    mode, minimum, step, cap, volts, direction
+    mode, minimum, step, cap, direction
 ):
-    e = ranges(minimum=minimum, step=step, modes=(mode,), caps={mode: cap}, volts=volts)
+    e = ranges(minimum=minimum, step=step, modes=(mode,), caps={mode: cap})
     currents = [0, *range(minimum, cap + 1, step)]
-    offers = [(amps * mode * volts, amps) for amps in currents]
+    offers = [(((amps * mode * 230 + 50) // 100) * 100, amps) for amps in currents]
     probes = {Fraction(0), Fraction(1), Fraction(offers[-1][0] + 1000)}
     for (low, _), (high, _) in zip(offers, offers[1:], strict=False):
         for boundary in (Fraction(low), Fraction(high), Fraction(low + high, 2)):
@@ -725,7 +724,8 @@ def test_quantization_against_exhaustive_executable_candidates(
         else:
             expected = min(offers, key=lambda p: (abs(p[0] - watts), -p[0]))
         point = e.resolve(watts, direction)
-        assert (point.watts, point.amps) == expected
+        assert (point.display_watts, point.amps) == expected
+        assert point.watts == point.amps * mode * 230
 
 
 async def test_failed_read_retains_confirmed_positive_phase_for_new_intent(ha):
