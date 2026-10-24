@@ -4,13 +4,15 @@ Home Assistant integration domain: `wallbox_manager`.
 
 This prerelease extends the passive rebuild for OCPP **2.1**, targeting the
 supported wallbox-stationary interface. The integration version is
-**0.4.0-beta.14**; see the [beta.14 release notes](docs/v0.4/release-notes-beta.14.md)
-for nominal NETZ power planning, technical phase-series navigation, draft-only
-initialization protection, card changes and upgrade considerations. The
-coordinated beta.12 control foundation remains in place. Install the matching
-Stationary implementation. The old Stationary
-capability inventory cannot satisfy the new NETZ execution requirements.
-Publication alone deploys neither component.
+**0.4.0-beta.15**; see the [beta.15 release notes](docs/v0.4/release-notes-beta.15.md)
+for live NETZ schedules, renewable editor ownership, active warnings, session
+presentation and the coordinated Stationary hardware-disable/CP correction.
+The [beta.14 release notes](docs/v0.4/release-notes-beta.14.md) retain nominal
+NETZ power planning, technical phase-series navigation and initialization details.
+The coordinated beta.12 control foundation remains in place. Install the matching
+Stationary candidate identified in the beta.15 notes. The old Stationary capability
+inventory cannot satisfy NETZ execution requirements. Publication alone deploys
+neither component.
 The [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) retain the historical
 Idle display, session meter corrections and migration details. The immutable
 [`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
