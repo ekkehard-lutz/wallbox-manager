@@ -1,8 +1,10 @@
-"""NETZ electrical planning, independent of measured vehicle draw (GRID-03–10)."""
+"""NETZ nominal 230 V technical steps and rounded planning (GRID-31–39)."""
 
 import math
 from dataclasses import dataclass
 from fractions import Fraction
+
+NOMINAL_VOLTAGE = 230
 
 
 def number(value):
@@ -14,15 +16,31 @@ def number(value):
         raise ValueError("Finite numeric value required") from exc
 
 
+def rounded_watts(watts):
+    """Exact decimal half-up at 100 W, without a binary-float tolerance."""
+    return math.floor(number(watts) / 100 + Fraction(1, 2)) * 100
+
+
+def rounded_kw(kw):
+    return rounded_watts(number(kw) * 1000) / 1000
+
+
 @dataclass(frozen=True)
 class Point:
     amps: int
     phases: int | None
     watts: Fraction
 
+    @property
+    def display_watts(self):
+        return rounded_watts(self.watts)
+
+    def selection(self):
+        return {"power_kw": self.display_watts / 1000, "power_phases": self.phases}
+
 
 class Envelope:
-    def __init__(self, minimum, maximum, asymmetry, step, modes, caps, voltages):
+    def __init__(self, minimum, maximum, asymmetry, step, modes, caps):
         self.minimum, maximum, asymmetry, self.step = map(
             number, (minimum, maximum, asymmetry, step)
         )
@@ -35,7 +53,6 @@ class Envelope:
             or asymmetry <= 0
         ):
             raise ValueError("Unsupported current diagnostics")
-        self.voltages = tuple(map(number, voltages))
         self.ranges = {}
         self.migration = {}
         for n in sorted(set(modes)):
@@ -44,8 +61,6 @@ class Envelope:
             ceiling = maximum if n == 3 else min(maximum, asymmetry)
             raw = caps.get(n)
             cap = ceiling if raw is None else number(raw)
-            # Legacy fractions/out-of-range caps can only decrease. Keep the raw
-            # store intact and expose the normalization; never silently raise it.
             normalized = max(0, min(math.floor(cap), math.floor(ceiling)))
             if normalized < self.minimum:
                 normalized = 0
@@ -54,21 +69,30 @@ class Envelope:
             if normalized == 0:
                 continue
             cap = self.minimum + ((normalized - self.minimum) // self.step) * self.step
-            voltage = sum(self.voltages[:n])
-            if voltage <= 0:
-                raise ValueError("Invalid voltage basis")
-            self.ranges[n] = (voltage, self.minimum * voltage, cap * voltage, cap)
+            voltage = n * NOMINAL_VOLTAGE
+            self.ranges[n] = (
+                voltage,
+                rounded_watts(self.minimum * voltage),
+                rounded_watts(cap * voltage),
+                cap,
+            )
+
+    def points(self, mode):
+        voltage, _, _, cap = self.ranges[mode]
+        return [
+            Point(amps, mode, amps * voltage)
+            for amps in range(int(self.minimum), int(cap) + 1, int(self.step))
+        ]
 
     def power_bounds(self):
-        """Positive technical range in kW, using the solver's exact envelopes."""
         if not self.ranges:
             return None
         return (
-            float(min(r[1] for r in self.ranges.values()) / 1000),
-            float(max(r[2] for r in self.ranges.values()) / 1000),
+            min(r[1] for r in self.ranges.values()) / 1000,
+            max(r[2] for r in self.ranges.values()) / 1000,
         )
 
-    def resolve(self, watts, direction="nearest", ongoing=None):
+    def resolve(self, watts, direction="nearest", ongoing=None, selected=None):
         watts = number(watts)
         if watts < 0 or direction not in ("down", "nearest", "up"):
             raise ValueError("Unsupported power request")
@@ -77,14 +101,18 @@ class Envelope:
         modes = sorted(self.ranges)
         if not modes:
             raise ValueError("All supported phase modes are disabled")
+        # A technical selection explicitly identifies one of the overlapping
+        # phase points. A stale/invalid hint never invents a now-illegal point.
+        if type(selected) is int and selected in modes:
+            for point in self.points(selected):
+                if point.display_watts == watts:
+                    return point
         if (
             ongoing in modes
             and self.ranges[ongoing][1] <= watts <= self.ranges[ongoing][2]
         ):
             mode = ongoing
         else:
-            # Ascending first-crossing also defines non-monotonic boundaries:
-            # choose the first lower mode satisfying its boundary, else highest.
             mode = modes[-1]
             for low, high in zip(modes, modes[1:], strict=False):
                 if watts <= (self.ranges[low][2] + self.ranges[high][1]) / 2:
@@ -93,35 +121,60 @@ class Envelope:
         return self.on_phase(watts, mode, direction)
 
     def on_phase(self, watts, mode, direction="nearest"):
-        """Round on a chosen phase, treating 0 A as a real, separate candidate.
-
-        A positive requested power below the minimum is not automatically
-        promoted to the minimum: DOWN must pause and NEAREST may pause.
-        This is also the phase-lockout fallback calculator.
-        """
+        """Approximate explicitly enumerated rounded offers, including zero."""
         watts = number(watts)
         if watts < 0 or direction not in ("down", "nearest", "up"):
             raise ValueError("Unsupported power request")
         if mode not in self.ranges:
             raise ValueError("Phase mode disabled or unsupported")
-        voltage, _, _, cap = self.ranges[mode]
-        minimum_power = self.minimum * voltage
-        if (
-            watts == 0
-            or (direction == "down" and watts < minimum_power)
-            or (direction == "nearest" and watts * 2 < minimum_power)
-        ):
-            return Point(0, None, Fraction(0))
-        index = (watts / voltage - self.minimum) / self.step
-        index = (
-            math.floor(index)
-            if direction == "down"
-            else math.ceil(index)
-            if direction == "up"
-            else math.floor(index + Fraction(1, 2))
+        points = [Point(0, None, Fraction(0)), *self.points(mode)]
+        if watts == 0:
+            return points[0]
+        if direction == "down":
+            return max(
+                (p for p in points if p.display_watts <= watts),
+                key=lambda p: p.display_watts,
+            )
+        if direction == "up":
+            return next((p for p in points[1:] if p.display_watts >= watts), points[-1])
+        return min(
+            points, key=lambda p: (abs(p.display_watts - watts), -p.display_watts)
         )
-        amps = int(max(self.minimum, min(cap, self.minimum + index * self.step)))
-        return Point(amps, mode, amps * voltage)
+
+    def interim(self, watts, mode, direction):
+        """An interim positive clamp cannot violate the requested direction."""
+        if mode not in self.ranges:
+            return Point(0, None, 0)
+        point = self.on_phase(watts, mode, direction)
+        if (
+            direction == "up"
+            and point.display_watts < watts
+            or direction == "down"
+            and point.display_watts > watts
+        ):
+            return Point(0, None, 0)
+        return point
+
+    def navigate(self, watts, mode, direction):
+        """One strict, monotonic technical step; keep the selected mode first."""
+        if type(direction) is not int or direction not in (-1, 1):
+            raise ValueError("Direction must be -1 or 1")
+        watts = number(watts)
+        same = self.points(mode) if mode in self.ranges else []
+        candidates = [p for p in same if (p.display_watts - watts) * direction > 0]
+        if not candidates:
+            candidates = [
+                p
+                for n in self.ranges
+                if n != mode
+                for p in self.points(n)
+                if (p.display_watts - watts) * direction > 0
+            ]
+        return (
+            min(candidates, key=lambda p: (abs(p.display_watts - watts), p.phases))
+            if candidates
+            else None
+        )
 
 
 def capabilities(state):
@@ -144,21 +197,8 @@ def capabilities(state):
     )
 
 
-def voltage_basis(state):
-    # One consistent basis: all valid observed phases, otherwise all nominal 230 V.
-    station, evse, _ = state.binding
-    voltages = [
-        state.value(("observation", (station, evse, None), f"voltage_l{n}"))
-        for n in (1, 2, 3)
-    ]
-    if any(v is None or not 100 <= number(v) <= 300 for v in voltages):
-        voltages = [230, 230, 230]
-    return voltages
-
-
 def envelope(state, settings):
     return Envelope(
         **capabilities(state),
         caps={n: settings.get(f"allowed_current_{n}p") for n in (1, 2, 3)},
-        voltages=voltage_basis(state),
     )

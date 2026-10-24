@@ -15,7 +15,7 @@ NUMBERS = {
         f"allowed_current_{n}p": (f"allowed_current_{n}p", None, 0, 100000, 1, "A")
         for n in (1, 2, 3)
     },
-    "soll_power": ("power_kw", 11, 0, 100, 0.1, "kW"),
+    "soll_power": ("power_kw", None, 0, 100, 0.1, "kW"),
     "min_soc": ("min_soc", 20, 0, 100, 1, "%"),
     "soll_soc_speicher": ("soll_soc_speicher", 95, 0, 99, 1, "%"),
     "soc_hysterese": ("soc_hysterese", 2, 0, 50, 1, "%"),
@@ -40,7 +40,7 @@ SELECTS = {
     "power_approximation": ("direction", ["up", "down", "nearest"]),
 }
 TIMES = ("grid_start_delay", "grid_duration")
-GRID_FIELDS = ("power_kw", *TIMES)
+GRID_FIELDS = ("power_kw", "power_phases", *TIMES)
 REGULATION = ("soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay")
 
 
@@ -67,6 +67,7 @@ class Settings:
         self.values.update({spec[0]: spec[1][0] for spec in SELECTS.values()})
         self.values.update(approximation="down", direction="nearest")
         self.values.update(dict.fromkeys(TIMES))
+        self.values["power_phases"] = None
         self.values.update(saved)
         # Restore caps before any connection/control task can use default maxima.
         # Entities are added only after capability discovery, which is too late
@@ -109,6 +110,7 @@ class Settings:
             "grid_next_timing", {k: self.values.get(k) for k in TIMES}
         )
         self.grid_equivalent = lambda values: False
+        self.grid_point = self.resolve_draft
         self.approval_error = None
 
     async def initialize_grid(self):
@@ -156,9 +158,10 @@ class Settings:
         }
 
     def equivalent_grid_draft(self, values):
-        if values["power_kw"] == self.approved("soll_power") or any(
-            values.get(k) != self.approved(k) for k in TIMES
-        ):
+        if (values["power_kw"], values.get("power_phases")) == (
+            self.approved("soll_power"),
+            self.approved("power_phases"),
+        ) or any(values.get(k) != self.approved(k) for k in TIMES):
             return False
         try:
             self.validate("soll_power", values["power_kw"])
@@ -209,7 +212,10 @@ class Settings:
                     self.validate(role, duration_text(self.get(role)))
                 previous = dict(self.values)
                 updated = dict(self.values)
-                power_changed = updated["power_kw"] != self.approved("soll_power")
+                power_changed = (updated["power_kw"], updated.get("power_phases")) != (
+                    self.approved("soll_power"),
+                    self.approved("power_phases"),
+                )
                 equivalent = not power_changed or self.grid_equivalent(updated)
                 self.approve_values(updated)
                 updated["charge_release"] = start or self.get("charge_release")
@@ -276,7 +282,9 @@ class Settings:
             if not math.isfinite(value) or not minimum <= value <= maximum:
                 raise ValueError("Number outside supported range")
             if role == "soll_power":
-                from .grid_point import envelope
+                from .grid_point import envelope, rounded_kw
+
+                value = rounded_kw(value)
 
                 try:
                     bounds = envelope(self.state, self).power_bounds()
@@ -353,7 +361,7 @@ class Settings:
         async with self.lock:
             await self._set(role, value)
 
-    async def _set(self, role, value):
+    async def _set(self, role, value, *, selected=None):
         value = self.validate(role, value)
         field = (
             NUMBERS[role][0]
@@ -362,9 +370,13 @@ class Settings:
             if role in SELECTS
             else role
         )
-        if self.values.get(field) == value:
+        if self.values.get(field) == value and (
+            role != "soll_power" or self.values.get("power_phases") == selected
+        ):
             return
         updated = {**self.values, field: value}
+        if role == "soll_power":
+            updated["power_phases"] = selected
         if role in ("soll_power", *TIMES):
             updated["grid_draft_revision"] = self.values["grid_draft_revision"] + 1
         if role == "charging_profile":
@@ -388,6 +400,96 @@ class Settings:
             self.notify_grid()
         else:
             self.notify(role)
+
+    def resolve_draft(self, values):
+        from .grid_point import envelope, number, rounded_kw
+
+        return envelope(self.state, self).resolve(
+            number(rounded_kw(values["power_kw"])) * 1000,
+            self.get("power_approximation"),
+            selected=values.get("power_phases"),
+        )
+
+    def power_attributes(self):
+        from .grid_point import envelope, number, rounded_kw
+
+        result = {
+            "draft_phase_hint": self.get("power_phases"),
+            "selected_phase_count": None,
+            "power_step_up": None,
+            "power_step_down": None,
+        }
+        try:
+            ranges = envelope(self.state, self)
+            point = self.grid_point(self.values)
+            result["selected_phase_count"] = point.phases
+            watts = (
+                point.display_watts
+                if point.amps > 0
+                else number(rounded_kw(self.get("soll_power"))) * 1000
+            )
+            for name, direction in (("power_step_up", 1), ("power_step_down", -1)):
+                step = ranges.navigate(watts, point.phases, direction)
+                result[name] = step.selection() if step else None
+        except ValueError, TypeError, OverflowError:
+            pass
+        return result
+
+    async def step_power(self, direction, revision):
+        from .grid_point import envelope, number, rounded_kw
+
+        async with self.lock:
+            if (
+                type(revision) is not int
+                or revision != self.values["grid_draft_revision"]
+            ):
+                raise ValueError("Superseded NETZ draft revision")
+            point = self.grid_point(self.values)
+            step = envelope(self.state, self).navigate(
+                point.display_watts
+                if point.amps > 0
+                else number(rounded_kw(self.get("soll_power"))) * 1000,
+                point.phases,
+                direction,
+            )
+            if step is not None:
+                await self._set(
+                    "soll_power", step.selection()["power_kw"], selected=step.phases
+                )
+
+    async def initialize_power(self):
+        """Initialize invalid drafts once capabilities exist, without dispatch."""
+        from .grid_point import envelope, rounded_kw
+
+        async with self.lock:
+            try:
+                try:
+                    ranges = envelope(self.state, self)
+                except ValueError, TypeError, OverflowError:
+                    return
+                bounds = ranges.power_bounds()
+                if bounds is None:
+                    return
+                try:
+                    value = rounded_kw(self.get("soll_power"))
+                    if bounds[0] <= value <= bounds[1]:
+                        return
+                except ValueError, TypeError, OverflowError:
+                    pass
+                point = min(
+                    (p for mode in ranges.ranges for p in ranges.points(mode)),
+                    key=lambda p: (p.display_watts, p.phases),
+                )
+                updated = {
+                    **self.values,
+                    **point.selection(),
+                    "grid_draft_revision": self.values["grid_draft_revision"] + 1,
+                }
+                await self._save(updated)
+                self.approval_error = None
+            except (ValueError, TypeError, OverflowError, OSError) as exc:
+                self.approval_error = str(exc)
+            self.notify_grid()
 
     async def persist(self, profiles):
         # HA Store logs and swallows WriteError. Its shutdown-deferred data and

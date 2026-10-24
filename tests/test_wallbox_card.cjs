@@ -36,13 +36,42 @@ function states(entry='E') {
       options:role==='charging_profile'?['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']:undefined,min:0,max:100}};
   }
   Object.assign(result[`${entry}.charge_action`].attributes,{charge_action_ready:false,charge_action:"start",charge_release:false});
-  Object.assign(result[`${entry}.soll_power`].attributes,{technical_min_kw:1.38,technical_max_kw:18.63});
+  Object.assign(result[`${entry}.soll_power`].attributes,{technical_min_kw:1.4,technical_max_kw:18.6,grid_draft_revision:0,runtime_incarnation:entry});
   return result;
+}
+// Canned backend neighbour payloads; the card never derives electrical steps.
+const neighbours = {
+  '1:1.4': [null,[1.6,1]], '1:1.6': [[1.4,1],[1.8,1]],
+  '1:1.8': [[1.6,1],[2.1,1]], '1:2.1': [[1.8,1],[2.3,1]],
+  '1:3.9': [[3.7,1],[4.1,1]], '1:4.1': [[3.9,1],[4.4,1]],
+  '1:4.4': [[4.1,1],[4.6,1]], '1:4.6': [[4.4,1],[4.8,3]],
+  '3:4.1': [[3.9,1],[4.8,3]], '3:4.8': [[4.1,3],[5.5,3]],
+  '3:5.5': [[4.8,3],[6.2,3]], '3:7.2': [[6.2,3],[7.6,3]],
+};
+function backendPoint(state, point=null) {
+  if (point) { state.state=String(point.power_kw); state.attributes.selected_phase_count=point.power_phases; state.attributes.draft_phase_hint=point.power_phases; }
+  let phase=state.attributes.selected_phase_count || 3;
+  if (!neighbours[`${phase}:${state.state}`]) phase=1;
+  const pair=neighbours[`${phase}:${state.state}`];
+  if (pair) {
+    state.attributes.selected_phase_count=phase;
+    [state.attributes.power_step_down,state.attributes.power_step_up]=pair.map(p=>p?{power_kw:p[0],power_phases:p[1]}:null);
+  }
 }
 function card(data=states(), config={}, language='en') {
   const Card = load(), card = new Card(), calls=[];
   card.setConfig({type:'custom:wallbox-manager-card',...config});
-  card.hass={states:data,language,callService:async(...args)=>calls.push(args)};
+  for (const state of Object.values(data)) if (state.attributes.wallbox_manager_role==='soll_power') backendPoint(state);
+  card.hass={states:data,language,callService:async(...args)=>{
+    calls.push(args);
+    if (args[0]==='wallbox_manager' && args[1]==='step_power') {
+      const request=args[2], state=data[request.entity_id];
+      if (request.revision!==state.attributes.grid_draft_revision) throw new Error('Stale revision');
+      const point=state.attributes[request.direction>0?'power_step_up':'power_step_down'];
+      backendPoint(state,point); state.attributes.grid_draft_revision++;
+      card.hass=card._hass;
+    }
+  }};
   return {card,calls,get:id=>card.shadowRoot.getElementById(id)};
 }
 
@@ -58,7 +87,7 @@ test('familiar layout, read-only permission and no multi-wallbox UI',()=>{
   assert.match(get('charge-action').textContent,/Start charging/);
   assert.match(get('status').textContent,/explicit actions/);
   assert.equal(get('connection').textContent,'Available');
-  assert.equal(get('live-power').textContent,'1.5 kW');
+  assert.equal(get('live-power').textContent,'1.50 kW');
   assert.equal(get('energy').textContent,'1.2 kWh');
   assert.equal(calls.length,0);
   c.connectedCallback(); c.disconnectedCallback();
@@ -301,21 +330,17 @@ test('automatic wake-up switch has no card markup or authorized card action',asy
 });
 
 
-test('Grid approximation and confirmed offer stay distinct from measured power',async()=>{
+test('reserve and approximation controls are absent while measured power remains separate',()=>{
   const data=states();
   data['E.power_approximation']={state:'nearest',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'power_approximation'}};
-  Object.assign(data['E.soll_power'].attributes,{profile_status:'rejected',command_reason:'PhaseSwitchLockout',applied_phase_count:3,applied_current_a:6,applied_offered_power_w:4140});
-  const {get,calls}=card(data);
-  assert.equal(get('approximation').value,'nearest');
-  assert.equal(get('approximation-row').hidden,false);
+  Object.assign(data['E.soll_power'].attributes,{profile_status:'rejected',command_reason:'PhaseSwitchLockout',applied_phase_count:3,applied_current_a:6});
+  const {card:c,get}=card(data);
+  assert.doesNotMatch(c.shadowRoot.html,/id="reserve|id="approximation|Entladereserve|Leistungsannäherung/);
+  assert.equal(c.discovery.roles.min_soc,'E.min_soc');
+  assert.equal(c.discovery.roles.power_approximation,'E.power_approximation');
   assert.equal(get('actual').textContent,'3-phase 6A');
-  assert.equal(get('live-power').textContent,'1.5 kW');
-  assert.match(get('status').textContent,/NETZ: rejected \(PhaseSwitchLockout\)/);
-  await get('approximation').onchange({target:{value:'down'}});
-  assert.equal(calls[0][2].entity_id,'E.power_approximation');
-  assert.equal(calls[0][2].option,'down');
+  assert.equal(get('live-power').textContent,'1.50 kW');
 });
-
 
 test('Grid parameters show actual and requested modes only, including pending pauses',()=>{
   const data=states();
@@ -404,17 +429,15 @@ test('charging action suppresses duplicates and preserves failed drafts',async()
   assert.equal(get('charge-action').textContent,'Start charging');
 });
 
-test('locale numeric steps and time clearing stage drafts and wait for backend acknowledgement',async()=>{
+test('locale technical steps use backend revisions and time clearing remains a draft',async()=>{
   const data=states(); data['E.soll_power'].state='1.4';
   data['E.charge_action'].attributes.charge_action_ready=true;
   const {card:c,get,calls}=card(data,{},'de');
   assert.equal(get('power').value,'1,4');
   await c.stepNumber('power',1); await c.stepNumber('power',1);
-  assert.equal(get('power').value,'1,6');
-  assert.deepEqual(calls.map(call=>call[2].value),[1.5,1.6]);
-  assert.equal(get('charge-action').disabled,true);
-  await get('charge-action').onclick(); assert.equal(calls.length,2);
-  data['E.soll_power'].state='1.6'; c.hass=c._hass;
+  assert.equal(get('power').value,'1,8');
+  assert.deepEqual(calls.map(call=>call[2].revision),[0,1]);
+  assert.ok(calls.every(call=>call[0]==='wallbox_manager' && call[1]==='step_power' && call[2].direction===1));
   assert.equal(get('charge-action').disabled,false);
   get('grid_duration-clear').onclick();
   await new Promise(resolve=>setImmediate(resolve));
@@ -433,7 +456,7 @@ test('power long press still stages repeated numeric edits without pressing SET'
   await new Promise(resolve=>setTimeout(resolve,500));
   c.stopHold();
   assert.ok(calls.length>=2);
-  assert.ok(calls.every(call=>call[0]==='number' && call[2].entity_id==='E.soll_power'));
+  assert.ok(calls.every(call=>call[0]==='wallbox_manager' && call[1]==='step_power' && call[2].entity_id==='E.soll_power'));
   assert.notEqual(get('charge-action').hidden,true); // The unified action is always visible.
   const count=calls.length; await new Promise(resolve=>setTimeout(resolve,175));
   assert.equal(calls.length,count);
@@ -444,13 +467,122 @@ test('newer backend draft revisions supersede another card optimistic edit',asyn
   data['E.charge_action'].attributes.charge_action_ready=true;
   const a=card(data), b=card(data);
   a.get('power').value='3'; await a.card.editNumber('power');
-  assert.equal(a.get('power').value,'3');
+  assert.equal(a.get('power').value,'3.0');
   // Another card wins; the first card never observes an intermediate 3 kW state.
   b.get('power').value='4'; await b.card.editNumber('power');
   data['E.soll_power'].state='4'; data['E.soll_power'].attributes.grid_draft_revision=2;
   a.card.hass=a.card._hass; b.card.hass=b.card._hass;
-  assert.equal(a.get('power').value,'4'); assert.equal(b.get('power').value,'4');
+  assert.equal(a.get('power').value,'4.0'); assert.equal(b.get('power').value,'4.0');
   assert.equal(a.get('charge-action').disabled,false);
   data['E.charge_action'].attributes.grid_approval_error='Disk full'; a.card.hass=a.card._hass;
   assert.match(a.get('status').textContent,/Disk full/);
+});
+
+
+test('technical phase transitions use backend identity and preserve overlap direction',async()=>{
+  const data=states(); data['E.soll_power'].state='4.6'; data['E.soll_power'].attributes.selected_phase_count=1;
+  const {card:c,get}=card(data);
+  await c.stepNumber('power',1);
+  assert.equal(get('power').value,'4.8');
+  assert.equal(data['E.soll_power'].attributes.selected_phase_count,3);
+  await c.stepNumber('power',-1);
+  assert.equal(get('power').value,'4.1');
+  assert.equal(data['E.soll_power'].attributes.selected_phase_count,3);
+  await c.stepNumber('power',-1);
+  assert.equal(get('power').value,'3.9');
+  assert.equal(data['E.soll_power'].attributes.selected_phase_count,1);
+});
+
+test('queued repeated presses and keyboard wait for backend acknowledgement',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4'; data['E.charge_action'].attributes.charge_action_ready=true;
+  const {card:c,get,calls}=card(data);
+  let release;
+  const original=c._hass.callService;
+  c._hass.callService=async(...args)=>{await new Promise(resolve=>{release=resolve;}); return original(...args);};
+  const first=c.stepNumber('power',1),second=c.stepNumber('power',1);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.length,0);
+  assert.equal(get('charge-action').disabled,true);
+  release(); await first;
+  await new Promise(resolve=>setImmediate(resolve));
+  release(); await second;
+  assert.equal(get('power').value,'1.8');
+  c._hass.callService=original;
+  get('power').onkeydown({key:'ArrowUp',preventDefault(){}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(get('power').value,'2.1');
+  assert.deepEqual(calls.map(call=>call[2].revision),[0,1,2]);
+});
+
+test('service return alone never acknowledges a step; another card revision cancels it',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4';
+  const {card:c,get}=card(data);
+  c._hass.callService=async()=>{};
+  const pending=c.stepNumber('power',1);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(get('power').value,'1.4');
+  assert.equal(c.draftWrites.size,1);
+  data['E.soll_power'].state='4.1'; data['E.soll_power'].attributes.grid_draft_revision=2;
+  c.hass=c._hass;
+  await pending;
+  assert.equal(get('power').value,'4.1');
+  assert.match(get('error').textContent,/selection changed/);
+});
+
+for (const [language,value,expected] of [['de',1378,'1,38 kW'],['de',5523,'5,52 kW'],['de',0,'0,00 kW'],['en',0,'0.00 kW'],['en',5523,'5.52 kW']]) {
+  test(`live measured power uses two locale decimals ${language}/${value}`,()=>{
+    const data=states(); data['E.power'].state=String(value); data['E.soll_power'].state='11';
+    const {get}=card(data,{},language);
+    assert.equal(get('live-power').textContent,expected);
+    assert.equal(get('power').value,language==='de'?'11,0':'11.0');
+  });
+}
+
+test('unavailable technical capabilities show a placeholder and disable navigation',()=>{
+  const data=states(); data['E.soll_power'].state='unavailable';
+  Object.assign(data['E.soll_power'].attributes,{technical_min_kw:null,technical_max_kw:null,power_step_up:null,power_step_down:null});
+  const {get}=card(data);
+  assert.equal(get('power').value,'');
+  assert.equal(get('power').disabled,true);
+  assert.equal(get('power-up').disabled,true);
+  assert.equal(get('power-down').disabled,true);
+});
+
+test('relative steps synchronize two cards and remain scoped after rebinding',async()=>{
+  const data={...states('A'),...states('B')};
+  data['A.soll_power'].state='1.4'; data['B.soll_power'].state='1.4';
+  const a=card(data,{entry_id:'A'}), other=card(data,{entry_id:'A'});
+  await a.card.stepNumber('power',1);
+  other.card.hass=other.card._hass;
+  assert.equal(other.get('power').value,'1.6');
+  await other.card.stepNumber('power',1);
+  a.card.hass=a.card._hass;
+  assert.equal(a.get('power').value,'1.8');
+  assert.deepEqual([...a.calls,...other.calls].map(call=>call[2].revision),[0,1]);
+  other.card.setConfig({entry_id:'B'});
+  await other.card.stepNumber('power',1);
+  assert.equal(data['B.soll_power'].state,'1.6');
+  assert.equal(data['A.soll_power'].state,'1.8');
+  assert.equal(other.calls.at(-1)[2].entity_id,'B.soll_power');
+});
+
+test('rebinding cancels queued steps and isolates a late acknowledgement',async()=>{
+  const data={...states('A'),...states('B')};
+  data['A.soll_power'].state='1.4'; data['B.soll_power'].state='1.4';
+  const {card:c,get,calls}=card(data,{entry_id:'A'});
+  let release;
+  const original=c._hass.callService;
+  c._hass.callService=async(...args)=>{await new Promise(resolve=>{release=resolve;}); return original(...args);};
+  const first=c.stepNumber('power',1),second=c.stepNumber('power',1);
+  await new Promise(resolve=>setImmediate(resolve));
+  c.setConfig({entry_id:'B'});
+  release(); await first; await second;
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][2].entity_id,'A.soll_power');
+  assert.equal(get('power').value,'1.4');
+  assert.equal(get('error').hidden,true);
+  c._hass.callService=original;
+  await c.stepNumber('power',1);
+  assert.equal(get('power').value,'1.6');
+  assert.equal(calls.at(-1)[2].entity_id,'B.soll_power');
 });

@@ -39,7 +39,7 @@ async def test_pending_draft_becomes_equivalent_after_approximation_change(ha):
         await eventually(
             lambda: grid.status == "confirmed" and grid.requested.amps == 6
         )
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
         assert settings.approved("soll_power") == 1.4
         assert settings.approval_attributes()["grid_set_required"]
         count = len(station.profiles)
@@ -47,7 +47,7 @@ async def test_pending_draft_becomes_equivalent_after_approximation_change(ha):
         await settings.set("power_approximation", "down")
         await eventually(lambda: grid.task.done())
         assert grid.requested.phases == 1 and grid.requested.amps == 6
-        await eventually(lambda: settings.approved("soll_power") == 1.6)
+        await eventually(lambda: settings.approved("soll_power") == 1.5)
         assert not settings.approval_attributes()["grid_set_required"]
         assert len(station.profiles) == count
         # The immediate approximation decision already reads the schedule;
@@ -61,13 +61,17 @@ async def test_approximation_executes_only_approved_power_when_draft_remains_dif
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
+        await settings.set("power_approximation", "down")
+        await settings.set("soll_power", 1.5)
+        await settings._approve_release()
+        await eventually(lambda: grid.task.done())
         await settings.set("soll_power", 3)
         count = len(station.profiles)
         await settings.set("power_approximation", "up")
         await eventually(lambda: grid.status == "confirmed" and grid.task.done())
         await asyncio.sleep(0)
         assert grid.requested.amps == 7 and grid.requested.phases == 1
-        assert settings.approved("soll_power") == 1.4
+        assert settings.approved("soll_power") == 1.5
         assert settings.approval_attributes()["grid_set_required"]
         assert len(station.profiles) == count + 1
         assert (
@@ -85,7 +89,7 @@ async def test_capabilities_can_make_existing_draft_equivalent(ha, source):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
         count = len(station.profiles)
         state = entry.runtime_data.state
         if source == "user_cap":
@@ -106,7 +110,7 @@ async def test_capabilities_can_make_existing_draft_equivalent(ha, source):
             assert settings.approved("soll_power") == 1.4
             assert settings.approval_attributes()["grid_set_required"]
         else:
-            await eventually(lambda: settings.approved("soll_power") == 1.6)
+            await eventually(lambda: settings.approved("soll_power") == 1.5)
             assert not settings.approval_attributes()["grid_set_required"]
         # The immediate capability decision uses 1.4 kW; adoption adds no command.
         expected = 1 if source in ("minimum", "phase_modes") else 0
@@ -121,7 +125,7 @@ async def test_missing_capability_keeps_set_until_reliable_context_returns(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
         state = entry.runtime_data.state
         key = ("capability", ("Wallbox01", "1", None), "supported_phases")
         state.observe(state.generation, key, None, "NotifyReport")
@@ -132,7 +136,7 @@ async def test_missing_capability_keeps_set_until_reliable_context_returns(ha):
         assert settings.approval_attributes()["grid_set_required"]
         count = len(station.profiles)
         state.observe(state.generation, key, "1,3", "NotifyReport")
-        await eventually(lambda: settings.approved("soll_power") == 1.6)
+        await eventually(lambda: settings.approved("soll_power") == 1.5)
         assert len(station.profiles) == count
 
 
@@ -140,7 +144,7 @@ async def test_timing_draft_blocks_automatic_adoption_after_context_change(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
         await settings.set("grid_duration", "00:00")
         count = len(station.profiles)
         await settings.set("power_approximation", "down")
@@ -157,11 +161,11 @@ async def test_lockout_adoption_preserves_desired_and_original_retry_deadline(ha
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         grid, clock = await pending_interim(entry, station)
         settings = entry.runtime_data.settings
-        await settings.set("soll_power", 1.7)
+        await settings.set("soll_power", 1.6)
         assert settings.approval_attributes()["grid_set_required"]
         count = len(station.profiles)
         await settings.set("power_approximation", "nearest")
-        await eventually(lambda: settings.approved("soll_power") == 1.7)
+        await eventually(lambda: settings.approved("soll_power") == 1.6)
         assert grid.requested.phases == 1 and grid.requested.amps == 7
         assert grid.confirmed.phases == 3 and grid.confirmed.amps == 0
         assert grid.status == "phase_lockout_pending"
@@ -181,6 +185,10 @@ async def test_uncertain_point_waits_for_existing_supported_confirmation(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
+        await settings.set("soll_power", 1.5)
+        await settings.set("power_approximation", "down")
+        await settings._approve_release()
+        await eventually(lambda: grid.task.done())
         await settings.set("soll_power", 1.6)
         station.readback = False
         await settings.set("power_approximation", "up")
@@ -188,7 +196,7 @@ async def test_uncertain_point_waits_for_existing_supported_confirmation(ha):
             lambda: grid.status == "accepted_unconfirmed" and grid.task.done()
         )
         assert grid.point_uncertain
-        assert settings.approved("soll_power") == 1.4
+        assert settings.approved("soll_power") == 1.5
         assert settings.approval_attributes()["grid_set_required"]
         count = len(station.profiles)
         station.readback = True
@@ -205,7 +213,7 @@ async def test_reevaluation_queued_behind_set_keeps_atomic_timing_approval(
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
         await settings.set("grid_duration", "00:05")
         waiting, release = asyncio.Event(), asyncio.Event()
         save = settings.store.async_save
@@ -242,7 +250,7 @@ async def test_reevaluation_queued_behind_set_keeps_atomic_timing_approval(
         await asyncio.sleep(0)
         async with settings.lock:
             assert len(writes) == 1
-            assert settings.approved("soll_power") == (1.4 if fail else 1.6)
+            assert settings.approved("soll_power") == (1.4 if fail else 1.5)
             assert settings.approved("grid_duration") == (None if fail else 300)
             assert settings.approval_attributes()["grid_set_required"] is fail
         assert settings.values.get("grid_request") is None
@@ -252,7 +260,7 @@ async def test_restart_retains_draft_until_current_generation_point_is_confirmed
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         _, settings = await approved_1400(entry, station)
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
     await settings.set("power_approximation", "down")
     assert settings.approved("soll_power") == 1.4
     assert await async_unload_entry(ha, entry)
@@ -286,7 +294,7 @@ async def test_restart_retains_draft_until_current_generation_point_is_confirmed
             "charging_schedule_period"
         ] == [{"start_period": 0, "limit": 0}]
         await grid.action()
-        assert settings.approved("soll_power") == 1.6
+        assert settings.approved("soll_power") == 1.5
         assert settings.get("charge_release") is True
 
 
@@ -294,7 +302,7 @@ async def test_repeated_notifications_do_not_reapprove_or_resend(ha, monkeypatch
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
         save = settings.store.async_save
         writes = []
 
@@ -305,7 +313,7 @@ async def test_repeated_notifications_do_not_reapprove_or_resend(ha, monkeypatch
         monkeypatch.setattr(settings.store, "async_save", record)
         count = len(station.profiles)
         await settings.set("power_approximation", "down")
-        await eventually(lambda: settings.approved("soll_power") == 1.6)
+        await eventually(lambda: settings.approved("soll_power") == 1.5)
         revision = settings.approval_attributes()["grid_approved_revision"]
         assert len(writes) == 2  # immediate direction + one numeric approval
         operations = list(station.operations)
@@ -329,13 +337,13 @@ async def test_automatic_adoption_waits_for_durable_save_and_recovers_on_event(
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid, settings = await approved_1400(entry, station)
-        await settings.set("soll_power", 1.6)
+        await settings.set("soll_power", 1.5)
         waiting, release = asyncio.Event(), asyncio.Event()
         save = settings.store.async_save
         writes = []
 
         async def delayed(data):
-            if data[settings.key]["grid_approved"]["power_kw"] == 1.6:
+            if data[settings.key]["grid_approved"]["power_kw"] == 1.5:
                 writes.append(data)
                 waiting.set()
                 await release.wait()
@@ -360,12 +368,12 @@ async def test_automatic_adoption_waits_for_durable_save_and_recovers_on_event(
             assert len(writes) == 1 and len(station.profiles) == count
             monkeypatch.setattr(settings.store, "async_save", save)
             grid.phase_changed()
-        await eventually(lambda: settings.approved("soll_power") == 1.6)
+        await eventually(lambda: settings.approved("soll_power") == 1.5)
         assert not settings.approval_attributes()["grid_set_required"]
         assert settings.approval_error is None
         assert len(station.profiles) == count
     assert await async_unload_entry(ha, entry)
     assert await async_setup_entry(ha, entry)
     settings = entry.runtime_data.settings
-    assert settings.approved("soll_power") == 1.6
+    assert settings.approved("soll_power") == 1.5
     assert not settings.approval_attributes()["grid_set_required"]

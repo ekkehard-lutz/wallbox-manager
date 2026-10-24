@@ -43,6 +43,16 @@ current/phase dispatch; unknown readback remains unconfirmed rather than implyin
 zero or authorizing blind replay. No additional polling or recovery state is needed.
 See the [correction evidence](../release-off-recovery-correction.md).
 
+### Nominal planning amendment
+
+[WBM-GRID-31–40](grid-profile.md#amendment--nominal-netz-steps-and-navigation-24-october-2026)
+now governs NETZ bounds, rounded 0.1-kW offers, technical navigation, initialization
+and phase-hint equivalence, superseding the voltage-basis portions of
+WBM-NETZ-ACTION-07–10. The selected phase hint belongs to the same durable draft/
+approval record. A phase-only difference at equal displayed power is meaningful.
+The unified Start/Apply/Stop contract, internal zero-current release OFF and
+recovery correction remain unchanged; measurement voltage does not affect readiness.
+
 ## NETZ button state machine (WBM-NETZ-ACTION-01–13)
 
 **One button replaces BOTH the Lovelace hardware-permission button and the separate SET button.** Its action always relates to the internal WBM charge-release intent. The old station hardware-enabled switch remains visible **only** on the HA device/integration page.

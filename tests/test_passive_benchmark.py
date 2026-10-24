@@ -191,13 +191,12 @@ async def test_passive_workloads(ha, monkeypatch):
         meter_voltage(230.05, 8000)
 
     await measure("normalized_voltage_boundary", boundary)
-    # Voltage and its dependent technical power range publish; no other controls.
-    assert results["normalized_voltage_boundary"]["ha_changes"] == 2
-    # The benchmark counts both state_changed and state_reported deliveries.
-    assert results["normalized_voltage_boundary"]["unrelated_writes"] == 2
-    assert {
-        ha.states.get(entity).attributes["wallbox_manager_role"] for entity in changes
-    } == {"voltage_l1", "soll_power"}
+    # Nominal NETZ planning has no dependency on measured voltage.
+    assert results["normalized_voltage_boundary"]["ha_changes"] == 1
+    assert results["normalized_voltage_boundary"]["unrelated_writes"] == 0
+    assert {ha.states.get(e).attributes["wallbox_manager_role"] for e in changes} == {
+        "voltage_l1"
+    }
 
     def meter_energy(raw, index):
         adapter.meters(

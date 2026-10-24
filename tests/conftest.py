@@ -11,7 +11,7 @@ from homeassistant.config_entries import ConfigEntries, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.entity_platform import EntityPlatform
+from homeassistant.helpers.entity_platform import EntityPlatform, current_platform
 
 from custom_components.wallbox_manager import async_setup_entry, async_unload_entry
 
@@ -73,7 +73,11 @@ async def ha(tmp_path, monkeypatch):
             def add(entities, platform=platform):
                 hass.async_create_task(platform.async_add_entities(list(entities)))
 
-            await module.async_setup_entry(hass, entry, add)
+            token = current_platform.set(platform)
+            try:
+                await module.async_setup_entry(hass, entry, add)
+            finally:
+                current_platform.reset(token)
         await hass.async_block_till_done()
 
     async def unload(entry, domains):

@@ -3,16 +3,29 @@
 import math
 from fractions import Fraction
 
+import voluptuous as vol
 from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import SettingEntity
-from .grid_point import capabilities, envelope
+from .grid_point import capabilities, envelope, rounded_kw
 from .settings import NUMBERS
 
 
 async def async_setup_entry(hass, entry, add):
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        "step_power",
+        {
+            vol.Required("direction"): vol.In([-1, 1]),
+            vol.Required("revision"): vol.All(int, vol.Range(min=0)),
+            vol.Required("incarnation"): str,
+        },
+        "async_step_power",
+    )
     state = entry.runtime_data.state
     seen = set()
 
@@ -63,6 +76,13 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
     @property
     def native_value(self):
         value = self.settings.get(self.role)
+        if self.role == "soll_power":
+            try:
+                bounds = self.power_bounds()
+                value = rounded_kw(value)
+                return value if bounds and bounds[0] <= value <= bounds[1] else None
+            except ValueError, TypeError, OverflowError:
+                return None
         if self.role.startswith("allowed_current_"):
             try:
                 ranges = envelope(self.observed, self.settings)
@@ -79,7 +99,7 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
     @property
     def available(self):
         if self.role == "soll_power":
-            return self.power_bounds() is not None
+            return self.power_bounds() is not None and self.native_value is not None
         if self.role.startswith("allowed_current_"):
             try:
                 return int(self.role[-2]) in capabilities(self.observed)["modes"]
@@ -135,6 +155,7 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
             )
         if self.role == "soll_power":
             bounds = self.power_bounds()
+            attrs.update(self.settings.power_attributes())
             attrs.update(
                 technical_min_kw=bounds[0] if bounds else None,
                 technical_max_kw=bounds[1] if bounds else None,
@@ -200,3 +221,15 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
 
     async def async_set_native_value(self, value):
         await self.settings.set(self.role, value)
+
+    async def async_step_power(self, direction, revision, incarnation):
+        if incarnation != self.observed.runtime_id:
+            raise HomeAssistantError("Superseded NETZ runtime")
+        if self.role != "soll_power":
+            raise HomeAssistantError(
+                "Technical steps apply only to NETZ requested power"
+            )
+        try:
+            await self.settings.step_power(direction, revision)
+        except (ValueError, TypeError, OSError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
