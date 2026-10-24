@@ -53,6 +53,7 @@ class Listener:
         self._logged = {}
         self.control = Control(self)
         self.grid = None
+        self.stopping = False
 
     def diagnostic(self, level, event, *, reason="none", **fields):
         """Bounded by event families; diagnostics can never break the protocol."""
@@ -144,11 +145,19 @@ class Listener:
             await adapter.close()
             if self.adapter is adapter:
                 self.state.reset(connected=False)
+                if not self.stopping:
+                    self.state.messages.set(
+                        "connection",
+                        source="ocpp",
+                        severity="warning",
+                        code="connection_lost",
+                    )
                 self.diagnostic(1, "disconnected", reason="transport_closed")
                 self._initialization = "disconnected"
                 self.adapter = None
 
     async def stop(self):
+        self.stopping = True
         if self.server:
             self.server.close()
             if self.adapter:
@@ -776,6 +785,17 @@ class Adapter(ChargePoint):
                 discovery = self.state.value(
                     ("station", (self.state.binding[0], None, None), "discovery")
                 )
+                if discovery == "verified":
+                    self.state.messages.clear("connection")
+                else:
+                    self.state.messages.set(
+                        "connection",
+                        source="ocpp",
+                        severity="warning",
+                        code="connection_failed",
+                        detail=discovery,
+                        generation=generation,
+                    )
                 self.listener.diagnostic(
                     1,
                     "initialization_completed"

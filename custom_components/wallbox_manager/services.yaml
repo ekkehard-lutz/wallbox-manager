@@ -28,3 +28,43 @@ step_power:
       required: true
       selector:
         text:
+edit_timing:
+  name: Edit NETZ timing
+  description: Coordinate both timing editors with current timing revision and runtime incarnation. Begin holds drafts while editing; end starts the 15-second window; update changes only the targeted timing draft. Renew extends a live focused editor lease without changing or persisting values.
+  target:
+    entity:
+      integration: wallbox_manager
+      domain: text
+  fields:
+    action:
+      name: Editing action
+      required: true
+      selector:
+        select:
+          options:
+            - begin
+            - update
+            - end
+            - renew
+    owner:
+      name: Editor identity
+      required: true
+      selector:
+        text:
+    revision:
+      name: Expected timing revision
+      required: true
+      selector:
+        number:
+          min: 0
+          step: 1
+          mode: box
+    incarnation:
+      name: Runtime incarnation
+      required: true
+      selector:
+        text:
+    value:
+      name: New draft time
+      selector:
+        text:

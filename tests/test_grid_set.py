@@ -52,7 +52,7 @@ async def test_draft_entity_steps_and_times_never_execute_until_set(ha):
         await asyncio.sleep(0)
         assert len(station.profiles) == count
         assert grid.requested.amps == 16 and settings.approved("soll_power") == 11
-        assert settings.values.get("grid_request") is None
+        assert settings.values["grid_request"]["start_at"] == 1000
         assert settings.approval_attributes()["grid_set_required"]
         button = by_role(ha, entry, "charge_action")
         assert button.available and button.scope == entry.runtime_data.state.binding
@@ -65,12 +65,13 @@ async def test_draft_entity_steps_and_times_never_execute_until_set(ha):
         assert settings.approval_attributes()["grid_approved_revision"] == revision + 1
         await eventually(lambda: grid.status == "confirmed")
         assert len(station.profiles) == count + 1
-        # SET configures timing for the next permission event, not this session.
-        assert settings.values.get("grid_request") is None
+        # Apply rearms the current business schedule and pauses this transaction.
+        assert settings.values["grid_request"]["start_at"] == 1300
+        assert station.amps == 0
         await asyncio.gather(button.async_press(), button.async_press())
         assert settings.approval_attributes()["grid_approved_revision"] == revision + 1
         await eventually(lambda: station.amps == 0)
-        assert len(station.profiles) == count + 2
+        assert len(station.profiles) == count + 1  # Already confirms zero.
         assert settings.get("charge_release") is False
 
 
@@ -158,13 +159,10 @@ async def test_set_is_durable_without_execution_eligibility(ha, mode):
         await settings.set("grid_duration", "00:00")
         button = by_role(ha, entry, "charge_action")
         assert button.available
-        with pytest.raises(
-            HomeAssistantError, match="control_unavailable|hardware_disabled"
-        ):
-            await button.async_press()
-        assert settings.approved("soll_power") == 11
-        assert settings.get("charge_release") is False
-        assert settings.approval_attributes()["grid_set_required"]
+        await button.async_press()
+        assert settings.approved("soll_power") == 3
+        assert settings.get("charge_release") is False  # Explicit zero duration.
+        assert not settings.approval_attributes()["grid_set_required"]
         if station:
             assert not station.profiles
             assert not any(
@@ -308,7 +306,7 @@ async def test_migration_reload_and_foreign_profile_data_preserve_both_states(ha
     )
 
 
-async def test_set_preserves_active_deadlines_and_consumed_delay(ha):
+async def test_apply_rearms_delay_and_duration_uses_unchanged_planned_start(ha):
     entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
@@ -327,16 +325,18 @@ async def test_set_preserves_active_deadlines_and_consumed_delay(ha):
         await settings.set("grid_start_delay", "00:05")
         assert settings.values["grid_request"] == request
         await settings._approve_release()
-        assert settings.values["grid_request"] == request
+        assert settings.values["grid_request"]["start_at"] == 1300
+        assert settings.values["grid_request"]["end_at"] == 1480
         assert len(station.profiles) == count
-        await clock.advance(120)
+        await clock.advance(300)
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 16
         )
         await settings.set("grid_duration", "00:01")
         await settings._approve_release()
-        assert settings.values["grid_request"] == request
-        await clock.advance(180)
+        assert settings.values["grid_request"]["start_at"] == 1300
+        assert settings.values["grid_request"]["end_at"] == 1360
+        await clock.advance(60)
         await eventually(lambda: settings.get("charge_release") is False)
         await grid.action()
         await eventually(
@@ -347,8 +347,11 @@ async def test_set_preserves_active_deadlines_and_consumed_delay(ha):
         await settings.set("soll_power", 5)
         await settings._approve_release()
         await grid.action()
+        assert settings.values["grid_request"]["start_at"] == clock.now + 300
+        await clock.advance(300)
         await eventually(lambda: grid.status == "confirmed" and grid.confirmed.amps > 0)
-        assert settings.values.get("grid_request") is None
+        assert settings.values["grid_request"]["start_at"] == clock.now
+        assert settings.values["grid_request"]["end_at"] == clock.now + 60
 
 
 async def test_set_visibility_uses_approved_desired_during_lockout(ha):
@@ -448,7 +451,7 @@ async def test_reserve_service_remains_immediate_with_unapproved_power(ha):
         assert len(station.profiles) == count
 
 
-async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_deadline(
+async def test_applied_timings_ignore_transaction_changes_and_duplicate_hardware_on(
     ha,
 ):
     from datetime import UTC, datetime
@@ -468,10 +471,11 @@ async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_d
         await settings.set("grid_start_delay", "00:01")
         await settings.set("grid_duration", "00:02")
         await settings._approve_release()
-        assert not settings.values.get("grid_request")
-        # Repeated permission ON during this session is not a new start event.
+        request = dict(settings.values["grid_request"])
+        assert request["start_at"] == 1060 and request["end_at"] == 1180
+        # Hardware permission and transaction changes do not rearm business time.
         await control.request("ChargingEnabled", "true")
-        assert not settings.values.get("grid_request")
+        assert settings.values["grid_request"] == request
         for kind, tx, seq in [("Ended", "net-test", 1), ("Started", "next-test", 0)]:
             await station.call(
                 call.TransactionEvent(
@@ -491,17 +495,17 @@ async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_d
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 0
         )
-        request = dict(settings.values["grid_request"])
-        assert request == {"start_at": 1060, "end_at": 1180}
+        assert settings.values["grid_request"] == request
         await settings.set("grid_duration", "00:03")
         await settings._approve_release()
         await control.request("ChargingEnabled", "true")
-        assert settings.values["grid_request"] == request
+        assert settings.values["grid_request"]["start_at"] == request["start_at"]
+        assert settings.values["grid_request"]["end_at"] == 1240
         await clock.advance(60)
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 16
         )
-        await clock.advance(120)
+        await clock.advance(180)
         await eventually(lambda: settings.get("charge_release") is False)
 
 
@@ -615,13 +619,13 @@ async def test_start_consumes_timing_after_concurrent_set_commits(ha, monkeypatc
     monkeypatch.setattr(settings.store, "async_save", delayed)
     approval = asyncio.create_task(settings._approve_release())
     await waiting.wait()
-    start = asyncio.create_task(settings.arm_grid(1000))
+    start = asyncio.create_task(settings._approve_release(start=True, now=lambda: 1000))
     await asyncio.sleep(0)
     release.set()
     await asyncio.gather(approval, start)
     assert settings.values["grid_request"]["start_at"] == 1300
     assert settings.approved("grid_start_delay") == 300
-    assert settings.values["grid_next_timing"]["grid_start_delay"] is None
+    assert settings.values["grid_request"]["epoch_at"] == 1000
 
 
 async def test_failed_start_persistence_cannot_bypass_approved_delay(ha, monkeypatch):
@@ -642,8 +646,10 @@ async def test_failed_start_persistence_cannot_bypass_approved_delay(ha, monkeyp
     async with peer(entry, station_type=GridStation) as station:
         with pytest.raises(OSError, match="Cannot persist schedule"):
             await start_grid(entry, station)
-        assert not station.profiles and grid.start_transaction == "net-test"
-        assert settings.values["grid_next_timing"]["grid_start_delay"] == 60
+        assert not station.profiles and grid.transaction() == "net-test"
+        assert settings.get("charge_release") is False
+        assert settings.values["grid_request"] is None
+        assert settings.approved("grid_start_delay") == 60
         monkeypatch.setattr(settings.store, "async_save", save)
         await settings.set("soll_power", 3)
         await grid.action()

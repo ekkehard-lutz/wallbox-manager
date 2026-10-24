@@ -1,6 +1,7 @@
 """NETZ planning and real OCPP 2.1 peer regression; simulated acceptance only."""
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from fractions import Fraction
 
@@ -160,6 +161,12 @@ class GridStation(Controllable):
 
 
 async def start_grid(entry, station, transaction="net-test"):
+    # Business schedules now exist from Start even without configured duration.
+    # Install the deterministic business clock before creating that epoch.
+    grid = entry.runtime_data.grid
+    if grid.wall_time is time.time:
+        clock = FakeClock()
+        grid.wall_time, grid.call_later = lambda: clock.now, clock.later
     control = await ready(entry, station)
     await control.request("ControlAuthority", "OCPP")
     await station.call(
@@ -336,10 +343,8 @@ async def test_start_delay_explicit_zero_duration_and_expiration_without_vehicle
         )
         assert grid.phase()[0] == "waiting"
         assert settings.approved("grid_duration") == 180
-        assert settings.values["grid_next_timing"] == {
-            "grid_start_delay": None,
-            "grid_duration": None,
-        }
+        assert settings.values["grid_request"]["start_at"] == 1120
+        assert settings.values["grid_request"]["end_at"] == 1300
         await clock.advance(120)
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 16
@@ -347,6 +352,7 @@ async def test_start_delay_explicit_zero_duration_and_expiration_without_vehicle
         await clock.advance(180)
         await eventually(lambda: settings.get("charge_release") is False)
         assert settings.values["grid_request"] is None
+        await settings.set("grid_start_delay", "")
         await settings.set("grid_duration", "00:00")
         await settings._approve_release()
         await grid.action()
@@ -399,6 +405,9 @@ async def test_reconnect_reconciles_positive_offer_to_zero_without_positive_repl
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
         assert len(station.profiles) == 1
+        await (
+            grid.stop_release()
+        )  # Explicit OFF; transport loss preserves business schedules.
     async with peer(entry, station_type=GridStation) as station:
         station.values.update(ControlAuthority="OCPP", PhaseRotation="RST")
         station.amps, station.phases = 16, 3
@@ -989,6 +998,7 @@ async def test_uncertain_actual_reconnect_requires_new_generation_confirmation(h
         station.fail_interim_read = True
         grid, _ = await pending_interim(entry, station)
         assert grid.attributes()["applied_current_a"] is None
+    await grid.stop_release()
     assert grid.attributes()["applied_phase_count"] is None
     async with peer(entry, station_type=GridStation) as station:
         station.values.update(ControlAuthority="OCPP", PhaseRotation="RST")

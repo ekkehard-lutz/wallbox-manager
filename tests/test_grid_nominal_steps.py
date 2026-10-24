@@ -353,10 +353,10 @@ async def test_explicit_technical_phase_transition_pauses_for_both_lockouts(
         await control.request("ControlAuthority", "OCPP")
         await session(station)
         grid, settings = entry.runtime_data.grid, entry.runtime_data.settings
-        await grid.action()
-        assert station.amps == initial_amps
         clock = FakeClock()
         grid.wall_time, grid.call_later = lambda: clock.now, clock.later
+        await grid.action()
+        assert station.amps == initial_amps
         station.locked = True
         count = len(station.profiles)
         await settings.step_power(step, settings.values["grid_draft_revision"])

@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from .messages import ActiveMessages
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -39,6 +41,7 @@ class State:
         self.identity = {}
         self.observations = {}
         self.listeners = {}
+        self.messages = ActiveMessages(self)
         self.add_sensor = None
         self.session = None
         self.closed_transactions = set()
@@ -80,6 +83,7 @@ class State:
         self.epoch = datetime.now(UTC)
         self.idle_barrier = None
         self.connected = connected
+        self.messages.reset_generation()
         self.missing = set(
             (
                 "voltage_l1",
@@ -204,6 +208,16 @@ class State:
         ):
             self.publish(key)
         if key[2] == "connector_state":
+            if self.value(key) == "faulted":
+                self.messages.set(
+                    "station:fault",
+                    source="station",
+                    severity="error",
+                    code="wallbox_fault",
+                    generation=generation,
+                )
+            elif self.value(key) is not None:
+                self.messages.clear("station:fault", generation=generation)
             charging = ("observation", self.binding, "charging_state")
             if self.add_sensor:
                 self.add_sensor(charging)

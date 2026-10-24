@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js', 'utf8');
 
-function load() {
+function load(clock={}) {
   const registry = new Map();
   class Element {
     constructor() { this.style = {}; this.value = ''; this.validity = {}; }
@@ -23,7 +23,7 @@ function load() {
   }
   const context = {HTMLElement:Host, customElements:{get:k=>registry.get(k), define:(k,v)=>registry.set(k,v)},
     window:{addEventListener(){},removeEventListener(){}}, document:{createElement:()=>new Element()},
-    setTimeout,clearTimeout,setInterval(){assert.fail('Passive card must not start an idle interval');}};
+    Date:clock.Date || Date, setTimeout:clock.setTimeout || setTimeout,clearTimeout:clock.clearTimeout || clearTimeout,setInterval(){assert.fail('Passive card must not start an idle interval');}};
   vm.runInNewContext(source, context);
   return registry.get('wallbox-manager-card');
 }
@@ -37,6 +37,7 @@ function states(entry='E') {
   }
   Object.assign(result[`${entry}.charge_action`].attributes,{charge_action_ready:false,charge_action:"start",charge_release:false});
   Object.assign(result[`${entry}.soll_power`].attributes,{technical_min_kw:1.4,technical_max_kw:18.6,grid_draft_revision:0,runtime_incarnation:entry});
+  for (const role of ['grid_start_delay','grid_duration']) Object.assign(result[`${entry}.${role}`].attributes,{grid_timing_revision:0,runtime_incarnation:entry});
   return result;
 }
 // Canned backend neighbour payloads; the card never derives electrical steps.
@@ -58,12 +59,24 @@ function backendPoint(state, point=null) {
     [state.attributes.power_step_down,state.attributes.power_step_up]=pair.map(p=>p?{power_kw:p[0],power_phases:p[1]}:null);
   }
 }
-function card(data=states(), config={}, language='en') {
-  const Card = load(), card = new Card(), calls=[];
+function card(data=states(), config={}, language='en', clock={}) {
+  const Card = load(clock), card = new Card(), calls=[];
   card.setConfig({type:'custom:wallbox-manager-card',...config});
   for (const state of Object.values(data)) if (state.attributes.wallbox_manager_role==='soll_power') backendPoint(state);
   card.hass={states:data,language,callService:async(...args)=>{
     calls.push(args);
+    if (args[0]==='wallbox_manager' && args[1]==='edit_timing') {
+      const r=args[2], state=data[r.entity_id], entry=state.attributes.wallbox_manager_entry;
+      if (r.revision!==state.attributes.grid_timing_revision) throw new Error('Stale timing revision');
+      if (r.action==='renew') return;
+      if (r.action==='update') state.state=r.value;
+      for (const role of ['grid_start_delay','grid_duration']) {
+        const a=data[`${entry}.${role}`].attributes;
+        a.grid_timing_revision++;
+        a.grid_timing_edit=r.action==='end' ? null : {owner:r.owner,active:true};
+      }
+      card.hass=card._hass;
+    }
     if (args[0]==='wallbox_manager' && args[1]==='step_power') {
       const request=args[2], state=data[request.entity_id];
       if (request.revision!==state.attributes.grid_draft_revision) throw new Error('Stale revision');
@@ -85,7 +98,7 @@ test('familiar layout, read-only permission and no multi-wallbox UI',()=>{
   assert.equal(typeof get('takeover').onclick,'function');
   assert.equal(typeof get('charge-action').onclick,'function');
   assert.match(get('charge-action').textContent,/Start charging/);
-  assert.match(get('status').textContent,/explicit actions/);
+  assert.equal(get('error').textContent,'—');
   assert.equal(get('connection').textContent,'Available');
   assert.equal(get('live-power').textContent,'1.50 kW');
   assert.equal(get('energy').textContent,'1.2 kWh');
@@ -97,7 +110,7 @@ test('multiple instances require explicit entry; two cards never cross entries',
   const data={...states('A'),...states('B')};
   const missing=card(data);
   assert.equal(Object.keys(missing.card.discovery.roles).length,0);
-  assert.match(missing.get('status').textContent,/entry_id/);
+  assert.match(missing.get('error').textContent,/entry_id/);
   const a=card(data,{entry_id:'A'}),b=card(data,{entry_id:'B'});
   assert.equal(a.get('station').textContent,'station-A');
   assert.equal(b.get('station').textContent,'station-B');
@@ -127,8 +140,9 @@ test('number and duration edits keep local service interactions',async()=>{
   get('grid_duration-hours').value='03'; get('grid_duration-minutes').value='15';
   await c.editDuration('grid_duration');
   assert.equal(calls[0][0],'number'); assert.equal(calls[0][2].value,8.4);
-  assert.equal(calls[1][0],'text'); assert.equal(calls[1][2].value,'03:15');
-  assert.equal(calls[1][2].entity_id,'E.grid_duration');
+  assert.equal(calls[1][1],'edit_timing'); assert.equal(calls[1][2].action,'begin');
+  assert.equal(calls[2][2].value,'03:15'); assert.equal(calls[2][2].entity_id,'E.grid_duration');
+  await c.endTiming();
 });
 
 test('German controls stay disabled and physical OFF stays visible',()=>{
@@ -138,7 +152,7 @@ test('German controls stay disabled and physical OFF stays visible',()=>{
   assert.match(get('charge-action').textContent,/Ladung starten/);
   assert.equal(get('charge-action').disabled,true);
   assert.equal(get('connection').textContent,'Frei');
-  assert.match(get('status').textContent,/Hardwarefreigabe/);
+  assert.equal(get('error').textContent,'—');
 });
 
 test('card action boundary refuses charging domains and foreign entity IDs',async()=>{
@@ -183,8 +197,7 @@ test('pending, unsupported and service failures remain visible without optimisti
   Object.assign(data['E.charge_action'].attributes,{charge_action_ready:true,command_status:'accepted_unconfirmed',command_reason:'readback_timeout'});
   const {card:c,get}=card(data);
   assert.equal(get('takeover').disabled,true);
-  assert.match(get('status').textContent,/unsupported/);
-  assert.match(get('status').textContent,/accepted_unconfirmed.*readback_timeout/);
+  assert.equal(get('error').textContent,'—'); // Ordinary pending state is not a warning.
   c._hass.callService=async()=>{throw new Error('Station rejected');};
   await get('charge-action').onclick();
   assert.match(get('error').textContent,/Station rejected/);
@@ -194,34 +207,14 @@ test('pending, unsupported and service failures remain visible without optimisti
   assert.equal(get('charge-action').disabled,true);
 });
 
-test('last takeover result stays separate from observed authority and reconnect availability',()=>{
-  for (const language of ['en','de']) {
-    const data=states();
-    data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true,command_status:'confirmed'}};
-    data['E.control_authority']={state:'remote',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'control_authority'}};
-    const {card:c,get}=card(data,{},language);
-    const commandLabel=language==='en' ? /Last takeover command: confirmed/ : /Letzter Übernahmebefehl: confirmed/;
-    assert.match(get('status').textContent,commandLabel);
-    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung|U L1|I L1/);
-    data['E.control_authority'].state='local'; c.hass=c._hass;
-    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung/);
-    assert.match(get('status').textContent,commandLabel);
-    data['E.connected'].state='off';
-    data['E.control_authority'].state='remote'; // Retained data is not current while offline.
-    Object.assign(data['E.take_control'].attributes,{execution_ready:false,execution_blocked_reason:'disconnected'});
+test('historical takeover results and ordinary Local or disconnected states are not messages',()=>{
+  const data=states();
+  data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true,command_status:'confirmed'}};
+  const {card:c,get}=card(data);
+  for (const status of ['confirmed','accepted_unconfirmed','superseded']) {
+    data['E.take_control'].attributes.command_status=status;
     c.hass=c._hass;
-    assert.equal(get('actual').textContent,'—');
-    assert.match(get('status').textContent,commandLabel);
-    assert.match(get('status').textContent,/disconnected/);
-    assert.equal(get('takeover').disabled,true);
-    data['E.connected'].state='on'; data['E.control_authority'].state='local';
-    Object.assign(data['E.take_control'].attributes,{execution_ready:true,execution_blocked_reason:null});
-    c.hass=c._hass;
-    assert.match(get('status').textContent,commandLabel);
-    assert.doesNotMatch(get('actual').textContent,/Observed authority|Beobachtete Steuerung/);
-    data['E.take_control'].attributes.command_status='superseded'; c.hass=c._hass;
-    assert.match(get('status').textContent,/superseded/);
-    assert.doesNotMatch(get('status').textContent,commandLabel);
+    assert.equal(get('error').textContent,'—');
   }
 });
 
@@ -441,8 +434,8 @@ test('locale technical steps use backend revisions and time clearing remains a d
   assert.equal(get('charge-action').disabled,false);
   get('grid_duration-clear').onclick();
   await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(calls[2][0],'text'); assert.equal(calls[2][2].value,'');
-  assert.equal(get('charge-action').disabled,true);
+  assert.equal(calls[2][1],'edit_timing');
+  assert.equal(calls[3][2].action,'update'); assert.equal(calls[3][2].value,'');
   data['E.grid_duration'].state=''; c.hass=c._hass;
   assert.equal(get('charge-action').disabled,false);
 });
@@ -474,8 +467,8 @@ test('newer backend draft revisions supersede another card optimistic edit',asyn
   a.card.hass=a.card._hass; b.card.hass=b.card._hass;
   assert.equal(a.get('power').value,'4.0'); assert.equal(b.get('power').value,'4.0');
   assert.equal(a.get('charge-action').disabled,false);
-  data['E.charge_action'].attributes.grid_approval_error='Disk full'; a.card.hass=a.card._hass;
-  assert.match(a.get('status').textContent,/Disk full/);
+  data['E.charge_action'].attributes.active_message={text:'Disk full',raised_at:1}; a.card.hass=a.card._hass;
+  assert.match(a.get('error').textContent,/Disk full/);
 });
 
 
@@ -580,9 +573,204 @@ test('rebinding cancels queued steps and isolates a late acknowledgement',async(
   assert.equal(calls.length,1);
   assert.equal(calls[0][2].entity_id,'A.soll_power');
   assert.equal(get('power').value,'1.4');
-  assert.equal(get('error').hidden,true);
+  assert.equal(get('error').textContent,'—');
   c._hass.callService=original;
   await c.stepNumber('power',1);
   assert.equal(get('power').value,'1.6');
   assert.equal(calls.at(-1)[2].entity_id,'B.soll_power');
+});
+
+function uiClock(now=1000000) {
+  const timers=new Map(); let serial=0;
+  return {Date:class extends Date { static now(){return now;} },
+    setTimeout(fn,delay){const id=++serial;timers.set(id,{fn,at:now+delay});return id;},
+    clearTimeout(id){timers.delete(id);},
+    advance(ms){now+=ms;const due=[...timers.entries()].filter(([,t])=>t.at<=now);for(const [id,t] of due){timers.delete(id);t.fn();}},
+    get pending(){return timers.size;}};
+}
+for(const language of ['en','de']) for(const [value,expected] of [[0,'0.0'],[1.234,'1.2'],[12.36,'12.4']]) {
+  test(`session energy has one locale decimal ${language}/${value}`,()=>{
+    const data=states();data['E.session_energy'].state=String(value);
+    const {get}=card(data,{},language);
+    assert.equal(get('energy').textContent,`${language==='de'?expected.replace('.',','):expected} kWh`);
+    assert.equal(data['E.session_energy'].state,String(value));
+    assert.equal(get('live-power').textContent,language==='de'?'1,50 kW':'1.50 kW');
+  });
+}
+test('canonical countdown uses absolute deadlines, floors minutes, and generates no HA calls',()=>{
+  const data=states(),clock=uiClock();
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop'});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:1000,start_at:1120,end_at:1300}});
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  assert.equal(get('grid_start_delay-hours').value,'00');
+  assert.equal(get('grid_start_delay-minutes').value,'02');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  clock.advance(61000);
+  assert.equal(get('grid_start_delay-minutes').value,'00');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  clock.advance(59000);
+  assert.equal(get('grid_start_delay-minutes').value,'');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  clock.advance(121000);
+  assert.equal(get('grid_duration-minutes').value,'00');
+  clock.advance(59000);
+  assert.equal(get('grid_duration-minutes').value,'');
+  assert.equal(calls.length,0);
+  c.disconnectedCallback();assert.equal(clock.pending,0);
+});
+test('both timing fields show drafts during one editing area and await revision acknowledgements',async()=>{
+  const data=states(),clock=uiClock();
+  data['E.grid_start_delay'].state='00:02';data['E.grid_duration'].state='00:03';
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop'});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:900,start_at:1020,end_at:1200}});
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  assert.equal(get('grid_start_delay-minutes').value,'00');
+  c.shadowRoot.activeElement=get('grid_duration-minutes');
+  await get('grid_duration-minutes').onfocus();
+  assert.equal(get('grid_start_delay-minutes').value,'02');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  get('grid_duration-minutes').value='10';await get('grid_duration-minutes').oninput();
+  assert.equal(data['E.grid_duration'].state,'00:10');
+  c.shadowRoot.activeElement=get('grid_start_delay-minutes');
+  await get('grid_duration-minutes').onblur();
+  assert.equal(calls.filter(c=>c[2].action==='end').length,0);
+  c.shadowRoot.activeElement=null;await get('grid_start_delay-minutes').onblur();await c.timingQueue.tail;
+  assert.deepEqual(calls.map(c=>c[2].revision),[0,1,2]);
+  c.disconnectedCallback();
+});
+test('backend edit window is shared, duration expiry retains drafts, and a later run is independent',()=>{
+  const data=states(),clock=uiClock();
+  const a=data['E.grid_duration'].attributes;
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'apply'});
+  Object.assign(a,{grid_schedule:{epoch_at:1000,start_at:1000,end_at:1060},grid_timing_edit:{owner:'other-card',active:false,expires_at:1015}});
+  data['E.grid_duration'].state='00:20';
+  const first=card(data,{},'en',clock),second=card(data,{},'en',clock);
+  for(const instance of [first,second]) assert.equal(instance.get('grid_duration-minutes').value,'20');
+  a.grid_timing_edit=null;a.grid_schedule=null;
+  Object.assign(data['E.charge_action'].attributes,{charge_release:false,charge_action:'start'});
+  for(const instance of [first,second]) {instance.card.hass=instance.card._hass;assert.equal(instance.get('grid_duration-minutes').value,'20');assert.equal(instance.get('charge-action').textContent,'Start charging');}
+  assert.equal(clock.pending,0);
+});
+test('timing service return alone is not acknowledgement and foreign revisions cancel queued writes',async()=>{
+  const {card:c,get}=card();let sent;
+  c._hass.callService=async(...args)=>{sent=args[2];};
+  const begin=c.beginTiming();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sent.action,'begin');assert.equal(c.draftWrites.size,1);
+  for(const role of ['grid_duration','grid_start_delay']) c._hass.states[`E.${role}`].attributes.grid_timing_revision=2;
+  c.hass=c._hass;await begin;
+  assert.match(get('error').textContent,/Timing selection changed/);
+  assert.equal(c.draftWrites.size,0);
+});
+test('runtime replacement fences a late timing response without warning in the replacement',async()=>{
+  const {card:c,get}=card();let finish;
+  c._hass.callService=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=c.beginTiming();await new Promise(resolve=>setImmediate(resolve));
+  for(const role of ['grid_duration','grid_start_delay']) c._hass.states[`E.${role}`].attributes.runtime_incarnation='new';
+  c.hass=c._hass;finish();await pending;
+  assert.equal(get('error').textContent,'—');assert.equal(c.timingEditing,false);
+});
+test('only one newest active warning is shown, resolution falls back, and pending history is silent',async()=>{
+  const data=states();data['E.charge_action'].attributes.active_message={text:'Old active warning',raised_at:1};
+  const {card:c,get}=card(data);
+  assert.equal(get('error').textContent,'Old active warning');
+  c.warn('grid_duration','Invalid minutes');
+  assert.equal(get('error').textContent,'Invalid minutes');
+  c.clearWarning('grid_duration');assert.equal(get('error').textContent,'Old active warning');
+  data['E.charge_action'].attributes.active_message=null;
+  data['E.charge_action'].attributes.command_status='accepted_unconfirmed';c.hass=c._hass;
+  assert.equal(get('error').textContent,'—');
+  assert.doesNotMatch(c.shadowRoot.html,/id="status"|id="no-messages"/);
+});
+
+test('moving focus from timing fields to Apply keeps the first explicit button click',async()=>{
+  const data=states();Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'apply',charge_action_ready:true});
+  const {card:c,get,calls}=card(data);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  get('grid_duration-minutes').value='12';await c.editDuration('grid_duration');
+  c.shadowRoot.activeElement=get('charge-action');await get('grid_duration-minutes').onblur();
+  assert.equal(get('charge-action').disabled,false);
+  await get('charge-action').onclick();
+  assert.equal(calls.at(-1)[0],'button');assert.equal(calls.at(-1)[1],'press');
+  assert.equal(calls.filter(call=>call[2].action==='end').length,1);
+});
+test('off schedule shows no fictitious countdown but keeps meaningful next-start drafts',()=>{
+  const data=states();Object.assign(data['E.grid_duration'].attributes,{grid_approved_duration:9000,grid_approved_start_delay:null});
+  const {card:c,get}=card(data);
+  assert.equal(get('grid_duration-minutes').value,'');
+  data['E.grid_duration'].state='00:12';c.hass=c._hass;
+  assert.equal(get('grid_duration-minutes').value,'12');
+});
+test('confirmed foreign field updates resolve a local validation warning',()=>{
+  const {card:c,get}=card();c.warn('grid_duration','Invalid minutes');
+  c._hass.states['E.grid_duration'].state='00:12';c.hass=c._hass;
+  assert.equal(get('error').textContent,'—');
+});
+
+test('focused active editor renews for long pauses without revisions or draft writes; End stops heartbeat',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');
+  await c.beginTiming();
+  const revision=data['E.grid_duration'].attributes.grid_timing_revision;
+  for(let i=0;i<12;i++) {
+    // Unrelated hass updates must not postpone the scheduled renewal forever.
+    clock.advance(10000);c.hass=c._hass;
+    clock.advance(10000);await c.timingQueue.tail;
+    assert.equal(c.draftWrites.size,0);
+    assert.equal(data['E.grid_duration'].attributes.grid_timing_revision,revision);
+  }
+  assert.equal(calls.filter(call=>call[2].action==='renew').length,12);
+  c.shadowRoot.activeElement=null;await c.endTiming();
+  const count=calls.length;clock.advance(120000);await c.timingQueue.tail;
+  assert.equal(calls.length,count);
+});
+test('backend abandonment cancels local focused ownership and a late heartbeat cannot rebegin',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) {
+    const a=data[`E.${role}`].attributes;a.grid_timing_revision++;
+    a.grid_timing_edit={owner:null,active:false,expires_at:1075};
+  }
+  c.hass=c._hass;
+  assert.equal(c.timingEditing,false);
+  const count=calls.length;clock.advance(120000);
+  assert.equal(calls.length,count);
+  assert.equal(clock.pending,0);
+});
+test('failed heartbeat relinquishes local focus ownership without retrying or sending End',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  c._hass.callService=async(...args)=>{calls.push(args);throw new Error('Network unavailable');};
+  clock.advance(20000);await c.timingQueue.tail;
+  assert.equal(c.timingEditing,false);assert.match(get('error').textContent,/Network unavailable/);
+  const count=calls.length;clock.advance(120000);
+  assert.equal(calls.length,count);assert.equal(clock.pending,0);
+});
+test('runtime replacement and disconnect stop editor lease renewal',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) data[`E.${role}`].attributes.runtime_incarnation='replacement';
+  c.hass=c._hass;
+  clock.advance(120000);assert.equal(calls.filter(call=>call[2].action==='renew').length,0);
+  assert.equal(c.timingEditing,false);c.disconnectedCallback();assert.equal(clock.pending,0);
+});
+
+test('missing intermediate abandonment update still restores a focused countdown after rollback',async()=>{
+  const data=states(),clock=uiClock();
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:900,start_at:900,end_at:1300}});
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) {
+    const a=data[`E.${role}`].attributes;a.grid_timing_revision+=2;a.grid_timing_edit=null;
+  }
+  c.hass=c._hass;
+  assert.equal(c.timingEditing,false);
+  assert.equal(get('grid_duration-minutes').value,'05');
+  clock.advance(20000);
+  assert.equal(calls.filter(call=>call[2].action==='renew').length,0);
+  c.disconnectedCallback();
 });

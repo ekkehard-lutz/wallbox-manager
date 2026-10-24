@@ -113,7 +113,9 @@ async def test_initialized_minimum_requires_explicit_action_in_both_orders(
         await settings.set("soll_power", 1.5)
         approved = deepcopy(settings.values["grid_approved"])
         request = deepcopy(settings.values["grid_request"])
-        next_timing = deepcopy(settings.values["grid_next_timing"])
+        next_timing = {
+            key: settings.approved(key) for key in ("grid_start_delay", "grid_duration")
+        }
         revision = settings.values["grid_draft_revision"]
         count, writes = len(station.profiles), list(station.writes)
 
@@ -124,7 +126,9 @@ async def test_initialized_minimum_requires_explicit_action_in_both_orders(
         assert settings.values["grid_draft_revision"] == revision + 1
         assert settings.values["grid_approved"] == approved
         assert settings.values["grid_request"] == request
-        assert settings.values["grid_next_timing"] == next_timing
+        assert {
+            key: settings.approved(key) for key in ("grid_start_delay", "grid_duration")
+        } == next_timing
         assert settings.get("charge_release") is released
         assert settings.approval_attributes()["grid_set_required"]
         assert grid.action_state()["charge_action"] == (
@@ -154,6 +158,8 @@ async def test_initialized_minimum_requires_explicit_action_in_both_orders(
             assert settings.values["grid_request"] == request
         else:
             assert settings.values["grid_request"] == {
+                "epoch_at": clock.now,
+                "revision": settings.values["grid_approved"]["revision"],
                 "start_at": clock.now,
                 "end_at": clock.now + 1800,
             }
@@ -231,6 +237,8 @@ async def test_initialization_origin_survives_reload_and_reconnect(
         await minimum_in_order(grid, monkeypatch, "initialization_first", station)
         approved = deepcopy(settings.values["grid_approved"])
         old_callback = settings.approve_equivalent_grid
+        # This recovery test exercises release-OFF reconciliation explicitly.
+        await grid.stop_release()
     if recovery == "reload":
         assert await async_unload_entry(ha, entry)
         assert await async_setup_entry(ha, entry)

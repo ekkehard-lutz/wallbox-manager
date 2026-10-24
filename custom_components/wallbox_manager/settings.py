@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from fractions import Fraction
 
 from homeassistant.core import CoreState
@@ -39,6 +40,7 @@ SELECTS = {
     "pv_approximation": ("approximation", ["up", "down"]),
     "power_approximation": ("direction", ["up", "down", "nearest"]),
 }
+EDITOR_LEASE_SECONDS = 60
 TIMES = ("grid_start_delay", "grid_duration")
 GRID_FIELDS = ("power_kw", "power_phases", *TIMES)
 REGULATION = ("soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay")
@@ -101,14 +103,15 @@ class Settings:
         # Runtime reload never resumes a previously granted release.
         self.values["charge_release"] = False
         self.values["grid_request"] = None
+        self.values["grid_timing_edit"] = None
+        self.values.setdefault("grid_timing_revision", 0)
+        self.timing_lease = None
+        self.wall_time = time.time
         self.state = None
         self.listeners = {}
         self.lock = asyncio.Lock()
         self.values.setdefault("grid_draft_revision", 0)
         self.values.setdefault("grid_approved", {**self.grid_draft(), "revision": 0})
-        self.values.setdefault(
-            "grid_next_timing", {k: self.values.get(k) for k in TIMES}
-        )
         self.grid_equivalent = lambda values: False
         self.grid_point = self.resolve_draft
         self.approval_error = None
@@ -122,7 +125,6 @@ class Settings:
                     **self.profiles.get(self.key, {}),
                     "grid_draft_revision": self.values["grid_draft_revision"],
                     "grid_approved": self.values["grid_approved"],
-                    "grid_next_timing": self.values["grid_next_timing"],
                 },
             }
             await self.persist(profiles)
@@ -148,6 +150,8 @@ class Settings:
             ready = False
         return {
             "grid_draft_revision": self.values["grid_draft_revision"],
+            "grid_timing_revision": self.values["grid_timing_revision"],
+            "grid_timing_edit": self.values.get("grid_timing_edit"),
             "grid_set_required": pending,
             "grid_set_ready": ready,
             "grid_approved_power_kw": approved["power_kw"],
@@ -197,11 +201,6 @@ class Settings:
             **self.grid_draft(updated),
             "revision": previous["revision"] + 1,
         }
-        pending = dict(updated["grid_next_timing"])
-        for key in TIMES:
-            if updated.get(key) != previous.get(key):
-                pending[key] = updated.get(key)
-        updated["grid_next_timing"] = pending
 
     async def _approve_release(
         self, *, start=False, notify=True, now=None, current=lambda: True
@@ -217,6 +216,9 @@ class Settings:
                     self.validate(role, duration_text(self.get(role)))
                 previous = dict(self.values)
                 updated = dict(self.values)
+                accepted_at = now() if callable(now) else now
+                if accepted_at is None:
+                    accepted_at = self.wall_time()
                 power_changed = (updated["power_kw"], updated.get("power_phases")) != (
                     self.approved("soll_power"),
                     self.approved("power_phases"),
@@ -225,8 +227,37 @@ class Settings:
                 self.approve_values(updated)
                 updated["charge_release"] = start or self.get("charge_release")
                 if start:
+                    updated["grid_request"] = self.schedule_values(updated, accepted_at)
+                elif updated["charge_release"] and any(
+                    updated.get(key) != previous["grid_approved"].get(key)
+                    for key in TIMES
+                ):
+                    request = previous.get("grid_request")
+                    if request is None or updated["grid_start_delay"] != previous[
+                        "grid_approved"
+                    ].get("grid_start_delay"):
+                        updated["grid_request"] = self.schedule_values(
+                            updated, accepted_at
+                        )
+                    else:
+                        duration = updated["grid_duration"]
+                        updated["grid_request"] = {
+                            **request,
+                            "revision": updated["grid_approved"]["revision"],
+                            "end_at": request["start_at"] + duration
+                            if duration is not None
+                            else None,
+                        }
+                updated["grid_timing_edit"] = None
+                updated["grid_timing_revision"] += 1
+                request = updated.get("grid_request")
+                if (
+                    request
+                    and request.get("end_at") is not None
+                    and request["end_at"] <= accepted_at
+                ):
+                    updated["charge_release"] = False
                     updated["grid_request"] = None
-                    self.arm_values(updated, now)
                 await self._save(updated)
                 if not current():
                     self.values["charge_release"] = False
@@ -236,7 +267,7 @@ class Settings:
                             "charge_release": False,
                             "grid_request": None,
                             "grid_approved": previous["grid_approved"],
-                            "grid_next_timing": previous["grid_next_timing"],
+                            "grid_timing_edit": None,
                             "grid_power_initialized": previous.get(
                                 "grid_power_initialized", False
                             ),
@@ -363,14 +394,16 @@ class Settings:
         return value
 
     async def set(self, role, value):
-        if role == "charging_profile" and self.validate(role, value) != self.get(role):
+        if role == "charging_profile" and self.validate_setting(
+            role, value
+        ) != self.get(role):
             self.values["charge_release"] = False
             self.notify("charge_release")
         async with self.lock:
             await self._set(role, value)
 
-    async def _set(self, role, value, *, selected=None):
-        value = self.validate(role, value)
+    async def _set(self, role, value, *, selected=None, editor=None):
+        value = self.validate_setting(role, value)
         field = (
             NUMBERS[role][0]
             if role in NUMBERS
@@ -392,10 +425,15 @@ class Settings:
             updated["grid_power_initialized"] = False
         if role in ("soll_power", *TIMES):
             updated["grid_draft_revision"] = self.values["grid_draft_revision"] + 1
+        if role in TIMES:
+            updated["grid_timing_revision"] += 1
+            self.edit_window_values(updated, editor, active=editor is not None)
         if role == "charging_profile":
             # set() already fenced wire dispatch before acquiring this lock.
             updated["charge_release"] = False
             updated["grid_request"] = None
+            updated["grid_timing_edit"] = None
+            updated["grid_timing_revision"] += 1
         equivalent = role in ("soll_power", *TIMES) and self.equivalent_grid_draft(
             updated
         )
@@ -411,8 +449,160 @@ class Settings:
             if equivalent:
                 self.notify("grid_equivalent")
             self.notify_grid()
+            if role in TIMES:
+                self.notify("grid_timing_edit")
         else:
             self.notify(role)
+
+    def edit_window_values(self, updated, owner, *, active):
+        request = updated.get("grid_request")
+        pending = any(
+            updated.get(key) != updated["grid_approved"].get(key) for key in TIMES
+        )
+        updated["grid_timing_edit"] = (
+            {
+                "owner": owner,
+                "active": active,
+                "revision": updated["grid_timing_revision"],
+                "schedule_revision": request["revision"],
+                "expires_at": None if active else self.wall_time() + 15,
+            }
+            if updated.get("charge_release") and request and (active or pending)
+            else None
+        )
+
+    def timing_edit_deadline(self):
+        edit = self.values.get("grid_timing_edit")
+        if not edit:
+            return None
+        if not edit["active"]:
+            return edit["expires_at"]
+        if self.timing_lease and self.timing_lease[:2] == (
+            edit["owner"],
+            edit["revision"],
+        ):
+            return self.timing_lease[2]
+        return None
+
+    def recover_timing_editor(self):
+        """Called under Settings.lock; abandonment changes ownership, not policy."""
+        edit = self.values.get("grid_timing_edit")
+        deadline = self.timing_edit_deadline()
+        if (
+            not edit
+            or not edit["active"]
+            or deadline is None
+            or deadline > self.wall_time()
+        ):
+            return
+        revision = self.values["grid_timing_revision"] + 1
+        pending = any(self.get(key) != self.approved(key) for key in TIMES)
+        self.values = {
+            **self.values,
+            "grid_timing_revision": revision,
+            "grid_timing_edit": {
+                **edit,
+                "owner": None,
+                "active": False,
+                "revision": revision,
+                "expires_at": deadline + 15,
+            }
+            if pending
+            else None,
+        }
+        self.timing_lease = None
+        self.notify_grid()
+        self.notify("grid_timing_edit")
+
+    async def edit_timing(self, role, action, owner, revision, value=None):
+        """One revision-fenced editing area for both Text entities."""
+        async with self.lock:
+            self.recover_timing_editor()
+            if role not in TIMES or action not in ("begin", "update", "end", "renew"):
+                raise ValueError("Unsupported timing edit")
+            if (
+                type(revision) is not int
+                or revision != self.values["grid_timing_revision"]
+            ):
+                raise ValueError("Superseded timing revision")
+            if not isinstance(owner, str) or not 1 <= len(owner) <= 128:
+                raise ValueError("Timing editor identity required")
+            current = self.values.get("grid_timing_edit")
+            if (
+                action != "begin"
+                and current
+                and (not current["active"] or current["owner"] != owner)
+            ):
+                raise ValueError("Superseded timing editor")
+            if action == "renew":
+                if (
+                    not current
+                    or not current["active"]
+                    or self.timing_edit_deadline() is None
+                ):
+                    raise ValueError("Expired timing editor")
+                self.timing_lease = (
+                    owner,
+                    revision,
+                    self.wall_time() + EDITOR_LEASE_SECONDS,
+                )
+                self.notify("grid_timing_lease")
+                return
+            if action == "update":
+                await self._set(role, value, editor=owner)
+                return
+            updated = {**self.values, "grid_timing_revision": revision + 1}
+            self.edit_window_values(updated, owner, active=action == "begin")
+            await self._save(updated)
+            self.notify_grid()
+            self.notify("grid_timing_edit")
+
+    async def expire_timing_edit(self, revision, schedule_revision):
+        """Rollback only timing drafts, never power, approval or an ended run."""
+        async with self.lock:
+            edit = self.values.get("grid_timing_edit")
+            request = self.values.get("grid_request")
+            now = self.wall_time()
+            if (
+                not self.get("charge_release")
+                or not edit
+                or not request
+                or edit["revision"] != revision
+                or edit["schedule_revision"] != schedule_revision
+                or request["revision"] != schedule_revision
+                or self.timing_edit_deadline() is None
+                or self.timing_edit_deadline() > now
+                or (request.get("end_at") is not None and request["end_at"] <= now)
+            ):
+                return
+            if edit["active"]:
+                self.recover_timing_editor()
+                return  # The existing scheduler now owns the new grace revision.
+            previous = self.values
+            updated = {
+                **self.values,
+                **{key: self.approved(key) for key in TIMES},
+                "grid_draft_revision": self.values["grid_draft_revision"] + 1,
+                "grid_timing_revision": self.values["grid_timing_revision"] + 1,
+                "grid_timing_edit": None,
+            }
+            await self._save(updated)
+            # Stop/expiry can retire release immediately while storage is
+            # awaiting I/O under this lock. Such retirement wins over rollback.
+            if not previous.get("charge_release") or (
+                request.get("end_at") is not None
+                and request["end_at"] <= self.wall_time()
+            ):
+                self.values = {
+                    **previous,
+                    "charge_release": False,
+                    "grid_request": None,
+                    "grid_timing_edit": None,
+                }
+                self.notify("charge_release")
+                await self._save(dict(self.values))
+            self.notify_grid()
+            self.notify("grid_timing_edit")
 
     def resolve_draft(self, values):
         from .grid_point import envelope, number, rounded_kw
@@ -422,6 +612,26 @@ class Settings:
             self.get("power_approximation"),
             selected=values.get("power_phases"),
         )
+
+    def validate_setting(self, role, value):
+        identity = "setting:" + (
+            role if role in (*NUMBERS, *SELECTS, *TIMES) else "request"
+        )
+        try:
+            result = self.validate(role, value)
+        except (ValueError, TypeError, OverflowError) as exc:
+            if self.state:
+                self.state.messages.set(
+                    identity,
+                    source="settings",
+                    severity="error",
+                    code="settings_value",
+                    detail=str(exc),
+                )
+            raise
+        if self.state:
+            self.state.messages.clear(identity)
+        return result
 
     def power_attributes(self):
         from .grid_point import envelope, number, rounded_kw
@@ -529,33 +739,42 @@ class Settings:
                 **{k: v for k, v in updated.items() if k not in REGULATION},
             },
         }
-        await self.persist(profiles)
+        edit = updated.get("grid_timing_edit")
+        lease = self.timing_lease
+        if edit and edit["active"]:
+            identity = (edit["owner"], edit["revision"])
+            if not lease or lease[:2] != identity:
+                lease = (*identity, self.wall_time() + EDITOR_LEASE_SECONDS)
+        else:
+            lease = None
+        try:
+            await self.persist(profiles)
+        except OSError as exc:
+            if self.state:
+                self.state.messages.set(
+                    "settings:storage",
+                    source="settings",
+                    severity="error",
+                    code="settings_save",
+                    detail=str(exc),
+                )
+            raise
         self.profiles, self.values = profiles, updated
+        # Slow storage cannot grant a fresh lease at its eventual completion.
+        self.timing_lease = lease
+        if self.state:
+            self.state.messages.clear("settings:storage")
 
-    def arm_values(self, updated, now):
-        """Consume timing in the same durable document as the explicit start."""
-        if updated.get("grid_request") or now is None:
-            return
-        delay, duration = (updated["grid_next_timing"].get(k) for k in TIMES)
-        if delay is None and duration is None:
-            return
-        start = now + (delay or 0)
-        updated["grid_next_timing"] = dict.fromkeys(TIMES)
-        updated["grid_request"] = {
+    def schedule_values(self, updated, now):
+        """One absolute business schedule, independent of vehicle/transaction."""
+        start = now + (updated["grid_start_delay"] or 0)
+        duration = updated["grid_duration"]
+        return {
+            "epoch_at": now,
+            "revision": updated["grid_approved"]["revision"],
             "start_at": start,
-            "end_at": now
-            if duration == 0
-            else start + duration
-            if duration is not None
-            else None,
+            "end_at": start + duration if duration is not None else None,
         }
-
-    async def arm_grid(self, now):
-        async with self.lock:
-            updated = dict(self.values)
-            self.arm_values(updated, now)
-            if updated != self.values:
-                await self._save(updated)
 
     async def save_runtime(self, fields):
         """Persist scheduling state without modifying approved/draft configuration."""

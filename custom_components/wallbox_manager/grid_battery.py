@@ -135,6 +135,20 @@ class GridBattery:
             await self.reserve.update(
                 self.grid.settings.get("min_soc") if charging else None
             )
+            messages = state.messages
+            if self.reserve.status == "error" or (
+                self.reserve.status == "write_unconfirmed"
+                and self.reserve.diagnostics.get("reason") == "confirmation_timeout"
+            ):
+                messages.set(
+                    "battery:reserve",
+                    source="battery",
+                    severity="error",
+                    code="battery_reserve",
+                    detail=self.reserve.last_error or "confirmation_timeout",
+                )
+            else:
+                messages.clear("battery:reserve")
 
     async def close(self):
         self.closed = True

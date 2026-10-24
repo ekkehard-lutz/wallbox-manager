@@ -1,3 +1,5 @@
+**Latest approved operational amendment (24 October 2026):** [WBM-DISP-01–03 / MSG-01–07 / TIME-01–24](operational-display-and-timing.md) specifies one-decimal session-energy presentation, newest active warning/error only, wall-clock NETZ countdowns and time-edits acting on running schedules with a 15-second approval window. Documentation only; supersedes only conflicting historical timing/card-text requirements.
+
 **Latest approved NETZ amendment:** [WBM-GRID-31–40](grid-profile.md#amendment--nominal-netz-steps-and-navigation-24-october-2026) fixes planning at nominal 230 V, defines rounded technical steps and backend phase-aware navigation. Older measured-voltage/UI-step clauses are superseded only as listed there.
 
 **New approved target (24 October 2026):** [Manager Ladefreigabe and unified NETZ/PV card action](charge-release.md). This supersedes the conflicting automatic wake-up, hardware permission, SET and profile-action rules below. Implemented on coordinated feature branches; see [implementation and migration](../coordinated-control-redesign.md). Independent review and deployment remain separate.
