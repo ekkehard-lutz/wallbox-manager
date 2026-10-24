@@ -34,7 +34,7 @@ class GridBattery:
             ("grid", state.binding, "soll_power"),
         ):
             self.removers.append(state.watch(key, self.changed))
-        for role in ("min_soc", "charging_profile"):
+        for role in ("min_soc", "charging_profile", "charge_release"):
             self.removers.append(self.grid.settings.watch(role, self.changed))
         self.changed()
 
@@ -96,6 +96,9 @@ class GridBattery:
             point = self.grid.confirmed
             charging = (
                 self.grid.eligible()
+                and (self.grid.settings.get("charge_release") or self.reserve.record)
+                and self.grid.settings.get("charging_profile") == "NETZ"
+                and permission is True
                 and point
                 and point.amps > 0
                 and getattr(self.grid, "point_generation", None) == state.generation

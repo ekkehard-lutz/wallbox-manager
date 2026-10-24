@@ -80,8 +80,9 @@ async def test_explicit_takeover_and_permission_without_vehicle_or_profile(ha):
         control = await ready(entry, station)
         assert not station.writes
         assert observed(entry, "ControlAuthority") == "local"
-        assert await control.request("ChargingEnabled", "false") == "rejected"
-        assert not station.writes  # Never implicit takeover.
+        assert await control.request("ChargingEnabled", "false") == "confirmed"
+        assert observed(entry, "ControlAuthority") == "local"
+        assert len(station.writes) == 1  # Hardware permission needs no takeover.
         assert await control.request("ControlAuthority", "OCPP") == "confirmed"
         assert observed(entry, "ControlAuthority") == "remote"
         assert await control.request("ChargingEnabled", "false") == "confirmed"
@@ -90,8 +91,8 @@ async def test_explicit_takeover_and_permission_without_vehicle_or_profile(ha):
         assert observed(entry, "ChargingEnabled") is True
         assert entry.runtime_data.state.session is None
         assert [w["attribute_value"] for w in station.writes] == [
-            "OCPP",
             "false",
+            "OCPP",
             "true",
         ]
         assert set(station.operations) <= {
@@ -232,7 +233,7 @@ async def test_obsolete_queued_command_is_never_dispatched(ha):
         assert [w["attribute_value"] for w in station.writes] == ["OCPP", "true"]
 
 
-async def test_external_authority_loss_fences_permission_and_late_ack(ha):
+async def test_authority_transition_preserves_independent_permission_confirmation(ha):
     entry = await ha.install()
     async with peer(entry, station_type=Controllable) as station:
         control = await ready(entry, station)
@@ -242,10 +243,10 @@ async def test_external_authority_loss_fences_permission_and_late_ack(ha):
         pending = asyncio.create_task(control.request("ChargingEnabled", "false"))
         await station.started.wait()
         event(entry, "ControlAuthority", "Local")
-        assert control.blocked("ChargingEnabled") == "no_authority"
+        assert control.blocked("ChargingEnabled") is None
         station.release.set()
-        assert await pending == "superseded"
-        assert observed(entry, "ChargingEnabled") is True
+        assert await pending == "confirmed"
+        assert observed(entry, "ChargingEnabled") is False
         assert observed(entry, "ControlAuthority") == "local"
 
 
@@ -374,19 +375,19 @@ async def test_direct_outbound_physical_commands_stay_blocked(ha, payload):
         assert not station.writes
 
 
-async def test_concurrent_takeover_never_authorizes_pending_permission(ha):
+async def test_concurrent_takeover_and_permission_serialize_independently(ha):
     entry = await ha.install()
     async with peer(entry, station_type=Controllable) as station:
         control = await ready(entry, station)
         station.release = asyncio.Event()
-        pending = asyncio.create_task(control.request("ControlAuthority", "OCPP"))
+        takeover = asyncio.create_task(control.request("ControlAuthority", "OCPP"))
         await station.started.wait()
-        assert await control.request("ChargingEnabled", "false") == "rejected"
+        permission = asyncio.create_task(control.request("ChargingEnabled", "false"))
+        await asyncio.sleep(0)
         station.release.set()
-        assert await pending == "confirmed"
-        assert len(station.writes) == 1
-        # Rejection is not queued for replay once authority becomes Remote.
-        assert observed(entry, "ChargingEnabled") is True
+        assert await asyncio.gather(takeover, permission) == ["confirmed", "confirmed"]
+        assert len(station.writes) == 2
+        assert observed(entry, "ChargingEnabled") is False
 
 
 async def test_duplicate_unconfirmed_takeover_does_not_repeat_write(ha):
@@ -445,8 +446,8 @@ async def test_queued_command_refused_after_authority_loss_and_reacquisition(ha)
             await eventually(lambda: "ChargingEnabled" in control.intents)
             event(entry, "ControlAuthority", "Local")
             event(entry, "ControlAuthority", "OCPP")
-        assert await pending == "superseded"
-        assert len(station.writes) == 1
+        assert await pending == "confirmed"
+        assert len(station.writes) == 2
 
 
 async def test_read_only_inventory_never_authorizes_control(ha):
@@ -718,7 +719,7 @@ async def test_newer_local_notification_wins_over_recovery_read(ha, monkeypatch)
         release.set()
         assert await recovery == "accepted_unconfirmed"
         assert observed(entry, "ControlAuthority") == "local"
-        assert control.blocked("ChargingEnabled") == "no_authority"
+        assert control.blocked("ChargingEnabled") is None
         assert len(station.writes) == 1
 
 
@@ -781,7 +782,7 @@ async def test_confirmed_command_is_history_after_external_loss_and_reconnect(ha
         event(entry, "ControlAuthority", "Local")
         assert observed(entry, "ControlAuthority") == "local"
         assert control.attributes("ControlAuthority")["command_status"] == "confirmed"
-        assert control.blocked("ChargingEnabled") == "no_authority"
+        assert control.blocked("ChargingEnabled") is None
     async with peer(entry, station_type=Controllable) as station:
         await ready(entry, station)
         assert observed(entry, "ControlAuthority") == "local"

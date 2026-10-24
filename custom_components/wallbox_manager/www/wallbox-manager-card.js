@@ -57,9 +57,9 @@ class WallboxManagerCard extends HTMLElement {
       .step {width:34px;padding:0;font-size:19px;touch-action:none;user-select:none;-webkit-user-select:none} .unit {color:var(--secondary-text-color);font-size:13px;width:2em}
       button {cursor:pointer} button:hover:not(:disabled) {background:var(--secondary-background-color)}
       :is(input,select,button):focus-visible {outline:2px solid var(--primary-color);outline-offset:2px}
-      :disabled {opacity:.5;cursor:default} #permission,#takeover {width:100%;padding:9px 12px;margin-top:6px;font-size:14px}
-      #permission {background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color);font-weight:500}
-      #permission:hover:not(:disabled) {filter:brightness(.95)}
+      :disabled {opacity:.5;cursor:default} #charge-action,#takeover {width:100%;padding:9px 12px;margin-top:6px;font-size:14px}
+      #charge-action {background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color);font-weight:500}
+      #charge-action:hover:not(:disabled) {filter:brightness(.95)}
       .live {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px}
       .caption {font-size:12px;color:var(--secondary-text-color);margin-bottom:3px} .reading {font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
       .section {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px} h3 {font-size:14px;font-weight:500;margin:0 0 8px} #messages:has(.notice:not([hidden])) #no-messages {display:none} .notice {font-size:13px;color:var(--error-color);line-height:1.4;margin:12px 0 0}
@@ -75,14 +75,12 @@ class WallboxManagerCard extends HTMLElement {
       <div class="row" id="soll_soc_speicher-row"><label id="soll_soc_speicher-label" for="soll_soc_speicher"></label><div class="numeric"><button id="soll_soc_speicher-down" class="step" type="button">−</button><input id="soll_soc_speicher" type="text" inputmode="numeric" autocomplete="off"><button id="soll_soc_speicher-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
       ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="—"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="—"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
       ${Object.entries(optimumFields).map(([id,labels]) => `<div class="row" id="${id}-row"><label id="${id}-label" for="${id}"></label><div class="numeric"><input id="${id}" type="number" min="0" step="${id === "estimated_daily_house_consumption_kwh" ? "0.1" : "1"}"><span class="unit">${labels[2]}</span></div></div>`).join("")}
-      <button id="grid-set" type="button" aria-label="Approve NETZ request">SET</button>
-      <button id="permission"></button>
+      <button id="charge-action"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
       <section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section>
       <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><div class="reading" id="no-messages">-</div><p id="status" class="notice" role="status" hidden></p><p id="error" class="notice" role="alert" hidden></p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
-    get("grid-set").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.grid_set});
     get("takeover").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.take_control});
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
     get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles[this._hass.states[this.discovery.roles.charging_profile]?.state === "NETZ" ? "power_approximation" : "pv_approximation"], option:e.target.value});
@@ -132,7 +130,7 @@ class WallboxManagerCard extends HTMLElement {
         this.call("number", "set_value", {entity_id:this.discovery.roles[id], value});
       };
     }
-    get("permission").onclick = () => this.call("switch", this._hass.states[this.discovery.roles.charging_enabled]?.state === "on" ? "turn_off" : "turn_on", {entity_id:this.discovery.roles.charging_enabled});
+    get("charge-action").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.charge_action});
     if (this._hass) this.hass = this._hass;
   }
   connectedCallback() {
@@ -245,10 +243,10 @@ class WallboxManagerCard extends HTMLElement {
     finally { edit.complete = true; this.draftWrites.delete(edit); this.hass = this._hass; }
   }
   async call(domain, service, data) {
-    const action = domain === "button" && service === "press" ? (data.entity_id === this.discovery.roles.grid_set ? "grid_set" : "take_control") : domain === "switch" && ["turn_on", "turn_off"].includes(service) ? "charging_enabled" : null;
+    const action = domain === "button" && service === "press" ? (data.entity_id === this.discovery.roles.charge_action ? "charge_action" : "take_control") : null;
     if (action) {
       const state = this._hass.states[this.discovery.roles[action]];
-      if (this.busy || !state || state.state === "unavailable" || (action === "grid_set" ? (state.attributes.grid_set_ready !== true || state.attributes.grid_set_required !== true || this.draftWrites.size > 0 || this.edits.power || Object.keys(this.durationEdits).length > 0) : state.attributes.execution_ready !== true) || data.entity_id !== this.discovery.roles[action]) return;
+      if (this.busy || !state || state.state === "unavailable" || (action === "charge_action" ? (state.attributes.charge_action_ready !== true || this.draftWrites.size > 0 || this.edits.power || Object.keys(this.durationEdits).length > 0) : state.attributes.execution_ready !== true) || data.entity_id !== this.discovery.roles[action]) return;
     } else if (!["number", "select", "text"].includes(domain) || !Object.values(this.discovery.roles).includes(data.entity_id)) return;
     const error = this.shadowRoot.getElementById("error");
     error.textContent = ""; error.hidden = true;
@@ -271,14 +269,11 @@ class WallboxManagerCard extends HTMLElement {
     get("station").textContent = state("connected")?.attributes.station_id || "—";
     get("takeover").textContent = de ? "Steuerung übernehmen" : "Take control";
     get("takeover").hidden = authority === "remote";
-    for (const [id,role] of [["takeover","take_control"],["permission","charging_enabled"]]) {
+    for (const [id,role] of [["takeover","take_control"]]) {
       const s = state(role);
       get(id).disabled = busy || !connected || !s || s.state === "unavailable" || s.attributes.execution_ready !== true;
     }
     get("takeover").disabled ||= !["local", "remote"].includes(authority);
-    const permission = state("charging_enabled");
-    const permissionText = permission?.state === "on" ? (de ? "aktiv" : "enabled") : permission?.state === "off" ? (de ? "inaktiv" : "disabled") : (de ? "unbekannt" : "unknown");
-    get("permission").textContent = `${de ? "Ladefreigabe" : "Charging permission"}: ${permissionText}`;
     get("profile-label").textContent = de ? "Ladeprofil" : "Charging profile";
     get("power-label").textContent = de ? "Angeforderte Ladeleistung" : "Requested charging power";
     get("reserve-label").textContent = de ? "Entladereserve" : "Discharge reserve";
@@ -290,7 +285,7 @@ class WallboxManagerCard extends HTMLElement {
       const s = state(role), edit = this.edits[id];
       if (edit && (edit.entity !== d.roles[role] || (available(s) && (Number(s.state) === edit.value || (edit.complete && s.attributes.grid_draft_revision > edit.revision))))) delete this.edits[id];
       if (previous !== d.entry || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value) : available(s) ? this.format(Number(s.state)) : "";
-      const disabled = busy || !available(s), value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
+      const disabled = busy || !available(s) || (id === "power" && this.maximum(id) === null), value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
       get(id).disabled = disabled;
       for (const suffix of ["up","down"]) get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= this.minimum(id) : maximum !== null && value >= maximum);
     }
@@ -326,10 +321,10 @@ class WallboxManagerCard extends HTMLElement {
       }
       get(`${id}-clear`).disabled = busy || !durationAvailable(s);
     }
-    const approval = state("grid_set");
-    get("grid-set").hidden = profile !== "NETZ" || approval?.attributes.grid_set_required !== true;
-    get("grid-set").disabled = busy || !approval || approval.state === "unavailable" || approval.attributes.grid_set_ready !== true || this.draftWrites.size > 0 || !!this.edits.power || Object.keys(this.durationEdits).length > 0;
-    get("grid-set").ariaLabel = de ? "NETZ-Anforderung bestätigen" : "Approve NETZ request";
+    const actionState = state("charge_action"), action = actionState?.attributes.charge_action;
+    get("charge-action").textContent = ({start: de ? "Ladung starten" : "Start charging", stop: de ? "Ladung beenden" : "Stop charging", apply: de ? "Ladeparameter übernehmen" : "Apply charging parameters"})[action] || (de ? "Ladung starten" : "Start charging");
+    get("charge-action").disabled = busy || !actionState || actionState.state === "unavailable" || actionState.attributes.charge_action_ready !== true || this.draftWrites.size > 0 || !!this.edits.power || Object.keys(this.durationEdits).length > 0;
+    get("charge-action").title = actionState?.attributes.charge_action_blocked_reason || (action === "stop" && authority !== "remote" ? (de ? "Lokale Ladung kann durch WBM nicht beendet werden" : "WBM cannot stop locally controlled charging") : "");
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
     const point = state("soll_power")?.attributes;
@@ -360,10 +355,11 @@ class WallboxManagerCard extends HTMLElement {
     }
     get("status").hidden = false;
     get("status").textContent = (d.ambiguous ? (de ? "Mehrere Instanzen: entry_id in der Kartenkonfiguration angeben. " : "Multiple instances: configure this card's entry_id. ") : "") +
-      (de ? "Übernahme und Ladefreigabe sind explizite Aktionen. Netzprofil: festes Leistungsangebot bei Ladefreigabe." : "Takeover and charging permission require explicit actions. Grid applies a fixed offered point while charging is permitted.") +
+      (de ? "Übernahme und Ladefreigabe sind explizite Aktionen. Die Hardwarefreigabe ist unabhängig." : "Takeover and charge release require explicit actions. Hardware permission is separate.") +
+      (authority === "local" ? (de ? " Lokale Steuerung: WBM kann die lokal gesteuerte Ladung mit seiner Ladefreigabe nicht beenden." : " Local control: WBM charge release cannot stop locally controlled charging.") : "") +
       (profile === "NETZ" && point ? ` NETZ: ${point.profile_status || "—"}${point.command_reason ? ` (${point.command_reason})` : ""}.` : "") +
-      (profile === "NETZ" && approval?.attributes.grid_approval_error ? ` SET: ${approval.attributes.grid_approval_error}.` : "") +
-      ["take_control","charging_enabled"].map(role => {
+      (profile === "NETZ" && actionState?.attributes.grid_approval_error ? `  ${actionState.attributes.grid_approval_error}.` : "") +
+      ["take_control","charge_action"].map(role => {
         const a = state(role)?.attributes;
         return a ? ` ${role === "take_control" ? (de ? "Letzter Übernahmebefehl" : "Last takeover command") : (de ? "Letzter Freigabebefehl" : "Last permission command")}: ${a.command_status || "—"}${a.command_reason ? ` (${a.command_reason})` : ""}. ${de ? "Steuerung" : "Control"}: ${a.execution_blocked_reason || (de ? "bereit" : "ready")}.` : "";
       }).join("");

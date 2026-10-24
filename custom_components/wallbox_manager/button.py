@@ -21,12 +21,19 @@ async def async_setup_entry(hass, entry, add):
     )
     if legacy and registry.async_get(legacy).config_entry_id == entry.entry_id:
         registry.async_remove(legacy)
+    obsolete = registry.async_get_entity_id(
+        "button",
+        "wallbox_manager",
+        unique_id(entry.entry_id, "control", state.binding, "grid_set"),
+    )
+    if obsolete and registry.async_get(obsolete).config_entry_id == entry.entry_id:
+        registry.async_remove(obsolete)
     add(
         [
             TakeControl(
                 entry, "station", (state.binding[0], None, None), "take_control"
             ),
-            GridSet(entry, "grid_set"),
+            ChargeAction(entry, "charge_action"),
         ]
     )
 
@@ -61,11 +68,11 @@ class TakeControl(WallboxEntity, ButtonEntity):
             raise HomeAssistantError(f"Takeover: {result}")
 
 
-class GridSet(SettingEntity, ButtonEntity):
+class ChargeAction(SettingEntity, ButtonEntity):
     """Durable connector-scoped approval, independent of station eligibility."""
 
     async def async_press(self):
         try:
-            await self.settings.approve_grid()
+            await self.entry.runtime_data.grid.action()
         except (ValueError, TypeError, OSError) as exc:
-            raise HomeAssistantError(f"NETZ SET: {exc}") from exc
+            raise HomeAssistantError(f"Charge action: {exc}") from exc

@@ -191,7 +191,13 @@ async def test_passive_workloads(ha, monkeypatch):
         meter_voltage(230.05, 8000)
 
     await measure("normalized_voltage_boundary", boundary)
-    assert results["normalized_voltage_boundary"]["ha_changes"] == 1
+    # Voltage and its dependent technical power range publish; no other controls.
+    assert results["normalized_voltage_boundary"]["ha_changes"] == 2
+    # The benchmark counts both state_changed and state_reported deliveries.
+    assert results["normalized_voltage_boundary"]["unrelated_writes"] == 2
+    assert {
+        ha.states.get(entity).attributes["wallbox_manager_role"] for entity in changes
+    } == {"voltage_l1", "soll_power"}
 
     def meter_energy(raw, index):
         adapter.meters(
@@ -269,6 +275,7 @@ async def test_passive_workloads(ha, monkeypatch):
         not in (
             "initial_sync",
             "disconnect_reconnect",
+            "normalized_voltage_boundary",
         )
     )
     remove()

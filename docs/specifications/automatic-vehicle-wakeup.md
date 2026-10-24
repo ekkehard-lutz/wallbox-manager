@@ -1,3 +1,5 @@
+**Implemented feature-branch supersession (24 October 2026):** [charge-release.md](charge-release.md) and [implementation report](../coordinated-control-redesign.md) govern manager release, unified NETZ actions, authority-independent hardware enable, and removal of WBM automatic wake-up control. Conflicting older clauses below are historical. PV regulation algorithms remain deferred.
+
 # SUPERSEDED — WBM automatic vehicle wake-up control
 
 **Decision 24 October 2026:** The WBM `AutoWakeUpEnabled` switch and all WBM-side OCPP handling of this setting are to be removed. Automatic vehicle wake-up is configured locally on Stationary through its INI, analogous to `cp_keep_awake`. The earlier approved requirements below are preserved for traceability but are **no longer binding** where they assign any wake-up setting/authority to WBM. See [the current charge-release/ownership decision](charge-release.md) and [the Stationary replacement specification](https://github.com/ekkehard-lutz/wallbox-stationary/blob/feature/local-wakeup-permission-requirements/docs/specifications/local-auto-wakeup.md). No source code was modified by this change.

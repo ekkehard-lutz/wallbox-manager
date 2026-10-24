@@ -1,3 +1,5 @@
+**Implemented feature-branch supersession (24 October 2026):** [charge-release.md](charge-release.md) and [implementation report](../coordinated-control-redesign.md) govern manager release, unified NETZ actions, authority-independent hardware enable, and removal of WBM automatic wake-up control. Conflicting older clauses below are historical. PV regulation algorithms remain deferred.
+
 **24 October 2026 clarification:** Stationary also owns *configuration* of automatic vehicle wake-up (local startup INI, no WBM OCPP setting). WBM manages its own independent `charge_release` user intent. Hardware `ChargingEnabled` is authority-independent; `ControlAuthority` governs offered current/phase. See [current target](charge-release.md); this clarification supersedes the older AutoWakeUpEnabled exception in WBM-ARCH-02.
 
 # Architectural responsibility and last-value-held observations [APPROVED]

@@ -1,6 +1,6 @@
 # WBM charging release, NETZ action button, and hardware-enable separation
 
-**Status: APPROVED TARGET REQUIREMENTS — documentation only (24 October 2026).** Implementation, migration, testing and release require separate work. This document is normative for the upcoming WBM UI/control redesign and supersedes the specifically conflicting historical requirements in `active-ocpp-control.md`, `grid-profile.md`, `automatic-vehicle-wakeup.md` and the PV V3 draft. It does not approve the PV algorithms themselves.
+**Status: APPROVED REQUIREMENTS — coordinated feature implementation (24 October 2026).** Implementation and simulated verification are recorded in [the implementation report](../coordinated-control-redesign.md). Independent review, merge, release and hardware acceptance remain separate. This document is normative for the upcoming WBM UI/control redesign and supersedes the specifically conflicting historical requirements in `active-ocpp-control.md`, `grid-profile.md`, `automatic-vehicle-wakeup.md` and the PV V3 draft. It does not approve the PV algorithms themselves.
 
 ## Terminology and ownership
 
@@ -10,7 +10,7 @@ Three states must **never** be conflated:
 2. **WBM Ladefreigabe (manager charge release):** a **per-connector, manager-owned boolean user intent**. This is not `ChargingEnabled`, not an OCPP variable and not vehicle charging evidence. False means WBM may not issue a positive current/phase operating point; when WBM has authority and a valid executable transaction, it commands **0 A** as a regular charging pause. True permits eligible profile current/phase requests, including a calculated **0 A for future PV profiles**. It must never turn hardware enable ON/OFF as a side effect.
 3. **ControlAuthority:** who may specify the station's offered **current and phase**. Only explicit takeover obtains Remote/OCPP current/phase authority; Local remains responsible otherwise. Hardware `ChargingEnabled` shall be writable from WBM regardless of Local/Remote authority (while station is reachable), without claiming current/phase authority. Actual station feedback determines success.
 
-Changing the last distinction requires a coordinated Stationary update: Stationary already has an authority-independent local `set_enabled()` path; its OCPP `set_ocpp_enabled()` currently enforces Remote authority. WBM currently rejects the command under Local as well. This is feasible with small, scoped changes on both sides; **not implemented by this documentation task**.
+Changing the last distinction requires a coordinated Stationary update: Stationary already has an authority-independent local `set_enabled()` path; its OCPP `set_ocpp_enabled()` currently enforces Remote authority. WBM currently rejects the command under Local as well. This is feasible with small, scoped changes on both sides; implemented on the coordinated feature branches.
 
 ## Normative WBM release contract (WBM-RELEASE-01–14)
 
@@ -82,4 +82,4 @@ Changing the last distinction requires a coordinated Stationary update: Stationa
 - Explicitly remove `AutoWakeUpEnabled` from WBM control inventory, state publication and entity surfaces once the coordinated Stationary wire removal occurs; tolerate protocol migration deterministically rather than exposing a dead switch.
 - Verify Local/Remote hardware enable in both configurations, station hardware bit Actual and notifications; verify Manager OFF while Remote uses 0 A, not bit 14; profile switching while positive, pending changes during running, 2-click stop behavior, no eligible modes, positive-min/max range, DOWN-to-zero, HA persistence, multiple cards, restart/reconnect and late ACK fencing.
 - No new OCPP component/variable for manager release, no WBM-owned physical CP logic, no automatic authority takeover.
-- This file records approved **future** behavior, not a claim that current `develop` already implements it.
+- The feature branches implement this contract; this does not claim deployment or integration into `develop`.

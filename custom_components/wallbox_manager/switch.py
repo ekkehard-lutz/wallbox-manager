@@ -2,22 +2,30 @@
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
-from .entity import WallboxEntity
+from .entity import WallboxEntity, unique_id
 
 
 async def async_setup_entry(hass, entry, add):
+    registry = er.async_get(hass)
+    legacy = registry.async_get_entity_id(
+        "switch",
+        "wallbox_manager",
+        unique_id(
+            entry.entry_id,
+            "station",
+            (entry.runtime_data.state.binding[0], None, None),
+            "auto_wakeup_enabled",
+        ),
+    )
+    if legacy and registry.async_get(legacy).config_entry_id == entry.entry_id:
+        registry.async_remove(legacy)
     add(
         [
             Permission(
                 entry, "control", entry.runtime_data.state.binding, "charging_enabled"
-            ),
-            AutomaticWakeUp(
-                entry,
-                "station",
-                (entry.runtime_data.state.binding[0], None, None),
-                "auto_wakeup_enabled",
-            ),
+            )
         ]
     )
 
@@ -62,19 +70,3 @@ class Permission(WallboxEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs):
         await self.set_permission(False)
-
-
-class AutomaticWakeUp(Permission):
-    """Only the station's confirmed boolean is displayed; WBM never times wake-up."""
-
-    command = "AutoWakeUpEnabled"
-    error_label = "Automatic vehicle wake-up"
-    state_represents = "confirmed_station_setting"
-    _attr_icon = "mdi:car-connected"
-
-    @property
-    def available(self):
-        return (
-            self.observed.value(self.key) is not None
-            and self.entry.runtime_data.server.control.blocked(self.command) is None
-        )

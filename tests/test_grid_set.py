@@ -44,7 +44,7 @@ async def test_draft_entity_steps_and_times_never_execute_until_set(ha):
         assert grid.requested.amps == 16 and settings.approved("soll_power") == 11
         assert settings.values.get("grid_request") is None
         assert settings.approval_attributes()["grid_set_required"]
-        button = by_role(ha, entry, "grid_set")
+        button = by_role(ha, entry, "charge_action")
         assert button.available and button.scope == entry.runtime_data.state.binding
         assert button.extra_state_attributes["wallbox_manager_scope"] == "connector"
         await button.async_press()
@@ -59,7 +59,9 @@ async def test_draft_entity_steps_and_times_never_execute_until_set(ha):
         assert settings.values.get("grid_request") is None
         await asyncio.gather(button.async_press(), button.async_press())
         assert settings.approval_attributes()["grid_approved_revision"] == revision + 1
-        assert len(station.profiles) == count + 1
+        await eventually(lambda: station.amps == 0)
+        assert len(station.profiles) == count + 2
+        assert settings.get("charge_release") is False
 
 
 async def test_equivalent_numeric_power_is_durable_without_set_or_ocpp(ha):
@@ -80,7 +82,7 @@ async def test_equivalent_numeric_power_is_durable_without_set_or_ocpp(ha):
         await settings.set("soll_power", 11.05)
         assert settings.approved("soll_power") == 11.04
         assert settings.approval_attributes()["grid_set_required"]
-        await settings.approve_grid()
+        await settings._approve_release()
         assert settings.approved("grid_duration") == 0
         assert settings.approved("soll_power") == 11.05
         assert len(station.profiles) == count
@@ -109,7 +111,7 @@ async def test_approximation_uses_approved_power_and_reserve_is_immediate(ha):
         await eventually(lambda: grid.status == "confirmed")
         settings = entry.runtime_data.settings
         await settings.set("soll_power", 1.4)
-        await settings.approve_grid()
+        await settings._approve_release()
         await eventually(lambda: grid.status == "confirmed")
         assert grid.requested.amps == 6 and grid.requested.phases == 1
         await settings.set("soll_power", 3)
@@ -143,13 +145,15 @@ async def test_set_is_durable_without_execution_eligibility(ha, mode):
     async def approve(station=None):
         await settings.set("soll_power", 3)
         await settings.set("grid_duration", "00:00")
-        button = by_role(ha, entry, "grid_set")
+        button = by_role(ha, entry, "charge_action")
         assert button.available
-        await button.async_press()
-        assert settings.approved("soll_power") == 3
-        assert settings.approved("grid_duration") == 0
-        assert not settings.approval_attributes()["grid_set_required"]
-        assert not settings.values.get("grid_request")
+        with pytest.raises(
+            HomeAssistantError, match="control_unavailable|hardware_disabled"
+        ):
+            await button.async_press()
+        assert settings.approved("soll_power") == 11
+        assert settings.get("charge_release") is False
+        assert settings.approval_attributes()["grid_set_required"]
         if station:
             assert not station.profiles
             assert not any(
@@ -191,7 +195,7 @@ async def test_failed_set_keeps_durable_drafts_approved_values_and_execution(
 
         monkeypatch.setattr(settings.store, "async_save", fail)
         with pytest.raises(HomeAssistantError, match="storage unavailable"):
-            await by_role(ha, entry, "grid_set").async_press()
+            await by_role(ha, entry, "charge_action").async_press()
         assert settings.get("soll_power") == 3 and settings.approved("soll_power") == 11
         assert settings.approved("grid_duration") is None
         assert settings.approval_attributes()["grid_set_required"]
@@ -200,9 +204,9 @@ async def test_failed_set_keeps_durable_drafts_approved_values_and_execution(
             == "storage unavailable"
         )
         assert await settings.store.async_load() == document
-        assert len(station.profiles) == count and grid.epoch == epoch
+        assert len(station.profiles) == count and grid.epoch > epoch
         monkeypatch.setattr(settings.store, "async_save", save)
-        await settings.approve_grid()
+        await settings._approve_release()
         assert not settings.approval_attributes()["grid_set_required"]
         assert settings.approval_attributes()["grid_approval_error"] is None
         await eventually(lambda: grid.status == "confirmed")
@@ -227,11 +231,11 @@ async def test_concurrent_set_and_edit_are_serialized_at_durable_commit(
         await save(data)
 
     monkeypatch.setattr(settings.store, "async_save", delayed)
-    first = asyncio.create_task(settings.approve_grid())
+    first = asyncio.create_task(settings._approve_release())
     await waiting.wait()
     assert settings.approved("soll_power") == 11
     assert settings.approval_attributes()["grid_set_required"]
-    duplicate = asyncio.create_task(settings.approve_grid())
+    duplicate = asyncio.create_task(settings._approve_release())
     edit = asyncio.create_task(settings.set("soll_power", 4))
     release.set()
     await asyncio.gather(first, duplicate, edit)
@@ -281,7 +285,7 @@ async def test_migration_reload_and_foreign_profile_data_preserve_both_states(ha
         json.dumps(["Wallbox01", 1, 1])
     ] == {"keep": True}
     assert settings.values.get("grid_request") is None
-    await settings.approve_grid()
+    await settings._approve_release()
     restored = Settings(
         ha, entry, entry.runtime_data.state.binding, store, await store.async_load()
     )
@@ -297,23 +301,20 @@ async def test_set_preserves_active_deadlines_and_consumed_delay(ha):
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
-        settings, control = (
-            entry.runtime_data.settings,
-            entry.runtime_data.server.control,
-        )
+        settings = entry.runtime_data.settings
         clock = FakeClock()
         grid.wall_time, grid.call_later = lambda: clock.now, clock.later
-        await control.request("ChargingEnabled", "false")
+        await grid.stop_release()
         await settings.set("grid_start_delay", "00:02")
         await settings.set("grid_duration", "00:03")
-        await settings.approve_grid()
-        await control.request("ChargingEnabled", "true")
+        await settings._approve_release()
+        await grid.action()
         await eventually(lambda: grid.status == "confirmed")
         request = dict(settings.values["grid_request"])
         count = len(station.profiles)
         await settings.set("grid_start_delay", "00:05")
         assert settings.values["grid_request"] == request
-        await settings.approve_grid()
+        await settings._approve_release()
         assert settings.values["grid_request"] == request
         assert len(station.profiles) == count
         await clock.advance(120)
@@ -321,19 +322,19 @@ async def test_set_preserves_active_deadlines_and_consumed_delay(ha):
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 16
         )
         await settings.set("grid_duration", "00:01")
-        await settings.approve_grid()
+        await settings._approve_release()
         assert settings.values["grid_request"] == request
         await clock.advance(180)
-        await eventually(lambda: station.values["ChargingEnabled"] == "false")
-        await control.request("ChargingEnabled", "true")
+        await eventually(lambda: settings.get("charge_release") is False)
+        await grid.action()
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 0
         )
         assert settings.values["grid_request"]["start_at"] == clock.now + 300
-        await control.request("ChargingEnabled", "false")
+        await grid.stop_release()
         await settings.set("soll_power", 5)
-        await settings.approve_grid()
-        await control.request("ChargingEnabled", "true")
+        await settings._approve_release()
+        await grid.action()
         await eventually(lambda: grid.status == "confirmed" and grid.confirmed.amps > 0)
         assert settings.values.get("grid_request") is None
 
@@ -379,32 +380,38 @@ async def test_ha_number_text_and_button_services_share_approval_boundary(ha):
     from homeassistant.components import button, number, text
 
     entry = await ha.install()
-    # Register the real HA domain entity services against the test platforms.
-    for component in (number, text, button):
-        assert await component.async_setup(ha, {})
-    settings = entry.runtime_data.settings
-    power = by_role(ha, entry, "soll_power")
-    duration = by_role(ha, entry, "grid_duration")
-    approve = by_role(ha, entry, "grid_set")
-    await ha.services.async_call(
-        "number", "set_value", {"entity_id": power.entity_id, "value": 3}, blocking=True
-    )
-    await ha.services.async_call(
-        "text",
-        "set_value",
-        {"entity_id": duration.entity_id, "value": "00:00"},
-        blocking=True,
-    )
-    assert settings.approved("soll_power") == 11
-    assert settings.get("soll_power") == 3
-    assert settings.approval_attributes()["grid_set_required"]
-    await ha.services.async_call(
-        "button", "press", {"entity_id": approve.entity_id}, blocking=True
-    )
-    assert (
-        settings.approved("soll_power") == 3 and settings.approved("grid_duration") == 0
-    )
-    assert not settings.approval_attributes()["grid_set_required"]
+    async with peer(entry, station_type=GridStation) as station:
+        await start_grid(entry, station)
+        # Register the real HA domain entity services against the test platforms.
+        for component in (number, text, button):
+            assert await component.async_setup(ha, {})
+        settings = entry.runtime_data.settings
+        power = by_role(ha, entry, "soll_power")
+        duration = by_role(ha, entry, "grid_duration")
+        approve = by_role(ha, entry, "charge_action")
+        await ha.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": power.entity_id, "value": 3},
+            blocking=True,
+        )
+        await ha.services.async_call(
+            "text",
+            "set_value",
+            {"entity_id": duration.entity_id, "value": "00:00"},
+            blocking=True,
+        )
+        assert settings.approved("soll_power") == 11
+        assert settings.get("soll_power") == 3
+        assert settings.approval_attributes()["grid_set_required"]
+        await ha.services.async_call(
+            "button", "press", {"entity_id": approve.entity_id}, blocking=True
+        )
+        assert (
+            settings.approved("soll_power") == 3
+            and settings.approved("grid_duration") == 0
+        )
+        assert not settings.approval_attributes()["grid_set_required"]
 
 
 async def test_reserve_service_remains_immediate_with_unapproved_power(ha):
@@ -448,7 +455,7 @@ async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_d
         grid.wall_time, grid.call_later = lambda: clock.now, clock.later
         await settings.set("grid_start_delay", "00:01")
         await settings.set("grid_duration", "00:02")
-        await settings.approve_grid()
+        await settings._approve_release()
         assert not settings.values.get("grid_request")
         # Repeated permission ON during this session is not a new start event.
         await control.request("ChargingEnabled", "true")
@@ -475,7 +482,7 @@ async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_d
         request = dict(settings.values["grid_request"])
         assert request == {"start_at": 1060, "end_at": 1180}
         await settings.set("grid_duration", "00:03")
-        await settings.approve_grid()
+        await settings._approve_release()
         await control.request("ChargingEnabled", "true")
         assert settings.values["grid_request"] == request
         await clock.advance(60)
@@ -483,7 +490,7 @@ async def test_set_timings_wait_for_new_transaction_and_duplicate_on_preserves_d
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 16
         )
         await clock.advance(120)
-        await eventually(lambda: station.values["ChargingEnabled"] == "false")
+        await eventually(lambda: settings.get("charge_release") is False)
 
 
 async def test_invalid_entity_drafts_do_not_bypass_approval(ha):
@@ -506,12 +513,13 @@ async def test_backend_entries_never_share_draft_or_approved_state(ha):
     first, second = one.runtime_data.settings, two.runtime_data.settings
     await first.set("soll_power", 3)
     await second.set("soll_power", 4)
-    await by_role(ha, one, "grid_set").async_press()
+    await first._approve_release()
     assert first.approved("soll_power") == 3 and second.approved("soll_power") == 11
     assert not first.approval_attributes()["grid_set_required"]
     assert second.approval_attributes()["grid_set_required"]
     assert (
-        by_role(ha, one, "grid_set").unique_id != by_role(ha, two, "grid_set").unique_id
+        by_role(ha, one, "charge_action").unique_id
+        != by_role(ha, two, "charge_action").unique_id
     )
 
 
@@ -565,13 +573,13 @@ async def test_set_validation_failure_keeps_pending_draft_and_approval(ha, monke
         return original(role, value)
 
     monkeypatch.setattr(settings, "validate", invalid)
-    with pytest.raises(HomeAssistantError, match="Invalid staged request"):
-        await by_role(ha, entry, "grid_set").async_press()
+    with pytest.raises((ValueError, OSError), match="Invalid staged request"):
+        await settings._approve_release()
     assert settings.approval_attributes()["grid_set_required"]
     assert not settings.approval_attributes()["grid_set_ready"]
     assert settings.get("soll_power") == 3 and settings.approved("soll_power") == 11
     monkeypatch.setattr(settings, "validate", original)
-    await settings.approve_grid()
+    await settings._approve_release()
     assert settings.approved("soll_power") == 3
 
 
@@ -579,7 +587,7 @@ async def test_start_consumes_timing_after_concurrent_set_commits(ha, monkeypatc
     entry = await ha.install()
     settings = entry.runtime_data.settings
     await settings.set("grid_start_delay", "00:01")
-    await settings.approve_grid()
+    await settings._approve_release()
     await settings.set("grid_start_delay", "00:05")
     save = settings.store.async_save
     waiting, release = asyncio.Event(), asyncio.Event()
@@ -590,7 +598,7 @@ async def test_start_consumes_timing_after_concurrent_set_commits(ha, monkeypatc
         await save(data)
 
     monkeypatch.setattr(settings.store, "async_save", delayed)
-    approval = asyncio.create_task(settings.approve_grid())
+    approval = asyncio.create_task(settings._approve_release())
     await waiting.wait()
     start = asyncio.create_task(settings.arm_grid(1000))
     await asyncio.sleep(0)
@@ -607,7 +615,7 @@ async def test_failed_start_persistence_cannot_bypass_approved_delay(ha, monkeyp
     clock = FakeClock()
     grid.wall_time, grid.call_later = lambda: clock.now, clock.later
     await settings.set("grid_start_delay", "00:01")
-    await settings.approve_grid()
+    await settings._approve_release()
     save = settings.store.async_save
 
     async def fail(data):
@@ -617,13 +625,13 @@ async def test_failed_start_persistence_cannot_bypass_approved_delay(ha, monkeyp
 
     monkeypatch.setattr(settings.store, "async_save", fail)
     async with peer(entry, station_type=GridStation) as station:
-        await start_grid(entry, station)
-        await eventually(lambda: grid.status == "communication_failure")
+        with pytest.raises(OSError, match="Cannot persist schedule"):
+            await start_grid(entry, station)
         assert not station.profiles and grid.start_transaction == "net-test"
         assert settings.values["grid_next_timing"]["grid_start_delay"] == 60
         monkeypatch.setattr(settings.store, "async_save", save)
         await settings.set("soll_power", 3)
-        await settings.approve_grid()
+        await grid.action()
         await eventually(lambda: grid.status == "confirmed")
         assert settings.values["grid_request"]["start_at"] == 1060
         assert not station.profiles and grid.confirmed.amps == 0
@@ -643,8 +651,8 @@ async def test_real_ha_store_swallowed_write_error_does_not_approve(ha, monkeypa
         raise WriteError("Disk write failed")
 
     monkeypatch.setattr(settings.store, "_write_prepared_data", fail)
-    with pytest.raises(HomeAssistantError):
-        await by_role(ha, entry, "grid_set").async_press()
+    with pytest.raises((ValueError, OSError)):
+        await settings._approve_release()
     assert settings.approved("soll_power") == 11
     assert settings.approval_attributes()["grid_set_required"]
     assert await settings.store.async_load() == before
@@ -660,8 +668,8 @@ async def test_shutdown_deferred_store_write_cannot_approve(ha):
     previous = ha.state
     ha.set_state(CoreState.stopping)
     try:
-        with pytest.raises(HomeAssistantError, match="stopping"):
-            await by_role(ha, entry, "grid_set").async_press()
+        with pytest.raises((ValueError, OSError), match="stopping"):
+            await settings._approve_release()
         assert settings.approved("soll_power") == 11
         assert settings.approval_attributes()["grid_set_required"]
         assert await settings.store.async_load() == before

@@ -97,6 +97,9 @@ class Settings:
         for key in REGULATION:
             if key in entry.options:
                 self.values[key] = entry.options[key]
+        # Runtime reload never resumes a previously granted release.
+        self.values["charge_release"] = False
+        self.values["grid_request"] = None
         self.state = None
         self.listeners = {}
         self.lock = asyncio.Lock()
@@ -192,39 +195,62 @@ class Settings:
                 pending[key] = updated.get(key)
         updated["grid_next_timing"] = pending
 
-    async def approve_grid(self):
+    async def _approve_release(
+        self, *, start=False, notify=True, now=None, current=lambda: True
+    ):
         async with self.lock:
-            if not self.approval_attributes()["grid_set_required"]:
-                return
+            if not start and not self.approval_attributes()["grid_set_required"]:
+                return True, True
             try:
+                if not current():
+                    raise ValueError("Superseded charge action")
                 self.validate("soll_power", self.get("soll_power"))
                 for role in TIMES:
                     self.validate(role, duration_text(self.get(role)))
+                previous = dict(self.values)
                 updated = dict(self.values)
                 power_changed = updated["power_kw"] != self.approved("soll_power")
                 equivalent = not power_changed or self.grid_equivalent(updated)
                 self.approve_values(updated)
+                updated["charge_release"] = start or self.get("charge_release")
+                if start:
+                    updated["grid_request"] = None
+                    self.arm_values(updated, now)
                 await self._save(updated)
+                if not current():
+                    self.values["charge_release"] = False
+                    await self._save(
+                        {
+                            **self.values,
+                            "charge_release": False,
+                            "grid_request": None,
+                            "grid_approved": previous["grid_approved"],
+                            "grid_next_timing": previous["grid_next_timing"],
+                        }
+                    )
+                    raise ValueError("Superseded charge action")
             except (ValueError, TypeError, OSError) as exc:
                 self.approval_error = str(exc)
                 self.notify_grid()
                 raise
             self.approval_error = None
-            self.notify(
-                "grid_timing"
-                if not power_changed
-                else "grid_equivalent"
-                if equivalent
-                else "grid_approved"
-            )
+            if notify:
+                self.notify(
+                    "grid_timing"
+                    if not power_changed
+                    else "grid_equivalent"
+                    if equivalent
+                    else "grid_approved"
+                )
             self.notify_grid()
+            return equivalent, not power_changed
 
     def notify(self, role):
         for listener in tuple(self.listeners.get(role, ())):
             listener()
 
     def notify_grid(self):
-        for role in ("soll_power", *TIMES, "grid_set"):
+        for role in ("soll_power", *TIMES, "charge_action"):
             self.notify(role)
 
     def watch(self, role, listener):
@@ -249,6 +275,20 @@ class Settings:
             value = float(Fraction(value))
             if not math.isfinite(value) or not minimum <= value <= maximum:
                 raise ValueError("Number outside supported range")
+            if role == "soll_power":
+                from .grid_point import envelope
+
+                try:
+                    bounds = envelope(self.state, self).power_bounds()
+                except ValueError, TypeError, AttributeError:
+                    # Unknown capabilities allow draft storage only. The editor
+                    # and action remain unavailable until the range is known.
+                    bounds = None
+                    known = False
+                else:
+                    known = True
+                if known and (bounds is None or not bounds[0] <= value <= bounds[1]):
+                    raise ValueError("Power outside positive technical range")
             if role == "soll_soc_speicher" and not value.is_integer():
                 raise ValueError("Target SoC must be a whole percent")
             if role.startswith("allowed_current_"):
@@ -307,6 +347,9 @@ class Settings:
         return value
 
     async def set(self, role, value):
+        if role == "charging_profile" and self.validate(role, value) != self.get(role):
+            self.values["charge_release"] = False
+            self.notify("charge_release")
         async with self.lock:
             await self._set(role, value)
 
@@ -325,6 +368,8 @@ class Settings:
         if role in ("soll_power", *TIMES):
             updated["grid_draft_revision"] = self.values["grid_draft_revision"] + 1
         if role == "charging_profile":
+            # set() already fenced wire dispatch before acquiring this lock.
+            updated["charge_release"] = False
             updated["grid_request"] = None
         equivalent = role in ("soll_power", *TIMES) and self.equivalent_grid_draft(
             updated
@@ -371,29 +416,30 @@ class Settings:
         await self.persist(profiles)
         self.profiles, self.values = profiles, updated
 
+    def arm_values(self, updated, now):
+        """Consume timing in the same durable document as the explicit start."""
+        if updated.get("grid_request") or now is None:
+            return
+        delay, duration = (updated["grid_next_timing"].get(k) for k in TIMES)
+        if delay is None and duration is None:
+            return
+        start = now + (delay or 0)
+        updated["grid_next_timing"] = dict.fromkeys(TIMES)
+        updated["grid_request"] = {
+            "start_at": start,
+            "end_at": now
+            if duration == 0
+            else start + duration
+            if duration is not None
+            else None,
+        }
+
     async def arm_grid(self, now):
-        """Capture and consume approved one-shot timing under the SET/edit lock."""
         async with self.lock:
-            if self.values.get("grid_request"):
-                return
-            delay, duration = (self.values["grid_next_timing"].get(k) for k in TIMES)
-            if delay is None and duration is None:
-                return
-            start = now + (delay or 0)
-            await self._save(
-                {
-                    **self.values,
-                    "grid_next_timing": dict.fromkeys(TIMES),
-                    "grid_request": {
-                        "start_at": start,
-                        "end_at": now
-                        if duration == 0
-                        else start + duration
-                        if duration is not None
-                        else None,
-                    },
-                }
-            )
+            updated = dict(self.values)
+            self.arm_values(updated, now)
+            if updated != self.values:
+                await self._save(updated)
 
     async def save_runtime(self, fields):
         """Persist scheduling state without modifying approved/draft configuration."""

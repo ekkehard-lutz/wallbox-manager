@@ -1,3 +1,5 @@
+**Implemented feature-branch supersession (24 October 2026):** [charge-release.md](charge-release.md) and [implementation report](../coordinated-control-redesign.md) govern manager release, unified NETZ actions, authority-independent hardware enable, and removal of WBM automatic wake-up control. Conflicting older clauses below are historical. PV regulation algorithms remain deferred.
+
 **Latest approved amendment (24 October 2026):** [WBM-NETZ-ACTION-01–13 and WBM-RELEASE-01–14](charge-release.md) supersede dedicated NETZ SET and hardware ChargingEnabled-based operator start/stop. NETZ uses the unified card button (Start charging / Apply charging parameters / Stop charging), central manager-owned boolean charge release, and a positive-only dynamically calculated power-selector interval. The earlier WBM-GRID-22–30 draft/approval semantics remain a historical baseline only where not explicitly superseded. Scheduling end means release OFF plus 0 A, not hardware disable. Documentation only.
 
 # NETZ / Grid fixed operating point — successor requirements

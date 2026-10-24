@@ -249,7 +249,6 @@ class Adapter(ChargePoint):
                 "charging_state",
                 "control_authority",
                 "charging_enabled",
-                "auto_wakeup_enabled",
                 "physical_phases",
             )
             and previous != self.state.value(key)
@@ -265,23 +264,11 @@ class Adapter(ChargePoint):
         if accepted and key[2] in (
             "control_authority",
             "charging_enabled",
-            "auto_wakeup_enabled",
         ):
             for name in ROLES:
                 if key == self.listener.control.key(name):
                     if name == "ControlAuthority" and previous != self.state.value(key):
-                        self.listener.control.authority_revision += 1
-                        for dependent in ("ChargingEnabled", "AutoWakeUpEnabled"):
-                            intent = self.listener.control.intents.get(dependent)
-                            if intent and intent.status in (
-                                "pending",
-                                "accepted_unconfirmed",
-                            ):
-                                self.listener.control.update(
-                                    intent, "superseded", "authority_changed"
-                                )
-                            else:
-                                self.listener.control.publish(dependent)
+                        self.listener.control.publish("ChargingEnabled")
                     self.listener.control.observed(name)
         return accepted
 
@@ -535,7 +522,6 @@ class Adapter(ChargePoint):
             )
         elif component == {"name": "WallboxController"} and variable in (
             {"name": "ChargingEnabled"},
-            {"name": "AutoWakeUpEnabled"},
         ):
             key = self.listener.control.key(variable["name"])
             self.observe(
@@ -597,7 +583,6 @@ class Adapter(ChargePoint):
             or row.get("attribute_value")
             not in {
                 "ChargingEnabled": ("true", "false"),
-                "AutoWakeUpEnabled": ("true", "false"),
                 "ControlAuthority": ("Local", "OCPP"),
                 "PhaseRotation": ("Rxx", "RST"),
             }.get(endpoint["variable"]["name"], ())
@@ -757,7 +742,6 @@ class Adapter(ChargePoint):
                     in (
                         "ControlAuthority",
                         "ChargingEnabled",
-                        "AutoWakeUpEnabled",
                         "PhaseRotation",
                     )
                     and attr.get("mutability", "ReadOnly") in ("ReadOnly", "ReadWrite")

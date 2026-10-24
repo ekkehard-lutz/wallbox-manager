@@ -29,7 +29,7 @@ async def test_retained_observation_reconnect_and_exact_energy(ha):
     assert all(
         e.available
         for e in entities(ha, entry)
-        if e.family == "control" and e.role != "charging_enabled"
+        if e.family == "control" and e.role not in ("charging_enabled", "soll_power")
     )
     new = state.reset(connected=True)
     assert not reading.available
