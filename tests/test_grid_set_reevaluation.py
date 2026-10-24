@@ -23,7 +23,7 @@ async def approved_1400(entry, station):
     await eventually(lambda: grid.status == "confirmed")
     settings = entry.runtime_data.settings
     await settings.set("soll_power", 1.4)
-    await settings.approve_grid()
+    await settings._approve_release()
     await eventually(lambda: grid.status == "confirmed" and grid.requested.amps == 6)
     return grid, settings
 
@@ -35,7 +35,7 @@ async def test_pending_draft_becomes_equivalent_after_approximation_change(ha):
         await eventually(lambda: grid.status == "confirmed")
         settings = entry.runtime_data.settings
         await settings.set("soll_power", 1.4)
-        await settings.approve_grid()
+        await settings._approve_release()
         await eventually(
             lambda: grid.status == "confirmed" and grid.requested.amps == 6
         )
@@ -99,8 +99,15 @@ async def test_capabilities_can_make_existing_draft_equivalent(ha, source):
             state.observe(
                 state.generation, ("capability", scope, role), value, "NotifyReport"
             )
-        await eventually(lambda: settings.approved("soll_power") == 1.6)
-        assert not settings.approval_attributes()["grid_set_required"]
+        if source in ("minimum", "phase_modes"):
+            await eventually(lambda: grid.task.done())
+            # The technical minimum rose above this legacy draft. Never approve
+            # an editor value outside the current positive technical interval.
+            assert settings.approved("soll_power") == 1.4
+            assert settings.approval_attributes()["grid_set_required"]
+        else:
+            await eventually(lambda: settings.approved("soll_power") == 1.6)
+            assert not settings.approval_attributes()["grid_set_required"]
         # The immediate capability decision uses 1.4 kW; adoption adds no command.
         expected = 1 if source in ("minimum", "phase_modes") else 0
         assert len(station.profiles) == count + expected
@@ -213,7 +220,7 @@ async def test_reevaluation_queued_behind_set_keeps_atomic_timing_approval(
             await save(data)
 
         monkeypatch.setattr(settings.store, "async_save", delayed)
-        approval = asyncio.create_task(settings.approve_grid())
+        approval = asyncio.create_task(settings._approve_release())
         await waiting.wait()
         state = entry.runtime_data.state
         state.observe(
@@ -271,8 +278,16 @@ async def test_restart_retains_draft_until_current_generation_point_is_confirmed
                 evse={"id": 1, "connector_id": 1},
             )
         )
-        await eventually(lambda: settings.approved("soll_power") == 1.6)
-        assert grid.confirmed.amps == 6 and not station.profiles
+        await eventually(lambda: grid.task and grid.task.done())
+        assert settings.get("charge_release") is False
+        assert settings.approved("soll_power") == 1.4
+        assert grid.confirmed.amps == 0 and len(station.profiles) == 1
+        assert station.profiles[0][1]["charging_schedule"][0][
+            "charging_schedule_period"
+        ] == [{"start_period": 0, "limit": 0}]
+        await grid.action()
+        assert settings.approved("soll_power") == 1.6
+        assert settings.get("charge_release") is True
 
 
 async def test_repeated_notifications_do_not_reapprove_or_resend(ha, monkeypatch):

@@ -25,28 +25,31 @@ read-only discovery/readbacks, and retains cumulative imported energy/statistics
 identities. Ordinary measurements remain valid until explicit invalidation or a
 connection/boot generation change. Silent, unchanged values do not expire.
 
-Profile, Number, Select and Text entities persist local configuration. Eligible
-NETZ sessions apply an approved fixed offered point and an optional battery reserve.
-Power, start delay and duration are persistent drafts until SET approves them
-together. Electrically equivalent power edits can be approved automatically;
-discharge reserve and approximation remain immediate. The existing Take Control button
-explicitly acquires OCPP authority; the permission switch independently requests
-ON/OFF only under observed Remote authority and supported writable endpoints.
-Switch state always reflects station observations, never an acknowledgement alone.
-See the [active successor requirements](docs/specifications/active-ocpp-control.md)
-and [source assessment / separate hardware procedure](docs/active-ocpp-control-assessment.md).
-There is no automatic takeover or unconditional command replay. The NETZ successor
-adds guarded fixed operating points; PV execution remains deferred.
+Profile, Number, Select and Text entities persist per-connector configuration.
+The manager-owned **charge release / Ladefreigabe** starts OFF and resets on every
+actual profile change, reload, reconnect or authority loss. The card has one charging
+action: **Start charging**, **Apply charging parameters** for meaningful pending NETZ
+drafts, or **Stop charging**. Applying consumes the first press; stopping takes the
+next press. Start atomically approves power/timing and creates the one-shot schedule.
+Stop requests **0 A** where Remote authority and a transaction permit it. After
+reload, reconnect or explicit takeover, release OFF also reconciles a confirmed
+retained positive offer to 0 A; confirmed zero is not resent. A positive
+slider value resolving to zero cannot start. The selector's positive technical
+range is calculated from current station diagnostics and enabled phase caps.
 
-Automatic wake-up replaces the manual HA button with
-**Automatic vehicle wake-up / Automatisches Aufwecken** on the existing device
-page, outside Lovelace. Stationary detects a genuine 0 A-to-positive CP B episode,
-waits its configured delay and attempts one CP interruption. WBM only reads and
-changes the station's confirmed persistent enable setting. First commissioning
-defaults OFF; restarts, reconnects and authority changes preserve the saved value.
-Enabling or restoring ON never arms an existing positive-current episode.
-See the [approved contract](docs/specifications/automatic-vehicle-wakeup.md) and
-[implementation assessment](docs/automatic-vehicle-wakeup-assessment.md).
+The independent hardware **Wallbox enabled / Wallbox aktiviert** switch remains on
+the integration/device page and works under Local or Remote authority, without
+Take Control or changing manager release. Its Actual state always comes from the
+station; enabling hardware under Local can activate the station's retained target.
+Only explicit Take Control acquires Remote current/phase authority. WBM cannot stop
+locally controlled charging using manager release.
+
+Automatic vehicle wake-up is configured only in Stationary's startup INI;
+WBM neither exposes a switch nor uses AutoWakeUpEnabled. The old wake-up switch
+and standalone NETZ SET registry identities are retired with exact ownership checks.
+PV regulation remains deferred; its shared release foundation supports zero-target
+pauses. See the [approved requirements](docs/specifications/charge-release.md) and
+[implementation, migration, validation and operational procedure](docs/coordinated-control-redesign.md).
 
 ```yaml
 type: custom:wallbox-manager-card
@@ -86,10 +89,9 @@ For separately authorized testing, select **v0.4.0-beta.11** through the HACS
 prerelease versions and verify integration version **0.4.0-beta.11** after the
 operator performs installation and the Home Assistant restart. Publication does
 not include installation or physical validation. NETZ now executes an event-driven fixed offered point under confirmed Remote
-authority and charging permission. PV profiles remain configuration-only. See the
+authority and charging permission. PV profiles expose only the shared Start/Stop release foundation; regulation remains deferred. See the
 [NETZ implementation and validation boundary](docs/grid-fixed-profile-implementation.md).
-Automatic wake-up requires the matching Stationary implementation to be separately
-installed. Simulated sleeping-vehicle tests are the acceptance
+Automatic wake-up requires the matching Stationary implementation and explicit local startup configuration. Simulated sleeping-vehicle tests are the acceptance
 basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is
 unconfirmed, another explicit Take Control action reads authority again without repeating the write.
 

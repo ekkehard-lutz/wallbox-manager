@@ -1,3 +1,5 @@
+**New approved target (24 October 2026):** [Manager Ladefreigabe and unified NETZ/PV card action](charge-release.md). This supersedes the conflicting automatic wake-up, hardware permission, SET and profile-action rules below. Implemented on coordinated feature branches; see [implementation and migration](../coordinated-control-redesign.md). Independent review and deployment remain separate.
+
 # Wallbox Manager – Specifications
 
 This directory contains WBM architecture, passive milestone requirements and the
@@ -14,7 +16,7 @@ V3 remains DRAFT overall.
 | [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, with explicit supersession register | **APPROVED independently** |
 | [Active OCPP control foundation](active-ocpp-control.md) | Explicit takeover and independent charging permission; successor milestone | **User-authorized implementation scope; hardware acceptance separate** |
 | [NETZ / Grid fixed-point profile](grid-profile.md) | Next event-driven NETZ control, phase range/limits, recognized lockout retry, battery reserve | **APPROVED target; not yet implemented** |
-| [Automatic vehicle wake-up](automatic-vehicle-wakeup.md) | Station-owned detection/delay/CP; WBM enable switch only | **APPROVED for implementation** |
+| [Automatic vehicle wake-up](automatic-vehicle-wakeup.md) | Historical remote-setting scope; superseded by local Stationary INI | **Superseded configuration ownership** |
 | [Legacy manual compatibility](manual-vehicle-wakeup.md) | Station DataTransfer only; no manual HA button | Superseded UI scope |
 | [Passive v0.4](passive-v0.4.md) | Current passive milestone | **APPROVED, subject to WBM-ARCH-01–12** |
 | [PV regulation – Requirements baseline V3](pv-regulation.md) | Current consolidated target specification draft with stable requirement IDs, acceptance criteria, sources and open issues | **DRAFT – overall subject-matter approval pending** |

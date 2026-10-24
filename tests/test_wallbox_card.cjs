@@ -30,12 +30,13 @@ function load() {
 function states(entry='E') {
   const result = {};
   for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',pv_approximation:'down',
-    grid_set:'unknown',charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
+    charge_action:'unknown',charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
     grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',optimum_max_discharge_w:'3000',estimated_daily_house_consumption_kwh:'12'})) {
     result[`${entry}.${role}`] = {state:value,attributes:{wallbox_manager_entry:entry,wallbox_manager_role:role,wallbox_manager_scope:'connector',station_id:`station-${entry}`,
       options:role==='charging_profile'?['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']:undefined,min:0,max:100}};
   }
-  Object.assign(result[`${entry}.grid_set`].attributes,{grid_set_ready:true,grid_set_required:false});
+  Object.assign(result[`${entry}.charge_action`].attributes,{charge_action_ready:false,charge_action:"start",charge_release:false});
+  Object.assign(result[`${entry}.soll_power`].attributes,{technical_min_kw:1.38,technical_max_kw:18.63});
   return result;
 }
 function card(data=states(), config={}, language='en') {
@@ -51,10 +52,10 @@ test('familiar layout, read-only permission and no multi-wallbox UI',()=>{
   assert.match(c.shadowRoot.html,/class="numeric"/);
   assert.doesNotMatch(c.shadowRoot.html,/id="wallbox"/);
   assert.equal(get('takeover').disabled,true);
-  assert.equal(get('permission').disabled,true);
+  assert.equal(get('charge-action').disabled,true);
   assert.equal(typeof get('takeover').onclick,'function');
-  assert.equal(typeof get('permission').onclick,'function');
-  assert.match(get('permission').textContent,/enabled/);
+  assert.equal(typeof get('charge-action').onclick,'function');
+  assert.match(get('charge-action').textContent,/Start charging/);
   assert.match(get('status').textContent,/explicit actions/);
   assert.equal(get('connection').textContent,'Available');
   assert.equal(get('live-power').textContent,'1.5 kW');
@@ -105,10 +106,10 @@ test('German controls stay disabled and physical OFF stays visible',()=>{
   const data=states(); data['E.charging_enabled'].state='off';
   const {get}=card(data,{},'de');
   assert.equal(get('takeover').textContent,'Steuerung übernehmen');
-  assert.match(get('permission').textContent,/inaktiv/);
-  assert.equal(get('permission').disabled,true);
+  assert.match(get('charge-action').textContent,/Ladung starten/);
+  assert.equal(get('charge-action').disabled,true);
   assert.equal(get('connection').textContent,'Frei');
-  assert.match(get('status').textContent,/festes Leistungsangebot/);
+  assert.match(get('status').textContent,/Hardwarefreigabe/);
 });
 
 test('card action boundary refuses charging domains and foreign entity IDs',async()=>{
@@ -123,25 +124,25 @@ test('unavailable measurement and permission are never fabricated as zero or OFF
   const data=states(); data['E.power'].state='unavailable'; data['E.charging_enabled'].state='unknown';
   const {get}=card(data);
   assert.equal(get('live-power').textContent,'—');
-  assert.match(get('permission').textContent,/unknown/);
+  assert.match(get('charge-action').textContent,/Start charging/);
 });
 
 test('explicit authority and permission actions stay scoped and observed',async()=>{
   const data=states();
   data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
-  data['E.charging_enabled'].attributes.execution_ready=true;
+  data['E.charge_action'].attributes.charge_action_ready=true;
   const {card:c,get,calls}=card(data);
   assert.equal(get('takeover').disabled,false);
-  assert.equal(get('permission').disabled,false);
+  assert.equal(get('charge-action').disabled,false);
   await get('takeover').onclick();
-  await get('permission').onclick();
+  await get('charge-action').onclick();
   assert.equal(calls[0][0],'button'); assert.equal(calls[0][1],'press');
   assert.equal(calls[0][2].entity_id,'E.take_control');
-  assert.equal(calls[1][0],'switch'); assert.equal(calls[1][1],'turn_off');
+  assert.equal(calls[1][0],'button'); assert.equal(calls[1][1],'press');
   assert.equal(data['E.charging_enabled'].state,'on');
   data['E.charging_enabled'].state='off'; c.hass=c._hass;
-  await get('permission').onclick();
-  assert.equal(calls[2][1],'turn_on');
+  await get('charge-action').onclick();
+  assert.equal(calls[2][1],'press');
   await c.call('switch','turn_on',{entity_id:'OTHER.charging_enabled'});
   await c.call('button','press',{entity_id:'E.charging_enabled'});
   assert.equal(calls.length,3);
@@ -150,18 +151,18 @@ test('explicit authority and permission actions stay scoped and observed',async(
 test('pending, unsupported and service failures remain visible without optimistic state',async()=>{
   const data=states();
   data['E.take_control']={state:'unavailable',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:false,execution_blocked_reason:'unsupported'}};
-  Object.assign(data['E.charging_enabled'].attributes,{execution_ready:true,command_status:'accepted_unconfirmed',command_reason:'readback_timeout'});
+  Object.assign(data['E.charge_action'].attributes,{charge_action_ready:true,command_status:'accepted_unconfirmed',command_reason:'readback_timeout'});
   const {card:c,get}=card(data);
   assert.equal(get('takeover').disabled,true);
   assert.match(get('status').textContent,/unsupported/);
   assert.match(get('status').textContent,/accepted_unconfirmed.*readback_timeout/);
   c._hass.callService=async()=>{throw new Error('Station rejected');};
-  await get('permission').onclick();
+  await get('charge-action').onclick();
   assert.match(get('error').textContent,/Station rejected/);
   assert.equal(data['E.charging_enabled'].state,'on');
-  data['E.charging_enabled'].attributes.execution_ready=false;
+  data['E.charge_action'].attributes.charge_action_ready=false;
   c.hass=c._hass;
-  assert.equal(get('permission').disabled,true);
+  assert.equal(get('charge-action').disabled,true);
 });
 
 test('last takeover result stays separate from observed authority and reconnect availability',()=>{
@@ -199,7 +200,7 @@ test('takeover follows Local to Remote to external Local through HA updates',asy
   for (const language of ['en','de']) {
     const data=states();
     data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
-    data['E.charging_enabled'].attributes.execution_ready=true;
+    data['E.charge_action'].attributes.charge_action_ready=true;
     const {card:c,get,calls}=card(data,{},language);
     assert.equal(get('takeover').hidden,false);
     assert.equal(get('takeover').disabled,false);
@@ -207,9 +208,9 @@ test('takeover follows Local to Remote to external Local through HA updates',asy
     assert.equal(get('takeover').hidden,false); // Sending a command is no observation.
     data['E.control_authority'].state='remote'; c.hass=c._hass;
     assert.equal(get('takeover').hidden,true);
-    assert.notEqual(get('permission').hidden,true);
-    assert.equal(get('permission').disabled,false);
-    await get('permission').onclick();
+    assert.notEqual(get('charge-action').hidden,true);
+    assert.equal(get('charge-action').disabled,false);
+    await get('charge-action').onclick();
     data['E.control_authority'].state='local'; c.hass=c._hass;
     assert.equal(get('takeover').hidden,false);
     assert.equal(get('takeover').disabled,false);
@@ -221,7 +222,7 @@ test('takeover follows Local to Remote to external Local through HA updates',asy
     await get('takeover').onclick();
     assert.equal(calls.length,2);
     assert.equal(calls[0][2].entity_id,'E.take_control');
-    assert.equal(calls[1][2].entity_id,'E.charging_enabled');
+    assert.equal(calls[1][2].entity_id,'E.charge_action');
   }
 });
 
@@ -238,7 +239,7 @@ test('missing, unknown, unavailable and disconnected authority keeps takeover vi
       const {get}=card(data);
       assert.equal(get('takeover').hidden,false,`${connection}/${authority}`);
       assert.equal(get('takeover').disabled,true,`${connection}/${authority}`);
-      assert.notEqual(get('permission').hidden,true);
+      assert.notEqual(get('charge-action').hidden,true);
     }
   }
 });
@@ -252,7 +253,7 @@ test('takeover visibility depends on observations independently of command histo
     for (const authority of ['remote','local']) {
       data['E.control_authority'].state=authority; c.hass=c._hass;
       assert.equal(get('takeover').hidden,authority==='remote',`${status}/${authority}`);
-      assert.notEqual(get('permission').hidden,true);
+      assert.notEqual(get('charge-action').hidden,true);
     }
   }
 });
@@ -354,74 +355,73 @@ test('unconfirmed interim actual stays unknown until zero-current readback',()=>
 });
 
 
-test('SET visibility is backend-approved intent, independent of physical point',()=>{
-  const data=states();
-  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0,requested_phase_count:1,requested_current_a:6});
-  const {card:c,get}=card(data,{},'de');
-  assert.equal(get('grid-set').hidden,true);
-  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
-  data['E.grid_set'].attributes.grid_set_required=true; c.hass=c._hass;
-  assert.equal(get('grid-set').hidden,false);
-  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:6}); c.hass=c._hass;
-  assert.equal(get('grid-set').hidden,false);
-  data['E.grid_set'].attributes.grid_set_required=false; c.hass=c._hass;
-  assert.equal(get('grid-set').hidden,true);
-  assert.match(c.shadowRoot.html, /id="grid-set" type="button" aria-label=/);
+test('one charging action follows backend start, apply, stop in both languages',async()=>{
+  for (const language of ['en','de']) {
+    const data=states();
+    const a=data['E.charge_action'].attributes;
+    Object.assign(a,{charge_action_ready:true,charge_action:'start'});
+    const {card:c,get,calls}=card(data,{},language);
+    assert.doesNotMatch(c.shadowRoot.html,/id="permission"|id="grid-set"/);
+    const labels=language==='de'?['Ladung starten','Ladeparameter übernehmen','Ladung beenden']:['Start charging','Apply charging parameters','Stop charging'];
+    assert.equal(get('charge-action').textContent,labels[0]);
+    await get('charge-action').onclick();
+    Object.assign(a,{charge_release:true,charge_action:'apply'}); c.hass=c._hass;
+    assert.equal(get('charge-action').textContent,labels[1]);
+    await get('charge-action').onclick();
+    assert.equal(get('charge-action').textContent,labels[1]); // Wait for backend approval.
+    a.charge_action='stop'; c.hass=c._hass;
+    assert.equal(get('charge-action').textContent,labels[2]);
+    await get('charge-action').onclick();
+    assert.equal(calls.length,3);
+    for (const call of calls) assert.equal(JSON.stringify(call),JSON.stringify(['button','press',{entity_id:'E.charge_action'}]));
+  }
 });
 
-test('SET remains available offline and Local and is isolated across cards',async()=>{
+test('backend readiness and multiple cards fence unavailable and foreign actions',async()=>{
   const data={...states('A'),...states('B')};
-  for (const entry of ['A','B']) data[`${entry}.grid_set`].attributes.grid_set_required=true;
-  data['A.connected'].state='off';
-  const a=card(data,{entry_id:'A'}), b=card(data,{entry_id:'B'});
-  assert.equal(a.get('grid-set').disabled,false);
-  assert.equal(b.get('grid-set').disabled,false);
-  await a.get('grid-set').onclick(); await b.get('grid-set').onclick();
-  assert.equal(JSON.stringify(a.calls[0]),JSON.stringify(['button','press',{entity_id:'A.grid_set'}]));
-  assert.equal(JSON.stringify(b.calls[0]),JSON.stringify(['button','press',{entity_id:'B.grid_set'}]));
-  await a.card.call('button','press',{entity_id:'B.grid_set'});
-  assert.equal(a.calls.length,1);
+  data['B.charge_action'].attributes.charge_action_ready=true;
+  const a=card(data,{entry_id:'A'}),b=card(data,{entry_id:'B'});
+  assert.equal(a.get('charge-action').disabled,true);
+  await a.get('charge-action').onclick();
+  await a.card.call('button','press',{entity_id:'B.charge_action'});
+  assert.equal(a.calls.length,0);
+  await b.get('charge-action').onclick();
+  assert.equal(b.calls[0][2].entity_id,'B.charge_action');
 });
 
-test('SET suppresses duplicate presses and keeps failed drafts editable',async()=>{
-  const data=states(); data['E.grid_set'].attributes.grid_set_required=true;
+test('charging action suppresses duplicates and preserves failed drafts',async()=>{
+  const data=states(); data['E.charge_action'].attributes.charge_action_ready=true;
   const {card:c,get}=card(data);
-  let reject, calls=0;
-  c._hass.callService=()=>{calls++; return new Promise((resolve,fail)=>{reject=fail;});};
-  const pending=get('grid-set').onclick();
-  assert.equal(get('grid-set').disabled,true);
-  await get('grid-set').onclick();
+  let reject,calls=0;
+  c._hass.callService=()=>{calls++;return new Promise((resolve,fail)=>{reject=fail;});};
+  const pending=get('charge-action').onclick();
+  assert.equal(get('charge-action').disabled,true);
+  await get('charge-action').onclick();
   assert.equal(calls,1);
   reject(new Error('Persistence failed')); await pending;
-  assert.equal(get('grid-set').hidden,false);
-  assert.equal(get('grid-set').disabled,false);
-  assert.equal(get('power').value,'7.2');
   assert.match(get('error').textContent,/Persistence failed/);
-  c._hass.callService=async()=>{};
-  await get('grid-set').onclick();
-  assert.equal(get('grid-set').hidden,false); // Service return alone is no approval observation.
-  data['E.grid_set'].attributes.grid_set_required=false; c.hass=c._hass;
-  assert.equal(get('grid-set').hidden,true);
+  assert.equal(get('power').value,'7.2');
+  assert.equal(get('charge-action').textContent,'Start charging');
 });
 
 test('locale numeric steps and time clearing stage drafts and wait for backend acknowledgement',async()=>{
   const data=states(); data['E.soll_power'].state='1.4';
-  data['E.grid_set'].attributes.grid_set_required=true;
+  data['E.charge_action'].attributes.charge_action_ready=true;
   const {card:c,get,calls}=card(data,{},'de');
   assert.equal(get('power').value,'1,4');
   await c.stepNumber('power',1); await c.stepNumber('power',1);
   assert.equal(get('power').value,'1,6');
   assert.deepEqual(calls.map(call=>call[2].value),[1.5,1.6]);
-  assert.equal(get('grid-set').disabled,true);
-  await get('grid-set').onclick(); assert.equal(calls.length,2);
+  assert.equal(get('charge-action').disabled,true);
+  await get('charge-action').onclick(); assert.equal(calls.length,2);
   data['E.soll_power'].state='1.6'; c.hass=c._hass;
-  assert.equal(get('grid-set').disabled,false);
+  assert.equal(get('charge-action').disabled,false);
   get('grid_duration-clear').onclick();
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(calls[2][0],'text'); assert.equal(calls[2][2].value,'');
-  assert.equal(get('grid-set').disabled,true);
+  assert.equal(get('charge-action').disabled,true);
   data['E.grid_duration'].state=''; c.hass=c._hass;
-  assert.equal(get('grid-set').disabled,false);
+  assert.equal(get('charge-action').disabled,false);
 });
 
 test('power long press still stages repeated numeric edits without pressing SET',async()=>{
@@ -434,14 +434,14 @@ test('power long press still stages repeated numeric edits without pressing SET'
   c.stopHold();
   assert.ok(calls.length>=2);
   assert.ok(calls.every(call=>call[0]==='number' && call[2].entity_id==='E.soll_power'));
-  assert.equal(get('grid-set').hidden,true); // Only a backend change can reveal it.
+  assert.notEqual(get('charge-action').hidden,true); // The unified action is always visible.
   const count=calls.length; await new Promise(resolve=>setTimeout(resolve,175));
   assert.equal(calls.length,count);
 });
 
 test('newer backend draft revisions supersede another card optimistic edit',async()=>{
   const data=states(); data['E.soll_power'].attributes.grid_draft_revision=0;
-  data['E.grid_set'].attributes.grid_set_required=true;
+  data['E.charge_action'].attributes.charge_action_ready=true;
   const a=card(data), b=card(data);
   a.get('power').value='3'; await a.card.editNumber('power');
   assert.equal(a.get('power').value,'3');
@@ -450,7 +450,7 @@ test('newer backend draft revisions supersede another card optimistic edit',asyn
   data['E.soll_power'].state='4'; data['E.soll_power'].attributes.grid_draft_revision=2;
   a.card.hass=a.card._hass; b.card.hass=b.card._hass;
   assert.equal(a.get('power').value,'4'); assert.equal(b.get('power').value,'4');
-  assert.equal(a.get('grid-set').disabled,false);
-  data['E.grid_set'].attributes.grid_approval_error='Disk full'; a.card.hass=a.card._hass;
-  assert.match(a.get('status').textContent,/SET: Disk full/);
+  assert.equal(a.get('charge-action').disabled,false);
+  data['E.charge_action'].attributes.grid_approval_error='Disk full'; a.card.hass=a.card._hass;
+  assert.match(a.get('status').textContent,/Disk full/);
 });

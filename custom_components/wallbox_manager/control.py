@@ -13,7 +13,6 @@ DISPATCH = ContextVar("wbm_control_dispatch", default=None)
 ROLES = {
     "ControlAuthority": "control_authority",
     "ChargingEnabled": "charging_enabled",
-    "AutoWakeUpEnabled": "auto_wakeup_enabled",
 }
 
 
@@ -31,7 +30,6 @@ class Intent:
     value: str
     adapter: object
     generation: tuple
-    authority_revision: int
     status: str = "pending"
     reason: str | None = None
     dispatched_at: datetime | None = None
@@ -42,12 +40,9 @@ class Control:
     def __init__(self, listener):
         self.listener = listener
         self.intents = {}
-        self.authority_revision = 0
 
     def key(self, name):
         state = self.listener.state
-        if name == "AutoWakeUpEnabled":
-            return ("station", (state.binding[0], None, None), "auto_wakeup_enabled")
         return (
             ("station", (state.binding[0], None, None), "control_authority")
             if name == "ControlAuthority"
@@ -62,11 +57,6 @@ class Control:
             return "not_registered"
         if name not in adapter.writable:
             return "unsupported"
-        if (
-            name in ("ChargingEnabled", "AutoWakeUpEnabled")
-            and self.listener.state.value(self.key("ControlAuthority")) != "remote"
-        ):
-            return "no_authority"
         return None
 
     def attributes(self, name):
@@ -106,10 +96,6 @@ class Control:
             and intent.status != "superseded"
             and intent.adapter.live(intent.generation)
             and self.blocked(intent.name) is None
-            and (
-                intent.name == "ControlAuthority"
-                or intent.authority_revision == self.authority_revision
-            )
         )
 
     def observed(self, name):
@@ -135,7 +121,6 @@ class Control:
         allowed = {
             "ControlAuthority": ("OCPP",),
             "ChargingEnabled": ("true", "false"),
-            "AutoWakeUpEnabled": ("true", "false"),
         }
         if value not in allowed.get(name, ()):
             raise ValueError("Unsupported control intent")
@@ -172,24 +157,14 @@ class Control:
             value,
             adapter,
             self.listener.state.generation,
-            self.authority_revision,
         )
         self.intents[name] = intent
         self.publish(name)
-        if name == "ChargingEnabled" and value == "false" and self.listener.grid:
-            await self.listener.grid.permission_requested(False)
         if reason := self.blocked(name):
             self.update(
                 intent, "unsupported" if reason == "unsupported" else "rejected", reason
             )
             return intent.status
-        if (
-            name == "ChargingEnabled"
-            and self.listener.grid
-            and value == "true"
-            and self.blocked(name) is None
-        ):
-            await self.listener.grid.permission_requested(value == "true")
         if not self.valid(intent):
             self.update(intent, "superseded", "authority_or_intent_changed")
             return "superseded"

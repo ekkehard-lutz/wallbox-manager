@@ -78,6 +78,8 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
 
     @property
     def available(self):
+        if self.role == "soll_power":
+            return self.power_bounds() is not None
         if self.role.startswith("allowed_current_"):
             try:
                 return int(self.role[-2]) in capabilities(self.observed)["modes"]
@@ -85,8 +87,25 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
                 return False
         return True
 
+    def power_bounds(self):
+        try:
+            return envelope(self.observed, self.settings).power_bounds()
+        except ValueError, TypeError:
+            return None
+
+    @property
+    def native_min_value(self):
+        if self.role == "soll_power":
+            bounds = self.power_bounds()
+            return bounds[0] if bounds else 0
+        return self._attr_native_min_value
+
     @property
     def native_max_value(self):
+        if self.role == "soll_power":
+            bounds = self.power_bounds()
+            return bounds[1] if bounds else 0
+
         if self.role.startswith("allowed_current_"):
             try:
                 caps = capabilities(self.observed)
@@ -115,12 +134,21 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
                 else None
             )
         if self.role == "soll_power":
-            attrs.update(technical_min_kw=None, technical_max_kw=None)
+            bounds = self.power_bounds()
+            attrs.update(
+                technical_min_kw=bounds[0] if bounds else None,
+                technical_max_kw=bounds[1] if bounds else None,
+            )
         return attrs
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        if self.role.startswith("allowed_current_"):
+        if self.role == "soll_power":
+            for mode in (1, 2, 3):
+                self.async_on_remove(
+                    self.settings.watch(f"allowed_current_{mode}p", self.changed)
+                )
+        if self.role.startswith("allowed_current_") or self.role == "soll_power":
             station, evse, _ = self.observed.binding
             for scope, roles in (
                 (

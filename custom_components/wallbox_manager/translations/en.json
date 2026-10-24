@@ -172,10 +172,7 @@
     },
     "switch": {
       "charging_enabled": {
-        "name": "{scope} Charging enabled"
-      },
-      "auto_wakeup_enabled": {
-        "name": "Automatic vehicle wake-up"
+        "name": "{scope} Wallbox enabled"
       }
     },
     "number": {
@@ -252,9 +249,11 @@
       }
     },
     "button": {
-      "grid_set": {"name": "{scope} Approve NETZ request (SET)"},
       "take_control": {
         "name": "Take control"
+      },
+      "charge_action": {
+        "name": "{scope} Charge release"
       }
     },
     "text": {

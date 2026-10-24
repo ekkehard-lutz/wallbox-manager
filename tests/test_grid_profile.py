@@ -178,6 +178,16 @@ async def start_grid(entry, station, transaction="net-test"):
             evse={"id": 1, "connector_id": 1},
         )
     )
+    try:
+        await entry.runtime_data.grid.action()
+    except ValueError:
+        # Rejection tests inspect the truthful backend outcome below.
+        if entry.runtime_data.grid.status not in (
+            "rejected",
+            "unsupported",
+            "communication_failure",
+        ):
+            raise
     return entry.runtime_data.grid
 
 
@@ -217,7 +227,7 @@ async def test_complete_profile_confirmation_no_telemetry_repeat_and_set(ha):
         for value in (8, 7, 6):
             await settings.set("soll_power", value)
         assert len(station.profiles) == 1
-        await settings.approve_grid()
+        await settings._approve_release()
         await eventually(lambda: len(station.profiles) == 2)
         await eventually(lambda: grid.status == "confirmed")
         assert grid.confirmed.phases == 3 and grid.confirmed.amps == 9
@@ -260,11 +270,11 @@ async def test_lockout_retry_recomputes_and_off_cancels(ha, monkeypatch):
         count = len(station.profiles)
         assert count >= 2
         await entry.runtime_data.settings.set("soll_power", 5)
-        await entry.runtime_data.settings.approve_grid()
-        await entry.runtime_data.server.control.request("ChargingEnabled", "false")
+        await grid.stop_release()
         assert grid.timer is None
         await asyncio.sleep(1.1)
-        assert len(station.profiles) == count
+        assert len(station.profiles) == count + 1
+        assert station.amps == 0 and station.values["ChargingEnabled"] == "true"
 
 
 async def test_generic_rejection_and_accepted_unconfirmed_never_retry(ha):
@@ -278,7 +288,7 @@ async def test_generic_rejection_and_accepted_unconfirmed_never_retry(ha):
         station.profile_result = "Accepted"
         station.apply_profile = False
         await entry.runtime_data.settings.set("soll_power", 8)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await eventually(lambda: grid.status == "accepted_unconfirmed")
         assert grid.confirmed.amps == 0
         assert grid.acknowledged.amps == 12
@@ -314,17 +324,14 @@ async def test_start_delay_explicit_zero_duration_and_expiration_without_vehicle
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
-        control, settings = (
-            entry.runtime_data.server.control,
-            entry.runtime_data.settings,
-        )
-        await control.request("ChargingEnabled", "false")
+        settings = entry.runtime_data.settings
+        await grid.stop_release()
         clock = FakeClock()
         grid.wall_time, grid.call_later = lambda: clock.now, clock.later
         await settings.set("grid_start_delay", "00:02")
         await settings.set("grid_duration", "00:03")
-        await settings.approve_grid()
-        await control.request("ChargingEnabled", "true")
+        await settings._approve_release()
+        await grid.action()
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 0
         )
@@ -339,21 +346,21 @@ async def test_start_delay_explicit_zero_duration_and_expiration_without_vehicle
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 16
         )
         await clock.advance(180)
-        await eventually(lambda: station.values["ChargingEnabled"] == "false")
+        await eventually(lambda: settings.get("charge_release") is False)
         assert settings.values["grid_request"] is None
         await settings.set("grid_duration", "00:00")
-        await settings.approve_grid()
-        await control.request("ChargingEnabled", "true")
+        await settings._approve_release()
+        await grid.action()
         await clock.advance(0)
-        await eventually(lambda: station.values["ChargingEnabled"] == "false")
+        await eventually(lambda: settings.get("charge_release") is False)
         await settings.set("grid_duration", "00:01")
-        await settings.approve_grid()
-        await control.request("ChargingEnabled", "true")
+        await settings._approve_release()
+        await grid.action()
         state = entry.runtime_data.state
         state.session["ended_at"] = datetime.now(UTC).isoformat()
         state.publish(("session", state.binding, "active"))
         await clock.advance(60)
-        await eventually(lambda: station.values["ChargingEnabled"] == "false")
+        await eventually(lambda: settings.get("charge_release") is False)
 
 
 @pytest.mark.parametrize("reason", ["PhaseSwitchLockout", "ReenableLockout"])
@@ -377,7 +384,7 @@ async def test_fallback_retry_deadline_and_generation_fence(ha, reason):
         assert len(station.profiles) == initial_count + 1
         station.profile_result = "Rejected"
         await entry.runtime_data.settings.set("soll_power", 5)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await clock.advance(1)
         await eventually(lambda: grid.retry_at == 60)
         state = entry.runtime_data.state
@@ -387,7 +394,7 @@ async def test_fallback_retry_deadline_and_generation_fence(ha, reason):
         assert grid.timer is None
 
 
-async def test_reconnect_reconciles_same_offer_without_replaying(ha):
+async def test_reconnect_reconciles_positive_offer_to_zero_without_positive_replay(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
@@ -410,9 +417,14 @@ async def test_reconnect_reconciles_same_offer_without_replaying(ha):
                 evse={"id": 1, "connector_id": 1},
             )
         )
-        await eventually(lambda: grid.status == "confirmed")
-        assert not station.profiles
-        assert grid.confirmed.amps == 16
+        await eventually(lambda: grid.status == "confirmed" and grid.task.done())
+        assert entry.runtime_data.settings.get("charge_release") is False
+        assert len(station.profiles) == 1
+        period = station.profiles[0][1]["charging_schedule"][0][
+            "charging_schedule_period"
+        ][0]
+        assert period == {"start_period": 0, "limit": 0}
+        assert grid.confirmed.amps == 0 and station.phases == 3
         assert control.attributes("ControlAuthority")["command_status"] == "confirmed"
 
 
@@ -479,18 +491,13 @@ async def test_grid_down_below_minimum_sends_zero_offer(ha):
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
         await entry.runtime_data.settings.set("power_approximation", "down")
-        await entry.runtime_data.settings.set("soll_power", 0.1)
-        await entry.runtime_data.settings.approve_grid()
+        with pytest.raises(ValueError, match="positive technical range"):
+            await entry.runtime_data.settings.set("soll_power", 0.1)
+        await grid.stop_release()
         await eventually(
             lambda: grid.status == "confirmed" and grid.confirmed.amps == 0
         )
-        schedule = station.profiles[-1][1]["charging_schedule"][0]
-        last = schedule["charging_schedule_period"][0]
-        assert last["limit"] == 0
-        assert "number_phases" not in last
-        count = len(station.profiles)
-        await asyncio.sleep(0)
-        assert len(station.profiles) == count
+        assert station.values["ChargingEnabled"] == "true"
 
 
 class TemporaryPhaseLockoutStation(GridStation):
@@ -527,7 +534,7 @@ async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
         station.locked = True
         await entry.runtime_data.settings.set("power_approximation", direction)
         await entry.runtime_data.settings.set("soll_power", requested)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await eventually(lambda: grid.timer is not None and grid.retry_at == 6)
         assert grid.requested.phases == 1
         assert grid.requested.amps == final_amps
@@ -588,7 +595,7 @@ async def pending_interim(entry, station, direction="down", power=1.5):
     await entry.runtime_data.settings.set("power_approximation", direction)
     await eventually(lambda: grid.task.done())
     await entry.runtime_data.settings.set("soll_power", power)
-    await entry.runtime_data.settings.approve_grid()
+    await entry.runtime_data.settings._approve_release()
     await clock.advance(1)
     await eventually(lambda: grid.task.done())
     return grid, clock
@@ -683,7 +690,7 @@ async def test_cancelled_retry_callback_cannot_escape_new_set_revision(ha):
         settings = entry.runtime_data.settings
         await settings.set("soll_power", 2)
         assert len(station.profiles) == count
-        await settings.approve_grid()
+        await settings._approve_release()
         await eventually(lambda: grid.status == "confirmed")
         count = len(station.profiles)
         stale()
@@ -728,7 +735,7 @@ async def test_failed_read_retains_confirmed_positive_phase_for_new_intent(ha):
         await eventually(lambda: grid.status == "confirmed")
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 4.2)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await eventually(lambda: grid.task.done())
         period = station.profiles[-1][1]["charging_schedule"][0][
             "charging_schedule_period"
@@ -807,7 +814,7 @@ async def test_held_matching_offer_does_not_retransmit_after_failed_read(ha):
         count = len(station.profiles)
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 11.04)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await eventually(lambda: grid.task.done())
         assert grid.status == "confirmed"
         assert len(station.profiles) == count
@@ -844,12 +851,12 @@ async def test_superseded_interim_cannot_dispatch_after_new_intent(ha, monkeypat
         await entry.runtime_data.settings.set("power_approximation", "down")
         await eventually(lambda: grid.task.done())
         await entry.runtime_data.settings.set("soll_power", 1.5)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await asyncio.wait_for(waiting.wait(), 5)
         old_task = grid.task
         station.locked = False
         await entry.runtime_data.settings.set("soll_power", 2)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         release.set()
         await old_task
         await eventually(lambda: grid.status == "confirmed")
@@ -884,12 +891,12 @@ async def test_held_match_cannot_hide_superseded_inflight_opposite_write(ha):
         await eventually(lambda: grid.status == "confirmed")
         station.delay = True
         await entry.runtime_data.settings.set("soll_power", 5)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await asyncio.wait_for(station.waiting.wait(), 5)
         assert station.amps == 7
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 11)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         station.profile_release.set()
         await eventually(lambda: grid.task.done())
         assert station.amps == 16
@@ -904,7 +911,7 @@ async def test_duplicate_launches_coalesce_inflight_reconciliation(ha):
         await eventually(lambda: grid.status == "confirmed")
         count = len(station.profiles)
         await entry.runtime_data.settings.set("soll_power", 5)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         grid.launch()
         task = grid.task
         grid.launch()
@@ -1000,7 +1007,7 @@ async def test_uncertain_actual_reconnect_requires_new_generation_confirmation(h
                 evse={"id": 1, "connector_id": 1},
             )
         )
-        await eventually(lambda: grid.status == "unconfirmed")
+        await eventually(lambda: grid.status == "unconfirmed" and grid.task.done())
         assert grid.attributes()["applied_current_a"] is None
         assert grid.attributes()["applied_phase_count"] is None
         assert not station.profiles and grid.timer is None
@@ -1010,7 +1017,7 @@ async def test_uncertain_actual_reconnect_requires_new_generation_confirmation(h
         )
         assert grid.attributes()["applied_current_a"] == 0
         assert grid.attributes()["applied_phase_count"] == 3
-        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert entry.runtime_data.settings.get("charge_release") is False
         assert not station.profiles and grid.timer is None
 
 
@@ -1040,13 +1047,13 @@ async def test_superseded_response_cannot_restore_stale_actual(
         count = len(station.profiles)
         station.profile_result = old_result
         await entry.runtime_data.settings.set("soll_power", 5)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await asyncio.wait_for(waiting.wait(), 5)
         old_task = grid.task
         station.profile_result = "Accepted"
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 8)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await eventually(lambda: grid.task.done())
         assert grid.status == "accepted_unconfirmed"
         uncertainty = grid.point_uncertain
@@ -1091,12 +1098,12 @@ async def test_overlapping_atomic_rejections_restore_prior_actual(ha, monkeypatc
         count = len(station.profiles)
         station.profile_result = "Rejected"
         await entry.runtime_data.settings.set("soll_power", 5)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await asyncio.wait_for(waiting[0].wait(), 5)
         old_task = grid.task
         station.readback = False
         await entry.runtime_data.settings.set("soll_power", 8)
-        await entry.runtime_data.settings.approve_grid()
+        await entry.runtime_data.settings._approve_release()
         await asyncio.wait_for(waiting[1].wait(), 5)
         release[0].set()
         await old_task

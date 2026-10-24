@@ -59,6 +59,15 @@ class Envelope:
                 raise ValueError("Invalid voltage basis")
             self.ranges[n] = (voltage, self.minimum * voltage, cap * voltage, cap)
 
+    def power_bounds(self):
+        """Positive technical range in kW, using the solver's exact envelopes."""
+        if not self.ranges:
+            return None
+        return (
+            float(min(r[1] for r in self.ranges.values()) / 1000),
+            float(max(r[2] for r in self.ranges.values()) / 1000),
+        )
+
     def resolve(self, watts, direction="nearest", ongoing=None):
         watts = number(watts)
         if watts < 0 or direction not in ("down", "nearest", "up"):
@@ -135,7 +144,7 @@ def capabilities(state):
     )
 
 
-def envelope(state, settings):
+def voltage_basis(state):
     # One consistent basis: all valid observed phases, otherwise all nominal 230 V.
     station, evse, _ = state.binding
     voltages = [
@@ -144,8 +153,12 @@ def envelope(state, settings):
     ]
     if any(v is None or not 100 <= number(v) <= 300 for v in voltages):
         voltages = [230, 230, 230]
+    return voltages
+
+
+def envelope(state, settings):
     return Envelope(
         **capabilities(state),
         caps={n: settings.get(f"allowed_current_{n}p") for n in (1, 2, 3)},
-        voltages=voltages,
+        voltages=voltage_basis(state),
     )

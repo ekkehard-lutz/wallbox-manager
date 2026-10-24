@@ -1,3 +1,7 @@
+**Implemented feature-branch supersession (24 October 2026):** [charge-release.md](charge-release.md) and [implementation report](../coordinated-control-redesign.md) govern manager release, unified NETZ actions, authority-independent hardware enable, and removal of WBM automatic wake-up control. Conflicting older clauses below are historical. PV regulation algorithms remain deferred.
+
+**Supersession (24 October 2026):** [WBM-RELEASE-01–14](charge-release.md) define separate station hardware enable and internal WBM Ladefreigabe. ChargingEnabled is to become authority-independent; only current/phase requests require Remote authority. Remove WBM AutoWakeUpEnabled control in the coordinated implementation. The existing foundation below documents the earlier implementation, not the updated target.
+
 # Active OCPP control foundation
 
 Status: implementation scope explicitly requested on 21 October 2026. Successor
