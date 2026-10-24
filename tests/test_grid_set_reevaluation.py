@@ -105,8 +105,12 @@ async def test_capabilities_can_make_existing_draft_equivalent(ha, source):
             )
         if source in ("minimum", "phase_modes"):
             await eventually(lambda: grid.task.done())
-            # The technical minimum rose above this legacy draft. Never approve
-            # an editor value outside the current positive technical interval.
+            await settings.initialize_power()
+            await settings.approve_equivalent_grid()
+            # The replacement is valid, but automatic initialization must not
+            # turn it into an approved user edit, even at an equivalent point.
+            assert settings.get("soll_power") == (1.6 if source == "minimum" else 4.1)
+            assert settings.values["grid_power_initialized"] is True
             assert settings.approved("soll_power") == 1.4
             assert settings.approval_attributes()["grid_set_required"]
         else:
