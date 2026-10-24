@@ -105,3 +105,8 @@ recovery correction remain unchanged; measurement voltage does not affect readin
 - Verify Local/Remote hardware enable in both configurations, station hardware bit Actual and notifications; verify Manager OFF while Remote uses 0 A, not bit 14; profile switching while positive, pending changes during running, 2-click stop behavior, no eligible modes, positive-min/max range, DOWN-to-zero, HA persistence, multiple cards, restart/reconnect and late ACK fencing.
 - No new OCPP component/variable for manager release, no WBM-owned physical CP logic, no automatic authority takeover.
 - The feature branches implement this contract; this does not claim deployment or integration into `develop`.
+
+
+## Later approved NETZ timing amendment (24 October 2026)
+
+[WBM-TIME-01–24](operational-display-and-timing.md) supersede only **next-start-only time parameter** clauses in WBM-RELEASE-13, WBM-NETZ-ACTION-04–05 and earlier NETZ timing provisions: confirmed start delay and duration run on absolute business deadlines regardless of connected car; approved edits take effect in the *ongoing* schedule; unapproved timing edits have a 15-second post-edit Apply window while release ON. Expiry during editing changes the action to Start and preserves edits for a new run. All electrical authority/hardware protection and the single-button contract remain unchanged. Specification only.
