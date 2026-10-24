@@ -1,3 +1,5 @@
+**Narrow approval (24 October 2026):** [WBM-PV-RELEASE-01–07](charge-release.md) introduce a separate operator-controlled manager `charge_release` gate for the future PV profiles: manual Start/Stop, a computed 0 A while release is true is not an operator stop, and each profile change resets release to false. These requirements supersede only conflicting charging-permission/start-stop UI wording below. The broader PV V3 regulator and economics remain DRAFT pending separate approval.
+
 # Wallbox Manager – PV Regulation: Consolidated Requirements Baseline V3
 
 **Status:** DRAFT for overall subject-matter approval; **no new implementation instruction without review**

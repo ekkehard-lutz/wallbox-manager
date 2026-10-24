@@ -1,3 +1,5 @@
+**24 October 2026 clarification:** Stationary also owns *configuration* of automatic vehicle wake-up (local startup INI, no WBM OCPP setting). WBM manages its own independent `charge_release` user intent. Hardware `ChargingEnabled` is authority-independent; `ControlAuthority` governs offered current/phase. See [current target](charge-release.md); this clarification supersedes the older AutoWakeUpEnabled exception in WBM-ARCH-02.
+
 # Architectural responsibility and last-value-held observations [APPROVED]
 
 **Decision:** Explicit user approval, 18 October 2026, “Architectural

@@ -1,3 +1,5 @@
+**Latest approved amendment (24 October 2026):** [WBM-NETZ-ACTION-01–13 and WBM-RELEASE-01–14](charge-release.md) supersede dedicated NETZ SET and hardware ChargingEnabled-based operator start/stop. NETZ uses the unified card button (Start charging / Apply charging parameters / Stop charging), central manager-owned boolean charge release, and a positive-only dynamically calculated power-selector interval. The earlier WBM-GRID-22–30 draft/approval semantics remain a historical baseline only where not explicitly superseded. Scheduling end means release OFF plus 0 A, not hardware disable. Documentation only.
+
 # NETZ / Grid fixed operating point — successor requirements
 
 **Decision:** 23 October 2026. **Status:** APPROVED target for the next NETZ implementation; **documentation only at this stage**. No code change, merge, release, or deployment is authorized here. IDs: **WBM-GRID-01–16**.

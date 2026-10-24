@@ -1,3 +1,5 @@
+**New approved target (24 October 2026):** [Manager Ladefreigabe and unified NETZ/PV card action](charge-release.md). This supersedes the conflicting automatic wake-up, hardware permission, SET and profile-action rules below. It is documentation only; no UI or controller code has been changed.
+
 # Wallbox Manager – Specifications
 
 This directory contains WBM architecture, passive milestone requirements and the

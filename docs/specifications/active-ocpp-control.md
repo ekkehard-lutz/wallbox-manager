@@ -1,3 +1,5 @@
+**Supersession (24 October 2026):** [WBM-RELEASE-01–14](charge-release.md) define separate station hardware enable and internal WBM Ladefreigabe. ChargingEnabled is to become authority-independent; only current/phase requests require Remote authority. Remove WBM AutoWakeUpEnabled control in the coordinated implementation. The existing foundation below documents the earlier implementation, not the updated target.
+
 # Active OCPP control foundation
 
 Status: implementation scope explicitly requested on 21 October 2026. Successor
