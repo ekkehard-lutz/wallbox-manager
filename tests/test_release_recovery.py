@@ -42,8 +42,12 @@ async def test_release_off_reconciles_recovered_offer_once(ha, recovery, offered
     entry = await ha.install()
     if recovery != "takeover":
         async with peer(entry, station_type=GridStation) as station:
-            await start_grid(entry, station)
+            grid = await start_grid(entry, station)
             assert station.amps == 16
+            if recovery == "reconnect":
+                # Reconnect preserves an active business release; this case
+                # explicitly exercises release-OFF retained-offer recovery.
+                await grid.stop_release()
             if recovery == "reload":
                 assert await async_unload_entry(ha, entry)
         if recovery == "reload":

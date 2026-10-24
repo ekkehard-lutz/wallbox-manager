@@ -332,6 +332,27 @@
           "name": "Runtime incarnation"
         }
       }
+    },
+    "edit_timing": {
+      "name": "Edit NETZ timing",
+      "description": "Coordinate both timing fields using their current timing revision and runtime incarnation. Begin holds drafts; end starts the 15-second window; update changes only the timing draft.",
+      "fields": {
+        "action": {
+          "name": "Editing action"
+        },
+        "owner": {
+          "name": "Editor identity"
+        },
+        "revision": {
+          "name": "Expected timing revision"
+        },
+        "incarnation": {
+          "name": "Runtime incarnation"
+        },
+        "value": {
+          "name": "New draft time"
+        }
+      }
     }
   }
 }

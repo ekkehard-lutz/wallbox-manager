@@ -72,7 +72,25 @@ class Control:
 
     def publish(self, name):
         # Only control entities subscribe to these command diagnostics.
-        self.listener.state.publish(("command", self.key(name)[1], ROLES[name]))
+        state = self.listener.state
+        intent = self.intents.get(name)
+        if intent and (
+            intent.status
+            in ("rejected", "unsupported", "timeout", "communication_failure")
+            or intent.reason in ("readback_timeout", "readback_communication_failure")
+        ):
+            state.messages.set(
+                "control:" + name,
+                source="control",
+                severity="error",
+                code="control_failed",
+                detail=f"{name}: {intent.reason or intent.status}",
+                generation=intent.generation,
+                token=id(intent),
+            )
+        else:
+            state.messages.clear("control:" + name)
+        state.publish(("command", self.key(name)[1], ROLES[name]))
 
     def update(self, intent, status, reason=None):
         if self.intents.get(intent.name) is intent and (

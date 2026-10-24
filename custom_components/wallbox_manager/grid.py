@@ -31,10 +31,13 @@ class Grid:
         self.epoch = 0
         self.closed = False
         self.task = self.timer = self.schedule_timer = None
+        self.deadline_tasks = set()
+        self.attempted_edit_revision = None
         self.task_epoch = None
         self.action_task = None
         self.allow_issue = False
-        self.known_transaction = self.start_transaction = None
+        self.known_transaction = None
+        self.last_authority = None
         self.signature = None
         self.status, self.reason = "waiting", None
         self.requested = self.confirmed = self.acknowledged = None
@@ -42,11 +45,15 @@ class Grid:
         self.point_uncertain = False
         self.retry_at = self.retry_deadline = None
         self.wall_time = time.time
+        settings.wall_time = lambda: self.wall_time()
         self.call_later = lambda delay, callback: asyncio.get_running_loop().call_later(
             delay, callback
         )
         self._published = None
+        self._publishing = False
+        self.outcome_epoch = None
         self.removers = []
+        self.removers.append(self.state.watch(self.state.messages.key, self.publish))
         station, evse, _ = self.state.binding
         self.station_scope = (station, None, None)
         for family, scope, roles in (
@@ -91,6 +98,9 @@ class Grid:
             )
 
         self.removers.append(settings.watch("charge_release", self.release_changed))
+        self.removers.append(
+            settings.watch("grid_timing_edit", self.edit_window_changed)
+        )
         settings.grid_equivalent = self.equivalent
         settings.grid_point = self.draft_point
         self.removers.append(
@@ -119,6 +129,10 @@ class Grid:
         self.signature = None
         self.changed()
 
+    def edit_window_changed(self):
+        self.schedule()
+        self.publish()
+
     def action_state(self):
         released = self.settings.get("charge_release") is True
         pending = self.settings.approval_attributes()["grid_set_required"]
@@ -132,9 +146,9 @@ class Grid:
         )
         reason = None
         if action != "stop":
-            if not self.eligible():
+            if not grid and not self.eligible():
                 reason = "control_unavailable"
-            elif (
+            elif not grid and (
                 self.state.value(self.listener.control.key("ChargingEnabled"))
                 is not True
             ):
@@ -144,8 +158,16 @@ class Grid:
                     self.settings.validate(
                         "soll_power", self.settings.get("soll_power")
                     )
-                    point = self.draft_point()
-                    if action == "start" and point.amps <= 0:
+                    try:
+                        point = self.draft_point()
+                    except ValueError, TypeError, OverflowError:
+                        # Unknown electrical context does not prevent a valid
+                        # business countdown; execution remains independently gated.
+                        point = None
+                    if action == "start" and (
+                        float(self.settings.get("soll_power")) <= 0
+                        or (point is not None and point.amps <= 0)
+                    ):
                         reason = "no_positive_current"
                 except ValueError, TypeError, OverflowError:
                     reason = "no_positive_point"
@@ -174,6 +196,9 @@ class Grid:
         return await asyncio.shield(self.action_task)
 
     async def _action(self):
+        if self.settings.get("charge_release") and self.phase()[0] == "expired":
+            await self.stop_release()
+            return
         state = self.action_state()
         if not state["charge_action_ready"]:
             raise ValueError(state["charge_action_blocked_reason"])
@@ -181,28 +206,46 @@ class Grid:
             await self.stop_release()
         elif self.settings.get("charging_profile") == "NETZ":
             retry_deadline = self.retry_deadline
+            previous_request = self.settings.values.get("grid_request")
             self.invalidate()
-            generation = self.state.generation
+            # Persistence may be delayed; the old business deadline still wins.
+            self.schedule()
             epochs = []
 
             def current():
                 # Capture the epoch after acquiring the settings lock. A preceding
                 # stop may still be completing its durable write when Start arrives.
                 if not epochs:
+                    if state["charge_action"] == "apply" and (
+                        not self.settings.get("charge_release")
+                        or self.settings.values.get("grid_request") != previous_request
+                        or self.phase()[0] == "expired"
+                    ):
+                        return False
                     epochs.append(self.epoch)
                 return (
                     epochs[0] == self.epoch
-                    and generation == self.state.generation
+                    and not self.closed
                     and self.settings.get("charging_profile") == "NETZ"
-                    and self.eligible()
                 )
 
-            equivalent, timing_only = await self.settings._approve_release(
-                start=state["charge_action"] == "start",
-                notify=False,
-                now=self.wall_time(),
-                current=current,
-            )
+            try:
+                equivalent, timing_only = await self.settings._approve_release(
+                    start=state["charge_action"] == "start",
+                    notify=False,
+                    now=self.wall_time,
+                    current=current,
+                )
+            except ValueError, TypeError, OSError:
+                if not self.settings.get("charge_release"):
+                    self.release_changed()
+                elif self.phase()[0] == "expired":
+                    await self.stop_release()
+                else:
+                    self.schedule()
+                    if retry_deadline is not None and self.eligible():
+                        self.retry(max(0, retry_deadline - self.wall_time()))
+                raise
             if state["charge_action"] == "start":
                 self.edited("charge_release")
             else:
@@ -223,9 +266,15 @@ class Grid:
             return
         self.settings.values["charge_release"] = False
         self.settings.values["grid_request"] = None
+        self.settings.values["grid_timing_edit"] = None
         self.release_changed()
         await self.settings.save_runtime(
-            {"charge_release": False, "grid_request": None}
+            {
+                "charge_release": False,
+                "grid_request": None,
+                "grid_timing_edit": None,
+                "grid_timing_revision": self.settings.values["grid_timing_revision"],
+            }
         )
         self.publish()
 
@@ -265,6 +314,14 @@ class Grid:
             return False
 
     def committed(self, equivalent, *, timing_only=False):
+        if timing_only:
+            previous = (self._published or {}).get("grid_schedule") or {}
+            current = self.settings.values.get("grid_request") or {}
+            if previous.get("start_at") != current.get("start_at") or (
+                self._published or {}
+            ).get("charge_release") != self.settings.get("charge_release"):
+                self.edited("grid_timing")
+                return
         if (
             not equivalent
             or (self.task and not self.task.done())
@@ -297,6 +354,7 @@ class Grid:
             "profile_control_ready": self.eligible(),
             "command_status": self.status,
             "command_reason": self.reason,
+            "active_message": self.state.messages.latest,
             "requested_current_a": self.requested.amps if self.requested else None,
             "requested_phase_count": self.requested.phases if self.requested else None,
             "acknowledged_current_a": self.acknowledged.amps
@@ -313,6 +371,7 @@ class Grid:
                 self.listener.control.key("ControlAuthority")
             ),
             "grid_request_armed": bool(self.settings.values.get("grid_request")),
+            "grid_schedule": self.settings.values.get("grid_request"),
             "grid_timing_state": self.phase()[0],
             "retry_in_seconds": self.retry_at,
         }
@@ -324,17 +383,91 @@ class Grid:
             self.launch(confirm_only=True)
 
     def publish(self):
-        attributes = self.attributes()
-        if attributes == self._published:
+        if self._publishing:
             return
-        self._published = attributes
-        for role in (
-            "soll_power",
-            "charging_profile",
-            "power_approximation",
-            "charge_action",
+        self._publishing = True
+        try:
+            self.sync_messages()
+            attributes = self.attributes()
+            if attributes == self._published:
+                return
+            self._published = attributes
+            for role in (
+                "soll_power",
+                "charging_profile",
+                "power_approximation",
+                "charge_action",
+                "grid_start_delay",
+                "grid_duration",
+            ):
+                self.state.publish(("grid", self.state.binding, role))
+        finally:
+            self._publishing = False
+
+    def sync_messages(self):
+        messages = self.state.messages
+        generation = self.state.generation
+        known = self.listener._initialization in ("ready", "missing")
+        problem = None
+        if known and self.state.current(self.state.registered_generation):
+            try:
+                if envelope(self.state, self.settings).power_bounds() is None:
+                    problem = "All supported phase modes are disabled"
+            except (ValueError, TypeError, OverflowError) as exc:
+                problem = str(exc)
+        if problem:
+            messages.set(
+                "grid:capabilities",
+                source="capabilities",
+                severity="warning",
+                code="capabilities",
+                detail=problem,
+                generation=generation,
+            )
+        else:
+            messages.clear("grid:capabilities")
+        current = self.outcome_epoch == self.epoch
+        lockout = current and self.retry_deadline is not None
+        failure = current and (
+            self.status in ("rejected", "communication_failure", "unsupported")
+            or self.reason in ("readback_failure", "interim_readback_failure")
+        )
+        if lockout or failure:
+            code = (
+                (
+                    "reenable_lockout"
+                    if self.reason == "ReenableLockout"
+                    else "phase_lockout"
+                )
+                if lockout
+                else "grid_failed"
+            )
+            messages.set(
+                "grid:outcome",
+                source="grid",
+                severity="warning" if lockout else "error",
+                code=code,
+                detail=self.reason,
+                generation=generation,
+                token=self.epoch,
+            )
+        else:
+            messages.clear("grid:outcome")
+        if (
+            current
+            and self.status == "confirmed"
+            and self.reason == "power_above_mode_maximum"
         ):
-            self.state.publish(("grid", self.state.binding, role))
+            messages.set(
+                "grid:limitation",
+                source="grid",
+                severity="warning",
+                code="power_limited",
+                generation=generation,
+                token=self.epoch,
+            )
+        else:
+            messages.clear("grid:limitation")
 
     def transaction(self):
         s = self.state.session
@@ -386,6 +519,9 @@ class Grid:
 
     def invalidate(self):
         self.epoch += 1
+        self.outcome_epoch = None
+        self.state.messages.clear("grid:outcome")
+        self.state.messages.clear("grid:limitation")
         self.cancel_timers()
 
     async def persist_release_loss(self):
@@ -396,6 +532,7 @@ class Grid:
                         **self.settings.values,
                         "charge_release": False,
                         "grid_request": None,
+                        "grid_timing_edit": None,
                     }
                 )
 
@@ -408,21 +545,22 @@ class Grid:
             adapter.spawn(self.settings.initialize_power())
         if self.signature and self.signature[0] != self.state.generation:
             self.allow_issue = False
-        if self.settings.get("charge_release") and (
-            (self.signature and self.signature[0] != self.state.generation)
-            or not self.state.connected
-            or self.state.value(self.listener.control.key("ControlAuthority"))
-            != "remote"
-        ):
+            self.known_transaction = None
+        authority = self.state.value(self.listener.control.key("ControlAuthority"))
+        authority_lost = self.last_authority == "remote" and authority == "local"
+        if authority in ("remote", "local"):
+            self.last_authority = authority
+        if self.settings.get("charge_release") and authority_lost:
             self.settings.values["charge_release"] = False
-            adapter = self.listener.adapter
-            if adapter and not self.closed:
-                adapter.spawn(self.persist_release_loss())
+            self.settings.values["grid_request"] = None
+            self.settings.values["grid_timing_edit"] = None
+            if not self.closed:
+                self.settings.hass.async_create_task(self.persist_release_loss())
             signature = self.fingerprint()
         transaction = self.transaction()
         if transaction and transaction != self.known_transaction:
             self.allow_issue = bool(self.settings.get("charge_release"))
-            self.known_transaction = self.start_transaction = transaction
+            self.known_transaction = transaction
         self.signature = signature
         self.invalidate()
         self.schedule()
@@ -480,13 +618,23 @@ class Grid:
         self.retry_at = self.retry_deadline = None
         adapter = self.listener.adapter
         epoch = self.task_epoch = self.epoch
+        business_phase = self.phase()[0]
         self.task = adapter.spawn(
             self.reconcile(epoch, adapter, confirm_only=confirm_only)
         )
 
         def settled(task):
             if not task.cancelled() and task.exception() is None:
-                self.reevaluate_pending()
+                # A planned start can fall while a read/zero write is in flight.
+                # The deadline cannot coalesce into that older waiting decision.
+                if (
+                    self.task is task
+                    and self.valid(epoch, adapter, self.transaction())
+                    and self.phase()[0] != business_phase
+                ):
+                    self.launch()
+                else:
+                    self.reevaluate_pending()
 
         self.task.add_done_callback(settled)
 
@@ -530,45 +678,74 @@ class Grid:
 
     def schedule(self):
         """Business deadlines also expire without a connected vehicle/transaction."""
+        if self.schedule_timer:
+            self.schedule_timer.cancel()
+            self.schedule_timer = None
         request = self.settings.values.get("grid_request")
         if (
             not request
             or not self.settings.get("charge_release")
             or self.closed
-            or not self.state.current(self.state.registered_generation)
             or self.settings.get("charging_profile") != "NETZ"
-            or self.state.value(self.listener.control.key("ControlAuthority"))
-            != "remote"
         ):
             return
-        phase, deadline = self.phase()
+        phase, business_deadline = self.phase()
         if phase == "expired":
-            deadline = self.wall_time()
-        if deadline is None:
+            business_deadline = self.wall_time()
+        edit = self.settings.values.get("grid_timing_edit")
+        edit_deadline = (
+            edit["expires_at"]
+            if edit
+            and not edit["active"]
+            and edit["schedule_revision"] == request["revision"]
+            and edit["revision"] != self.attempted_edit_revision
+            else None
+        )
+        deadlines = [d for d in (business_deadline, edit_deadline) if d is not None]
+        if not deadlines:
             return
-        epoch = self.epoch
-        adapter = self.listener.adapter
+        deadline = min(deadlines)
 
         async def elapsed():
-            if (
-                epoch != self.epoch
-                or not adapter
-                or not adapter.live(adapter.generation)
-            ):
+            if self.closed or self.schedule_timer is not handle:
+                return
+            self.schedule_timer = None
+            if self.wall_time() < deadline:
+                self.schedule()
                 return
             if self.phase()[0] == "expired":
                 await self.stop_release()
             else:
-                self.launch()
+                if edit_deadline is not None and edit_deadline <= self.wall_time():
+                    # Keep the business end armed while rollback awaits storage.
+                    # This revision is attempted once, without an I/O retry loop.
+                    self.attempted_edit_revision = edit["revision"]
+                    self.schedule()
+                    try:
+                        await self.settings.expire_timing_edit(
+                            edit["revision"], edit["schedule_revision"]
+                        )
+                    except OSError as exc:
+                        self.settings.approval_error = str(exc)
+                        self.settings.notify_grid()
+                if (
+                    business_deadline is not None
+                    and business_deadline <= self.wall_time()
+                ):
+                    self.launch()
                 self.schedule()
             self.publish()
 
-        self.schedule_timer = self.call_later(
-            max(0, deadline - self.wall_time()), lambda: adapter.spawn(elapsed())
-        )
+        def fire():
+            task = self.settings.hass.async_create_task(
+                elapsed(), "NETZ business deadline"
+            )
+            self.deadline_tasks.add(task)
+            task.add_done_callback(self.deadline_tasks.discard)
 
-    async def arm_timing(self):
-        await self.settings.arm_grid(self.wall_time())
+        handle = self.schedule_timer = self.call_later(
+            max(0, deadline - self.wall_time()), fire
+        )
 
     async def read_point(self, adapter, epoch, transaction):
         response = await adapter.request(
@@ -648,6 +825,7 @@ class Grid:
                     point.amps > 0
                     and (
                         not self.settings.get("charge_release")
+                        or self.phase()[0] != "active"
                         or self.state.value(
                             self.listener.control.key("ChargingEnabled")
                         )
@@ -683,14 +861,6 @@ class Grid:
         try:
             if not self.valid(epoch, adapter, transaction):
                 return
-            if self.start_transaction == transaction and self.settings.get(
-                "charge_release"
-            ):
-                await self.arm_timing()
-                if not self.valid(epoch, adapter, transaction):
-                    return
-                self.start_transaction = None
-                self.schedule()
             phase, _ = self.phase()
             if phase == "expired" and self.settings.get("charge_release"):
                 await self.stop_release()
@@ -835,6 +1005,7 @@ class Grid:
                             )
                             self.allow_issue = True
                             self.retry(delay)
+                    self.outcome_epoch = epoch
                     self.publish()
                     return
                 self.acknowledged = desired
@@ -860,11 +1031,13 @@ class Grid:
                     self.status, self.reason = "confirmed", limitation
                 else:
                     self.reason = "readback_unknown_or_mismatch"
+            self.outcome_epoch = epoch
             self.publish()
         except (ValueError, TypeError, OverflowError) as exc:
             if not self.valid(epoch, adapter, transaction):
                 return
             self.status, self.reason = "unsupported", str(exc)
+            self.outcome_epoch = epoch
             self.publish()
         except TimeoutError, OSError, OCPPError, ConnectionClosed:
             if not self.valid(epoch, adapter, transaction):
@@ -874,6 +1047,7 @@ class Grid:
                 if self.status == "accepted_unconfirmed"
                 else ("communication_failure", "transport_failure")
             )
+            self.outcome_epoch = epoch
             self.publish()
         except Refused:
             pass
@@ -884,5 +1058,9 @@ class Grid:
         if self.action_task and not self.action_task.done():
             self.action_task.cancel()
             await asyncio.gather(self.action_task, return_exceptions=True)
+        for task in self.deadline_tasks:
+            task.cancel()
+        if self.deadline_tasks:
+            await asyncio.gather(*self.deadline_tasks, return_exceptions=True)
         for remove in self.removers:
             remove()

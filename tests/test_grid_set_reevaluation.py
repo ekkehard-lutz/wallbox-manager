@@ -257,7 +257,9 @@ async def test_reevaluation_queued_behind_set_keeps_atomic_timing_approval(
             assert settings.approved("soll_power") == (1.4 if fail else 1.5)
             assert settings.approved("grid_duration") == (None if fail else 300)
             assert settings.approval_attributes()["grid_set_required"] is fail
-        assert settings.values.get("grid_request") is None
+        request = settings.values["grid_request"]
+        assert request["epoch_at"] == request["start_at"] == 1000
+        assert request["end_at"] == (None if fail else 1300)
 
 
 async def test_restart_retains_draft_until_current_generation_point_is_confirmed(ha):

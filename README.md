@@ -29,12 +29,19 @@ connection/boot generation change. Silent, unchanged values do not expire.
 
 Profile, Number, Select and Text entities persist per-connector configuration.
 The manager-owned **charge release / Ladefreigabe** starts OFF and resets on every
-actual profile change, reload, reconnect or authority loss. The card has one charging
+actual profile change, reload or confirmed Remote-to-Local authority loss.
+An active NETZ business schedule continues across transport disconnection; its
+deadlines remain enforced, and reload never restores its previous release. The card has one charging
 action: **Start charging**, **Apply charging parameters** for meaningful pending NETZ
 drafts, or **Stop charging**. Applying consumes the first press; stopping takes the
-next press. Start atomically approves power/timing and creates the one-shot schedule.
+next press. Start atomically approves power/timing and creates an absolute business
+schedule even without an EV. Delay and duration run from the planned start,
+independently of actual power or connection. Apply changes timing on the current
+schedule: duration retains planned start; a changed delay establishes a new epoch
+and pauses authorized charging to 0 A. Duration expiry turns manager release OFF.
 Stop requests **0 A** where Remote authority and a transaction permit it. After
-reload, reconnect or explicit takeover, release OFF also reconciles a confirmed
+reload, a reconnect while release is OFF, or explicit takeover, release OFF also
+reconciles a confirmed
 retained positive offer to 0 A; confirmed zero is not resent. A positive
 slider value resolving to zero cannot start. The selector's positive technical
 range is calculated from current station diagnostics and enabled phase caps.
@@ -67,6 +74,15 @@ type: custom:wallbox-manager-card
 # Optional with one WBM entry; required with multiple entries:
 entry_id: YOUR_EXISTING_CONFIG_ENTRY_ID
 ```
+
+The two time fields show live countdowns and switch to drafts as one editing area.
+After editing ends, unapplied time changes expire after 15 seconds while the old
+schedule is active. An independent power draft survives. If duration ends first,
+release goes OFF and the entered time drafts remain for a new explicit Start.
+The Messages field shows the newest currently active warning/error; resolved
+conditions disappear, and ordinary waiting or command history stays in diagnostics.
+Session energy uses one locale decimal, actual power two; measurement precision
+and energy accounting are unchanged. See the [implementation and migration report](docs/live-netz-timing-and-status.md).
 
 The resource remains `/wallbox_manager/wallbox-manager-card.js`. A previously
 configured single-instance card can continue with only its existing type. With

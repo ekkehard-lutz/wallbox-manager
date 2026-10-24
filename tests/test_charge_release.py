@@ -105,7 +105,9 @@ async def test_local_loss_blocks_release_without_unauthorized_zero_or_takeover(h
         assert entry.runtime_data.settings.get("charge_release") is False
         await grid.stop_release()
         assert len(station.profiles) == count
-        assert grid.action_state()["charge_action_ready"] is False
+        assert (
+            grid.action_state()["charge_action_ready"] is True
+        )  # Business Start remains available.
         assert station.amps > 0  # Never claim local charging stopped.
         assert [w["variable"]["name"] for w in station.writes] == ["ControlAuthority"]
 
@@ -146,7 +148,9 @@ async def test_start_delay_approval_is_atomic_and_apply_preserves_deadlines(ha):
         await settings.set("grid_duration", "00:02")
         await grid.action()
         request = dict(settings.values["grid_request"])
-        assert station.amps == 0 and request == {"start_at": 1060, "end_at": 1180}
+        assert station.amps == 0
+        assert request["epoch_at"] == 1000
+        assert request["start_at"] == 1060 and request["end_at"] == 1180
         stored = (await settings.store.async_load())[settings.key]
         assert stored["charge_release"] is True and stored["grid_request"] == request
         await settings.set("soll_power", 5)
