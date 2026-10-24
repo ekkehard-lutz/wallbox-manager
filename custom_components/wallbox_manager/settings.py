@@ -158,6 +158,10 @@ class Settings:
         }
 
     def equivalent_grid_draft(self, values):
+        # Capability initialization is not a user edit, even if its new minimum
+        # happens to resolve to the recalculated approved operating point.
+        if values.get("grid_power_initialized"):
+            return False
         if (values["power_kw"], values.get("power_phases")) == (
             self.approved("soll_power"),
             self.approved("power_phases"),
@@ -188,6 +192,7 @@ class Settings:
 
     def approve_values(self, updated):
         previous = self.values["grid_approved"]
+        updated["grid_power_initialized"] = False
         updated["grid_approved"] = {
             **self.grid_draft(updated),
             "revision": previous["revision"] + 1,
@@ -232,6 +237,9 @@ class Settings:
                             "grid_request": None,
                             "grid_approved": previous["grid_approved"],
                             "grid_next_timing": previous["grid_next_timing"],
+                            "grid_power_initialized": previous.get(
+                                "grid_power_initialized", False
+                            ),
                         }
                     )
                     raise ValueError("Superseded charge action")
@@ -371,12 +379,17 @@ class Settings:
             else role
         )
         if self.values.get(field) == value and (
-            role != "soll_power" or self.values.get("power_phases") == selected
+            role != "soll_power"
+            or (
+                self.values.get("power_phases") == selected
+                and not self.values.get("grid_power_initialized")
+            )
         ):
             return
         updated = {**self.values, field: value}
         if role == "soll_power":
             updated["power_phases"] = selected
+            updated["grid_power_initialized"] = False
         if role in ("soll_power", *TIMES):
             updated["grid_draft_revision"] = self.values["grid_draft_revision"] + 1
         if role == "charging_profile":
@@ -484,6 +497,7 @@ class Settings:
                     **self.values,
                     **point.selection(),
                     "grid_draft_revision": self.values["grid_draft_revision"] + 1,
+                    "grid_power_initialized": True,
                 }
                 await self._save(updated)
                 self.approval_error = None
