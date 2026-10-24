@@ -150,6 +150,8 @@ async def test_restart_pauses_retained_offer_and_restores_reserve_after_session_
         await transaction(station, "Ended", charging="Idle", power=0, sequence=3)
         reserve = entry.runtime_data.battery.reserve
         await eventually(lambda: reserve.record is None)
+        # The record clears before the awaited journal save finishes.
+        await ha.async_block_till_done()
         assert writes == [40, 20]
         assert await reserve.store.async_load() is None
 
