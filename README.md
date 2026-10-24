@@ -4,9 +4,9 @@ Home Assistant integration domain: `wallbox_manager`.
 
 This prerelease extends the passive rebuild for OCPP **2.1**, targeting the
 supported wallbox-stationary interface. The integration version is
-**0.4.0-beta.11**; see the [beta.11 release notes](docs/v0.4/release-notes-beta.11.md)
-for zero-current approximation, lockout handling, explicit SET approval and
-the required matching Stationary NETZ implementation. The old Stationary
+**0.4.0-beta.12**; see the [beta.12 release notes](docs/v0.4/release-notes-beta.12.md)
+for local Stationary wake-up, independent manager release, unified NETZ actions
+and release-OFF recovery. Install the matching Stationary implementation. The old Stationary
 capability inventory cannot satisfy the new NETZ execution requirements.
 Publication alone deploys neither component.
 The [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) retain the historical
@@ -85,8 +85,8 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-For separately authorized testing, select **v0.4.0-beta.11** through the HACS
-prerelease versions and verify integration version **0.4.0-beta.11** after the
+For separately authorized testing, select **v0.4.0-beta.12** through the HACS
+prerelease versions and verify integration version **0.4.0-beta.12** after the
 operator performs installation and the Home Assistant restart. Publication does
 not include installation or physical validation. NETZ now executes an event-driven fixed offered point under confirmed Remote
 authority and charging permission. PV profiles expose only the shared Start/Stop release foundation; regulation remains deferred. See the
