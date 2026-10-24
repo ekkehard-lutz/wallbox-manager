@@ -40,6 +40,7 @@ SELECTS = {
     "pv_approximation": ("approximation", ["up", "down"]),
     "power_approximation": ("direction", ["up", "down", "nearest"]),
 }
+EDITOR_LEASE_SECONDS = 60
 TIMES = ("grid_start_delay", "grid_duration")
 GRID_FIELDS = ("power_kw", "power_phases", *TIMES)
 REGULATION = ("soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay")
@@ -104,6 +105,7 @@ class Settings:
         self.values["grid_request"] = None
         self.values["grid_timing_edit"] = None
         self.values.setdefault("grid_timing_revision", 0)
+        self.timing_lease = None
         self.wall_time = time.time
         self.state = None
         self.listeners = {}
@@ -469,10 +471,54 @@ class Settings:
             else None
         )
 
+    def timing_edit_deadline(self):
+        edit = self.values.get("grid_timing_edit")
+        if not edit:
+            return None
+        if not edit["active"]:
+            return edit["expires_at"]
+        if self.timing_lease and self.timing_lease[:2] == (
+            edit["owner"],
+            edit["revision"],
+        ):
+            return self.timing_lease[2]
+        return None
+
+    def recover_timing_editor(self):
+        """Called under Settings.lock; abandonment changes ownership, not policy."""
+        edit = self.values.get("grid_timing_edit")
+        deadline = self.timing_edit_deadline()
+        if (
+            not edit
+            or not edit["active"]
+            or deadline is None
+            or deadline > self.wall_time()
+        ):
+            return
+        revision = self.values["grid_timing_revision"] + 1
+        pending = any(self.get(key) != self.approved(key) for key in TIMES)
+        self.values = {
+            **self.values,
+            "grid_timing_revision": revision,
+            "grid_timing_edit": {
+                **edit,
+                "owner": None,
+                "active": False,
+                "revision": revision,
+                "expires_at": deadline + 15,
+            }
+            if pending
+            else None,
+        }
+        self.timing_lease = None
+        self.notify_grid()
+        self.notify("grid_timing_edit")
+
     async def edit_timing(self, role, action, owner, revision, value=None):
         """One revision-fenced editing area for both Text entities."""
         async with self.lock:
-            if role not in TIMES or action not in ("begin", "update", "end"):
+            self.recover_timing_editor()
+            if role not in TIMES or action not in ("begin", "update", "end", "renew"):
                 raise ValueError("Unsupported timing edit")
             if (
                 type(revision) is not int
@@ -482,8 +528,26 @@ class Settings:
             if not isinstance(owner, str) or not 1 <= len(owner) <= 128:
                 raise ValueError("Timing editor identity required")
             current = self.values.get("grid_timing_edit")
-            if action != "begin" and current and current["owner"] != owner:
+            if (
+                action != "begin"
+                and current
+                and (not current["active"] or current["owner"] != owner)
+            ):
                 raise ValueError("Superseded timing editor")
+            if action == "renew":
+                if (
+                    not current
+                    or not current["active"]
+                    or self.timing_edit_deadline() is None
+                ):
+                    raise ValueError("Expired timing editor")
+                self.timing_lease = (
+                    owner,
+                    revision,
+                    self.wall_time() + EDITOR_LEASE_SECONDS,
+                )
+                self.notify("grid_timing_lease")
+                return
             if action == "update":
                 await self._set(role, value, editor=owner)
                 return
@@ -503,14 +567,17 @@ class Settings:
                 not self.get("charge_release")
                 or not edit
                 or not request
-                or edit["active"]
                 or edit["revision"] != revision
                 or edit["schedule_revision"] != schedule_revision
                 or request["revision"] != schedule_revision
-                or edit["expires_at"] > now
+                or self.timing_edit_deadline() is None
+                or self.timing_edit_deadline() > now
                 or (request.get("end_at") is not None and request["end_at"] <= now)
             ):
                 return
+            if edit["active"]:
+                self.recover_timing_editor()
+                return  # The existing scheduler now owns the new grace revision.
             previous = self.values
             updated = {
                 **self.values,
@@ -672,6 +739,14 @@ class Settings:
                 **{k: v for k, v in updated.items() if k not in REGULATION},
             },
         }
+        edit = updated.get("grid_timing_edit")
+        lease = self.timing_lease
+        if edit and edit["active"]:
+            identity = (edit["owner"], edit["revision"])
+            if not lease or lease[:2] != identity:
+                lease = (*identity, self.wall_time() + EDITOR_LEASE_SECONDS)
+        else:
+            lease = None
         try:
             await self.persist(profiles)
         except OSError as exc:
@@ -685,6 +760,8 @@ class Settings:
                 )
             raise
         self.profiles, self.values = profiles, updated
+        # Slow storage cannot grant a fresh lease at its eventual completion.
+        self.timing_lease = lease
         if self.state:
             self.state.messages.clear("settings:storage")
 

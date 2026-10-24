@@ -56,6 +56,17 @@ An operator-confirmed Start creates a **business schedule** with absolute wall-c
 - **WBM-TIME-23:** Any real release OFF (Stop, duration expiry, profile change, authority loss) cancels active schedule/positive intents. Preserve valid future settings but never permit an orphan deadline to start the wallbox. TIME-18 specifically governs expiry during a pending edit.
 - **WBM-TIME-24:** Pending time edits do not turn into an implicit new Start, even if the car was connected after editing. The planned start and planned end are **manager wall-clock policies**, independent of the station's transaction lifecycle. Do not invent new OCPP scheduling variables or violate hardware lockouts.
 
+### Operational clarification: abandoned editors (authorized review follow-up)
+
+WBM-TIME-15/16/20/21 require bounded, renewable ownership while focused. A focused
+editor may renew indefinitely without publishing or persisting unchanged values.
+Stopped renewal retires ownership and starts the ordinary 15-second window from
+the lease deadline; no meaningful pending timing draft means no rollback is needed.
+Renew/Update/End from expired ownership cannot revive it. Only a fresh deliberate
+Begin with the current revision/runtime may claim new ownership. Duration expiry
+still wins and retains drafts under TIME-18. This lease applies solely to browser
+editing intent, never to observation validity, OCPP authority or electrical safety.
+
 ## Acceptance examples
 
 | Scenario | Expected result |

@@ -335,7 +335,7 @@
     },
     "edit_timing": {
       "name": "NETZ-Zeitparameter bearbeiten",
-      "description": "Beide Zeitfelder mit aktueller Zeitrevision und Laufzeitkennung koordinieren. Begin hält Entwürfe; End startet das 15-Sekunden-Fenster; Update verändert nur den Zeitentwurf.",
+      "description": "Beide Zeitfelder mit aktueller Zeitrevision und Laufzeitkennung koordinieren. Begin hält Entwürfe; End startet das 15-Sekunden-Fenster; Update verändert nur den Zeitentwurf. Renew verlängert nur die aktive Editor-Lease.",
       "fields": {
         "action": {
           "name": "Bearbeitungsschritt"

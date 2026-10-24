@@ -13,7 +13,7 @@ async def async_setup_entry(hass, entry, add):
     entity_platform.async_get_current_platform().async_register_entity_service(
         "edit_timing",
         {
-            vol.Required("action"): vol.In(["begin", "update", "end"]),
+            vol.Required("action"): vol.In(["begin", "update", "end", "renew"]),
             vol.Required("owner"): vol.All(str, vol.Length(min=1, max=128)),
             vol.Required("revision"): vol.All(int, vol.Range(min=0)),
             vol.Required("incarnation"): str,

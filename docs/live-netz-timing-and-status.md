@@ -130,10 +130,10 @@ browser before a backend request exists; backend failures are canonical across c
   new card requires its matching WBM backend editor service; stale revisions are
   rejected rather than guessed. Existing direct HA Text automation remains valid,
   with the new 15-second draft-only window while a schedule is active.
-- Browser blur/pagehide/disconnect sends editor end. Abrupt browser/process/network
-  loss cannot guarantee delivery of that final service; a focused ownership record
-  remains pending until a fresh editor, explicit action, duration expiry or HA reload
-  supersedes it. It never alters the accepted schedule or grants new charging.
+- Browser blur/pagehide/disconnect sends editor end. The previously documented
+  abandoned-focus limitation is corrected by the renewable lease described below.
+  A browser suspended or disconnected long enough to stop renewal must explicitly
+  refocus/edit to acquire fresh ownership; reconnect alone never replays Begin.
 - Offline/Local expiry retires manager permission immediately; physical zero can
   only be sent after normal Remote/transaction eligibility returns. No hardware
   claim is inferred from the business deadline. Wall-clock changes are observed
@@ -171,7 +171,7 @@ Stationary OCPP contract suites remain required. Final counts and CI evidence ar
 reported with the implementation commit. No merge, release, installation or
 production operation is performed by this task.
 
-Local final validation: **502 Python tests passed** (including the hardware-mocked
+Original implementation validation: **502 Python tests passed** (including the hardware-mocked
 companion Stationary/WBM contract), **53 frontend tests passed**, Ruff lint/format,
 JavaScript syntax, translation leaf parity, service/manifest/HACS metadata,
 39-file candidate ZIP content verification and whitespace checks passed. Four
@@ -181,3 +181,65 @@ storage. The eight unrelated untracked files retain their baseline SHA-256 hashe
 CI uses no companion checkout and therefore skips that single combined contract;
 its exact-commit result is reported separately. Stationary validation and its
 pre-existing quality baseline are recorded in the companion implementation report.
+
+
+## Follow-up: bounded editor ownership (TIME-15/16/20/21)
+
+The review found that `active=True` alone had no abandonment deadline. The fix
+adds a runtime-only **60-second editor lease**, renewed by the card every
+**20 seconds** while its logical timing area is editing an active schedule. A
+focused pause can therefore last indefinitely without changing drafts. Renew uses
+the existing `edit_timing` service with action `renew` and the same owner, timing
+revision and runtime incarnation. It neither saves profiles nor advances revisions
+nor publishes changing entity attributes. Only the existing Grid deadline handle
+is re-armed; no OCPP/hardware polling or independent business scheduler is added.
+Real draft writes establish a fresh lease for their new timing revision, dated
+from acceptance before storage I/O; delayed completion cannot extend it.
+
+On missed renewal, the same canonical deadline path takes Settings.lock, retires
+the owner and advances the timing revision. Meaningful timing drafts enter the
+normal 15-second grace period, measured from the expired lease deadline, not from
+a delayed callback. If no time draft differs from approval, ownership simply
+clears with no rollback write. An abandoned record cannot renew, update or End,
+even if a late request knows the new revision; owner and active-state checks still
+apply. Renewal arriving at/after deadline also retires ownership before validating
+its old revision, so a delayed timer cannot grant extra ownership. A fresh explicit
+Begin can take the latest revision, including from the same browser. Direct HA
+Text edits continue to supersede ownership with their own revision and window.
+
+Only ownership transitions and the eventual durable draft rollback are public;
+heartbeat deadlines are not persisted or exposed as per-renewal timestamps.
+Reload resets ownership/lease and release, retaining drafts. Failed rollback leaves
+an actionable storage warning with the owner retired, no retry loop, and business
+expiry still armed. Duration expiry continues to take precedence even during a
+blocked rollback write, retaining the unapproved values for a new explicit Start.
+
+The card serializes renewals with edits, does not wait for a nonexistent HA
+revision acknowledgement for renewal, and stops the heartbeat on End, replacement,
+service failure, rebind or disconnect. Canonical abandonment/replacement also
+retires local focus display, so a stale focused input cannot conceal countdown
+restoration. Transient network loss can renew the same still-valid backend lease;
+following a failed card service or a lost lease the operator refocuses to make a
+fresh explicit ownership attempt. Browser timer suspension longer than the lease
+is treated as stopped renewal, rather than indefinite proof of active editing.
+
+The reference checks remain WBM beta.18 (`87963014c9af73416c438807f523a3da2a98bd22`)
+`grid_timing.py` and actual openWB/core
+`849340ec8d91f4e7cca08a7664cf9ec0187fb496`
+`packages/control/chargepoint/chargepoint.py` (`_is_manual_lock_inactive`,
+`_is_ev_plugged`, `is_charging_possible`). They supply business/physical boundary
+references, not a frontend ownership protocol; no station loop is copied or changed.
+
+
+Follow-up local validation: **516 Python tests passed**, including the companion
+Stationary contract; **58 frontend tests passed**. The 14 new Python cases cover
+long renewable focus with unchanged HA state objects and no durable writes/OCPP
+traffic, normal End, abandonment, reconnect, replacement, exact deadline fencing,
+late callbacks, direct Text conflicts, both duration precedence paths, blocked and
+failed rollback storage, delayed draft persistence, queued renewal, reload/runtime
+replacement, no-op focus cleanup, and preserved explicit power/phase hints. Four
+forced clock/lock/storage orderings passed three repeat rounds (4/4 each). Ruff,
+formatting, syntax, translation parity, metadata, 39-file package verification and
+whitespace passed; the eight unrelated untracked files remain unchanged. Exact
+feature-commit CI is reported separately. No Stationary source, version, tag,
+release, baseline branch or installed runtime is changed by this follow-up.

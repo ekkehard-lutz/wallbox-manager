@@ -544,7 +544,9 @@ async def test_vehicle_starts_while_editing_delay_apply_still_pauses_same_transa
         await editing(settings, "begin")
         await editing(settings, "update", role="grid_start_delay", value="00:05")
         await session(station)
-        await clock.advance(60)
+        await clock.advance(30)
+        await editing(settings, "renew")
+        await clock.advance(30)
         await ha.async_block_till_done()
         await grid.task
         from conftest import eventually

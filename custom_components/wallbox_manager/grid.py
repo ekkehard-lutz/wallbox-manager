@@ -101,6 +101,7 @@ class Grid:
         self.removers.append(
             settings.watch("grid_timing_edit", self.edit_window_changed)
         )
+        self.removers.append(settings.watch("grid_timing_lease", self.schedule))
         settings.grid_equivalent = self.equivalent
         settings.grid_point = self.draft_point
         self.removers.append(
@@ -694,9 +695,8 @@ class Grid:
             business_deadline = self.wall_time()
         edit = self.settings.values.get("grid_timing_edit")
         edit_deadline = (
-            edit["expires_at"]
+            self.settings.timing_edit_deadline()
             if edit
-            and not edit["active"]
             and edit["schedule_revision"] == request["revision"]
             and edit["revision"] != self.attempted_edit_revision
             else None

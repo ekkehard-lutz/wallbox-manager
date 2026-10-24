@@ -68,6 +68,7 @@ function card(data=states(), config={}, language='en', clock={}) {
     if (args[0]==='wallbox_manager' && args[1]==='edit_timing') {
       const r=args[2], state=data[r.entity_id], entry=state.attributes.wallbox_manager_entry;
       if (r.revision!==state.attributes.grid_timing_revision) throw new Error('Stale timing revision');
+      if (r.action==='renew') return;
       if (r.action==='update') state.state=r.value;
       for (const role of ['grid_start_delay','grid_duration']) {
         const a=data[`${entry}.${role}`].attributes;
@@ -703,4 +704,73 @@ test('confirmed foreign field updates resolve a local validation warning',()=>{
   const {card:c,get}=card();c.warn('grid_duration','Invalid minutes');
   c._hass.states['E.grid_duration'].state='00:12';c.hass=c._hass;
   assert.equal(get('error').textContent,'—');
+});
+
+test('focused active editor renews for long pauses without revisions or draft writes; End stops heartbeat',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');
+  await c.beginTiming();
+  const revision=data['E.grid_duration'].attributes.grid_timing_revision;
+  for(let i=0;i<12;i++) {
+    // Unrelated hass updates must not postpone the scheduled renewal forever.
+    clock.advance(10000);c.hass=c._hass;
+    clock.advance(10000);await c.timingQueue.tail;
+    assert.equal(c.draftWrites.size,0);
+    assert.equal(data['E.grid_duration'].attributes.grid_timing_revision,revision);
+  }
+  assert.equal(calls.filter(call=>call[2].action==='renew').length,12);
+  c.shadowRoot.activeElement=null;await c.endTiming();
+  const count=calls.length;clock.advance(120000);await c.timingQueue.tail;
+  assert.equal(calls.length,count);
+});
+test('backend abandonment cancels local focused ownership and a late heartbeat cannot rebegin',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) {
+    const a=data[`E.${role}`].attributes;a.grid_timing_revision++;
+    a.grid_timing_edit={owner:null,active:false,expires_at:1075};
+  }
+  c.hass=c._hass;
+  assert.equal(c.timingEditing,false);
+  const count=calls.length;clock.advance(120000);
+  assert.equal(calls.length,count);
+  assert.equal(clock.pending,0);
+});
+test('failed heartbeat relinquishes local focus ownership without retrying or sending End',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  c._hass.callService=async(...args)=>{calls.push(args);throw new Error('Network unavailable');};
+  clock.advance(20000);await c.timingQueue.tail;
+  assert.equal(c.timingEditing,false);assert.match(get('error').textContent,/Network unavailable/);
+  const count=calls.length;clock.advance(120000);
+  assert.equal(calls.length,count);assert.equal(clock.pending,0);
+});
+test('runtime replacement and disconnect stop editor lease renewal',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) data[`E.${role}`].attributes.runtime_incarnation='replacement';
+  c.hass=c._hass;
+  clock.advance(120000);assert.equal(calls.filter(call=>call[2].action==='renew').length,0);
+  assert.equal(c.timingEditing,false);c.disconnectedCallback();assert.equal(clock.pending,0);
+});
+
+test('missing intermediate abandonment update still restores a focused countdown after rollback',async()=>{
+  const data=states(),clock=uiClock();
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:900,start_at:900,end_at:1300}});
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) {
+    const a=data[`E.${role}`].attributes;a.grid_timing_revision+=2;a.grid_timing_edit=null;
+  }
+  c.hass=c._hass;
+  assert.equal(c.timingEditing,false);
+  assert.equal(get('grid_duration-minutes').value,'05');
+  clock.advance(20000);
+  assert.equal(calls.filter(call=>call[2].action==='renew').length,0);
+  c.disconnectedCallback();
 });

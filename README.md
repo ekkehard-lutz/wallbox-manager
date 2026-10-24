@@ -76,6 +76,9 @@ entry_id: YOUR_EXISTING_CONFIG_ENTRY_ID
 ```
 
 The two time fields show live countdowns and switch to drafts as one editing area.
+Active editors renew a backend lease without Recorder or storage churn. If the
+browser disappears, its 60-second lease expires and starts the same 15-second
+window. Refocus after a lost lease to claim fresh ownership.
 After editing ends, unapplied time changes expire after 15 seconds while the old
 schedule is active. An independent power draft survives. If duration ends first,
 release goes OFF and the entered time drafts remain for a new explicit Start.

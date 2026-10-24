@@ -335,7 +335,7 @@
     },
     "edit_timing": {
       "name": "Edit NETZ timing",
-      "description": "Coordinate both timing fields using their current timing revision and runtime incarnation. Begin holds drafts; end starts the 15-second window; update changes only the timing draft.",
+      "description": "Coordinate both timing fields using their current timing revision and runtime incarnation. Begin holds drafts; end starts the 15-second window; update changes only the timing draft. Renew extends only the active editor lease.",
       "fields": {
         "action": {
           "name": "Editing action"

@@ -281,6 +281,8 @@ class WallboxManagerCard extends HTMLElement {
     return ["grid_start_delay", "grid_duration"].some(id => ["hours", "minutes", "clear"].some(part => this.shadowRoot.activeElement === this.shadowRoot.getElementById(`${id}-${part}`)));
   }
   cancelTiming() {
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = null;
     clearTimeout(this.countdownTimer);
     if (this.timingQueue) this.timingQueue.cancelled = true;
     if (this.timingPending) this.timingPending.reject(new Error("Timing editor replaced"));
@@ -301,9 +303,33 @@ class WallboxManagerCard extends HTMLElement {
     return this.queueTiming("begin", "grid_start_delay");
   }
   endTiming() {
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = null;
     if (!this.timingEditing) return Promise.resolve();
     this.timingEditing = false;
     return this.queueTiming("end", "grid_start_delay").finally(() => this.renderTiming());
+  }
+  scheduleTimingRenewal() {
+    const queue = this.timingQueue, edit = this.timingAttributes().grid_timing_edit;
+    if (!this.timingEditing || !queue || queue.cancelled || !edit?.active || edit.owner !== queue.owner) {
+      clearTimeout(this.leaseTimer); this.leaseTimer = null; return;
+    }
+    if (this.leaseTimer) return;
+    this.leaseTimer = setTimeout(() => {
+      this.leaseTimer = null;
+      // Serialize with real edits, but renewals need no HA state acknowledgement.
+      queue.tail = queue.tail.then(async () => {
+        if (!this.timingEditing || queue.cancelled || this.timingQueue !== queue) return;
+        const a = this.timingAttributes(), current = a.grid_timing_edit;
+        if (a.runtime_incarnation !== queue.incarnation || a.grid_timing_revision !== queue.revision || !current?.active || current.owner !== queue.owner) throw new Error("Timing editor expired or replaced; focus again");
+        await this._hass.callService("wallbox_manager","edit_timing",{entity_id:this.discovery.roles.grid_start_delay,action:"renew",owner:queue.owner,revision:queue.revision,incarnation:queue.incarnation});
+      }).catch(error => {
+        if (!queue.cancelled && this.timingQueue === queue) {
+          queue.cancelled = true; this.timingEditing = false;
+          this.warn("grid_duration",error.message || String(error));
+        }
+      }).finally(() => { this.scheduleTimingRenewal(); this.renderTiming(); });
+    },20000);
   }
   queueTiming(action, id, value="") {
     const queue = this.timingQueue, entity = this.discovery.roles[id];
@@ -390,7 +416,7 @@ class WallboxManagerCard extends HTMLElement {
       const parts = value === "" ? ["", ""] : value.split(":");
       for (const [index,part] of ["hours","minutes"].entries()) {
         const input = this.shadowRoot.getElementById(`${id}-${part}`);
-        if (!this.timingEditing && this.shadowRoot.activeElement !== input) input.value = parts[index];
+        if (!this.timingEditing) input.value = parts[index];
       }
     }
     if (live && !editing) this.countdownTimer = setTimeout(() => this.renderTiming(),1000);
@@ -440,6 +466,11 @@ class WallboxManagerCard extends HTMLElement {
     this.runtime = this.timingAttributes().runtime_incarnation;
     for (const [id,warning] of this.localWarnings) if (warning.snapshot && warning.snapshot !== this.warningSnapshot(id)) this.localWarnings.delete(id);
     this.acknowledgeTiming();
+    const timing = this.timingAttributes(), editor = timing.grid_timing_edit;
+    if (this.timingEditing && this.timingQueue && this.draftWrites.size === 0 && !this.timingPending && (timing.grid_timing_revision !== this.timingQueue.revision || (editor && (!editor.active || editor.owner !== this.timingQueue.owner)))) {
+      this.cancelTiming(); this.durationEdits = {};
+    }
+    this.scheduleTimingRenewal();
     this.acknowledgePowerStep();
     const state = role => hass.states[d.roles[role]], busy = !!this.busy;
     const connected = state("connected")?.state === "on";
