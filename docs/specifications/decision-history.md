@@ -294,3 +294,8 @@ User clarified that BALANCE uses Fronius two nonnegative entities, one charge an
 ## 25 October 2026 – Existing SoC STOP restart rule confirmed [AGREED]
 
 After either BALANCE STOP cause (insufficient positive battery recharge at the feasible minimum EV point or SoC strictly below T-H), use the **existing common STOP state**; no additional A-specific restart logic. From STOP, a battery SoC **strictly above T+H/2** permits BALANCE **when proven PV surplus and all common eligibility conditions exist**; at **SoC >= T+H**, FAST may start regardless of PV surplus. The previous SoC matrix's `SoC <= T-H/2` STOP is replaced with strict `SoC < T-H`, and the previous inclusive restart at M is changed to strict `SoC > M`. Dynamic Solcast-driven increases in T recalculate the thresholds. Separate economic import-Wh STOP restart inhibition still applies. The updated normative matrix is [PV-SOC-02](pv-regulation.md). Documentation only.
+
+
+## 25 October 2026 – BALANCE minimum-current STOP A accepted [APPROVED]
+
+No extra STOP timer or repeated-sample counter: on the next ordinary PV tick, if SoC is **strictly below T-H/2**, the truly applied/physically valid operating point is **1p/6 A**, initial 0 A→positive settling has finished, and measured battery charge minus discharge power is **strictly negative**, BALANCE requests 0 A. Battery power at 0 or positive is not cause A. A mere requested/OCPP-accepted or phase-locked point is not valid proof. The shared SoC STOP→BALANCE/FAST thresholds in PV-SOC-02 apply; independent SoC STOP at SoC<T-H and economic Wh STOP are not weakened. See PV-BAL-06. Documentation only.
