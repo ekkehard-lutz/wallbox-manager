@@ -42,7 +42,7 @@ test('home battery aligns with wallbox parameters and stacks by card width',()=>
       assert.equal(r.afterLive,true,JSON.stringify(r));
       assert.equal(r.width<=320?r.stacked:r.aligned,true,JSON.stringify(r));
       assert.match(r.point,/6A → .*17A/);
-      assert.equal(r.battery,r.language==='de'?'69,125 % → 40 %':'69.125 % → 40 %');
+      assert.equal(r.battery,r.language==='de'?'69,1 % → 40,0 %':'69.1 % → 40.0 %');
     }
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });

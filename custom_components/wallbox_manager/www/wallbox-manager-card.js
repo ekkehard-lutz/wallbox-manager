@@ -487,15 +487,23 @@ class WallboxManagerCard extends HTMLElement {
     const mappings = state("charging_profile")?.attributes || {};
     const soc = hass.states[mappings.battery_soc_entity_id];
     const reserve = hass.states[mappings.battery_reserve_entity_id];
-    const percent = s => {
-      if (!available(s) || s.attributes.restored || typeof s.state !== "string" || !s.state.trim()) return "—";
+    const percentageValue = s => {
+      if (!available(s) || s.attributes.restored || typeof s.state !== "string" || !s.state.trim()) return null;
       const value = Number(s.state);
-      return Number.isFinite(value) && value >= 0 && value <= 100 ? `${this.format(value)} %` : "—";
+      return Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
     };
-    const reference = profile === "NETZ" ? percent(reserve)
-      : profile === "PV_SURPLUS" && mappings.battery_soc_entity_id && mappings.battery_reserve_entity_id
-        ? percent(state("soll_soc_speicher")) : "—";
-    const actualSoc = percent(soc);
+    const percent = value => value === null ? "—" : `${this.format(value,1)} %`;
+    const observedReserve = percentageValue(reserve);
+    const target = percentageValue(state("soll_soc_speicher"));
+    const envelope = mappings.pv_surplus_target;
+    // Compare full-precision HA reserve with the backend's validity envelope.
+    // Invalidated settings are unavailable, never clamped or replanned here.
+    const surplusTarget = mappings.battery_soc_entity_id && observedReserve !== null && target !== null &&
+      envelope?.soc === target && typeof envelope.maximum_reserve === "number" && Number.isFinite(envelope.maximum_reserve) && observedReserve <= envelope.maximum_reserve
+        ? target : null;
+    const reference = profile === "NETZ" ? percent(observedReserve)
+      : profile === "PV_SURPLUS" ? percent(surplusTarget) : "—";
+    const actualSoc = percent(percentageValue(soc));
     const referenceLabel = profile === "NETZ" ? (de ? "Aktuelle Mindestreserve" : "Current minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
     get("battery-label").textContent = de ? "Hausspeicher" : "Home battery";
     get("battery-soc-label").textContent = de ? "Ladezustand" : "State of charge";

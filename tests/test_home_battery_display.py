@@ -108,3 +108,71 @@ async def test_changed_mapping_publishes_once_without_observation_churn(ha):
         await ha.async_block_till_done()
     assert not any(e.data["entity_id"] == profile.entity_id for e in published)
     remove()
+
+
+async def test_surplus_envelope_tracks_settings_without_reserve_publication(ha):
+    entry = await ha.install()
+    profile = next(e for e in entities(ha, entry) if e.role == "charging_profile")
+    settings = entry.runtime_data.settings
+    ha.config_entries.async_update_entry(
+        entry,
+        options={
+            "soc_speicher_aktuell": "sensor.soc",
+            "min_soc_speicher": "number.reserve",
+        },
+    )
+    ha.states.async_set("number.reserve", "0")
+    await settings.set("soll_soc_speicher", 40)
+    await ha.async_block_till_done()
+    expected = {"soc": 40, "maximum_reserve": 38}
+    assert ha.states.get(profile.entity_id).attributes["pv_surplus_target"] == expected
+    published = []
+    remove = ha.bus.async_listen("state_changed", lambda event: published.append(event))
+    for reserve in ("20", "38", "38.01", "65", "unavailable", "0"):
+        ha.states.async_set("number.reserve", reserve)
+        await ha.async_block_till_done()
+        # Live reserve validity is tested in the card against this fixed envelope.
+        assert profile.extra_state_attributes["pv_surplus_target"] == expected
+        assert settings.get("soll_soc_speicher") == 40
+    assert not any(e.data["entity_id"] == profile.entity_id for e in published)
+    remove()
+    await settings.set("soc_hysterese", 3.25)
+    await ha.async_block_till_done()
+    assert ha.states.get(profile.entity_id).attributes["pv_surplus_target"] == {
+        "soc": 40,
+        "maximum_reserve": 36.75,
+    }
+    ha.config_entries.async_update_entry(
+        entry, options={**entry.options, "soc_hysterese": 4.5}
+    )
+    await ha.async_block_till_done()
+    assert ha.states.get(profile.entity_id).attributes["pv_surplus_target"] == {
+        "soc": 40,
+        "maximum_reserve": 35.5,
+    }
+
+
+@pytest.mark.parametrize(
+    "target,hysteresis,expected",
+    [
+        (40, 2, {"soc": 40, "maximum_reserve": 38}),
+        (0, 0, {"soc": 0, "maximum_reserve": 0}),
+        (98, 2, {"soc": 98, "maximum_reserve": 96}),
+        (99, 2, None),
+        (40.5, 2, None),
+        (40, "NaN", None),
+        (40, -1, None),
+        (40, 51, None),
+        (40, None, None),
+        ("unavailable", 2, None),
+    ],
+)
+async def test_surplus_envelope_rejects_invalid_saved_values(
+    ha, target, hysteresis, expected
+):
+    entry = await ha.install()
+    profile = next(e for e in entities(ha, entry) if e.role == "charging_profile")
+    # Legacy/corrupt saved settings must not be displayed as effective targets.
+    settings = entry.runtime_data.settings
+    settings.values.update(soll_soc_speicher=target, soc_hysterese=hysteresis)
+    assert profile.surplus_target() == expected
