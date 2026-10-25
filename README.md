@@ -4,15 +4,18 @@ Home Assistant integration domain: `wallbox_manager`.
 
 This prerelease extends the passive rebuild for OCPP **2.1**, targeting the
 supported wallbox-stationary interface. The integration version is
-**0.4.0-beta.15**; see the [beta.15 release notes](docs/v0.4/release-notes-beta.15.md)
-for live NETZ schedules, renewable editor ownership, active warnings, session
+**0.4.0-beta.16**; see the [beta.16 release notes](docs/v0.4/release-notes-beta.16.md)
+for the read-only home-battery status, one-decimal battery percentages and
+simplified PV card editors. The [beta.15 release notes](docs/v0.4/release-notes-beta.15.md)
+retain live NETZ schedules, renewable editor ownership, active warnings, session
 presentation and the coordinated Stationary hardware-disable/CP correction.
 The [beta.14 release notes](docs/v0.4/release-notes-beta.14.md) retain nominal
 NETZ power planning, technical phase-series navigation and initialization details.
-The coordinated beta.12 control foundation remains in place. Install the matching
-Stationary candidate identified in the beta.15 notes. The old Stationary capability
-inventory cannot satisfy NETZ execution requirements. Publication alone deploys
-neither component.
+The coordinated beta.12 control foundation remains in place. The existing
+Stationary implementation identified in the beta.15 notes remains compatible;
+**no Stationary update is required for this UI feature**. The old Stationary
+capability inventory cannot satisfy NETZ execution requirements. Publication alone
+deploys neither component.
 The [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) retain the historical
 Idle display, session meter corrections and migration details. The immutable
 [`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
@@ -89,6 +92,18 @@ conditions disappear, and ordinary waiting or command history stays in diagnosti
 Session energy uses one locale decimal, actual power two; measurement precision
 and energy accounting are unchanged. See the [implementation and migration report](docs/live-netz-timing-and-status.md).
 
+The read-only **Hausspeicher / Home battery** block compares actual mapped
+battery SoC with the current profile reference. All battery percentages use exactly
+one HA-language decimal (German `69,3 % → 40,0 %`, English `69.3 % → 40.0 %`).
+NETZ shows the observed writable reserve, including confirmed overrides and
+external changes. PV_SURPLUS shows its configured target only while valid against
+the actual reserve and hysteresis; invalid or unavailable values show `—`.
+PV_OPTIMUM and PV_MAXIMUM effective targets remain `—` until their backend
+regulators exist. The five PV tuning editors are removed from the card; their HA
+Number entities, services and saved settings remain available. See the
+[specification](docs/specifications/lovelace-home-battery-display.md) and
+[implementation report](docs/lovelace-home-battery-implementation.md).
+
 The resource remains `/wallbox_manager/wallbox-manager-card.js`. A previously
 configured single-instance card can continue with only its existing type. With
 multiple entries, a configured `entity` belonging to the intended entry can
@@ -110,6 +125,7 @@ Development checks:
 .venv/bin/ruff format --check .
 node --check custom_components/wallbox_manager/www/wallbox-manager-card.js
 node tests/test_wallbox_card.cjs
+node tests/test_wallbox_card_layout.cjs
 git diff --check
 ```
 
@@ -117,9 +133,11 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-For separately authorized testing, select **v0.4.0-beta.14** through the HACS
-prerelease versions and verify integration version **0.4.0-beta.14** after the
-operator performs installation and the Home Assistant restart. Publication does
+For separately authorized testing, select **v0.4.0-beta.16** through the HACS
+prerelease versions and verify integration version **0.4.0-beta.16** after the
+operator performs installation and the Home Assistant restart. Refresh each browser/app
+cache for `/wallbox_manager/wallbox-manager-card.js`; see the beta.16 notes for
+supervised rollback to beta.15. Publication does
 not include installation or physical validation. NETZ now executes an event-driven fixed offered point under confirmed Remote
 authority and charging permission. PV profiles expose only the shared Start/Stop release foundation; regulation remains deferred. See the
 [NETZ implementation and validation boundary](docs/grid-fixed-profile-implementation.md).
