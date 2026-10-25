@@ -12,7 +12,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import SettingEntity
 from .grid_point import capabilities, envelope, rounded_kw
-from .settings import NUMBERS
+from .settings import NUMBERS, REGULATION
 
 
 async def async_setup_entry(hass, entry, add):
@@ -58,19 +58,9 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
         _, _, minimum, maximum, step, unit = NUMBERS[role]
         self._attr_native_min_value, self._attr_native_max_value = minimum, maximum
         self._attr_native_step, self._attr_native_unit_of_measurement = step, unit
-        if role.startswith("allowed_current_") or role in (
-            "soc_hysterese",
-            "regulation_interval",
-            "pv_start_delay",
-            "pv_stop_delay",
-        ):
+        if role.startswith("allowed_current_") or role in REGULATION:
             self._attr_entity_category = EntityCategory.CONFIG
-        if role in (
-            "soc_hysterese",
-            "regulation_interval",
-            "pv_start_delay",
-            "pv_stop_delay",
-        ):
+        if role in REGULATION:
             self._attr_entity_registry_enabled_default = False
 
     @property

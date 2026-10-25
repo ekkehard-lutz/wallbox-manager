@@ -174,7 +174,8 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
             "diagnostic_level": 1,
             "leistung_pv": "sensor.pv",
             "foreign": {"keep": True},
-            "pv_stop_delay": 123,
+            "pv_stop_delay": 123,  # PV-TUNE-10: removed, never converted to cycles.
+            "pv_decrease_delay_cycles": 3,
         },
     )
     await ha.async_block_till_done()
@@ -190,14 +191,18 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
     assert fields["min_soc_speicher"].config["domain"] == ["number", "input_number"]
     assert fields["soc_speicher_aktuell"].selector_type == "entity"
     result = await flow.async_step_init(
-        {"general": {"diagnostic_level": "3"}, "regulation": {"pv_start_delay": 20}}
+        {
+            "general": {"diagnostic_level": "3"},
+            "regulation": {"pv_startup_hold_cycles": 20},
+        }
     )
     assert result["data"]["leistung_pv"] == "sensor.pv"
     assert result["data"]["foreign"] == {"keep": True}
-    assert result["data"]["pv_stop_delay"] == 123
+    assert "pv_stop_delay" not in result["data"]
+    assert result["data"]["pv_decrease_delay_cycles"] == 3
     ha.config_entries.async_update_entry(entry, options=result["data"])
     await ha.async_block_till_done()
-    assert settings.get("pv_start_delay") == 20
+    assert settings.get("pv_startup_hold_cycles") == 20
     assert entry.runtime_data.server.adapter is None
     assert entry.runtime_data.state.generation == (0, 0)
     invalid = await flow.async_step_init({"regulation": {"regulation_interval": 0}})

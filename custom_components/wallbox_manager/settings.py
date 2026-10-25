@@ -32,8 +32,34 @@ NUMBERS = {
         "kWh",
     ),
     "regulation_interval": ("regulation_interval", 5, 1, 300, 1, "s"),
-    "pv_start_delay": ("pv_start_delay", 0, 0, 3600, 1, "s"),
-    "pv_stop_delay": ("pv_stop_delay", 90, 0, 3600, 1, "s"),
+    "pv_increase_interval_cycles": (
+        "pv_increase_interval_cycles",
+        3,
+        1,
+        720,
+        1,
+        "cycles",
+    ),
+    "pv_startup_hold_cycles": ("pv_startup_hold_cycles", 10, 0, 720, 1, "cycles"),
+    "pv_grid_deadband_w": ("pv_grid_deadband_w", 100, 0, 10000, 1, "W"),
+    "pv_decrease_delay_cycles": ("pv_decrease_delay_cycles", 0, 0, 720, 1, "cycles"),
+    "pv_grid_import_budget_wh": ("pv_grid_import_budget_wh", 50, 0.1, 10000, 0.1, "Wh"),
+    "pv_ev_uptake_threshold_pct": (
+        "pv_ev_uptake_threshold_pct",
+        50,
+        0.1,
+        100,
+        0.1,
+        "%",
+    ),
+    "pv_fast_restart_household_load_limit_w": (
+        "pv_fast_restart_household_load_limit_w",
+        500,
+        0,
+        100000,
+        1,
+        "W",
+    ),
 }
 SELECTS = {
     "charging_profile": ("profile", ["NETZ", "PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"]),
@@ -43,7 +69,22 @@ SELECTS = {
 EDITOR_LEASE_SECONDS = 60
 TIMES = ("grid_start_delay", "grid_duration")
 GRID_FIELDS = ("power_kw", "power_phases", *TIMES)
-REGULATION = ("soc_hysterese", "regulation_interval", "pv_start_delay", "pv_stop_delay")
+PV_TUNING = tuple(k for k in NUMBERS if k.startswith("pv_"))
+REGULATION = ("soc_hysterese", "regulation_interval", *PV_TUNING)
+OBSOLETE_PV = ("pv_start_delay", "pv_stop_delay")
+
+
+def regulation_value(role, value):
+    """Same finite bounds in HA options and direct Number service calls."""
+    if isinstance(value, bool):
+        raise ValueError("Number required")
+    value = float(Fraction(value))
+    _, _, minimum, maximum, _, _ = NUMBERS[role]
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError("Number outside supported range")
+    if role.endswith("_cycles") and not value.is_integer():
+        raise ValueError("Regulation cycles must be whole numbers")
+    return value
 
 
 def duration_seconds(value):
@@ -70,7 +111,7 @@ class Settings:
         self.values.update(approximation="down", direction="nearest")
         self.values.update(dict.fromkeys(TIMES))
         self.values["power_phases"] = None
-        self.values.update(saved)
+        self.values.update({k: v for k, v in saved.items() if k not in OBSOLETE_PV})
         # Restore caps before any connection/control task can use default maxima.
         # Entities are added only after capability discovery, which is too late
         # to make their RestoreEntity callback the sole migration boundary.
@@ -118,6 +159,13 @@ class Settings:
 
     async def initialize_grid(self):
         """Migrate active beta.10 settings once, before entities/transport start."""
+        cleaned = {
+            key: {k: v for k, v in values.items() if k not in OBSOLETE_PV}
+            for key, values in self.profiles.items()
+        }
+        if cleaned != self.profiles:
+            await self.persist(cleaned)
+            self.profiles = cleaned
         if "grid_approved" not in self.profiles.get(self.key, {}):
             profiles = {
                 **self.profiles,
@@ -320,6 +368,8 @@ class Settings:
             value = float(Fraction(value))
             if not math.isfinite(value) or not minimum <= value <= maximum:
                 raise ValueError("Number outside supported range")
+            if role in REGULATION:
+                value = regulation_value(role, value)
             if role == "soll_power":
                 from .grid_point import envelope, rounded_kw
 
