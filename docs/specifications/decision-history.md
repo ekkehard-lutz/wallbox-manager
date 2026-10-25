@@ -261,3 +261,16 @@ WBM-ARCH-01–12 remain overarching, profile settings remain local, and PV V3 re
 a draft. No operating-point control, wake-up, current/phase preparation, automatic
 takeover/retry/replay or deployment is authorized. Commit/push is separate from
 independent review, merge, release and user-controlled hardware acceptance.
+
+
+## 25 October 2026 – Shared PV regulator simplification and Level-2 diagnostic scope [AGREED DESIGN DIRECTION]
+
+**Source:** The user's explicit agreement to the analysis comparing `wallbox-manager` `v0.3.2-beta.18` (`pv_soc.py`, `pv_optimum.py`, `pv_regulators.py`), `wallbox-stationary` (`services/dynamic_amps.py`, `control/amps.py`) and publicly documented openWB grid/battery priority approaches. The user additionally required Level-2 (“relevante Zustandsänderungen”) diagnostics to record **only enough relevant measurements to reconstruct regulation choices**, without a growing raw or per-tick log stream. This history is descriptive; normative changes live in [PV V3](pv-regulation.md#4-fast_discharge--grid-point-led-utilization-25-october-direction) and [PV-DIAG-01–10](pv-decision-diagnostics.md).
+
+**Agreed concept:** Shared SoC state machine with all three battery PV profiles distinguished only by T. The former v0.3.2 target calculations remain a reuse candidate; simplify FAST to primarily **grid-point feedback plus bounded active upward exploration even at 0 W grid**, and BALANCE to **signed battery charge/discharge feedback, SoC recovery near T and an independent grid economic fallback**. Stationary exclusively enforces physical hardware safety. Temporary deviations are tolerable and subsequently corrected. Remove the old user-configurable maximum storage-discharge power `D` from **future** regulator decisions; retain the HA Number identity/persistence until a separately reviewed entity migration. No change to current beta.16 control code.
+
+**Dependencies / OPEN:** The new BALANCE rule requires a *bidirectional* storage power mapping, not just the old positive discharge reading. The historical PV-ECO-08 restart capacity formula includes D and cannot be reused; preserve historical STOP history, strict improvement intent and 50 Wh accounting, but decide a valid non-D restart test before programming active PV regulation. Controller gains/bands and SoC recovery response also need replay/test-driven decisions. Do not silently substitute a grid-only formula that cannot actively explore battery headroom at zero grid exchange.
+
+**Diagnostics decision:** Level 2 logs only significant profile/T/SoC-mode/feasible-point/economic/failed-and-recovered decision transitions and the **subset of measured inputs that caused each decision**, with stable reasons, compact units and no raw OCPP/HA sample stream. Hundreds of unchanged ticks yield zero new PV decision logs. The exact semantic deduplication thresholds and severity policy require implementation review. Level 0–3 existing OCPP diagnostic semantics remain valid.
+
+**Authorization boundary:** Documentation and design direction only; overall V3 remains DRAFT. No Codex implementation, merge, release, HA install, wallbox-stationary edit or hardware execution follows automatically.
