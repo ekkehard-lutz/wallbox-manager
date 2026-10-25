@@ -70,8 +70,9 @@ locally controlled charging using manager release.
 Automatic vehicle wake-up is configured only in Stationary's startup INI;
 WBM neither exposes a switch nor uses AutoWakeUpEnabled. The old wake-up switch
 and standalone NETZ SET registry identities are retired with exact ownership checks.
-PV regulation remains deferred; its shared release foundation supports zero-target
-pauses. See the [approved requirements](docs/specifications/charge-release.md) and
+This feature branch implements shared PV V3 FAST/BALANCE regulation and economic
+pauses behind manager release. See the [implementation and verification report](docs/pv-v3-implementation.md).
+The branch is not released or deployed. See the [approved requirements](docs/specifications/charge-release.md) and
 [implementation, migration, validation and operational procedure](docs/coordinated-control-redesign.md).
 
 ```yaml
@@ -98,8 +99,8 @@ one HA-language decimal (German `69,3 % → 40,0 %`, English `69.3 % → 40.0 %`
 NETZ shows the observed writable reserve, including confirmed overrides and
 external changes. PV_SURPLUS shows its configured target only while valid against
 the actual reserve and hysteresis; invalid or unavailable values show `—`.
-PV_OPTIMUM and PV_MAXIMUM effective targets remain `—` until their backend
-regulators exist. The five PV tuning editors are removed from the card; their HA
+PV_OPTIMUM and PV_MAXIMUM display their canonical effective backend targets once
+calculated, and `—` while unavailable. The five PV tuning editors are removed from the card; their HA
 Number entities, services and saved settings remain available. See the
 [specification](docs/specifications/lovelace-home-battery-display.md) and
 [implementation report](docs/lovelace-home-battery-implementation.md).
@@ -139,7 +140,8 @@ operator performs installation and the Home Assistant restart. Refresh each brow
 cache for `/wallbox_manager/wallbox-manager-card.js`; see the beta.16 notes for
 supervised rollback to beta.15. Publication does
 not include installation or physical validation. NETZ now executes an event-driven fixed offered point under confirmed Remote
-authority and charging permission. PV profiles expose only the shared Start/Stop release foundation; regulation remains deferred. See the
+authority and charging permission. PV profiles now use the same Start/Stop release with one shared clocked regulator
+on this implementation branch; beta.16 itself remains unchanged. See the
 [NETZ implementation and validation boundary](docs/grid-fixed-profile-implementation.md).
 Automatic wake-up requires the matching Stationary implementation and explicit local startup configuration. Simulated sleeping-vehicle tests are the acceptance
 basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is

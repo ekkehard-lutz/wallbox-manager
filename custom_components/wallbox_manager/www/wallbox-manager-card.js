@@ -502,7 +502,8 @@ class WallboxManagerCard extends HTMLElement {
       envelope?.soc === target && typeof envelope.maximum_reserve === "number" && Number.isFinite(envelope.maximum_reserve) && observedReserve <= envelope.maximum_reserve
         ? target : null;
     const reference = profile === "NETZ" ? percent(observedReserve)
-      : profile === "PV_SURPLUS" ? percent(surplusTarget) : "—";
+      : profile === "PV_SURPLUS" ? percent(surplusTarget)
+      : percent(typeof mappings.effective_target_soc === "number" && Number.isFinite(mappings.effective_target_soc) && mappings.effective_target_soc >= 0 && mappings.effective_target_soc <= 100 ? mappings.effective_target_soc : null);
     const actualSoc = percent(percentageValue(soc));
     const referenceLabel = profile === "NETZ" ? (de ? "Aktuelle Mindestreserve" : "Current minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
     get("battery-label").textContent = de ? "Hausspeicher" : "Home battery";

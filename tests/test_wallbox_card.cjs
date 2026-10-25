@@ -932,3 +932,15 @@ for (const language of ['de','en']) for (const profile of ['NETZ','PV_SURPLUS','
     assert.equal(calls.length,0);
   });
 }
+for (const language of ['de','en']) for (const profile of ['PV_OPTIMUM','PV_MAXIMUM']) {
+  test(`canonical effective PV target is displayed without frontend planning ${language}/${profile}`,()=>{
+    const data=batteryStates('E','69','20');
+    data['E.charging_profile'].state=profile;
+    const {card:c,get,calls}=card(data,{},language);
+    for (const [value,text] of [[40.25,language==='de'?'40,3 %':'40.3 %'],[0,language==='de'?'0,0 %':'0.0 %'],[100,language==='de'?'100,0 %':'100.0 %'],[null,'—'],[NaN,'—'],[101,'—'],[-1,'—'],['50','—']]) {
+      data['E.charging_profile'].attributes.effective_target_soc=value; c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,`${language==='de'?'69,0':'69.0'} % → ${text}`);
+    }
+    assert.equal(calls.length,0);
+  });
+}
