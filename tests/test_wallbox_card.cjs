@@ -9,6 +9,7 @@ function load(clock={}) {
   const registry = new Map();
   class Element {
     constructor() { this.style = {}; this.value = ''; this.validity = {}; }
+    setAttribute(key,value) { this[key] = value; }
     replaceChildren(...children) { this.children = children; }
     checkValidity() { return true; }
     focus() {}
@@ -773,4 +774,115 @@ test('missing intermediate abandonment update still restores a focused countdown
   clock.advance(20000);
   assert.equal(calls.filter(call=>call[2].action==='renew').length,0);
   c.disconnectedCallback();
+});
+
+// WBM-HS-UI-01–15: the card projects HA facts; it never plans battery actions.
+function batteryStates(entry='E', soc='69', reserve='40') {
+  const data=states(entry);
+  Object.assign(data[`${entry}.charging_profile`].attributes,{
+    battery_soc_entity_id:`sensor.${entry.toLowerCase()}_battery`,
+    battery_reserve_entity_id:`number.${entry.toLowerCase()}_reserve`,
+  });
+  data[`sensor.${entry.toLowerCase()}_battery`]={state:soc,attributes:{}};
+  data[`number.${entry.toLowerCase()}_reserve`]={state:reserve,attributes:{}};
+  return data;
+}
+test('battery shows actual and observed reserve, never requested or journal targets',()=>{
+  const data=batteryStates('E','69','20');
+  data['E.min_soc'].state='40';
+  Object.assign(data['E.charging_profile'].attributes,{
+    battery_status:'confirmation_pending',original_reserve:20,temporary:40,pending:40,
+  });
+  const {card:c,get,calls}=card(data);
+  assert.equal(get('battery-soc').textContent,'69 % → 20 %');
+  for (const value of ['40','65','20','0']) {
+    data['number.e_reserve'].state=value; c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,`69 % → ${value} %`);
+  }
+  assert.match(get('battery-soc')['aria-label'],/Current minimum reserve/);
+  assert.equal(get('error').textContent,'—');
+  assert.equal(calls.length,0);
+});
+test('battery sides independently preserve zero and fractional locale values',()=>{
+  const data=batteryStates('E','69.125','40.5');
+  const {card:c,get,calls}=card(data,{},'de');
+  assert.equal(get('battery-label').textContent,'Hausspeicher');
+  assert.equal(get('battery-soc').textContent,'69,125 % → 40,5 %');
+  assert.match(get('battery-soc')['aria-label'],/Aktuelle Mindestreserve/);
+  for (const invalid of ['unknown','unavailable','',' ','NaN','Infinity','-1','101']) {
+    data['sensor.e_battery'].state=invalid; c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,'— → 40,5 %');
+    data['sensor.e_battery'].state='0'; data['number.e_reserve'].state=invalid; c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,'0 % → —');
+    data['number.e_reserve'].state='40.5';
+  }
+  data['sensor.e_battery'].attributes.restored=true; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'— → 40,5 %');
+  delete data['sensor.e_battery']; delete data['number.e_reserve']; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'— → —');
+  assert.equal(get('error').textContent,'—'); assert.equal(calls.length,0);
+});
+test('fixed SURPLUS target follows HA Number with independent missing SoC and target',()=>{
+  const data=batteryStates(); data['E.charging_profile'].state='PV_SURPLUS';
+  data['E.soll_soc_speicher'].state='40';
+  const {card:c,get,calls}=card(data);
+  assert.equal(get('battery-soc').textContent,'69 % → 40 %');
+  assert.match(get('battery-soc')['aria-label'],/Target SoC/);
+  data['sensor.e_battery'].state='unavailable'; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'— → 40 %');
+  data['E.soll_soc_speicher'].state='unavailable'; data['sensor.e_battery'].state='69'; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69 % → —');
+  data['E.soll_soc_speicher'].state='0'; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69 % → 0 %');
+  data['E.soll_soc_speicher'].state='55'; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69 % → 55 %');
+  assert.equal(card(data).get('battery-soc').textContent,'69 % → 55 %');
+  assert.equal(calls.length,0);
+});
+test('battery-free SURPLUS has no fictional target or additional action gating',()=>{
+  const data=states(); data['E.charging_profile'].state='PV_SURPLUS';
+  data['E.charge_action'].attributes.charge_action_ready=true;
+  const {get,calls}=card(data);
+  assert.equal(get('battery-soc').textContent,'— → —');
+  assert.equal(get('charge-action').disabled,false);
+  assert.equal(get('profile').disabled,false); assert.equal(calls.length,0);
+});
+test('deferred OPTIMUM and MAXIMUM cannot invent effective targets from inputs',()=>{
+  const data=batteryStates(); const {card:c,get,calls}=card(data);
+  for (const profile of ['PV_OPTIMUM','PV_MAXIMUM']) {
+    data['E.charging_profile'].state=profile;
+    for (const phase of ['BEFORE_SURPLUS','DYNAMIC','FINISHED']) {
+      // Unimplemented planner inputs/old diagnostics cannot become an effective target.
+      Object.assign(data['E.charging_profile'].attributes,{planner_phase:phase,remaining_pv_energy:10000,local_day:'2026-10-25'});
+      data['number.e_reserve'].state='50'; c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,'69 % → —');
+      data['E.charging_profile'].attributes.local_day='2026-10-26';
+      data['E.charging_profile'].attributes.remaining_pv_energy=0; c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,'69 % → —');
+    }
+  }
+  assert.equal(calls.length,0);
+});
+test('five editors and their controls are absent for every profile',()=>{
+  const data=batteryStates(); const {card:c}=card(data);
+  for (const profile of ['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']) {
+    data['E.charging_profile'].state=profile; c.hass=c._hass;
+    for (const role of ['optimum_lower_soc','optimum_upper_soc','optimum_max_discharge_w','estimated_daily_house_consumption_kwh','soll_soc_speicher']) {
+      assert.doesNotMatch(c.shadowRoot.html,new RegExp(`id="${role}(?:-|\\")`));
+    }
+  }
+  assert.doesNotMatch(source,/optimumFields|optimum_lower_soc|optimum_upper_soc|optimum_max_discharge_w|estimated_daily_house_consumption_kwh/);
+});
+test('multiple cards use own HA mappings, survive offline OCPP and language switch',()=>{
+  const data={...batteryStates('A','69.5','40'),...batteryStates('B','75','65')};
+  const a=card(data,{entry_id:'A'}), b=card(data,{entry_id:'B'});
+  data['A.connected'].state='off'; data['sensor.a_battery'].state='70.25';
+  a.card.hass={...a.card._hass,language:'de'}; b.card.hass=b.card._hass;
+  assert.equal(a.get('battery-soc').textContent,'70,25 % → 40 %');
+  assert.equal(a.get('actual').textContent,'—');
+  assert.equal(b.get('battery-soc').textContent,'75 % → 65 %');
+  assert.equal(b.get('battery-label').textContent,'Home battery');
+  a.card.setConfig({entry_id:'B'});
+  assert.equal(a.get('battery-soc').textContent,'75 % → 65 %');
+  assert.equal(a.calls.length+b.calls.length,0);
 });
