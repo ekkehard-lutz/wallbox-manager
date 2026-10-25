@@ -24,7 +24,6 @@ function parseInput(value, language) {
 }
 function available(state) { return state && !["unknown", "unavailable", ""].includes(state.state); }
 function durationAvailable(state) { return state && typeof state.state === "string" && (state.state === "" || /^[0-9]{2,}:[0-5][0-9]$/.test(state.state)); }
-const optimumFields = {optimum_lower_soc:["Lower target SoC","Unterer Ziel-SoC","%"], optimum_upper_soc:["Upper target SoC","Oberer Ziel-SoC","%"], optimum_max_discharge_w:["Maximum storage discharge","Maximale Speicher-Entladeleistung","W"], estimated_daily_house_consumption_kwh:["Daily household consumption (without EV)","Täglicher Hausverbrauch (ohne EV)","kWh/d"]};
 function numberRole(id) { return id === "power" ? "soll_power" : id; }
 class WallboxManagerCard extends HTMLElement {
   setConfig(config) {
@@ -59,6 +58,8 @@ class WallboxManagerCard extends HTMLElement {
       #charge-action:hover:not(:disabled) {filter:brightness(.95)}
       .live {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px}
       .caption {font-size:12px;color:var(--secondary-text-color);margin-bottom:3px} .reading {font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+      .details {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;container-type:inline-size}
+      @container (max-width:320px) {.details > section {grid-column:1 / -1}}
       .section {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px} h3 {font-size:14px;font-weight:500;margin:0 0 8px} .notice {font-size:13px;color:var(--error-color);line-height:1.4;margin:12px 0 0}
       [hidden] {display:none!important}
       @media(max-width:360px) {ha-card {padding:12px} .row {gap:8px} header {gap:8px;flex-wrap:wrap} .numeric {gap:2px} .step {width:32px}}
@@ -67,12 +68,10 @@ class WallboxManagerCard extends HTMLElement {
       <button id="takeover"></button>
       <label class="row" id="profile-row"><span id="profile-label"></span><select id="profile"></select></label>
       <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" placeholder="—" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
-      <div class="row" id="soll_soc_speicher-row"><label id="soll_soc_speicher-label" for="soll_soc_speicher"></label><div class="numeric"><button id="soll_soc_speicher-down" class="step" type="button">−</button><input id="soll_soc_speicher" type="text" inputmode="numeric" autocomplete="off"><button id="soll_soc_speicher-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
       ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="--"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="--"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
-      ${Object.entries(optimumFields).map(([id,labels]) => `<div class="row" id="${id}-row"><label id="${id}-label" for="${id}"></label><div class="numeric"><input id="${id}" type="number" min="0" step="${id === "estimated_daily_house_consumption_kwh" ? "0.1" : "1"}"><span class="unit">${labels[2]}</span></div></div>`).join("")}
       <button id="charge-action"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
-      <section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section>
+      <div class="details"><section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section><section class="section" aria-labelledby="battery-label"><h3 id="battery-label"></h3><div class="caption" id="battery-soc-label"></div><div class="reading" id="battery-soc" role="img"></div></section></div>
       <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><p id="error" class="notice" role="status">—</p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
@@ -96,7 +95,7 @@ class WallboxManagerCard extends HTMLElement {
         this.editDuration(id).then(() => { if (!this.timingFocused()) this.endTiming(); });
       };
     }
-    for (const id of ["power", "soll_soc_speicher"]) {
+    for (const id of ["power"]) {
       get(id).onchange = () => this.editNumber(id);
       get(id).onkeydown = e => {
         if (["ArrowUp", "ArrowDown"].includes(e.key)) { e.preventDefault(); this.stepNumber(id, e.key === "ArrowUp" ? 1 : -1); }
@@ -121,13 +120,6 @@ class WallboxManagerCard extends HTMLElement {
           if (!pointer && !button.disabled) this.stepNumber(id,direction);
         };
       }
-    }
-    for (const id of Object.keys(optimumFields)) {
-      get(id).onchange = () => {
-        const input = get(id), value = Number(input.value);
-        if (input.disabled || input.value === "" || !input.checkValidity() || !Number.isFinite(value)) return;
-        this.call("number", "set_value", {entity_id:this.discovery.roles[id], value});
-      };
     }
     get("charge-action").onclick = async () => {
       // Moving focus from a time editor onto Apply must keep this first click.
@@ -181,20 +173,11 @@ class WallboxManagerCard extends HTMLElement {
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
   }
   maximum(id) {
-    if (id === "soll_soc_speicher") return this._hass.states[this.discovery.roles[id]]?.attributes.max ?? 98;
     const value = this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_max_kw;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
   }
   stepNumber(id, direction) {
-    if (id === "power") return this.stepTechnical(direction);
-    const input = this.shadowRoot.getElementById(id);
-    if (input.disabled) return;
-    const value = parseInput(input.value, this._hass.language);
-    if (!Number.isFinite(value) || (id !== "power" && !Number.isInteger(value))) return;
-    const next = Math.min(this.maximum(id),Math.max(this.minimum(id),Math.round(value) + direction));
-    if (next === value) return;
-    input.value = this.format(next);
-    return this.editNumber(id);
+    return this.stepTechnical(direction);
   }
   stepTechnical(direction) {
     const entity = this.discovery.roles.soll_power;
@@ -251,9 +234,8 @@ class WallboxManagerCard extends HTMLElement {
     if (input.disabled) return;
     const value = parseInput(input.value,this._hass.language), maximum = this.maximum(id);
     const de = this._hass.language?.startsWith("de");
-    if (!Number.isFinite(value) || value < this.minimum(id) || (maximum !== null && value > maximum) || (id !== "power" && !Number.isInteger(value))) {
-      this.warn(id, de ? `Bitte einen gültigen Wert ab ${this.format(this.minimum(id))}${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben${id !== "power" ? " (ganze Prozent)" : ""}.` : `Enter a valid value from ${this.format(this.minimum(id))}${maximum === null ? "" : ` to ${this.format(maximum)}`}${id !== "power" ? " (whole percent)" : ""}.`);
-      if (id === "soll_soc_speicher") input.value = this.format(Math.round(Number(this._hass.states[this.discovery.roles[id]].state)));
+    if (!Number.isFinite(value) || value < this.minimum(id) || (maximum !== null && value > maximum)) {
+      this.warn(id, de ? `Bitte einen gültigen Wert ab ${this.format(this.minimum(id))}${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben.` : `Enter a valid value from ${this.format(this.minimum(id))}${maximum === null ? "" : ` to ${this.format(maximum)}`}.`);
       return;
     }
     input.value = this.format(value, id === "power" ? 1 : null);
@@ -268,7 +250,7 @@ class WallboxManagerCard extends HTMLElement {
     catch (err) {
       if (this.edits[id] === edit && this.discovery.roles[numberRole(id)] === entity) {
         delete this.edits[id];
-        input.value = this.format(id === "soll_soc_speicher" ? Math.round(Number(this._hass.states[entity].state)) : Number(this._hass.states[entity].state), id === "power" ? 1 : null);
+        input.value = this.format(Number(this._hass.states[entity].state), id === "power" ? 1 : null);
         this.warn(id,err.message || String(err));
       }
     }
@@ -486,11 +468,10 @@ class WallboxManagerCard extends HTMLElement {
     get("takeover").disabled ||= !["local", "remote"].includes(authority);
     get("profile-label").textContent = de ? "Ladeprofil" : "Charging profile";
     get("power-label").textContent = de ? "Angeforderte Ladeleistung" : "Requested charging power";
-    get("soll_soc_speicher-label").textContent = de ? "Speicher-Ziel-SoC" : "Battery target SoC";
     this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(v => [v, {NETZ:de ? "Netz" : "Grid", PV_SURPLUS:de ? "PV-Überschuss" : "PV Surplus",PV_OPTIMUM:"PV Optimum",PV_MAXIMUM:"PV Maximum"}[v] || v]));
     get("profile").value = state("charging_profile")?.state || "";
     get("profile").disabled = busy || !available(state("charging_profile"));
-    for (const [id,role] of [["power","soll_power"],["soll_soc_speicher","soll_soc_speicher"]]) {
+    for (const [id,role] of [["power","soll_power"]]) {
       const s = state(role), edit = this.edits[id];
       if (edit && (edit.entity !== d.roles[role] || (available(s) && (Number(s.state) === edit.value || (edit.complete && s.attributes.grid_draft_revision > edit.revision))))) delete this.edits[id];
       if (previous !== d.entry || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value, id === "power" ? 1 : null) : available(s) ? this.format(Number(s.state), id === "power" ? 1 : null) : "";
@@ -499,17 +480,36 @@ class WallboxManagerCard extends HTMLElement {
       for (const suffix of ["up","down"]) get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= this.minimum(id) : maximum !== null && value >= maximum) || (id === "power" && !s?.attributes[suffix === "down" ? "power_step_down" : "power_step_up"]);
     }
     const profile = state("charging_profile")?.state;
-    const optimum = profile === "PV_OPTIMUM", pv = ["PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"].includes(profile);
+    const pv = ["PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"].includes(profile);
     get("power-row").hidden = pv;
-    get("soll_soc_speicher-row").hidden = profile !== "PV_SURPLUS";
-    for (const [id,labels] of Object.entries(optimumFields)) {
-      get(`${id}-row`).hidden = id === "optimum_max_discharge_w" ? !pv : !optimum;
-      get(`${id}-label`).textContent = labels[de ? 1 : 0];
-      const s = state(id), input = get(id);
-      input.disabled = busy || !available(s);
-      input.min = s?.attributes.min ?? 0; input.max = s?.attributes.max ?? 100;
-      if (this.shadowRoot.activeElement !== input) input.value = available(s) ? s.state : "";
-    }
+    // Read mapped HA observations independently of the station connection.
+    // No requested reserve, battery journal or card-side PV planner is evidence.
+    const mappings = state("charging_profile")?.attributes || {};
+    const soc = hass.states[mappings.battery_soc_entity_id];
+    const reserve = hass.states[mappings.battery_reserve_entity_id];
+    const percentageValue = s => {
+      if (!available(s) || s.attributes.restored || typeof s.state !== "string" || !s.state.trim()) return null;
+      const value = Number(s.state);
+      return Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
+    };
+    const percent = value => value === null ? "—" : `${this.format(value,1)} %`;
+    const observedReserve = percentageValue(reserve);
+    const target = percentageValue(state("soll_soc_speicher"));
+    const envelope = mappings.pv_surplus_target;
+    // Compare full-precision HA reserve with the backend's validity envelope.
+    // Invalidated settings are unavailable, never clamped or replanned here.
+    const surplusTarget = mappings.battery_soc_entity_id && observedReserve !== null && target !== null &&
+      envelope?.soc === target && typeof envelope.maximum_reserve === "number" && Number.isFinite(envelope.maximum_reserve) && observedReserve <= envelope.maximum_reserve
+        ? target : null;
+    const reference = profile === "NETZ" ? percent(observedReserve)
+      : profile === "PV_SURPLUS" ? percent(surplusTarget) : "—";
+    const actualSoc = percent(percentageValue(soc));
+    const referenceLabel = profile === "NETZ" ? (de ? "Aktuelle Mindestreserve" : "Current minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
+    get("battery-label").textContent = de ? "Hausspeicher" : "Home battery";
+    get("battery-soc-label").textContent = de ? "Ladezustand" : "State of charge";
+    get("battery-soc").textContent = `${actualSoc} → ${reference}`;
+    get("battery-soc").title = `${de ? "Ladezustand" : "State of charge"}: ${actualSoc}; ${referenceLabel}: ${reference}`;
+    get("battery-soc").setAttribute("aria-label",get("battery-soc").title);
     for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
       get(`${id}-row`).hidden = pv;
       get(`${id}-label`).textContent = label;
