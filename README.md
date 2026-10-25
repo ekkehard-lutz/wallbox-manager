@@ -2,10 +2,9 @@
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This **v0.4.0-beta.17 release candidate** provides the shared PV Regulation V3
+This **v0.4.0-beta.17 prerelease** provides the shared PV Regulation V3
 runtime for PV_SURPLUS, PV_OPTIMUM and PV_MAXIMUM, alongside the existing NETZ
-profile and OCPP **2.1** interface. It is prepared for operator review and is not
-yet published. See the [beta.17 release notes](docs/v0.4/release-notes-beta.17.md)
+profile and OCPP **2.1** interface. See the [beta.17 release notes](docs/v0.4/release-notes-beta.17.md)
 for features, seven new tuning parameters, migration and supervised HACS/rollback
 instructions, and the [implementation report](docs/pv-v3-implementation.md) for
 source evidence and regression validation.
@@ -144,7 +143,7 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-After final approval and publication, separately authorized testing may select
+For separately authorized installation and testing, select
 **v0.4.0-beta.17** in HACS. Keep manager release OFF, take a full pre-upgrade HA
 backup, verify installed manifest **0.4.0-beta.17** after the operator-managed
 restart, and refresh all dashboard caches. Follow the

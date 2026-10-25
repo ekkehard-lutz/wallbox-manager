@@ -1,8 +1,7 @@
 # Wallbox Manager v0.4.0-beta.17
 
-This **release candidate** packages the reviewed PV Regulation V3 implementation
-through `f6b834672128ae8c68500fc7eb8a1c3bd48d2aef`. It is prepared for final operator
-approval, not yet tagged or published. The intended GitHub prerelease tag is
+This **prerelease** packages the reviewed PV Regulation V3 implementation
+through `f6b834672128ae8c68500fc7eb8a1c3bd48d2aef`. The GitHub prerelease tag is
 `v0.4.0-beta.17`; the integration manifest version is `0.4.0-beta.17`. HACS uses
 the tagged repository source archive, without an additional integration ZIP.
 Publication and supervised installation remain separate actions.
@@ -125,7 +124,7 @@ this accepted tradeoff is unchanged. No priority mechanism or extra writer is ad
 
 ## HACS upgrade and rollback
 
-These are **prepared operator instructions**, not actions performed by this task.
+These are **operator instructions**; publication does not perform installation.
 
 1. Record the installed WBM version (normally **0.4.0-beta.16**), HA version,
    Stationary version and current mappings/settings. Keep manager charging release
@@ -136,7 +135,7 @@ These are **prepared operator instructions**, not actions performed by this task
    (profiles, session, NETZ reserve recovery, legacy PV journals and any V3 journal).
    Keep the beta.16 package available. Use HA's supported consistent backup method;
    do not manually edit live `.storage` files.
-3. Only **after approval and publication**, enable prereleases in HACS and select
+3. For a separately authorized upgrade, enable prereleases in HACS and select
    **v0.4.0-beta.17**. Install WBM and perform the normal HA restart under operator
    control. Verify `custom_components/wallbox_manager/manifest.json` reports
    **0.4.0-beta.17**. Do not update or restart `wallbox-stationary`.
@@ -178,6 +177,6 @@ implementation commits and the four review corrections. Successful simulations d
 not certify physical phase switching, EV response, electrical safety or live HA CPU
 acceptance. Full initial station telemetry remains an interface acceptance gap.
 
-Final operator approval and successful CI on the eventual publication commit/tag
-remain publication gates. No merge, tag, GitHub release, HACS install, HA restart,
-deployment or hardware command is included in this release-preparation task.
+Publication requires successful CI on the final publication commit and tag.
+Publication does not include HACS installation, HA restart, deployment, Stationary
+changes or hardware commands. Physical hardware acceptance remains outstanding.
