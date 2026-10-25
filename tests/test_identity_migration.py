@@ -362,7 +362,9 @@ async def test_failed_setting_save_does_not_commit_options_or_memory(ha, monkeyp
         settings.store, "async_save", AsyncMock(side_effect=OSError("disk"))
     )
     with pytest.raises(OSError, match="disk"):
-        await settings.set("pv_stop_delay", 120)
+        # PV-TUNE-10 retires the seconds-based delay; storage failure semantics
+        # are now checked with its independently named cycle-based successor.
+        await settings.set("pv_decrease_delay_cycles", 120)
     assert (dict(entry.options), settings.values, settings.profiles) == before
 
 

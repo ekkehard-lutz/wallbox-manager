@@ -7,6 +7,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
+from .settings import OBSOLETE_PV
 
 
 def target(value):
@@ -112,7 +113,7 @@ def migrate(hass, entry, profiles):
         "evse_id": binding[1],
         "connector_id": binding[2],
     }
-    options = dict(entry.options)
+    options = {k: v for k, v in entry.options.items() if k not in OBSOLETE_PV}
     if entry.subentries:
         options.setdefault(
             "passive_v04_legacy_subentries",
@@ -145,7 +146,7 @@ def migrate(hass, entry, profiles):
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         retired = False
         for family, roles in (
-            ("control", {"phase_switch_deviation_pct"}),
+            ("control", {"phase_switch_deviation_pct", *OBSOLETE_PV}),
             (
                 "capability",
                 {"maximum_current_1", "maximum_current_2", "maximum_current_3"},

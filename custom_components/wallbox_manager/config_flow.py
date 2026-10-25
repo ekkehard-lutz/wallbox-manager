@@ -11,7 +11,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .migration import target
-from .settings import NUMBERS, REGULATION
+from .settings import NUMBERS, OBSOLETE_PV, REGULATION, regulation_value
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -62,6 +62,7 @@ SOURCES = (
     "leistung_pv",
     "leistung_verbraucher",
     "storage_discharge_power",
+    "storage_charge_power",
     "storage_capacity",
     "remaining_pv_energy",
     "grid_import_power",
@@ -95,7 +96,9 @@ def diagnostic_level(options):
 
 class Options(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
-        options = dict(self.config_entry.options)
+        options = {
+            k: v for k, v in self.config_entry.options.items() if k not in OBSOLETE_PV
+        }
         runtime = getattr(self.config_entry, "runtime_data", None)
         # Central options retain precedence over the existing profile settings.
         if runtime:
@@ -177,15 +180,17 @@ class Options(config_entries.OptionsFlow):
                             options.pop(key, None)
                 for key in REGULATION_FIELDS:
                     if key in data:
-                        if runtime and key in NUMBERS:
-                            runtime.settings.validate(key, data[key])
+                        if key in NUMBERS:
+                            regulation_value(key, data[key])
+                            if runtime:
+                                runtime.settings.validate(key, data[key])
                         options[key] = regulation[
                             next(
                                 marker for marker in regulation if marker.schema == key
                             )
                         ](data[key])
                 return self.async_create_entry(title="", data=options)
-            except ValueError, TypeError, vol.Invalid:
+            except ValueError, TypeError, OverflowError, vol.Invalid:
                 errors["base"] = "invalid_settings"
         return self.async_show_form(
             step_id="init",

@@ -203,12 +203,6 @@
       "regulation_interval": {
         "name": "Regelintervall"
       },
-      "pv_start_delay": {
-        "name": "PV-Startverzögerung"
-      },
-      "pv_stop_delay": {
-        "name": "PV-Stoppverzögerung"
-      },
       "optimum_lower_soc": {
         "name": "{scope} PV Optimum unterer Ziel-SoC"
       },
@@ -216,10 +210,31 @@
         "name": "{scope} PV Optimum oberer Ziel-SoC"
       },
       "optimum_max_discharge_w": {
-        "name": "Maximale PV-Speicherentladeleistung"
+        "name": "Maximale PV-Speicherentladeleistung (veraltet, ungenutzt)"
       },
       "estimated_daily_house_consumption_kwh": {
         "name": "{scope} PV Optimum täglicher Hausverbrauch ohne EV"
+      },
+      "pv_increase_interval_cycles": {
+        "name": "Hochregelintervall"
+      },
+      "pv_startup_hold_cycles": {
+        "name": "Einschwingzeit nach Ladestart"
+      },
+      "pv_grid_deadband_w": {
+        "name": "Netzpunkt-Totzone"
+      },
+      "pv_decrease_delay_cycles": {
+        "name": "Runterregelverzögerung"
+      },
+      "pv_grid_import_budget_wh": {
+        "name": "Zulässiger Netzbezug"
+      },
+      "pv_ev_uptake_threshold_pct": {
+        "name": "Mindestleistungsaufnahme Fahrzeug"
+      },
+      "pv_fast_restart_household_load_limit_w": {
+        "name": "FAST-Wiederanlauf: maximale Hauslast"
       }
     },
     "select": {
@@ -278,11 +293,11 @@
   "options": {
     "step": {
       "init": {
-        "title": "Passive Einstellungen",
-        "description": "Keine Ladesteuerung in dieser passiven Version.",
+        "title": "Wallbox Manager",
+        "description": "Messquellen und PV-Regelung konfigurieren.",
         "data": {
           "general": "Diagnose und Messwertquellen",
-          "regulation": "Regelungsparameter (nur gespeichert)"
+          "regulation": "PV-Regelparameter"
         },
         "sections": {
           "general": {
@@ -292,22 +307,28 @@
               "min_soc_speicher": "min soc speicher",
               "soc_speicher_aktuell": "soc speicher aktuell",
               "leistung_pv": "leistung pv",
-              "leistung_verbraucher": "leistung verbraucher",
+              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewähltem EV",
               "storage_discharge_power": "storage discharge power",
               "storage_capacity": "storage capacity",
               "remaining_pv_energy": "remaining pv energy",
               "grid_import_power": "grid import power",
-              "grid_export_power": "grid export power"
+              "grid_export_power": "grid export power",
+              "storage_charge_power": "Speicher-Ladeleistung"
             }
           },
           "regulation": {
-            "name": "Regelungsparameter (nur gespeichert)",
+            "name": "PV-Regelparameter",
             "data": {
               "regulation_interval": "Regelintervall",
               "soc_hysterese": "SoC-Hysterese und Ziel-Sicherheitsabstand",
-              "pv_start_delay": "PV-Startverzögerung",
-              "pv_stop_delay": "PV-Stoppverzögerung",
-              "power_smoothing_window": "Glättungsfenster (Sekunden)"
+              "power_smoothing_window": "Glättungsfenster (Sekunden)",
+              "pv_increase_interval_cycles": "Hochregelintervall",
+              "pv_startup_hold_cycles": "Einschwingzeit nach Ladestart",
+              "pv_grid_deadband_w": "Netzpunkt-Totzone",
+              "pv_decrease_delay_cycles": "Runterregelverzögerung",
+              "pv_grid_import_budget_wh": "Zulässiger Netzbezug",
+              "pv_ev_uptake_threshold_pct": "Mindestleistungsaufnahme Fahrzeug",
+              "pv_fast_restart_household_load_limit_w": "FAST-Wiederanlauf: maximale Hauslast"
             }
           }
         }

@@ -1,10 +1,4 @@
-**Latest approved Lovelace display amendment (25 October 2026):** [WBM-HS-UI-01–15](lovelace-home-battery-display.md) adds a read-only home-battery SoC → profile target/current NETZ reserve comparison and removes five PV tuning inputs only from the card. Existing HA Number entities, permissions, persistence, backend profile algorithms and battery-free PV_SURPLUS remain unchanged. The PV V3 draft remains a draft.
-
-**Latest approved operational amendment (24 October 2026):** [WBM-DISP-01–03 / MSG-01–07 / TIME-01–24](operational-display-and-timing.md) specifies one-decimal session-energy presentation, newest active warning/error only, wall-clock NETZ countdowns and time-edits acting on running schedules with a 15-second approval window. Documentation only; supersedes only conflicting historical timing/card-text requirements.
-
-**Latest approved NETZ amendment:** [WBM-GRID-31–40](grid-profile.md#amendment--nominal-netz-steps-and-navigation-24-october-2026) fixes planning at nominal 230 V, defines rounded technical steps and backend phase-aware navigation. Older measured-voltage/UI-step clauses are superseded only as listed there.
-
-**New approved target (24 October 2026):** [Manager Ladefreigabe and unified NETZ/PV card action](charge-release.md). This supersedes the conflicting automatic wake-up, hardware permission, SET and profile-action rules below. Implemented on coordinated feature branches; see [implementation and migration](../coordinated-control-redesign.md). Independent review and deployment remain separate.
+**25 October 2026 – consolidated PV documentation review:** The current targets are [PV regulation V3](pv-regulation.md), [shared operating points and six configuration parameters](pv-operating-point-response.md), and [sparse Level-2 diagnostics](pv-decision-diagnostics.md). The SoC matrix S/L/M/U, BALANCE one-step bias and STOP A/B, no smoothing, dual Fronius charge/discharge zero-on-both-positive rule, technical-minimum continuation, economic Wh STOP and non-D restart with site-specific FAST house-load threshold are decided. Historic paragraphs in [decision-history](decision-history.md) are provenance, **not simultaneous target rules**. **V3 as a whole remains DRAFT and not implemented**; remaining work is implementation verification and realistic hardware/replay acceptance, not inventing additional automatic retry constraints.
 
 # Wallbox Manager – Specifications
 
@@ -26,6 +20,8 @@ V3 remains DRAFT overall.
 | [Automatic vehicle wake-up](automatic-vehicle-wakeup.md) | Historical remote-setting scope; superseded by local Stationary INI | **Superseded configuration ownership** |
 | [Legacy manual compatibility](manual-vehicle-wakeup.md) | Station DataTransfer only; no manual HA button | Superseded UI scope |
 | [Passive v0.4](passive-v0.4.md) | Current passive milestone | **APPROVED, subject to WBM-ARCH-01–12** |
+| [Shared PV operating points and EV settling](pv-operating-point-response.md) | Configurable cycle timing, phase-first navigation, EV uptake, 100 W default grid deadband, Wh budget and 500 W default FAST restart house load | **Agreed target; execution tests pending** |
+| [Level-2 PV decision diagnostics](pv-decision-diagnostics.md) | Minimal measurement context for changed PV regulation decisions; suppression of unchanged ticks | **APPROVED direction; detailed implementation choices OPEN** |
 | [PV regulation – Requirements baseline V3](pv-regulation.md) | Current consolidated target specification draft with stable requirement IDs, acceptance criteria, sources and open issues | **DRAFT – overall subject-matter approval pending** |
 | [Decision history, October 2026](decision-history.md) | NON-NORMATIVE history: approved decisions, superseded interim solutions and explicitly rejected approaches | Reference / history |
 

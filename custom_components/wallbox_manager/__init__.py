@@ -24,6 +24,7 @@ class EntryRuntime:
     session_store: Store
     grid: object
     battery: object
+    pv: object
 
 
 async def async_setup(hass, config):
@@ -63,24 +64,32 @@ async def async_setup_entry(hass, entry):
     )
     from .grid import Grid
     from .grid_battery import GridBattery
+    from .pv import PV
 
     settings.state = state
     grid = server.grid = Grid(server, settings)
     if state.session:
         grid.known_transaction = state.session.get("external_transaction_id")
     battery = GridBattery(hass, entry, grid)
+    pv = grid.pv = PV(hass, entry, grid)
     entry.runtime_data = EntryRuntime(
-        state, settings, server, session_store, grid, battery
+        state, settings, server, session_store, grid, battery, pv
     )
+    await pv.start()
     await battery.start()
     try:
         await server.start()
     except OSError as exc:
+        await pv.close()
+        await grid.close()
+        await battery.close()
+        await server.stop()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         await async_setup_assets(hass)
     except BaseException:
+        await pv.close()
         await grid.close()
         await battery.close()
         await server.stop()
@@ -89,6 +98,7 @@ async def async_setup_entry(hass, entry):
 
     async def options_updated(hass, updated_entry):
         battery.changed()
+        pv.options_updated()
         # Options update held preferences without reconnecting the transport.
         for key in REGULATION:
             if key in updated_entry.options:
@@ -101,6 +111,7 @@ async def async_setup_entry(hass, entry):
     entry.async_on_unload(entry.add_update_listener(options_updated))
 
     async def stop(event):
+        await pv.close()
         await grid.close()
         await battery.close()
         await server.stop()
@@ -114,6 +125,7 @@ async def async_setup_entry(hass, entry):
 async def async_unload_entry(hass, entry):
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
+    await entry.runtime_data.pv.close()
     await entry.runtime_data.grid.close()
     await entry.runtime_data.battery.close()
     await entry.runtime_data.server.stop()

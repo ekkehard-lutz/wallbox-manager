@@ -155,6 +155,45 @@ class Envelope:
             return Point(0, None, 0)
         return point
 
+    def regulation_target(self, watts, current):
+        """Nominal phase-first counterpart of NETZ navigation, with a positive floor.
+
+        Stay at a series minimum until the next strictly lower cross-series point
+        actually fits. This prevents the 3p/6 A -> overlapping 1p/18 A oscillation.
+        """
+        points = [p for n in self.ranges for p in self.points(n)]
+        if not points:
+            raise ValueError("no_positive_modes")
+        floor = min(points, key=lambda p: (p.watts, p.phases))
+        ongoing = current is not None and current.amps > 0
+        if watts <= 0:
+            return floor if ongoing else Point(0, None, 0)
+        if ongoing and current.phases in self.ranges:
+            same = self.points(current.phases)
+            if watts < same[0].watts:
+                lower = self.navigate(same[0].display_watts, current.phases, -1)
+                if lower is None or watts > lower.watts:
+                    return same[0]
+                candidates = [
+                    p for p in points if p.watts <= watts and p.watts < same[0].watts
+                ]
+                return (
+                    max(candidates, key=lambda p: (p.watts, -p.phases))
+                    if candidates
+                    else floor
+                )
+            if watts <= same[-1].watts:
+                return min(same, key=lambda p: (abs(p.watts - watts), -p.watts))
+            higher = self.navigate(same[-1].display_watts, current.phases, 1)
+            if higher is None or watts < higher.watts:
+                return same[-1]
+        # Initial selection uses the existing eligible-mode policy; positive minima
+        # are explicit here instead of relying on NETZ's zero/nearest midpoint.
+        selected = self.resolve(watts, "up" if watts < floor.watts else "nearest")
+        if selected.amps == 0:
+            return floor
+        return selected
+
     def navigate(self, watts, mode, direction):
         """One strict, monotonic technical step; keep the selected mode first."""
         if type(direction) is not int or direction not in (-1, 1):

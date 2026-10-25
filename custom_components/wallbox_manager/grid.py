@@ -28,6 +28,7 @@ def retry_delay(info):
 class Grid:
     def __init__(self, listener, settings):
         self.listener, self.state, self.settings = listener, listener.state, settings
+        self.pv = None
         self.epoch = 0
         self.closed = False
         self.task = self.timer = self.schedule_timer = None
@@ -253,7 +254,7 @@ class Grid:
                 self.retry_deadline = retry_deadline
                 self.committed(equivalent, timing_only=timing_only)
         else:
-            # Shared foundation only; PV regulation is intentionally absent.
+            # PV Start grants release; the next regular tick decides its point.
             await self.settings.save_runtime({"charge_release": True})
         if self.task and self.eligible():
             await asyncio.shield(self.task)
@@ -277,6 +278,8 @@ class Grid:
                 "grid_timing_revision": self.settings.values["grid_timing_revision"],
             }
         )
+        if self.pv:
+            await self.pv.operator_stop()
         self.publish()
 
     def equivalent(self, values):
@@ -375,6 +378,7 @@ class Grid:
             "grid_schedule": self.settings.values.get("grid_request"),
             "grid_timing_state": self.phase()[0],
             "retry_in_seconds": self.retry_at,
+            **(self.pv.attributes() if self.pv else {}),
         }
 
     def phase_changed(self):
@@ -608,7 +612,14 @@ class Grid:
 
         return elapsed
 
-    def launch(self, *, confirm_only=False):
+    def launch(self, *, confirm_only=False, pv_point=None):
+        if (
+            self.settings.get("charging_profile") != "NETZ"
+            and self.settings.get("charge_release")
+            and pv_point is None
+            and not confirm_only
+        ):
+            return  # Observations never execute an additional PV regulation pass.
         if self.closed or not self.eligible():
             return
         if self.task and not self.task.done() and self.task_epoch == self.epoch:
@@ -621,7 +632,7 @@ class Grid:
         epoch = self.task_epoch = self.epoch
         business_phase = self.phase()[0]
         self.task = adapter.spawn(
-            self.reconcile(epoch, adapter, confirm_only=confirm_only)
+            self.reconcile(epoch, adapter, confirm_only=confirm_only, pv_point=pv_point)
         )
 
         def settled(task):
@@ -856,7 +867,7 @@ class Grid:
             self.publish()
         return response
 
-    async def reconcile(self, epoch, adapter, *, confirm_only=False):
+    async def reconcile(self, epoch, adapter, *, confirm_only=False, pv_point=None):
         transaction = self.transaction()
         try:
             if not self.valid(epoch, adapter, transaction):
@@ -891,7 +902,14 @@ class Grid:
             # to zero. allow_issue never authorizes replay of a positive target.
             # Missing supported readback on reconnect cannot authorize blind replay.
             if held is None and not self.allow_issue:
-                self.status, self.reason = "unconfirmed", "readback_unknown"
+                self.status, self.reason = (
+                    "accepted_unconfirmed"
+                    if self.settings.get("charging_profile") != "NETZ"
+                    and self.acknowledged
+                    and self.point_uncertain
+                    else "unconfirmed",
+                    "readback_unknown",
+                )
                 self.publish()
                 return
             ongoing = held.phases if held and held.amps > 0 else None
@@ -905,6 +923,18 @@ class Grid:
                 if ranges
                 else Point(0, None, 0)
             )
+            if pv_point is not None:
+                desired = pv_point
+                watts = desired.watts
+            elif self.settings.get("charging_profile") != "NETZ" and self.settings.get(
+                "charge_release"
+            ):
+                # Asynchronous confirmation can update an existing request, but
+                # never computes a fresh positive PV target.
+                if not confirm_only or self.requested is None:
+                    return
+                desired = self.requested
+                watts = desired.watts
             self.requested = desired
             limitation = (
                 "power_above_mode_maximum"
@@ -957,6 +987,15 @@ class Grid:
                                 if ranges and held.phases in ranges.ranges
                                 else Point(0, None, 0)
                             )
+                            if pv_point is not None and desired.amps > 0:
+                                # PV continuation during a real phase lockout:
+                                # retain the executable positive current-series
+                                # minimum, rather than importing NETZ DOWN=zero.
+                                temporary = (
+                                    ranges.points(held.phases)[0]
+                                    if ranges and held.phases in ranges.ranges
+                                    else Point(0, None, 0)
+                                )
                             if temporary.amps != held.amps or (
                                 temporary.phases is not None
                                 and temporary.phases != held.phases
@@ -968,6 +1007,8 @@ class Grid:
                                     return
                                 if fallback.status == "Accepted":
                                     self.acknowledged = temporary
+                                    if pv_point is not None and self.pv:
+                                        self.pv.accepted(temporary, held)
                                     # The original recognized lockout still owns
                                     # its retry even if interim confirmation fails.
                                     try:
@@ -1009,6 +1050,8 @@ class Grid:
                     self.publish()
                     return
                 self.acknowledged = desired
+                if pv_point is not None and self.pv:
+                    self.pv.accepted(desired, held)
                 self.status = "accepted_unconfirmed"
                 await adapter.read(
                     adapter.generation,

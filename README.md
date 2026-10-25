@@ -1,25 +1,27 @@
-# Wallbox Manager — OCPP control and NETZ Grid profile
+# Wallbox Manager — OCPP control, NETZ and PV Regulation V3
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This prerelease extends the passive rebuild for OCPP **2.1**, targeting the
-supported wallbox-stationary interface. The integration version is
-**0.4.0-beta.16**; see the [beta.16 release notes](docs/v0.4/release-notes-beta.16.md)
-for the read-only home-battery status, one-decimal battery percentages and
-simplified PV card editors. The [beta.15 release notes](docs/v0.4/release-notes-beta.15.md)
-retain live NETZ schedules, renewable editor ownership, active warnings, session
-presentation and the coordinated Stationary hardware-disable/CP correction.
-The [beta.14 release notes](docs/v0.4/release-notes-beta.14.md) retain nominal
-NETZ power planning, technical phase-series navigation and initialization details.
-The coordinated beta.12 control foundation remains in place. The existing
-Stationary implementation identified in the beta.15 notes remains compatible;
-**no Stationary update is required for this UI feature**. The old Stationary
-capability inventory cannot satisfy NETZ execution requirements. Publication alone
-deploys neither component.
-The [beta.6 release notes](docs/v0.4/release-notes-beta.6.md) retain the historical
-Idle display, session meter corrections and migration details. The immutable
+This **v0.4.0-beta.17 prerelease** provides the shared PV Regulation V3
+runtime for PV_SURPLUS, PV_OPTIMUM and PV_MAXIMUM, alongside the existing NETZ
+profile and OCPP **2.1** interface. See the [beta.17 release notes](docs/v0.4/release-notes-beta.17.md)
+for features, seven new tuning parameters, migration and supervised HACS/rollback
+instructions, and the [implementation report](docs/pv-v3-implementation.md) for
+source evidence and regression validation.
+
+The [beta.16 notes](docs/v0.4/release-notes-beta.16.md) retain the home-battery
+status and simplified PV card history. The [beta.15 notes](docs/v0.4/release-notes-beta.15.md)
+cover live NETZ schedules and the coordinated Stationary hardware-disable/CP
+correction; the [beta.14 notes](docs/v0.4/release-notes-beta.14.md) explain nominal
+NETZ power planning. The existing Stationary implementation identified in beta.15
+remains the interface baseline; **no Stationary update is part of beta.17**.
+Stationary retains physical and electrical safety ownership. The old Stationary
+capability inventory cannot satisfy current execution requirements.
+The [beta.6 notes](docs/v0.4/release-notes-beta.6.md) retain Idle/session migration
+history. Immutable
 [`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
-remains the historical v0.3 reference and rollback source.
+remains a historical source reference; it is not a guaranteed package-only rollback
+from V3 storage. Back up HA configuration and storage before upgrading.
 
 Each config entry has exactly one explicitly bound station/EVSE/connector and
 one listener port. Multiple wallboxes require separate independent entries and
@@ -70,8 +72,14 @@ locally controlled charging using manager release.
 Automatic vehicle wake-up is configured only in Stationary's startup INI;
 WBM neither exposes a switch nor uses AutoWakeUpEnabled. The old wake-up switch
 and standalone NETZ SET registry identities are retired with exact ownership checks.
-PV regulation remains deferred; its shared release foundation supports zero-target
-pauses. See the [approved requirements](docs/specifications/charge-release.md) and
+PV V3 shares SoC hysteresis, FAST/BALANCE control, phase-aware technical steps,
+configurable timing and economic import pauses. BALANCE uses the mapped Fronius
+charge/discharge channels without additional measurement smoothing. The canonical
+target and PV_OPTIMUM daily planner continue on the existing single scheduler while
+release is OFF, independently of OCPP availability. Planning grants no charging
+permission and sends no operating-point commands. See the
+[implementation and verification report](docs/pv-v3-implementation.md),
+[approved requirements](docs/specifications/charge-release.md) and
 [implementation, migration, validation and operational procedure](docs/coordinated-control-redesign.md).
 
 ```yaml
@@ -98,8 +106,9 @@ one HA-language decimal (German `69,3 % → 40,0 %`, English `69.3 % → 40.0 %`
 NETZ shows the observed writable reserve, including confirmed overrides and
 external changes. PV_SURPLUS shows its configured target only while valid against
 the actual reserve and hysteresis; invalid or unavailable values show `—`.
-PV_OPTIMUM and PV_MAXIMUM effective targets remain `—` until their backend
-regulators exist. The five PV tuning editors are removed from the card; their HA
+PV_OPTIMUM and PV_MAXIMUM display their canonical effective backend targets once
+calculated, including while release is OFF, and `—` while unavailable. The five PV
+tuning editors are removed from the card; their HA
 Number entities, services and saved settings remain available. See the
 [specification](docs/specifications/lovelace-home-battery-display.md) and
 [implementation report](docs/lovelace-home-battery-implementation.md).
@@ -113,7 +122,8 @@ Read the [compatibility inventory](docs/v0.4/compatibility-inventory.md),
 [architecture/migration report](docs/v0.4/passive-rebuild-report.md) and
 [approved milestone requirements](docs/specifications/passive-v0.4.md). The
 consolidated [V3 specification](docs/specifications/pv-regulation.md) remains
-DRAFT overall; individually approved decisions are preserved for future work.
+DRAFT overall; its explicitly approved decisions and supersessions govern the
+implemented V3 runtime.
 Other historical implementation reports describe the tagged v0.3 code, not
 this new runtime.
 
@@ -133,14 +143,16 @@ Live HA CPU acceptance (target <=0.1 percentage points average increase) require
 separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
-For separately authorized testing, select **v0.4.0-beta.16** through the HACS
-prerelease versions and verify integration version **0.4.0-beta.16** after the
-operator performs installation and the Home Assistant restart. Refresh each browser/app
-cache for `/wallbox_manager/wallbox-manager-card.js`; see the beta.16 notes for
-supervised rollback to beta.15. Publication does
-not include installation or physical validation. NETZ now executes an event-driven fixed offered point under confirmed Remote
-authority and charging permission. PV profiles expose only the shared Start/Stop release foundation; regulation remains deferred. See the
-[NETZ implementation and validation boundary](docs/grid-fixed-profile-implementation.md).
+For separately authorized installation and testing, select
+**v0.4.0-beta.17** in HACS. Keep manager release OFF, take a full pre-upgrade HA
+backup, verify installed manifest **0.4.0-beta.17** after the operator-managed
+restart, and refresh all dashboard caches. Follow the
+[beta.17 upgrade and rollback procedure](docs/v0.4/release-notes-beta.17.md#hacs-upgrade-and-rollback).
+A package-only downgrade to beta.16 cannot restore removed delay settings or
+carry back V3 economic STOP history. Publication does not install anything or
+establish physical acceptance. NETZ retains event-driven fixed-point execution;
+PV uses one clocked regulator behind the same explicit Start/Stop release.
+See the [NETZ validation boundary](docs/grid-fixed-profile-implementation.md).
 Automatic wake-up requires the matching Stationary implementation and explicit local startup configuration. Simulated sleeping-vehicle tests are the acceptance
 basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is
 unconfirmed, another explicit Take Control action reads authority again without repeating the write.
