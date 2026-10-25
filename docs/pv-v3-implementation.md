@@ -92,9 +92,11 @@ Recognized old records preserve exact stored Ws as Wh and STOP state, including 
 in-flight OFF; malformed/mismatched history remains inhibited rather than becoming a
 fresh allowance. Legacy D-dependent restart references are deliberately not reused.
 
-Temporary disconnect produces no commands or accounting/reset credit. HA-only target
-planning may continue provisionally, with no invented EV reading, first-surplus evidence,
-physical point or command queue. A Local authority report retires release. Recovery needs
+Temporary disconnect produces no commands or accounting/reset credit. The canonical
+HA-only target/day planner continues independently of release and OCPP availability,
+using only genuinely available surplus evidence, with no invented EV reading, physical
+point or command queue. See the release-independent planning amendment below.
+A Local authority report retires release. Recovery needs
 current-generation supported observations, explicit authority/release where applicable,
 and the next ordinary PV tick, rather than a reconnect-triggered positive command.
 
@@ -485,3 +487,16 @@ unchanged. Localhost simulated OCPP peers provide command-level evidence; physic
 wallbox timing, uptake and installation acceptance still require the separate authorized
 hardware review. No merge, tag, release, installation, deployment or hardware command
 was performed. Pre-existing untracked investigation files were excluded and preserved.
+
+## v0.4.0-beta.17 release preparation
+
+The reviewed runtime is packaged unchanged as manifest `0.4.0-beta.17` on the
+release preparation branch. See [release notes](v0.4/release-notes-beta.17.md) for
+the beta.16 migration assessment, seven parameter defaults, retired delay settings,
+compatibility entity and prepared HACS/rollback procedure. The
+[release verification record](v0.4/release-validation-beta.17.md) records fresh
+candidate validation and ancestry. New V3 economics/day records are not consumed
+by beta.16; package-only downgrade cannot guarantee economic history preservation.
+Pre-upgrade backup and reconciliation of post-backup activity are required before
+re-enabling charging after rollback. No controller behavior, specification,
+Stationary source, installation or hardware operation changes in preparation.
