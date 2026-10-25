@@ -3,14 +3,17 @@
 import asyncio
 import logging
 import math
-from datetime import UTC, datetime
 from fractions import Fraction
 
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 
-from .diagnostics import diagnostic_event
+
+def diagnostic_event(entry, event, **fields):
+    if runtime := getattr(entry, "runtime_data", None):
+        runtime.server.diagnostic(2, event, **fields)
+
 
 CONFIRMATION_TIMEOUT = 10
 
@@ -58,17 +61,10 @@ class BatteryReserve:
                 confirmed = False
             self.status = "preserved" if confirmed else "write_unconfirmed"
 
-    def read(self, entity, *, fresh=False):
+    def read(self, entity):
         state = self.hass.states.get(entity)
         if state is None:
             raise ValueError("entity unavailable")
-        if fresh:
-            at = getattr(state, "last_reported", state.last_updated)
-            if not 0 <= (datetime.now(UTC) - at).total_seconds() <= 90:
-                raise ValueError("stale SOC")
-        expiry = state.attributes.get("valid_until")
-        if expiry and datetime.fromisoformat(expiry) <= datetime.now(UTC):
-            raise ValueError("expired reserve/SOC evidence")
         if state.attributes.get("restored"):
             raise ValueError("restored entity is not live evidence")
         value = float(state.state)
@@ -91,6 +87,13 @@ class BatteryReserve:
             <= float(state.attributes.get("max", 100))
         ):
             raise ValueError("reserve outside entity range")
+        if self.record and self.read(entity) not in (
+            self.record["original"],
+            self.record["temporary"],
+            self.record.get("pending"),
+            *self.record.get("superseded", []),
+        ):
+            raise ValueError("reserve changed before dispatch")
         self.diagnostics["write_count"] = self.diagnostics.get("write_count", 0) + 1
         self.diagnostics["last_written_reserve"] = value
         await self.hass.services.async_call(
@@ -174,7 +177,7 @@ class BatteryReserve:
             remove()
 
     def desired(self, requested, original):
-        soc = self.read(self.soc, fresh=True)
+        soc = self.read(self.soc)
         state = self.hass.states.get(self.reserve)
         step = Fraction(str(state.attributes.get("step", 1)))
         minimum = Fraction(str(state.attributes.get("min", 0)))

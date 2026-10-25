@@ -1,51 +1,78 @@
-"""Explicit, station-scoped authority takeover; never a return-control action."""
+"""Explicit station-scoped takeover, retaining the public registry identity."""
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import Entity
 
-from .authority_entity import setup_authority_entities
-from .entity import StationEntity
+from .entity import SettingEntity, WallboxEntity, unique_id
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    setup_authority_entities(
-        hass,
-        entry,
-        async_add_entities,
-        "take_control",
-        lambda station: TakeControlButton(
-            entry.runtime_data.control, entry.entry_id, station
+async def async_setup_entry(hass, entry, add):
+    state = entry.runtime_data.state
+    # Retire only this integration's exact legacy button, not other devices/entities.
+    registry = er.async_get(hass)
+    legacy = registry.async_get_entity_id(
+        "button",
+        "wallbox_manager",
+        unique_id(
+            entry.entry_id, "station", (state.binding[0], None, None), "wake_up_vehicle"
         ),
+    )
+    if legacy and registry.async_get(legacy).config_entry_id == entry.entry_id:
+        registry.async_remove(legacy)
+    obsolete = registry.async_get_entity_id(
+        "button",
+        "wallbox_manager",
+        unique_id(entry.entry_id, "control", state.binding, "grid_set"),
+    )
+    if obsolete and registry.async_get(obsolete).config_entry_id == entry.entry_id:
+        registry.async_remove(obsolete)
+    add(
+        [
+            TakeControl(
+                entry, "station", (state.binding[0], None, None), "take_control"
+            ),
+            ChargeAction(entry, "charge_action"),
+        ]
     )
 
 
-class TakeControlButton(StationEntity, ButtonEntity):
-    _attr_entity_category = None
-
-    def __init__(self, control, entry_id, station):
-        super().__init__(control.runtime, entry_id, station, "take_control")
-        self.control = control
-
+class TakeControl(WallboxEntity, ButtonEntity):
     @property
     def available(self):
-        adapter = self.control.authority_adapter(self.station)
-        return bool(
-            self.snapshot
-            and self.snapshot.connected
-            and adapter
-            and adapter.can_take_control()
+        return (
+            self.entry.runtime_data.server.control.blocked("ControlAuthority") is None
         )
 
     @property
     def extra_state_attributes(self):
-        result = self.control.takeover_results.get(self.station)
         return {
             **super().extra_state_attributes,
-            "takeover_status": result.status.value if result else None,
-            "takeover_reason": result.reason.value
-            if result and result.reason
-            else None,
+            **self.entry.runtime_data.server.control.attributes("ControlAuthority"),
         }
 
+    async def async_added_to_hass(self):
+        await Entity.async_added_to_hass(self)
+        self.async_on_remove(
+            self.observed.watch(
+                ("command", self.scope, "control_authority"), self.changed
+            )
+        )
+
     async def async_press(self):
-        await self.control.take_control(self.station)
-        self.async_write_ha_state()
+        result = await self.entry.runtime_data.server.control.request(
+            "ControlAuthority", "OCPP"
+        )
+        if result != "confirmed":
+            raise HomeAssistantError(f"Takeover: {result}")
+
+
+class ChargeAction(SettingEntity, ButtonEntity):
+    """Durable connector-scoped approval, independent of station eligibility."""
+
+    async def async_press(self):
+        try:
+            await self.entry.runtime_data.grid.action()
+        except (ValueError, TypeError, OSError) as exc:
+            raise HomeAssistantError(f"Charge action: {exc}") from exc

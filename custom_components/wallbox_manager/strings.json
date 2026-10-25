@@ -4,10 +4,13 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "Host an OCPP endpoint on a trusted local network. Manual control requires explicitly verified capabilities. Configure the wallbox to connect to ws://HA-address:port/station-id.",
+        "description": "Passive OCPP 2.1 listener for exactly one explicitly bound station/EVSE/connector. No charging control.",
         "data": {
           "host": "Local bind address",
-          "port": "WebSocket port"
+          "port": "WebSocket port",
+          "station_id": "OCPP station ID",
+          "evse_id": "EVSE ID",
+          "connector_id": "Connector ID"
         }
       }
     },
@@ -15,7 +18,7 @@
       "already_configured": "Wallbox Manager is already configured."
     },
     "error": {
-      "invalid_listener": "Enter a valid IP address and a port between 1 and 65535."
+      "invalid_listener": "Enter a valid IP, unused port and explicit station/EVSE/connector identity."
     }
   },
   "entity": {
@@ -146,17 +149,8 @@
       "enable_disable": {
         "name": "{scope} Enable/disable supported"
       },
-      "maximum_current_1": {
-        "name": "{scope} Maximum current 1p"
-      },
-      "maximum_current_2": {
-        "name": "{scope} Maximum current 2p"
-      },
-      "maximum_current_3": {
-        "name": "{scope} Maximum current 3p"
-      },
       "maximum_current": {
-        "name": "{scope} Maximum current"
+        "name": "Maximum current"
       },
       "control_authority": {
         "name": "Control authority",
@@ -168,19 +162,22 @@
       },
       "zero_current": {
         "name": "{scope} Zero-current support"
+      },
+      "physical_phases": {
+        "name": "Last observed physical phases"
+      },
+      "maximum_asymmetry_current": {
+        "name": "Maximum asymmetry current"
       }
     },
     "switch": {
       "charging_enabled": {
-        "name": "{scope} Charging enabled"
+        "name": "{scope} Wallbox enabled"
       }
     },
     "number": {
       "desired_charging_power": {
         "name": "{scope} Desired charging power"
-      },
-      "phase_switch_deviation_pct": {
-        "name": "{scope} Maximum deviation without phase switching"
       },
       "allowed_current_1p": {
         "name": "{scope} Allowed current 1p"
@@ -206,12 +203,6 @@
       "regulation_interval": {
         "name": "Regulation interval"
       },
-      "pv_start_delay": {
-        "name": "PV start delay"
-      },
-      "pv_stop_delay": {
-        "name": "PV stop delay"
-      },
       "optimum_lower_soc": {
         "name": "{scope} PV Optimum lower target SoC"
       },
@@ -219,10 +210,31 @@
         "name": "{scope} PV Optimum upper target SoC"
       },
       "optimum_max_discharge_w": {
-        "name": "Maximum PV storage discharge"
+        "name": "Maximum PV storage discharge (deprecated, unused)"
       },
       "estimated_daily_house_consumption_kwh": {
         "name": "{scope} PV Optimum daily household consumption without EV"
+      },
+      "pv_increase_interval_cycles": {
+        "name": "Upward regulation interval"
+      },
+      "pv_startup_hold_cycles": {
+        "name": "Startup settling time"
+      },
+      "pv_grid_deadband_w": {
+        "name": "Grid point deadband"
+      },
+      "pv_decrease_delay_cycles": {
+        "name": "Downward regulation delay"
+      },
+      "pv_grid_import_budget_wh": {
+        "name": "Permitted grid import energy"
+      },
+      "pv_ev_uptake_threshold_pct": {
+        "name": "Minimum vehicle power uptake"
+      },
+      "pv_fast_restart_household_load_limit_w": {
+        "name": "FAST restart maximum household load"
       }
     },
     "select": {
@@ -243,9 +255,6 @@
           "PV_MAXIMUM": "PV Maximum"
         }
       },
-      "active_wallbox": {
-        "name": "Active wallbox"
-      },
       "pv_approximation": {
         "name": "PV power approximation",
         "state": {
@@ -257,6 +266,9 @@
     "button": {
       "take_control": {
         "name": "Take control"
+      },
+      "charge_action": {
+        "name": "{scope} Charge release"
       }
     },
     "text": {
@@ -268,90 +280,99 @@
       }
     }
   },
+  "selector": {
+    "diagnostic_level": {
+      "options": {
+        "0": "Errors only",
+        "1": "Events and errors",
+        "2": "Relevant state transitions",
+        "3": "Detailed passive diagnostics"
+      }
+    }
+  },
   "options": {
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "PV Surplus requires both power references. Without battery SoC it operates without battery logic; the discharge-reserve reference is independent.",
+        "description": "Configure measurement sources and PV regulation.",
+        "data": {
+          "general": "Diagnostics and measurement sources",
+          "regulation": "PV regulation parameters"
+        },
         "sections": {
           "general": {
-            "name": "General parameters",
+            "name": "Diagnostics and measurement sources",
             "data": {
-              "min_soc_speicher": "Minimum reserve",
-              "soc_speicher_aktuell": "Battery SoC",
-              "leistung_pv": "PV power",
-              "leistung_verbraucher": "Consumption power",
-              "storage_discharge_power": "Storage discharge power",
-              "storage_capacity": "Nominal storage capacity (WHRtg)",
-              "remaining_pv_energy": "Expected remaining PV energy today",
-              "grid_import_power": "Grid import power",
-              "grid_export_power": "Grid export power",
-              "diagnostic_level": "Diagnostic level"
-            },
-            "data_description": {
-              "leistung_verbraucher": "Total consumption including the selected wallbox.",
-              "storage_discharge_power": "Actual nonnegative discharge power; zero while charging.",
-              "storage_capacity": "Fronius nominal storage capacity: WHRtg / model_120_whrtg, in Wh or kWh.",
-              "remaining_pv_energy": "Expected remaining PV production today, in Wh or kWh.",
-              "grid_import_power": "Nonnegative power drawn from the grid.",
-              "grid_export_power": "Nonnegative power fed into the grid.",
-              "diagnostic_level": "Wallbox Manager diagnostics: 0 off, 1 events and errors, 2 with relevant data, 3 full trace. Normal warnings and errors remain active at Level 0. Disabled by default."
+              "diagnostic_level": "Diagnostic level",
+              "min_soc_speicher": "min soc speicher",
+              "soc_speicher_aktuell": "soc speicher aktuell",
+              "leistung_pv": "leistung pv",
+              "leistung_verbraucher": "Total consumption including selected EV",
+              "storage_discharge_power": "storage discharge power",
+              "storage_capacity": "storage capacity",
+              "remaining_pv_energy": "remaining pv energy",
+              "grid_import_power": "grid import power",
+              "grid_export_power": "grid export power",
+              "storage_charge_power": "Storage charging power"
             }
           },
           "regulation": {
-            "name": "Regulation parameters",
+            "name": "PV regulation parameters",
             "data": {
               "regulation_interval": "Regulation interval",
-              "pv_start_delay": "PV start delay",
-              "pv_stop_delay": "PV stop delay",
               "soc_hysterese": "SoC hysteresis and target safety margin",
-              "power_smoothing_window": "Power smoothing window"
+              "power_smoothing_window": "Power smoothing window (seconds)",
+              "pv_increase_interval_cycles": "Upward regulation interval",
+              "pv_startup_hold_cycles": "Startup settling time",
+              "pv_grid_deadband_w": "Grid point deadband",
+              "pv_decrease_delay_cycles": "Downward regulation delay",
+              "pv_grid_import_budget_wh": "Permitted grid import energy",
+              "pv_ev_uptake_threshold_pct": "Minimum vehicle power uptake",
+              "pv_fast_restart_household_load_limit_w": "FAST restart maximum household load"
             }
           }
         }
       }
+    },
+    "error": {
+      "invalid_settings": "Invalid or inconsistent settings."
     }
   },
-  "config_subentries": {
-    "wallbox": {
-      "title": "Wallbox",
-      "initiate_flow": {
-        "user": "Wallbox",
-        "reconfigure": "Configure capabilities"
-      },
-      "step": {
-        "reconfigure": {
-          "title": "Station capabilities",
-          "description": "Supply only missing OCPP values. An empty form needs no additional information.",
-          "data": {
-            "reference_phases": "Supported phase counts (e.g. 1,3)",
-            "reference_min_a": "Minimum current (A)",
-            "reference_step_a": "Current step (A)",
-            "reference_phase_switching": "Phase switching supported",
-            "reference_enable_disable": "Enable/disable supported",
-            "reference_max_1a": "Maximum current 1p (A)",
-            "reference_max_2a": "Maximum current 2p (A)",
-            "reference_max_3a": "Maximum current 3p (A)"
-          }
+  "services": {
+    "step_power": {
+      "name": "Step NETZ requested power",
+      "description": "Move the draft by one technical step without approval or charging release. Requires the current draft revision and runtime incarnation.",
+      "fields": {
+        "direction": {
+          "name": "Direction"
+        },
+        "revision": {
+          "name": "Expected draft revision"
+        },
+        "incarnation": {
+          "name": "Runtime incarnation"
         }
-      },
-      "error": {
-        "invalid_reference": "Provide valid topology identity and consistent reference values."
-      },
-      "abort": {
-        "reconfigure_successful": "Station capabilities saved.",
-        "discovered_automatically": "Wallboxes are added automatically through OCPP discovery."
-      },
-      "entry_type": "Wallbox"
-    }
-  },
-  "selector": {
-    "diagnostic_level": {
-      "options": {
-        "0": "Off",
-        "1": "Events and errors",
-        "2": "Events with relevant data",
-        "3": "Full diagnostic trace"
+      }
+    },
+    "edit_timing": {
+      "name": "Edit NETZ timing",
+      "description": "Coordinate both timing fields using their current timing revision and runtime incarnation. Begin holds drafts; end starts the 15-second window; update changes only the timing draft. Renew extends only the active editor lease.",
+      "fields": {
+        "action": {
+          "name": "Editing action"
+        },
+        "owner": {
+          "name": "Editor identity"
+        },
+        "revision": {
+          "name": "Expected timing revision"
+        },
+        "incarnation": {
+          "name": "Runtime incarnation"
+        },
+        "value": {
+          "name": "New draft time"
+        }
       }
     }
   }

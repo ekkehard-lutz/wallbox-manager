@@ -1,0 +1,70 @@
+{
+  "production_python": {
+    "before": {
+      "files": 18,
+      "lines": 2463,
+      "bytes": 88430
+    },
+    "after": {
+      "files": 18,
+      "lines": 2718,
+      "bytes": 98231
+    },
+    "delta": {
+      "files": 0,
+      "lines": 255,
+      "bytes": 9801
+    }
+  },
+  "python_tests": {
+    "before": {
+      "files": 5,
+      "lines": 1573,
+      "bytes": 59287
+    },
+    "after": {
+      "files": 6,
+      "lines": 1958,
+      "bytes": 74298
+    },
+    "delta": {
+      "files": 1,
+      "lines": 385,
+      "bytes": 15011
+    }
+  },
+  "card": {
+    "before": {
+      "files": 1,
+      "lines": 350,
+      "bytes": 26928
+    },
+    "after": {
+      "files": 1,
+      "lines": 350,
+      "bytes": 26928
+    },
+    "delta": {
+      "files": 0,
+      "lines": 0,
+      "bytes": 0
+    }
+  },
+  "javascript_tests": {
+    "before": {
+      "files": 1,
+      "lines": 126,
+      "bytes": 6373
+    },
+    "after": {
+      "files": 1,
+      "lines": 126,
+      "bytes": 6373
+    },
+    "delta": {
+      "files": 0,
+      "lines": 0,
+      "bytes": 0
+    }
+  }
+}

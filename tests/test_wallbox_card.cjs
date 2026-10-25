@@ -1,840 +1,946 @@
-/* Run: node --test tests/test_wallbox_card.cjs */
+// Fresh focused tests for the passive card, not the beta.18 frontend suite.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const source = fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js', 'utf8');
 
-function runtime() {
-  let ms=0, next=0;
-  const timers=new Map(), listeners=new Map();
-  const schedule=(fn,delay,interval=0)=>{ const id=++next; timers.set(id,{fn,at:ms+delay,interval}); return id; };
-  const clock={advance(delta) {
-    const end=ms+delta;
-    while (true) {
-      const due=[...timers].filter(([,t])=>t.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];
-      if (!due) break;
-      const [id,t]=due; ms=t.at; timers.delete(id);
-      if(t.interval) timers.set(id,{...t,at:ms+t.interval});
-      t.fn();
-    }
-    ms=end;
-  },get pending(){return timers.size;},listeners};
-  class Node {
-    constructor() { this.style = {}; this.children = []; this.value = ''; this.textContent = ''; }
-    replaceChildren(...nodes) { this.children = nodes; }
-    focus() {}
-    setPointerCapture(id) { this.pointer=id; }
-    hasPointerCapture(id) { return this.pointer===id; }
-    releasePointerCapture() { this.pointer=null; }
-    getBoundingClientRect() { return {left:0,top:0,right:34,bottom:40}; }
-  }
-  class HTMLElement {
-    attachShadow() {
-      const nodes = {};
-      this.shadowRoot = {getElementById: id => nodes[id] ||= new Node(), activeElement: null};
-    }
-  }
+function load(clock={}) {
   const registry = new Map();
-  const context = vm.createContext({HTMLElement, document:{createElement: () => new Node()}, setTimeout:(fn,delay)=>schedule(fn,delay),clearTimeout:id=>timers.delete(id),setInterval:(fn,delay)=>schedule(fn,delay,delay),clearInterval:id=>timers.delete(id),window:{addEventListener:(event,fn)=>listeners.set(event,fn),removeEventListener:(event)=>listeners.delete(event)}, customElements:{get: key=>registry.get(key),define:(key,value)=>registry.set(key,value)}});
-  const source = fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8');
-  vm.runInContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testHelpers = {sessionDuration,discoverWallboxManager,powerStep,liveValues,gridCountdown};})();'), context);
-  return {context, source, clock, duration:context.testHelpers.sessionDuration, Card:registry.get('wallbox-manager-card'), discover:context.testHelpers.discoverWallboxManager, step:context.testHelpers.powerStep, live:context.testHelpers.liveValues};
+  class Element {
+    constructor() { this.style = {}; this.value = ''; this.validity = {}; }
+    setAttribute(key,value) { this[key] = value; }
+    replaceChildren(...children) { this.children = children; }
+    checkValidity() { return true; }
+    focus() {}
+  }
+  class Host {
+    attachShadow() {
+      const nodes = new Map();
+      this.shadowRoot = {activeElement: null,
+        set innerHTML(html) { this.html = html; for (const match of html.matchAll(/id="([^"]+)"/g)) nodes.set(match[1], new Element()); },
+        getElementById(id) { assert.ok(nodes.has(id), `Real rendered element missing: ${id}`); return nodes.get(id); }};
+    }
+  }
+  const context = {HTMLElement:Host, customElements:{get:k=>registry.get(k), define:(k,v)=>registry.set(k,v)},
+    window:{addEventListener(){},removeEventListener(){}}, document:{createElement:()=>new Element()},
+    Date:clock.Date || Date, setTimeout:clock.setTimeout || setTimeout,clearTimeout:clock.clearTimeout || clearTimeout,setInterval(){assert.fail('Passive card must not start an idle interval');}};
+  vm.runInNewContext(source, context);
+  return registry.get('wallbox-manager-card');
 }
-function state(role, target, value, extra={}) {
-  return {state:value,attributes:{wallbox_manager_role:role,wallbox_manager_target:target,...extra}};
+function states(entry='E') {
+  const result = {};
+  for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',pv_approximation:'down',
+    charge_action:'unknown',charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
+    grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',optimum_max_discharge_w:'3000',estimated_daily_house_consumption_kwh:'12'})) {
+    result[`${entry}.${role}`] = {state:value,attributes:{wallbox_manager_entry:entry,wallbox_manager_role:role,wallbox_manager_scope:'connector',station_id:`station-${entry}`,
+      options:role==='charging_profile'?['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']:undefined,min:0,max:100}};
+  }
+  Object.assign(result[`${entry}.charge_action`].attributes,{charge_action_ready:false,charge_action:"start",charge_release:false});
+  Object.assign(result[`${entry}.soll_power`].attributes,{technical_min_kw:1.4,technical_max_kw:18.6,grid_draft_revision:0,runtime_incarnation:entry});
+  for (const role of ['grid_start_delay','grid_duration']) Object.assign(result[`${entry}.${role}`].attributes,{grid_timing_revision:0,runtime_incarnation:entry});
+  return result;
 }
-function states(ready=false) {
-  return {
-    'select.renamed_owner':state('active_wallbox',null, ready ? 'A' : 'unknown', {active_wallbox:ready ? 'A':null,profile_control_ready:ready,ownership_status:ready?'ready':'take_control_required',wallboxes:{A:{name:'Wallbox01',connected:true}}}),
-    'select.anything':state('charging_profile','A','NETZ',{options:['NETZ'],profile_control_ready:ready}),
-    'number.renamed_power':state('soll_power','A','11'),
-    'switch.another_name':state('charging_enabled','A','off'),
-    'number.x':state('min_soc','A','20'),
-  };
+// Canned backend neighbour payloads; the card never derives electrical steps.
+const neighbours = {
+  '1:1.4': [null,[1.6,1]], '1:1.6': [[1.4,1],[1.8,1]],
+  '1:1.8': [[1.6,1],[2.1,1]], '1:2.1': [[1.8,1],[2.3,1]],
+  '1:3.9': [[3.7,1],[4.1,1]], '1:4.1': [[3.9,1],[4.4,1]],
+  '1:4.4': [[4.1,1],[4.6,1]], '1:4.6': [[4.4,1],[4.8,3]],
+  '3:4.1': [[3.9,1],[4.8,3]], '3:4.8': [[4.1,3],[5.5,3]],
+  '3:5.5': [[4.8,3],[6.2,3]], '3:7.2': [[6.2,3],[7.6,3]],
+};
+function backendPoint(state, point=null) {
+  if (point) { state.state=String(point.power_kw); state.attributes.selected_phase_count=point.power_phases; state.attributes.draft_phase_hint=point.power_phases; }
+  let phase=state.attributes.selected_phase_count || 3;
+  if (!neighbours[`${phase}:${state.state}`]) phase=1;
+  const pair=neighbours[`${phase}:${state.state}`];
+  if (pair) {
+    state.attributes.selected_phase_count=phase;
+    [state.attributes.power_step_down,state.attributes.power_step_up]=pair.map(p=>p?{power_kw:p[0],power_phases:p[1]}:null);
+  }
 }
-function card(data) {
-  const {Card,clock} = runtime();
-  const card = new Card();
-  card.setConfig({type:'custom:wallbox-manager-card'});
-  const calls = [];
-  card.hass = {states:data, language:'en',callService:async (...args)=>calls.push(args)};
-  return {card,calls,clock,get:id=>card.shadowRoot.getElementById(id)};
+function card(data=states(), config={}, language='en', clock={}) {
+  const Card = load(clock), card = new Card(), calls=[];
+  card.setConfig({type:'custom:wallbox-manager-card',...config});
+  for (const state of Object.values(data)) if (state.attributes.wallbox_manager_role==='soll_power') backendPoint(state);
+  card.hass={states:data,language,callService:async(...args)=>{
+    calls.push(args);
+    if (args[0]==='wallbox_manager' && args[1]==='edit_timing') {
+      const r=args[2], state=data[r.entity_id], entry=state.attributes.wallbox_manager_entry;
+      if (r.revision!==state.attributes.grid_timing_revision) throw new Error('Stale timing revision');
+      if (r.action==='renew') return;
+      if (r.action==='update') state.state=r.value;
+      for (const role of ['grid_start_delay','grid_duration']) {
+        const a=data[`${entry}.${role}`].attributes;
+        a.grid_timing_revision++;
+        a.grid_timing_edit=r.action==='end' ? null : {owner:r.owner,active:true};
+      }
+      card.hass=card._hass;
+    }
+    if (args[0]==='wallbox_manager' && args[1]==='step_power') {
+      const request=args[2], state=data[request.entity_id];
+      if (request.revision!==state.attributes.grid_draft_revision) throw new Error('Stale revision');
+      const point=state.attributes[request.direction>0?'power_step_up':'power_step_down'];
+      backendPoint(state,point); state.attributes.grid_draft_revision++;
+      card.hass=card._hass;
+    }
+  }};
+  return {card,calls,get:id=>card.shadowRoot.getElementById(id)};
 }
 
-test('only type required; single wallbox hides selector, shows explicit takeover',async()=>{
-  const {card:c,calls,get} = card(states());
-  assert.equal(get('wallbox-row').hidden,true);
-  assert.equal(get('takeover').hidden,false);
-  assert.equal(get('permission').disabled,true);
-  await c.activate('A');
-  assert.equal(calls.length,1);
-  assert.equal(calls[0][0],'select');
-  assert.equal(calls[0][2].entity_id,'select.renamed_owner');
-  assert.equal(calls[0][2].option,'A');
-  assert.equal(get('permission').disabled,true); // UI cannot assume successful readiness.
+test('familiar layout, read-only permission and no multi-wallbox UI',()=>{
+  const {card:c,get,calls}=card();
+  assert.match(c.shadowRoot.html,/ha-card/);
+  assert.match(c.shadowRoot.html,/class="numeric"/);
+  assert.doesNotMatch(c.shadowRoot.html,/id="wallbox"/);
+  assert.equal(get('takeover').disabled,true);
+  assert.equal(get('charge-action').disabled,true);
+  assert.equal(typeof get('takeover').onclick,'function');
+  assert.equal(typeof get('charge-action').onclick,'function');
+  assert.match(get('charge-action').textContent,/Start charging/);
+  assert.equal(get('error').textContent,'—');
+  assert.equal(get('connection').textContent,'Available');
+  assert.equal(get('live-power').textContent,'1.50 kW');
+  assert.equal(get('energy').textContent,'1.2 kWh');
+  assert.equal(calls.length,0);
+  c.connectedCallback(); c.disconnectedCallback();
 });
 
-test('renamed entity IDs and names are resolved by role and stable target',()=>{
-  const data = states(true);
-  const {discover} = runtime();
-  data['number.totally_different'] = {...data['number.renamed_power'],attributes:{...data['number.renamed_power'].attributes,friendly_name:'Whatever'}};
-  delete data['number.renamed_power'];
-  assert.equal(discover(data).roles.soll_power,'number.totally_different');
+test('multiple instances require explicit entry; two cards never cross entries',async()=>{
+  const data={...states('A'),...states('B')};
+  const missing=card(data);
+  assert.equal(Object.keys(missing.card.discovery.roles).length,0);
+  assert.match(missing.get('error').textContent,/entry_id/);
+  const a=card(data,{entry_id:'A'}),b=card(data,{entry_id:'B'});
+  assert.equal(a.get('station').textContent,'station-A');
+  assert.equal(b.get('station').textContent,'station-B');
+  await a.get('profile').onchange({target:{value:'PV_SURPLUS'}});
+  await b.get('profile').onchange({target:{value:'PV_OPTIMUM'}});
+  assert.equal(a.calls[0][2].entity_id,'A.charging_profile');
+  assert.equal(b.calls[0][2].entity_id,'B.charging_profile');
 });
 
-test('adding and removing wallboxes requires no card reconfiguration',()=>{
-  const data = states(true);
-  const {card:c,get} = card(data);
-  data['select.renamed_owner'].attributes.wallboxes.B = {name:'Wallbox02',connected:true};
-  c.hass = {...c._hass, states:data};
-  assert.equal(get('wallbox-row').hidden,false);
-  assert.equal(get('wallbox').children.length,3);
-  delete data['select.renamed_owner'].attributes.wallboxes.A;
-  c.hass = {...c._hass,states:data};
-  assert.equal(c.discovery.displayed,null); // Missing active target never silently selects B.
-  assert.equal(get('permission').disabled,true);
-  assert.match(get('status').textContent,/missing/);
+test('existing configured entity can bind a card to its entry',()=>{
+  const {card:c}=card({...states('A'),...states('B')},{entity:'B.soll_power'});
+  assert.equal(c.discovery.entry,'B');
 });
 
-test('switching active target changes controls to B stored values',()=>{
-  const data=states(true);
-  data['select.renamed_owner'].attributes.wallboxes.B={name:'B',connected:true};
-  data['select.b']=state('charging_profile','B','NETZ',{profile_control_ready:true,options:['NETZ']});
-  data['number.b']=state('soll_power','B','7');
-  data['switch.b']=state('charging_enabled','B','off');
-  data['select.renamed_owner'].attributes.active_wallbox='B';
+test('a missing explicit binding never falls back to another entry',async()=>{
+  for (const config of [{entity:'removed.soll_power'}, {entry_id:'removed'}]) {
+    const {card:c,get,calls}=card(states('OTHER'),config);
+    assert.equal(Object.keys(c.discovery.roles).length,0);
+    get('power').value='8.4'; await c.editNumber('power');
+    assert.equal(calls.length,0);
+  }
+});
+
+test('number and duration edits keep local service interactions',async()=>{
+  const {card:c,get,calls}=card();
+  get('power').value='8.4'; await c.editNumber('power');
+  get('grid_duration-hours').value='03'; get('grid_duration-minutes').value='15';
+  await c.editDuration('grid_duration');
+  assert.equal(calls[0][0],'number'); assert.equal(calls[0][2].value,8.4);
+  assert.equal(calls[1][1],'edit_timing'); assert.equal(calls[1][2].action,'begin');
+  assert.equal(calls[2][2].value,'03:15'); assert.equal(calls[2][2].entity_id,'E.grid_duration');
+  await c.endTiming();
+});
+
+test('German controls stay disabled and physical OFF stays visible',()=>{
+  const data=states(); data['E.charging_enabled'].state='off';
+  const {get}=card(data,{},'de');
+  assert.equal(get('takeover').textContent,'Steuerung übernehmen');
+  assert.match(get('charge-action').textContent,/Ladung starten/);
+  assert.equal(get('charge-action').disabled,true);
+  assert.equal(get('connection').textContent,'Frei');
+  assert.equal(get('error').textContent,'—');
+});
+
+test('card action boundary refuses charging domains and foreign entity IDs',async()=>{
+  const {card:c,calls}=card();
+  await c.call('switch','turn_on',{entity_id:'E.charging_enabled'});
+  await c.call('button','press',{entity_id:'E.take_control'});
+  await c.call('select','select_option',{entity_id:'FOREIGN.charging_profile',option:'NETZ'});
+  assert.equal(calls.length,0);
+});
+
+test('unavailable measurement and permission are never fabricated as zero or OFF',()=>{
+  const data=states(); data['E.power'].state='unavailable'; data['E.charging_enabled'].state='unknown';
   const {get}=card(data);
-  assert.equal(get('power').value,'7');
-  assert.equal(get('permission').disabled,false);
-  assert.match(get('permission').textContent,/Enable/);
+  assert.equal(get('live-power').textContent,'—');
+  assert.match(get('charge-action').textContent,/Start charging/);
 });
 
-test('pending transition inhibits every command and no automatic service runs',()=>{
-  const data=states(true);
-  data['select.renamed_owner'].attributes.transition_pending=true;
-  const {get,calls}=card(data);
-  for (const id of ['permission','power','profile','wallbox']) assert.equal(get(id).disabled,true);
+test('explicit authority and permission actions stay scoped and observed',async()=>{
+  const data=states();
+  data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
+  data['E.charge_action'].attributes.charge_action_ready=true;
+  const {card:c,get,calls}=card(data);
+  assert.equal(get('takeover').disabled,false);
+  assert.equal(get('charge-action').disabled,false);
+  await get('takeover').onclick();
+  await get('charge-action').onclick();
+  assert.equal(calls[0][0],'button'); assert.equal(calls[0][1],'press');
+  assert.equal(calls[0][2].entity_id,'E.take_control');
+  assert.equal(calls[1][0],'button'); assert.equal(calls[1][1],'press');
+  assert.equal(data['E.charging_enabled'].state,'on');
+  data['E.charging_enabled'].state='off'; c.hass=c._hass;
+  await get('charge-action').onclick();
+  assert.equal(calls[2][1],'press');
+  await c.call('switch','turn_on',{entity_id:'OTHER.charging_enabled'});
+  await c.call('button','press',{entity_id:'E.charging_enabled'});
+  assert.equal(calls.length,3);
+});
+
+test('pending, unsupported and service failures remain visible without optimistic state',async()=>{
+  const data=states();
+  data['E.take_control']={state:'unavailable',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:false,execution_blocked_reason:'unsupported'}};
+  Object.assign(data['E.charge_action'].attributes,{charge_action_ready:true,command_status:'accepted_unconfirmed',command_reason:'readback_timeout'});
+  const {card:c,get}=card(data);
+  assert.equal(get('takeover').disabled,true);
+  assert.equal(get('error').textContent,'—'); // Ordinary pending state is not a warning.
+  c._hass.callService=async()=>{throw new Error('Station rejected');};
+  await get('charge-action').onclick();
+  assert.match(get('error').textContent,/Station rejected/);
+  assert.equal(data['E.charging_enabled'].state,'on');
+  data['E.charge_action'].attributes.charge_action_ready=false;
+  c.hass=c._hass;
+  assert.equal(get('charge-action').disabled,true);
+});
+
+test('historical takeover results and ordinary Local or disconnected states are not messages',()=>{
+  const data=states();
+  data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true,command_status:'confirmed'}};
+  const {card:c,get}=card(data);
+  for (const status of ['confirmed','accepted_unconfirmed','superseded']) {
+    data['E.take_control'].attributes.command_status=status;
+    c.hass=c._hass;
+    assert.equal(get('error').textContent,'—');
+  }
+});
+
+test('takeover follows Local to Remote to external Local through HA updates',async()=>{
+  for (const language of ['en','de']) {
+    const data=states();
+    data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
+    data['E.charge_action'].attributes.charge_action_ready=true;
+    const {card:c,get,calls}=card(data,{},language);
+    assert.equal(get('takeover').hidden,false);
+    assert.equal(get('takeover').disabled,false);
+    await get('takeover').onclick();
+    assert.equal(get('takeover').hidden,false); // Sending a command is no observation.
+    data['E.control_authority'].state='remote'; c.hass=c._hass;
+    assert.equal(get('takeover').hidden,true);
+    assert.notEqual(get('charge-action').hidden,true);
+    assert.equal(get('charge-action').disabled,false);
+    await get('charge-action').onclick();
+    data['E.control_authority'].state='local'; c.hass=c._hass;
+    assert.equal(get('takeover').hidden,false);
+    assert.equal(get('takeover').disabled,false);
+    c.busy=true; c.hass=c._hass;
+    assert.equal(get('takeover').disabled,true);
+    c.busy=false;
+    data['E.take_control'].attributes.execution_ready=false; c.hass=c._hass;
+    assert.equal(get('takeover').disabled,true);
+    await get('takeover').onclick();
+    assert.equal(calls.length,2);
+    assert.equal(calls[0][2].entity_id,'E.take_control');
+    assert.equal(calls[1][2].entity_id,'E.charge_action');
+  }
+});
+
+test('missing, unknown, unavailable and disconnected authority keeps takeover visible and disabled',()=>{
+  for (const connection of ['on','off','unknown','unavailable']) {
+    for (const authority of [null,'unknown','unavailable','','local','remote']) {
+      if (connection==='on' && ['local','remote'].includes(authority)) continue;
+      const data=states();
+      data['E.connected'].state=connection;
+      if (authority===null) delete data['E.control_authority'];
+      else data['E.control_authority'].state=authority;
+      // Even optimistic readiness and historical success cannot establish authority.
+      data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true,command_status:'confirmed'}};
+      const {get}=card(data);
+      assert.equal(get('takeover').hidden,false,`${connection}/${authority}`);
+      assert.equal(get('takeover').disabled,true,`${connection}/${authority}`);
+      assert.notEqual(get('charge-action').hidden,true);
+    }
+  }
+});
+
+test('takeover visibility depends on observations independently of command history',()=>{
+  const data=states();
+  data['E.take_control']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'take_control',execution_ready:true}};
+  const {card:c,get}=card(data);
+  for (const status of [undefined,'pending','accepted_unconfirmed','confirmed','rejected','unsupported','timeout','communication_failure','superseded']) {
+    data['E.take_control'].attributes.command_status=status;
+    for (const authority of ['remote','local']) {
+      data['E.control_authority'].state=authority; c.hass=c._hass;
+      assert.equal(get('takeover').hidden,authority==='remote',`${status}/${authority}`);
+      assert.notEqual(get('charge-action').hidden,true);
+    }
+  }
+});
+
+test('authority visibility stays isolated across entries and card rebinding',()=>{
+  const data={...states('A'),...states('B')};
+  for (const entry of ['A','B']) data[`${entry}.take_control`]={state:'unknown',attributes:{wallbox_manager_entry:entry,wallbox_manager_role:'take_control',execution_ready:true}};
+  data['A.control_authority'].state='remote';
+  const a=card(data,{entry_id:'A'}), b=card(data,{entry_id:'B'}), ambiguous=card(data);
+  assert.equal(a.get('takeover').hidden,true);
+  assert.equal(b.get('takeover').hidden,false);
+  assert.equal(b.get('takeover').disabled,false);
+  assert.equal(ambiguous.get('takeover').hidden,false);
+  assert.equal(ambiguous.get('takeover').disabled,true);
+  data['B.control_authority'].state='remote';
+  a.card.hass=a.card._hass; b.card.hass=b.card._hass;
+  assert.equal(a.get('takeover').hidden,true);
+  assert.equal(b.get('takeover').hidden,true);
+  data['A.control_authority'].state='local';
+  a.card.hass=a.card._hass; b.card.hass=b.card._hass;
+  assert.equal(a.get('takeover').hidden,false);
+  assert.equal(b.get('takeover').hidden,true);
+  b.card.setConfig({entry_id:'A'}); b.card.hass=b.card._hass;
+  assert.equal(b.get('takeover').hidden,false);
+  assert.equal(b.get('takeover').disabled,false);
+});
+
+test('device wake-up button is excluded from card rendering and service actions',async()=>{
+  const data=states();
+  data['E.wake_up_vehicle']={state:'unknown',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'wake_up_vehicle',execution_ready:true}};
+  const {card:c,calls}=card(data);
+  assert.doesNotMatch(c.shadowRoot.html,/wake_up_vehicle|Wake up vehicle|Fahrzeug aufwecken/);
+  await c.call('button','press',{entity_id:'E.wake_up_vehicle'});
   assert.equal(calls.length,0);
 });
 
-test('battery UI appears only with backend battery configuration',()=>{
-  const data=states(true);
+test('automatic wake-up switch has no card markup or authorized card action',async()=>{
+  const data=states();
+  data['E.auto_wakeup_enabled']={state:'on',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'auto_wakeup_enabled',execution_ready:true}};
+  const {card:c,calls}=card(data);
+  assert.doesNotMatch(c.shadowRoot.html,/auto_wakeup_enabled|Automatic vehicle wake-up|Automatisches Aufwecken/);
+  await c.call('switch','turn_on',{entity_id:'E.auto_wakeup_enabled'});
+  await c.call('switch','turn_off',{entity_id:'E.auto_wakeup_enabled'});
+  assert.equal(calls.length,0);
+});
+
+
+test('reserve and approximation controls are absent while measured power remains separate',()=>{
+  const data=states();
+  data['E.power_approximation']={state:'nearest',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'power_approximation'}};
+  Object.assign(data['E.soll_power'].attributes,{profile_status:'rejected',command_reason:'PhaseSwitchLockout',applied_phase_count:3,applied_current_a:6});
   const {card:c,get}=card(data);
-  assert.equal(get('reserve-row').hidden,true);
-  data['select.anything'].attributes.battery_configured=true;
-  c.hass={...c._hass,states:data,language:'de'};
-  assert.equal(get('reserve-row').hidden,false);
-  assert.equal(get('reserve-label').textContent,'Entladereserve');
+  assert.doesNotMatch(c.shadowRoot.html,/id="reserve|id="approximation|Entladereserve|Leistungsannäherung/);
+  assert.equal(c.discovery.roles.min_soc,'E.min_soc');
+  assert.equal(c.discovery.roles.power_approximation,'E.power_approximation');
+  assert.equal(get('actual').textContent,'3-phase 6A');
+  assert.equal(get('live-power').textContent,'1.50 kW');
+});
+
+test('Grid parameters show actual and requested modes only, including pending pauses',()=>{
+  const data=states();
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_current_a:6,requested_current_a:7});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'3-phasig 6A → 1-phasig 7A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:7});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'1-phasig 7A');
+  assert.doesNotMatch(get('actual').textContent,/Voltage|Strom|U L1|I L1|Beobachtete Steuerung|Bestätigtes Angebot/);
+});
+
+test('Grid actual requires a complete confirmed point; unknown and offline stay unknown',()=>{
+  const data=states();
+  data['E.physical_phases']={state:'3',attributes:{...data['E.soll_power'].attributes,wallbox_manager_role:'physical_phases'}};
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:null,applied_current_a:7,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'— → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:1,applied_current_a:6});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'1-phasig 6A');
+  data['E.connected'].state='off'; c.hass=c._hass;
   assert.equal(get('actual').textContent,'—');
-  assert.equal(get('profile-label').textContent,'Ladeprofil');
 });
 
-test('progressive steps cross 10 exactly in both directions and obey real ceiling',()=>{
-  const {step}=runtime();
-  let value=9.8;
-  for (const expected of [9.9,10,11,12]) { value=step(value,1); assert.equal(value,expected); }
-  for (const expected of [11,10,9.9,9.8]) { value=step(value,-1); assert.equal(value,expected); }
-  assert.equal(step(0,-1),0);
-  assert.equal(step(21.9,1,22.08),22.08);
-  assert.equal(step(99,1),100); // No made-up 99 kW station rating.
+test('unconfirmed interim actual stays unknown until zero-current readback',()=>{
+  const data=states();
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:null,applied_current_a:null,acknowledged_current_a:0,requested_phase_count:1,requested_current_a:6});
+  const {card:c,get}=card(data,{},'de');
+  assert.equal(get('actual').textContent,'— → 1-phasig 6A');
+  Object.assign(data['E.soll_power'].attributes,{applied_phase_count:3,applied_current_a:0});
+  c.hass=c._hass;
+  assert.equal(get('actual').textContent,'3-phasig 0A → 1-phasig 6A');
 });
 
-test('rapid steps stay interactive and preserve newest value during slow service responses',async()=>{
-  const data=states(true); data['number.renamed_power'].state='9.8';
-  const {card:c,get}=card(data), requests=[];
-  c._hass.callService=async (...args)=>new Promise(resolve=>requests.push({args,resolve}));
-  const first=c.stepNumber('power',1), second=c.stepNumber('power',1), third=c.stepNumber('power',1);
-  assert.deepEqual(requests.map(r=>r.args[2].value),[9.9,10,11]);
-  assert.equal(get('power').disabled,false);
-  assert.equal(get('power').value,'11');
-  requests[0].resolve(); await first;
-  assert.equal(get('power').value,'11');
-  requests[1].resolve(); requests[2].resolve(); await Promise.all([second,third]);
-  data['number.renamed_power'].state='11'; c.hass={...c._hass};
-  assert.equal(c.edits.power,undefined);
+
+test('one charging action follows backend start, apply, stop in both languages',async()=>{
+  for (const language of ['en','de']) {
+    const data=states();
+    const a=data['E.charge_action'].attributes;
+    Object.assign(a,{charge_action_ready:true,charge_action:'start'});
+    const {card:c,get,calls}=card(data,{},language);
+    assert.doesNotMatch(c.shadowRoot.html,/id="permission"|id="grid-set"/);
+    const labels=language==='de'?['Ladung starten','Ladeparameter übernehmen','Ladung beenden']:['Start charging','Apply charging parameters','Stop charging'];
+    assert.equal(get('charge-action').textContent,labels[0]);
+    await get('charge-action').onclick();
+    Object.assign(a,{charge_release:true,charge_action:'apply'}); c.hass=c._hass;
+    assert.equal(get('charge-action').textContent,labels[1]);
+    await get('charge-action').onclick();
+    assert.equal(get('charge-action').textContent,labels[1]); // Wait for backend approval.
+    a.charge_action='stop'; c.hass=c._hass;
+    assert.equal(get('charge-action').textContent,labels[2]);
+    await get('charge-action').onclick();
+    assert.equal(calls.length,3);
+    for (const call of calls) assert.equal(JSON.stringify(call),JSON.stringify(['button','press',{entity_id:'E.charge_action'}]));
+  }
 });
 
-test('fractional input above 10 is preserved and localized',async()=>{
-  const {card:c,calls,get}=card(states(true));
-  c.hass={...c._hass,language:'de'};
-  get('power').value='11,25'; await c.editNumber('power');
-  assert.equal(calls[0][2].value,11.25);
-  assert.equal(get('power').value,'11,25');
-  assert.equal(get('power-label').textContent,'Angeforderte Ladeleistung');
-  assert.equal(get('energy-label').textContent,'Energie');
+test('backend readiness and multiple cards fence unavailable and foreign actions',async()=>{
+  const data={...states('A'),...states('B')};
+  data['B.charge_action'].attributes.charge_action_ready=true;
+  const a=card(data,{entry_id:'A'}),b=card(data,{entry_id:'B'});
+  assert.equal(a.get('charge-action').disabled,true);
+  await a.get('charge-action').onclick();
+  await a.card.call('button','press',{entity_id:'B.charge_action'});
+  assert.equal(a.calls.length,0);
+  await b.get('charge-action').onclick();
+  assert.equal(b.calls[0][2].entity_id,'B.charge_action');
 });
 
-test('technical limit controls stepping and rejects direct overflow without sending',async()=>{
-  const data=states(true);
-  data['number.renamed_power'].attributes.technical_max_kw=11.04;
-  const {card:c,calls,get}=card(data);
-  await c.stepNumber('power',1);
-  assert.equal(calls[0][2].value,11.04);
-  assert.equal(get('power-up').disabled,true);
-  get('power').value='11.05'; await c.editNumber('power');
-  assert.equal(calls.length,1);
-  assert.equal(get('error').hidden,false);
-  assert.match(get('error').textContent,/11.04/);
-});
-
-test('unknown technical limit ignores generic HA max and surfaces backend rejection',async()=>{
-  const data=states(true); data['number.renamed_power'].attributes.max=100;
-  const {card:c,get}=card(data); const sent=[];
-  c._hass.callService=async (...args)=>{sent.push(args); throw Error('Requested power exceeds available limit');};
-  get('power').value='105'; await c.editNumber('power');
-  assert.equal(sent[0][2].value,105);
-  assert.match(get('error').textContent,/exceeds available limit/);
-  assert.equal(get('error').hidden,false);
-});
-
-test('reserve is integral, bounded 0..100 and steps by one',async()=>{
-  const data=states(true); data['select.anything'].attributes.battery_configured=true;
-  const {card:c,calls,get}=card(data);
-  assert.equal(get('reserve-label').textContent,'Discharge reserve');
-  for (const invalid of ['-1','100.1','50.5','oops']) {get('reserve').value=invalid; await c.editNumber('reserve');}
-  assert.equal(calls.length,0);
-  get('reserve').value='99'; await c.stepNumber('reserve',1);
-  assert.equal(calls[0][2].value,100);
-  assert.equal(get('reserve-up').disabled,true);
-  get('reserve').value='0'; await c.stepNumber('reserve',-1);
-  assert.equal(calls.length,1);
-});
-
-test('device subtitle is independent of optional card title, header selector updates dynamically',()=>{
-  const data=states(true); data['select.renamed_owner'].attributes.wallboxes.A.display_name='Garage';
+test('charging action suppresses duplicates and preserves failed drafts',async()=>{
+  const data=states(); data['E.charge_action'].attributes.charge_action_ready=true;
   const {card:c,get}=card(data);
-  c.setConfig({type:'custom:wallbox-manager-card',name:'My energy'});
-  assert.equal(get('title').textContent,'My energy');
-  assert.equal(get('station').textContent,'Garage');
-  data['select.renamed_owner'].attributes.wallboxes.A.display_name='Renamed garage';
-  c.hass={...c._hass};
-  assert.equal(get('station').textContent,'Renamed garage');
-  assert.match(c.shadowRoot.innerHTML,/<header>[\s\S]*mdi:ev-station[\s\S]*id="wallbox-row"[\s\S]*<\/header>/);
+  let reject,calls=0;
+  c._hass.callService=()=>{calls++;return new Promise((resolve,fail)=>{reject=fail;});};
+  const pending=get('charge-action').onclick();
+  assert.equal(get('charge-action').disabled,true);
+  await get('charge-action').onclick();
+  assert.equal(calls,1);
+  reject(new Error('Persistence failed')); await pending;
+  assert.match(get('error').textContent,/Persistence failed/);
+  assert.equal(get('power').value,'7.2');
+  assert.equal(get('charge-action').textContent,'Start charging');
 });
 
-function metered() {
-  const data=states(true), valid_until=new Date(Date.now()+60000).toISOString();
-  for (const [role,value] of Object.entries({connector_state:'occupied',charging_state:'charging',power:'4100',current_l1:'18',current_l2:'0',current_l3:'0',session_energy:'9.3',session_duration:'4980',energy:'10000'}))
-    data[`sensor.renamed_${role}`]=state(role,'A',value,{valid_until,connected:true,session_active:true,unit_of_measurement:role==='power'?'W':role==='session_duration'?'s':undefined,duration_sampled_at:new Date().toISOString()});
+test('locale technical steps use backend revisions and time clearing remains a draft',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4';
+  data['E.charge_action'].attributes.charge_action_ready=true;
+  const {card:c,get,calls}=card(data,{},'de');
+  assert.equal(get('power').value,'1,4');
+  await c.stepNumber('power',1); await c.stepNumber('power',1);
+  assert.equal(get('power').value,'1,8');
+  assert.deepEqual(calls.map(call=>call[2].revision),[0,1]);
+  assert.ok(calls.every(call=>call[0]==='wallbox_manager' && call[1]==='step_power' && call[2].direction===1));
+  assert.equal(get('charge-action').disabled,false);
+  get('grid_duration-clear').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls[2][1],'edit_timing');
+  assert.equal(calls[3][2].action,'update'); assert.equal(calls[3][2].value,'');
+  data['E.grid_duration'].state=''; c.hass=c._hass;
+  assert.equal(get('charge-action').disabled,false);
+});
+
+test('power long press still stages repeated numeric edits without pressing SET',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4';
+  const {card:c,get,calls}=card(data,{},'de');
+  const button=get('power-up');
+  button.setPointerCapture=()=>{}; button.hasPointerCapture=()=>true; button.releasePointerCapture=()=>{};
+  c.startHold(button,'power',1,{button:0,isPrimary:true,pointerId:1,preventDefault(){}});
+  await new Promise(resolve=>setTimeout(resolve,500));
+  c.stopHold();
+  assert.ok(calls.length>=2);
+  assert.ok(calls.every(call=>call[0]==='wallbox_manager' && call[1]==='step_power' && call[2].entity_id==='E.soll_power'));
+  assert.notEqual(get('charge-action').hidden,true); // The unified action is always visible.
+  const count=calls.length; await new Promise(resolve=>setTimeout(resolve,175));
+  assert.equal(calls.length,count);
+});
+
+test('newer backend draft revisions supersede another card optimistic edit',async()=>{
+  const data=states(); data['E.soll_power'].attributes.grid_draft_revision=0;
+  data['E.charge_action'].attributes.charge_action_ready=true;
+  const a=card(data), b=card(data);
+  a.get('power').value='3'; await a.card.editNumber('power');
+  assert.equal(a.get('power').value,'3.0');
+  // Another card wins; the first card never observes an intermediate 3 kW state.
+  b.get('power').value='4'; await b.card.editNumber('power');
+  data['E.soll_power'].state='4'; data['E.soll_power'].attributes.grid_draft_revision=2;
+  a.card.hass=a.card._hass; b.card.hass=b.card._hass;
+  assert.equal(a.get('power').value,'4.0'); assert.equal(b.get('power').value,'4.0');
+  assert.equal(a.get('charge-action').disabled,false);
+  data['E.charge_action'].attributes.active_message={text:'Disk full',raised_at:1}; a.card.hass=a.card._hass;
+  assert.match(a.get('error').textContent,/Disk full/);
+});
+
+
+test('technical phase transitions use backend identity and preserve overlap direction',async()=>{
+  const data=states(); data['E.soll_power'].state='4.6'; data['E.soll_power'].attributes.selected_phase_count=1;
+  const {card:c,get}=card(data);
+  await c.stepNumber('power',1);
+  assert.equal(get('power').value,'4.8');
+  assert.equal(data['E.soll_power'].attributes.selected_phase_count,3);
+  await c.stepNumber('power',-1);
+  assert.equal(get('power').value,'4.1');
+  assert.equal(data['E.soll_power'].attributes.selected_phase_count,3);
+  await c.stepNumber('power',-1);
+  assert.equal(get('power').value,'3.9');
+  assert.equal(data['E.soll_power'].attributes.selected_phase_count,1);
+});
+
+test('queued repeated presses and keyboard wait for backend acknowledgement',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4'; data['E.charge_action'].attributes.charge_action_ready=true;
+  const {card:c,get,calls}=card(data);
+  let release;
+  const original=c._hass.callService;
+  c._hass.callService=async(...args)=>{await new Promise(resolve=>{release=resolve;}); return original(...args);};
+  const first=c.stepNumber('power',1),second=c.stepNumber('power',1);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.length,0);
+  assert.equal(get('charge-action').disabled,true);
+  release(); await first;
+  await new Promise(resolve=>setImmediate(resolve));
+  release(); await second;
+  assert.equal(get('power').value,'1.8');
+  c._hass.callService=original;
+  get('power').onkeydown({key:'ArrowUp',preventDefault(){}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(get('power').value,'2.1');
+  assert.deepEqual(calls.map(call=>call[2].revision),[0,1,2]);
+});
+
+test('service return alone never acknowledges a step; another card revision cancels it',async()=>{
+  const data=states(); data['E.soll_power'].state='1.4';
+  const {card:c,get}=card(data);
+  c._hass.callService=async()=>{};
+  const pending=c.stepNumber('power',1);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(get('power').value,'1.4');
+  assert.equal(c.draftWrites.size,1);
+  data['E.soll_power'].state='4.1'; data['E.soll_power'].attributes.grid_draft_revision=2;
+  c.hass=c._hass;
+  await pending;
+  assert.equal(get('power').value,'4.1');
+  assert.match(get('error').textContent,/selection changed/);
+});
+
+for (const [language,value,expected] of [['de',1378,'1,38 kW'],['de',5523,'5,52 kW'],['de',0,'0,00 kW'],['en',0,'0.00 kW'],['en',5523,'5.52 kW']]) {
+  test(`live measured power uses two locale decimals ${language}/${value}`,()=>{
+    const data=states(); data['E.power'].state=String(value); data['E.soll_power'].state='11';
+    const {get}=card(data,{},language);
+    assert.equal(get('live-power').textContent,expected);
+    assert.equal(get('power').value,language==='de'?'11,0':'11.0');
+  });
+}
+
+test('unavailable technical capabilities show a placeholder and disable navigation',()=>{
+  const data=states(); data['E.soll_power'].state='unavailable';
+  Object.assign(data['E.soll_power'].attributes,{technical_min_kw:null,technical_max_kw:null,power_step_up:null,power_step_down:null});
+  const {get}=card(data);
+  assert.equal(get('power').value,'');
+  assert.equal(get('power').disabled,true);
+  assert.equal(get('power-up').disabled,true);
+  assert.equal(get('power-down').disabled,true);
+});
+
+test('relative steps synchronize two cards and remain scoped after rebinding',async()=>{
+  const data={...states('A'),...states('B')};
+  data['A.soll_power'].state='1.4'; data['B.soll_power'].state='1.4';
+  const a=card(data,{entry_id:'A'}), other=card(data,{entry_id:'A'});
+  await a.card.stepNumber('power',1);
+  other.card.hass=other.card._hass;
+  assert.equal(other.get('power').value,'1.6');
+  await other.card.stepNumber('power',1);
+  a.card.hass=a.card._hass;
+  assert.equal(a.get('power').value,'1.8');
+  assert.deepEqual([...a.calls,...other.calls].map(call=>call[2].revision),[0,1]);
+  other.card.setConfig({entry_id:'B'});
+  await other.card.stepNumber('power',1);
+  assert.equal(data['B.soll_power'].state,'1.6');
+  assert.equal(data['A.soll_power'].state,'1.8');
+  assert.equal(other.calls.at(-1)[2].entity_id,'B.soll_power');
+});
+
+test('rebinding cancels queued steps and isolates a late acknowledgement',async()=>{
+  const data={...states('A'),...states('B')};
+  data['A.soll_power'].state='1.4'; data['B.soll_power'].state='1.4';
+  const {card:c,get,calls}=card(data,{entry_id:'A'});
+  let release;
+  const original=c._hass.callService;
+  c._hass.callService=async(...args)=>{await new Promise(resolve=>{release=resolve;}); return original(...args);};
+  const first=c.stepNumber('power',1),second=c.stepNumber('power',1);
+  await new Promise(resolve=>setImmediate(resolve));
+  c.setConfig({entry_id:'B'});
+  release(); await first; await second;
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][2].entity_id,'A.soll_power');
+  assert.equal(get('power').value,'1.4');
+  assert.equal(get('error').textContent,'—');
+  c._hass.callService=original;
+  await c.stepNumber('power',1);
+  assert.equal(get('power').value,'1.6');
+  assert.equal(calls.at(-1)[2].entity_id,'B.soll_power');
+});
+
+function uiClock(now=1000000) {
+  const timers=new Map(); let serial=0;
+  return {Date:class extends Date { static now(){return now;} },
+    setTimeout(fn,delay){const id=++serial;timers.set(id,{fn,at:now+delay});return id;},
+    clearTimeout(id){timers.delete(id);},
+    advance(ms){now+=ms;const due=[...timers.entries()].filter(([,t])=>t.at<=now);for(const [id,t] of due){timers.delete(id);t.fn();}},
+    get pending(){return timers.size;}};
+}
+for(const language of ['en','de']) for(const [value,expected] of [[0,'0.0'],[1.234,'1.2'],[12.36,'12.4']]) {
+  test(`session energy has one locale decimal ${language}/${value}`,()=>{
+    const data=states();data['E.session_energy'].state=String(value);
+    const {get}=card(data,{},language);
+    assert.equal(get('energy').textContent,`${language==='de'?expected.replace('.',','):expected} kWh`);
+    assert.equal(data['E.session_energy'].state,String(value));
+    assert.equal(get('live-power').textContent,language==='de'?'1,50 kW':'1.50 kW');
+  });
+}
+test('canonical countdown uses absolute deadlines, floors minutes, and generates no HA calls',()=>{
+  const data=states(),clock=uiClock();
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop'});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:1000,start_at:1120,end_at:1300}});
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  assert.equal(get('grid_start_delay-hours').value,'00');
+  assert.equal(get('grid_start_delay-minutes').value,'02');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  clock.advance(61000);
+  assert.equal(get('grid_start_delay-minutes').value,'00');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  clock.advance(59000);
+  assert.equal(get('grid_start_delay-minutes').value,'');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  clock.advance(121000);
+  assert.equal(get('grid_duration-minutes').value,'00');
+  clock.advance(59000);
+  assert.equal(get('grid_duration-minutes').value,'');
+  assert.equal(calls.length,0);
+  c.disconnectedCallback();assert.equal(clock.pending,0);
+});
+test('both timing fields show drafts during one editing area and await revision acknowledgements',async()=>{
+  const data=states(),clock=uiClock();
+  data['E.grid_start_delay'].state='00:02';data['E.grid_duration'].state='00:03';
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop'});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:900,start_at:1020,end_at:1200}});
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  assert.equal(get('grid_start_delay-minutes').value,'00');
+  c.shadowRoot.activeElement=get('grid_duration-minutes');
+  await get('grid_duration-minutes').onfocus();
+  assert.equal(get('grid_start_delay-minutes').value,'02');
+  assert.equal(get('grid_duration-minutes').value,'03');
+  get('grid_duration-minutes').value='10';await get('grid_duration-minutes').oninput();
+  assert.equal(data['E.grid_duration'].state,'00:10');
+  c.shadowRoot.activeElement=get('grid_start_delay-minutes');
+  await get('grid_duration-minutes').onblur();
+  assert.equal(calls.filter(c=>c[2].action==='end').length,0);
+  c.shadowRoot.activeElement=null;await get('grid_start_delay-minutes').onblur();await c.timingQueue.tail;
+  assert.deepEqual(calls.map(c=>c[2].revision),[0,1,2]);
+  c.disconnectedCallback();
+});
+test('backend edit window is shared, duration expiry retains drafts, and a later run is independent',()=>{
+  const data=states(),clock=uiClock();
+  const a=data['E.grid_duration'].attributes;
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'apply'});
+  Object.assign(a,{grid_schedule:{epoch_at:1000,start_at:1000,end_at:1060},grid_timing_edit:{owner:'other-card',active:false,expires_at:1015}});
+  data['E.grid_duration'].state='00:20';
+  const first=card(data,{},'en',clock),second=card(data,{},'en',clock);
+  for(const instance of [first,second]) assert.equal(instance.get('grid_duration-minutes').value,'20');
+  a.grid_timing_edit=null;a.grid_schedule=null;
+  Object.assign(data['E.charge_action'].attributes,{charge_release:false,charge_action:'start'});
+  for(const instance of [first,second]) {instance.card.hass=instance.card._hass;assert.equal(instance.get('grid_duration-minutes').value,'20');assert.equal(instance.get('charge-action').textContent,'Start charging');}
+  assert.equal(clock.pending,0);
+});
+test('timing service return alone is not acknowledgement and foreign revisions cancel queued writes',async()=>{
+  const {card:c,get}=card();let sent;
+  c._hass.callService=async(...args)=>{sent=args[2];};
+  const begin=c.beginTiming();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sent.action,'begin');assert.equal(c.draftWrites.size,1);
+  for(const role of ['grid_duration','grid_start_delay']) c._hass.states[`E.${role}`].attributes.grid_timing_revision=2;
+  c.hass=c._hass;await begin;
+  assert.match(get('error').textContent,/Timing selection changed/);
+  assert.equal(c.draftWrites.size,0);
+});
+test('runtime replacement fences a late timing response without warning in the replacement',async()=>{
+  const {card:c,get}=card();let finish;
+  c._hass.callService=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=c.beginTiming();await new Promise(resolve=>setImmediate(resolve));
+  for(const role of ['grid_duration','grid_start_delay']) c._hass.states[`E.${role}`].attributes.runtime_incarnation='new';
+  c.hass=c._hass;finish();await pending;
+  assert.equal(get('error').textContent,'—');assert.equal(c.timingEditing,false);
+});
+test('only one newest active warning is shown, resolution falls back, and pending history is silent',async()=>{
+  const data=states();data['E.charge_action'].attributes.active_message={text:'Old active warning',raised_at:1};
+  const {card:c,get}=card(data);
+  assert.equal(get('error').textContent,'Old active warning');
+  c.warn('grid_duration','Invalid minutes');
+  assert.equal(get('error').textContent,'Invalid minutes');
+  c.clearWarning('grid_duration');assert.equal(get('error').textContent,'Old active warning');
+  data['E.charge_action'].attributes.active_message=null;
+  data['E.charge_action'].attributes.command_status='accepted_unconfirmed';c.hass=c._hass;
+  assert.equal(get('error').textContent,'—');
+  assert.doesNotMatch(c.shadowRoot.html,/id="status"|id="no-messages"/);
+});
+
+test('moving focus from timing fields to Apply keeps the first explicit button click',async()=>{
+  const data=states();Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'apply',charge_action_ready:true});
+  const {card:c,get,calls}=card(data);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  get('grid_duration-minutes').value='12';await c.editDuration('grid_duration');
+  c.shadowRoot.activeElement=get('charge-action');await get('grid_duration-minutes').onblur();
+  assert.equal(get('charge-action').disabled,false);
+  await get('charge-action').onclick();
+  assert.equal(calls.at(-1)[0],'button');assert.equal(calls.at(-1)[1],'press');
+  assert.equal(calls.filter(call=>call[2].action==='end').length,1);
+});
+test('off schedule shows no fictitious countdown but keeps meaningful next-start drafts',()=>{
+  const data=states();Object.assign(data['E.grid_duration'].attributes,{grid_approved_duration:9000,grid_approved_start_delay:null});
+  const {card:c,get}=card(data);
+  assert.equal(get('grid_duration-minutes').value,'');
+  data['E.grid_duration'].state='00:12';c.hass=c._hass;
+  assert.equal(get('grid_duration-minutes').value,'12');
+});
+test('confirmed foreign field updates resolve a local validation warning',()=>{
+  const {card:c,get}=card();c.warn('grid_duration','Invalid minutes');
+  c._hass.states['E.grid_duration'].state='00:12';c.hass=c._hass;
+  assert.equal(get('error').textContent,'—');
+});
+
+test('focused active editor renews for long pauses without revisions or draft writes; End stops heartbeat',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');
+  await c.beginTiming();
+  const revision=data['E.grid_duration'].attributes.grid_timing_revision;
+  for(let i=0;i<12;i++) {
+    // Unrelated hass updates must not postpone the scheduled renewal forever.
+    clock.advance(10000);c.hass=c._hass;
+    clock.advance(10000);await c.timingQueue.tail;
+    assert.equal(c.draftWrites.size,0);
+    assert.equal(data['E.grid_duration'].attributes.grid_timing_revision,revision);
+  }
+  assert.equal(calls.filter(call=>call[2].action==='renew').length,12);
+  c.shadowRoot.activeElement=null;await c.endTiming();
+  const count=calls.length;clock.advance(120000);await c.timingQueue.tail;
+  assert.equal(calls.length,count);
+});
+test('backend abandonment cancels local focused ownership and a late heartbeat cannot rebegin',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) {
+    const a=data[`E.${role}`].attributes;a.grid_timing_revision++;
+    a.grid_timing_edit={owner:null,active:false,expires_at:1075};
+  }
+  c.hass=c._hass;
+  assert.equal(c.timingEditing,false);
+  const count=calls.length;clock.advance(120000);
+  assert.equal(calls.length,count);
+  assert.equal(clock.pending,0);
+});
+test('failed heartbeat relinquishes local focus ownership without retrying or sending End',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  c._hass.callService=async(...args)=>{calls.push(args);throw new Error('Network unavailable');};
+  clock.advance(20000);await c.timingQueue.tail;
+  assert.equal(c.timingEditing,false);assert.match(get('error').textContent,/Network unavailable/);
+  const count=calls.length;clock.advance(120000);
+  assert.equal(calls.length,count);assert.equal(clock.pending,0);
+});
+test('runtime replacement and disconnect stop editor lease renewal',async()=>{
+  const data=states(),clock=uiClock();
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) data[`E.${role}`].attributes.runtime_incarnation='replacement';
+  c.hass=c._hass;
+  clock.advance(120000);assert.equal(calls.filter(call=>call[2].action==='renew').length,0);
+  assert.equal(c.timingEditing,false);c.disconnectedCallback();assert.equal(clock.pending,0);
+});
+
+test('missing intermediate abandonment update still restores a focused countdown after rollback',async()=>{
+  const data=states(),clock=uiClock();
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:900,start_at:900,end_at:1300}});
+  const {card:c,get,calls}=card(data,{},'en',clock);
+  c.shadowRoot.activeElement=get('grid_duration-minutes');await c.beginTiming();
+  for(const role of ['grid_duration','grid_start_delay']) {
+    const a=data[`E.${role}`].attributes;a.grid_timing_revision+=2;a.grid_timing_edit=null;
+  }
+  c.hass=c._hass;
+  assert.equal(c.timingEditing,false);
+  assert.equal(get('grid_duration-minutes').value,'05');
+  clock.advance(20000);
+  assert.equal(calls.filter(call=>call[2].action==='renew').length,0);
+  c.disconnectedCallback();
+});
+
+// WBM-HS-UI-01–15: the card projects HA facts; it never plans battery actions.
+function batteryStates(entry='E', soc='69', reserve='40') {
+  const data=states(entry);
+  Object.assign(data[`${entry}.charging_profile`].attributes,{
+    battery_soc_entity_id:`sensor.${entry.toLowerCase()}_battery`,
+    battery_reserve_entity_id:`number.${entry.toLowerCase()}_reserve`,
+    pv_surplus_target:{soc:95,maximum_reserve:93},
+  });
+  data[`sensor.${entry.toLowerCase()}_battery`]={state:soc,attributes:{}};
+  data[`number.${entry.toLowerCase()}_reserve`]={state:reserve,attributes:{}};
   return data;
 }
-
-test('live status uses measured state and current session despite permission OFF',()=>{
-  const data=metered(), {card:c,get}=card(data);
-  c.hass={...c._hass,language:'de'};
-  assert.equal(get('connection').textContent,'Belegt');
-  assert.equal(get('charging').textContent,'Lädt');
-  assert.equal(get('energy').textContent,'9,3 kWh');
-  assert.equal(get('live-power').textContent,'4,1 kW');
-  assert.equal(get('duration').textContent,'1:23');
-  assert.equal(get('actual').textContent,'—'); // Permission/meter data do not prove an applied point.
-  assert.equal(get('status').hidden,true);
-  data['switch.another_name'].state='on';
-  data['sensor.renamed_charging_state'].state='suspended_vehicle';
-  c.hass={...c._hass};
-  assert.equal(get('charging').textContent,'Vom Fahrzeug pausiert');
-});
-
-test('applied current replaces measured-current range while power remains measured',()=>{
-  const data=metered();
-  data['sensor.renamed_current_l2'].state='16'; data['sensor.renamed_current_l3'].state='17';
-  Object.assign(data['select.anything'].attributes,{applied_current_a:9,applied_phase_count:3,actual_enabled:true,control_authority:'remote'});
-  const {get}=card(data);
-  assert.equal(get('actual').textContent,'3-phase · 9 A');
-  assert.equal(get('live-power').textContent,'4.1 kW');
-});
-
-test('stale, unavailable, completed-session and disconnected data use placeholders',()=>{
-  const data=metered(), {card:c,get}=card(data);
-  data['sensor.renamed_power'].attributes.valid_until=new Date(Date.now()-1).toISOString();
-  data['sensor.renamed_current_l1'].state='unavailable';
-  data['sensor.renamed_session_energy'].attributes.session_active=false;
-  data['sensor.renamed_session_duration'].state='unknown';
-  c.hass={...c._hass};
-  for (const id of ['live-power','actual','energy','duration']) assert.equal(get(id).textContent,'—');
-  data['select.renamed_owner'].attributes.wallboxes.A.connected=false; c.hass={...c._hass};
-  for (const id of ['connection','charging','live-power','actual','energy','duration']) assert.equal(get(id).textContent,'—');
-});
-
-test('only explicit unambiguous scope metadata permits broader telemetry joins',()=>{
-  const data=states(true), {discover}=runtime();
-  data['sensor.evse']=state('power',undefined,'4000',{wallbox_manager_targets:['A'],wallbox_manager_scope:'evse'});
-  data['sensor.station']=state('power',undefined,'12000',{wallbox_manager_targets:['A'],wallbox_manager_scope:'station'});
-  data['sensor.other']=state('power','B','7000');
-  assert.equal(discover(data).roles.power,'sensor.evse');
-  data['sensor.connector']=state('power','A','4200');
-  assert.equal(discover(data).roles.power,'sensor.connector');
-  delete data['sensor.connector']; delete data['sensor.evse'].attributes.wallbox_manager_targets; delete data['sensor.station'].attributes.wallbox_manager_targets;
-  assert.equal(discover(data).roles.power,undefined);
-});
-
-test('physical feedback and current samples cannot masquerade as applied limits',()=>{
-  const data=metered(); delete data['sensor.renamed_current_l2']; delete data['sensor.renamed_current_l3'];
-  const {card:c,get}=card(data);
-  assert.equal(get('actual').textContent,'—');
-  Object.assign(data['select.anything'].attributes,{physical_phase_mode:['l1'],physical_phase_valid_until:new Date(Date.now()+60000).toISOString()});
-  c.hass={...c._hass}; assert.equal(get('actual').textContent,'—');
-  data['select.anything'].attributes.physical_phase_valid_until=new Date(Date.now()-1).toISOString();
-  c.hass={...c._hass}; assert.equal(get('actual').textContent,'—');
-});
-
-test('responsive two-column layout uses theme variables and contains no old diagnostics',()=>{
-  const {card:c,get}=card(states(true));
-  assert.match(c.shadowRoot.innerHTML,/grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
-  assert.match(c.shadowRoot.innerHTML,/@media\(max-width:360px\)/);
-  assert.match(c.shadowRoot.innerHTML,/var\(--primary-color\)/);
-  assert.match(c.shadowRoot.innerHTML,/:focus-visible/);
-  assert.equal(get('status').textContent,'');
-  const js=fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8');
-  assert.doesNotMatch(js,/Vehicle not charging|Operating point applied|Active wallbox selected|Fahrzeug lädt nicht/);
-});
-
-test('actionable backend failure is readable while normal internal statuses stay hidden',()=>{
-  const data=states(true), {card:c,get}=card(data);
-  for (const status of ['idle','observing','complete','phase_lockout']) {
-    data['select.anything'].attributes.profile_status=status;
-    c.hass={...c._hass}; assert.equal(get('status').hidden,true);
-  }
-  data['select.anything'].attributes.control_status='voltage_unavailable';
-  c.hass={...c._hass};
-  assert.match(get('status').textContent,/fresh voltage readings/);
-  assert.doesNotMatch(get('status').textContent,/voltage_unavailable/);
-  assert.equal(get('status').hidden,false);
-});
-
-test('keyboard arrows and enter use the same validated numeric service path',async()=>{
-  const data=states(true); data['number.renamed_power'].state='9.9';
-  const {card:c,calls,get}=card(data);
-  let prevented=0;
-  get('power').onkeydown({key:'ArrowUp',preventDefault(){prevented++;}});
-  await Promise.resolve();
-  assert.equal(calls[0][2].value,10);
-  get('power').value='11.25';
-  get('power').onkeydown({key:'Enter',preventDefault(){prevented++;}});
-  await Promise.resolve();
-  assert.equal(calls[1][2].value,11.25);
-  data['number.renamed_power'].state='11.25'; c.hass={...c._hass};
-  await get('power').onchange(); // Enter followed by blur must not dispatch twice.
-  assert.equal(calls.length,2);
-  assert.equal(prevented,2);
-});
-
-test('expiry timer only rerenders and stops on removal; stale session energy is hidden',()=>{
-  const data=metered(), {card:c,get}=card(data);
-  data['sensor.renamed_session_energy'].attributes.valid_until=new Date(Date.now()-1).toISOString();
-  data['sensor.renamed_session_duration'].attributes.start_known=false;
-  c.hass={...c._hass};
-  assert.equal(get('energy').textContent,'—');
-  assert.equal(get('duration').textContent,'—');
-  const js=fs.readFileSync('custom_components/wallbox_manager/www/wallbox-manager-card.js','utf8');
-  assert.match(js,/setInterval\(\(\) => \{ if \(this\._hass\) this\.hass = this\._hass; \},1000\)/);
-  assert.match(js,/disconnectedCallback\(\)[\s\S]*clearInterval/);
-});
-
-const press={button:0,isPrimary:true,pointerId:1,preventDefault(){}};
-test('icon is 48px and both numeric fields use the former narrow 4em width',()=>{
-  const {card:c}=card(states(true)), html=c.shadowRoot.innerHTML;
-  assert.match(html,/--mdc-icon-size:48px;width:48px;height:48px/);
-  assert.match(html,/input \{width:4em;/);
-  assert.doesNotMatch(html,/#reserve \{width:|width:5.3em|width:4.5em/);
-});
-
-test('short pointer click changes once, keyboard clicks still work',()=>{
-  const {get,calls,clock}=card(states(true));
-  get('power-up').onpointerdown(press);
-  assert.equal(calls.length,1);
-  get('power-up').onpointerup();
-  get('power-up').onclick({detail:1});
-  clock.advance(2000);
-  assert.equal(calls.length,1);
-  get('power-up').onclick({detail:0});
-  assert.equal(calls.length,2);
-  assert.equal(clock.pending,0);
-});
-
-test('hold repeats after 450ms at 150ms intervals across 9.9/10 boundary',()=>{
-  const data=states(true);data['number.renamed_power'].state='9.8';
-  const {get,calls,clock}=card(data);
-  get('power-up').onpointerdown(press);
-  assert.equal(calls[0][2].value,9.9);
-  clock.advance(449);assert.equal(calls.length,1);
-  clock.advance(1);assert.equal(calls[1][2].value,10);
-  clock.advance(150);assert.equal(calls[2][2].value,11);
-  get('power-up').onpointerup();clock.advance(3000);
-  assert.equal(calls.length,3);
-  get('power-down').onpointerdown(press);clock.advance(600);
-  assert.deepEqual(calls.slice(3).map(x=>x[2].value),[10,9.9,9.8]);
-  get('power-down').onpointerup();
-});
-
-for (const event of ['pointerup','pointercancel','pointerleave','lostpointercapture','outside','disconnect','disabled','wallbox','blur','reconfigure'])
-  test(`hold ends and clears timers on ${event}`,()=>{
-    const data=states(true), {card:c,get,calls,clock}=card(data);
-    c.connectedCallback();get('power-up').onpointerdown(press);
-    if(event==='outside')get('power-up').onpointermove({clientX:50,clientY:20});
-    else if(event==='disconnect')c.disconnectedCallback();
-    else if(event==='disabled'){data['select.renamed_owner'].attributes.transition_pending=true;c.hass={...c._hass};}
-    else if(event==='wallbox'){data['select.renamed_owner'].attributes.wallboxes.B={name:'B',connected:true};data['select.renamed_owner'].attributes.active_wallbox='B';c.hass={...c._hass};}
-    else if(event==='blur')clock.listeners.get('blur')();
-    else if(event==='reconfigure')c.setConfig({type:'custom:wallbox-manager-card'});
-    else get('power-up')[`on${event}`]();
-    clock.advance(3000);assert.equal(calls.length,1);
-    assert.equal(c.hold,null);c.disconnectedCallback();
-    assert.equal(clock.pending,0);assert.equal(clock.listeners.size,0);
+test('battery shows actual and observed reserve, never requested or journal targets',()=>{
+  const data=batteryStates('E','69','20');
+  data['E.min_soc'].state='40';
+  Object.assign(data['E.charging_profile'].attributes,{
+    battery_status:'confirmation_pending',original_reserve:20,temporary:40,pending:40,
   });
-
-test('reserve hold stops at 100 and 0; power hold stops at backend ceiling',()=>{
-  const data=states(true);data['select.anything'].attributes.battery_configured=true;
-  data['number.x'].state='99';data['number.renamed_power'].attributes.technical_max_kw=11.04;
-  const {get,calls,clock}=card(data);
-  get('reserve-up').onpointerdown(press);clock.advance(3000);
-  assert.equal(calls.length,1);assert.equal(calls[0][2].value,100);
-  get('reserve').value='1';get('reserve-down').onpointerdown(press);clock.advance(3000);
-  assert.equal(calls.length,2);assert.equal(calls[1][2].value,0);
-  get('power-up').onpointerdown(press);clock.advance(3000);
-  assert.equal(calls.length,3);assert.equal(calls[2][2].value,11.04);
-  assert.equal(clock.pending,0);
-});
-
-for (const [value,unit,expected] of [[1320,'s','0:22'],[83,'min','1:23'],[23+59/60,'h','23:59'],[25.2,'h','25:12'],[2945,'min','49:05'],[4980000,'ms','1:23'],[1.05,'d','25:12']])
-  test(`duration converts ${value} ${unit} into ${expected}`,()=>{
-    const {duration}=runtime();const now=Date.now();
-    const s=state('session_duration','A',String(value),{unit_of_measurement:unit,session_active:true,connected:true});s.last_updated=new Date(now).toISOString();
-    assert.equal(duration(s,true,now),expected);
-  });
-
-test('duration advances during pause, freezes at session end and resets on next session',()=>{
-  const {duration}=runtime(),now=Date.now();
-  const s=state('session_duration','A','1379',{unit_of_measurement:'s',session_active:true,connected:true,session_id:'one',duration_sampled_at:new Date(now).toISOString(),duration_valid_until:new Date(now+90000).toISOString()});
-  assert.equal(duration(s,true,now),'0:22');
-  assert.equal(duration(s,true,now+1000),'0:23');
-  s.attributes.charging_state='suspended_vehicle';
-  assert.equal(duration(s,true,now+61000),'0:24');
-  s.attributes.session_active=false;s.state='1500';
-  assert.equal(duration(s,false,now+3600000),'0:25');
-  Object.assign(s.attributes,{session_active:true,session_id:'two',duration_sampled_at:new Date(now+3600000).toISOString(),duration_valid_until:new Date(now+3690000).toISOString()});s.state='0';
-  assert.equal(duration(s,true,now+3600000),'0:00');
-});
-
-test('active duration never extrapolates unavailable, stale, future or disconnected data',()=>{
-  const {duration}=runtime(),now=Date.now();
-  const s=state('session_duration','A','4980',{unit_of_measurement:'s',session_active:true,connected:true});
-  assert.equal(duration(s,true,now),'—');
-  s.last_updated=new Date(now-90000).toISOString();assert.equal(duration(s,true,now),'—');
-  s.last_updated=new Date(now+1000).toISOString();assert.equal(duration(s,true,now),'—');
-  s.last_updated=new Date(now).toISOString();assert.equal(duration(s,false,now),'—');
-  s.state='unavailable';assert.equal(duration(s,true,now),'—');
-  s.state='invalid';assert.equal(duration(s,true,now),'—');
-  s.state='20';s.attributes.unit_of_measurement='unknown';assert.equal(duration(s,true,now),'—');
-});
-
-test('renamed duration role and independent applied snapshots follow wallbox selection',()=>{
-  const data=metered(),{card:c,get}=card(data);
-  data['sensor.random_name']=data['sensor.renamed_session_duration'];delete data['sensor.renamed_session_duration'];
-  Object.assign(data['select.anything'].attributes,{applied_current_a:16,applied_phase_count:1,actual_enabled:true,control_authority:'remote',profile_status:'phase_lockout',requested_phase_count:3});
-  c.hass={...c._hass};assert.equal(get('duration').textContent,'1:23');assert.equal(get('actual').textContent,'1-phase · 16 A');
-  data['select.renamed_owner'].attributes.wallboxes.B={name:'B',connected:true};
-  data['select.renamed_owner'].attributes.active_wallbox='B';
-  data['select.renamed_b']=state('charging_profile','B','NETZ',{profile_control_ready:true,applied_current_a:9,applied_phase_count:3,actual_enabled:true,control_authority:'remote'});
-  c.hass={...c._hass,language:'de'};assert.equal(get('actual').textContent,'3-phasig · 9 A');assert.equal(get('duration').textContent,'—');
-  for(const attrs of [{applied_current_a:null},{applied_current_a:9,actual_enabled:false},{actual_enabled:true,control_authority:'local'}]){
-    Object.assign(data['select.renamed_b'].attributes,attrs);c.hass={...c._hass};assert.equal(get('actual').textContent,'—');
-  }
-});
-
-for (const battery of [false,true]) for (const language of ['en','de']) {
-  test(`PV settings, discovery and labels: battery=${battery} language=${language}`,async()=>{
-    const data=states(true);
-    data['select.anything'].state='PV_SURPLUS';
-    Object.assign(data['select.anything'].attributes,{battery_configured:battery,battery_reserve_configured:true,options:['NETZ','PV_SURPLUS']});
-    for(const [role,value] of Object.entries({soll_soc_speicher:'95',soc_hysterese:'5',regulation_interval:'5'})) data[`number.random_${role}`]=state(role,'A',value);
-    data['select.random_pv']=state('pv_approximation','A','down');
-    const {card:c,calls,get}=card(data);c.hass={...c._hass,language};
-    assert.equal(get('power-row').hidden,true);
-    assert.equal(get('reserve-row').hidden,true);
-    assert.equal(get('approximation-row').hidden,true);
-    assert.equal(get('soll_soc_speicher-row').hidden,!battery);
-    assert.equal(get('grid_start_delay-row').hidden,true);
-    assert.equal(get('grid_duration-row').hidden,true);
-    assert.equal(get('permission').disabled,false);
-    get('soll_soc_speicher').value='90';
-    await get('soll_soc_speicher').onchange();
-    assert.equal(calls.at(-1)[2].entity_id,'number.random_soll_soc_speicher');
-    assert.equal(calls.at(-1)[2].value,90);
-  });
-}
-
-test('automatic and manual duplicate loads do not execute or define the card twice',()=>{
-  const {context,source,Card}=runtime();
-  const cards=context.window.customCards;
-  context.customElements.define=()=>{throw new Error('duplicate definition');};
-  vm.runInContext(source,context,{filename:'automatic-module.js'});
-  vm.runInContext(source,context,{filename:'temporary-manual-resource.js'});
-  assert.equal(context.customElements.get('wallbox-manager-card'),Card);
-  assert.equal(cards.length,1);
-});
-
-for(const options of [['NETZ'],['NETZ','PV_SURPLUS']]) {
-  test(`profile selector visibility follows backend options: ${options.join(',')}`,()=>{
-    const data=states(true);data['select.anything'].attributes.options=options;
-    const {get}=card(data);
-    assert.equal(get('profile-row').hidden,options.length===1);
-  });
-}
-
-for(const battery of [false,true]) {
-  test(`profile settings remain editable without authority: battery=${battery}`,async()=>{
-    const data=states(false);
-    data['select.anything'].state='PV_SURPLUS';
-    Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS'],battery_configured:battery});
-    data['switch.another_name'].state='on';
-    for(const [role,value] of Object.entries({soll_soc_speicher:'95',soc_hysterese:'5',regulation_interval:'5',pv_start_delay:'0',pv_stop_delay:'60'})) data[`number.${role}`]=state(role,'A',value);
-    data['select.pv']=state('pv_approximation','A','down');
-    const {card:c,get,calls}=card(data);
-    assert.equal(get('permission').disabled,true);
-    assert.match(get('permission').textContent,/enabled.*no control/);
-    assert.equal(get('profile').disabled,false);
-    assert.equal(get('power').disabled,false);
-    assert.equal(get('reserve').disabled,false);
-    assert.equal(get('approximation').disabled,false);
-    assert.equal(get('approximation-row').hidden,true);
-    assert.equal(get('soll_soc_speicher-row').hidden,!battery);
-    await get('profile').onchange({target:{value:'NETZ'}});
-    get('soll_soc_speicher').value='90';
-    await get('soll_soc_speicher').onchange();
-    assert.deepEqual(calls.map(call=>call.slice(0,2)),[['select','select_option'],['number','set_value']]);
-    assert.equal(calls[1][2].entity_id,'number.soll_soc_speicher');
-  });
-}
-
-test('profile availability is discovered separately for the displayed connector',()=>{
-  const data=states(true);
-  data['select.anything'].attributes.options=['NETZ'];
-  data['select.renamed_owner'].attributes.wallboxes.B={name:'B',connected:true};
-  data['select.b']=state('charging_profile','B','PV_SURPLUS',{options:['NETZ','PV_SURPLUS']});
-  const {card:c,get}=card(data);
-  assert.equal(get('profile-row').hidden,true);
-  data['select.renamed_owner'].attributes.active_wallbox='B';
-  c.hass={...c._hass};
-  assert.equal(get('profile-row').hidden,false);
-  assert.equal(get('profile').value,'PV_SURPLUS');
-});
-
-test('last known CP states remain visible and dimmed until fresh observations', () => {
-  const data = states(true);
-  data['sensor.connector'] = state('connector_state','A','occupied',{state_represents:'last_known_observation',state_fresh:false});
-  data['sensor.charging'] = state('charging_state','A','charging',{state_represents:'last_known_observation',state_fresh:false});
-  const {card: c,get} = card(data);
-  assert.equal(get('connection').textContent,'Occupied');
-  assert.equal(get('charging').textContent,'Charging');
-  assert.equal(get('connection').style.opacity,'0.5');
-  assert.match(get('connection').title,/Last known/);
-  assert.match(get('permission').textContent,/Enable/);
-  data['sensor.connector'].state = 'available';
-  data['sensor.charging'].state = 'idle';
-  data['sensor.connector'].attributes.state_fresh = true;
-  data['sensor.charging'].attributes.state_fresh = true;
-  c.hass = {states:data,language:'en'};
-  assert.equal(get('connection').textContent,'Available');
-  assert.equal(get('charging').textContent,'Idle');
-  assert.equal(get('connection').style.opacity,'1');
-});
-
-test('parameters heading precedes confirmed point and permanent messages section',()=>{
-  const {card:c,get}=card(states(true));
-  const html=c.shadowRoot.innerHTML;
-  assert.ok(html.indexOf('id="parameters-label"') < html.indexOf('id="actual"'));
-  assert.ok(html.indexOf('id="actual"') < html.indexOf('id="messages"'));
-  assert.match(html, /id="no-messages">-<\/div>/);
-  assert.equal(get('parameters-label').textContent,'Wallbox parameters');
-  assert.equal(get('messages-label').textContent,'Messages');
-  assert.equal(get('status').hidden,true);
-  assert.match(html, /#messages:has\(\.notice:not\(\[hidden\]\)\) #no-messages \{display:none\}/);
-  assert.match(html, /\.notice \{[^}]*color:var\(--error-color\)/);
-  c.hass={...c._hass, language:'de'};
-  assert.equal(get('parameters-label').textContent,'Wallboxparameter');
-  assert.equal(get('messages-label').textContent,'Meldungen');
-});
-
-test('existing backend and service errors stay inside messages without duplicates',async()=>{
-  const data=states(true);
-  data['select.anything'].attributes.control_status='voltage_unavailable';
-  const {card:c,get}=card(data);
-  const html=c.shadowRoot.innerHTML;
-  const section=html.slice(html.indexOf('id="messages"'));
-  for(const id of ['status','error']) {
-    assert.equal(html.split(`id="${id}"`).length-1,1);
-    assert.ok(section.includes(`id="${id}"`));
-  }
-  assert.match(get('status').textContent,/No fresh voltage/);
-  assert.equal(get('status').hidden,false);
-  c.hass={...c._hass,callService:async()=>{throw new Error('station error');}};
-  await c.call('switch','turn_off',{});
-  assert.equal(get('error').textContent,'station error');
-  assert.equal(get('error').hidden,false);
-  delete data['select.anything'].attributes.control_status;
-  c.hass={...c._hass, states:data};
-  assert.equal(get('status').hidden,true);
-  assert.equal(get('error').hidden,false); // Placeholder stays hidden for service errors too.
-});
-
-for (const role of ['grid_start_delay','grid_duration']) for (const value of ['', '00:00','01:30','24:00','120:15']) {
-  test(`${role} split round trip ${JSON.stringify(value)} without authority`, async () => {
-    const data=states(false);
-    data['text.setting']=state(role,'A',value);
-    const {card:c,get,calls}=card(data);
-    const [hours,minutes]=value ? value.split(':') : ['',''];
-    assert.equal(get(`${role}-hours`).value,hours);
-    assert.equal(get(`${role}-minutes`).value,minutes);
-    assert.equal(get(`${role}-hours`).disabled,false);
-    assert.equal(get(`${role}-minutes`).disabled,false);
-    await get(`${role}-hours`).onchange();
-    assert.deepEqual(JSON.parse(JSON.stringify(calls[0])),['text','set_value',{entity_id:'text.setting',value}]);
-    assert.equal(get('permission').disabled,true);
-    c.hass={...c._hass};
-    assert.equal(get(`${role}-hours`).value,hours);
-    get(`${role}-clear`).onclick();
-    assert.equal(calls.at(-1)[2].value,'');
-    assert.equal(get(`${role}-hours`).value,'');
-    assert.equal(get(`${role}-minutes`).value,'');
-  });
-}
-for (const [hours,minutes,valid] of [['1','30',true],['120','15',true],['','5',true],['1','',true],['0','59',true],['0','0',true],['1.5','30',false],['1','30.5',false],['1.0','30',false],['-1','0',false],['0','-1',false],['1','60',false],['1e2','0',false]]) {
-  test(`duration integer bounds ${hours}:${minutes}`,async()=>{
-    const data=states(true);data['text.time']=state('grid_duration','A','01:30');
-    const {get,calls}=card(data);
-    get('grid_duration-hours').value=hours;get('grid_duration-minutes').value=minutes;
-    await get('grid_duration-minutes').onchange();
-    assert.equal(calls.length,valid?1:0);
-    if(valid) assert.equal(calls[0][2].value,`${String(Number(hours||0)).padStart(2,'0')}:${String(Number(minutes||0)).padStart(2,'0')}`);
-    else assert.equal(get('error').hidden,false);
-  });
-}
-for(const value of ['unknown','unavailable',null]) {
-  test(`unusable duration remains disabled: ${value}`,()=>{
-    const data=states(false);if(value!==null)data['text.time']=state('grid_duration','A',value);
-    const {get}=card(data);assert.equal(get('grid_duration-hours').disabled,true);
-    assert.equal(get('grid_duration-minutes').disabled,true);
-  });
-}
-test('split editors use native integer spinners and a visible colon',()=>{
-  const {card:c}=card(states());const html=c.shadowRoot.innerHTML;
-  for(const role of ['grid_start_delay','grid_duration']) {
-    assert.match(html,new RegExp(`<input type="number" id="${role}-hours" min="0" step="1"`));
-    assert.match(html,new RegExp(`<input type="number" id="${role}-minutes" min="0" max="59" step="1"`));
-    assert.ok(!html.includes(`id="${role}-up"`));
-  }
-  assert.match(html,/<span class="colon">:<\/span>/);
-  assert.match(html,/duration-editor input \{text-align:left/);
-});
-for(const stored of ['40.0','40','40.5']) {
-  test(`PV percentage compact integer rendering from ${stored}`,async()=>{
-    const data=states(false);data['select.anything'].state='PV_SURPLUS';
-    data['select.anything'].attributes.battery_configured=true;
-    data['number.target']=state('soll_soc_speicher','A',stored);
-    const {card:c,get,calls}=card(data);
-    const initial=Math.round(Number(stored));
-    assert.equal(get('soll_soc_speicher').value,String(initial));
-    assert.equal(get('soll_soc_speicher-row').hidden,false);
-    assert.equal(get('grid_duration-row').hidden,true);
-    assert.equal(get('grid_start_delay-row').hidden,true);
-    assert.equal(get('reserve-row').hidden,true);
-    await c.stepNumber('soll_soc_speicher',-1);
-    assert.equal(calls.at(-1)[2].value,initial-1);
-    await c.stepNumber('soll_soc_speicher',1);
-    assert.equal(calls.at(-1)[2].value,initial);
-    get('soll_soc_speicher').value='40.5';
-    const count=calls.length;await get('soll_soc_speicher').onchange();
-    assert.equal(calls.length,count);
-    assert.match(c.shadowRoot.innerHTML,/<input id="soll_soc_speicher" type="text" inputmode="numeric"/);
-    assert.ok(calls.every(call=>Number.isInteger(call[2].value)));
-  });
-}
-test('technical regulation fields are absent from card markup',()=>{
-  const {source}=runtime();
-  for (const field of ['soc_hysterese','regulation_interval','pv_start_delay','pv_stop_delay','power_smoothing_window']) {
-    assert.ok(!source.includes(`id="${field}"`));
-  }
-});
-
-for(const value of [7,98]) {
-  test(`target SoC buttons respect ${value} boundary`,async()=>{
-    const data=states(true);data['select.anything'].state='PV_SURPLUS';
-    data['select.anything'].attributes.battery_configured=true;
-    data['number.target']=state('soll_soc_speicher','A',String(value),{min:7,max:98});
-    const {card:c,get,calls}=card(data);
-    assert.equal(get(`soll_soc_speicher-${value===7?'down':'up'}`).disabled,true);
-    await c.stepNumber('soll_soc_speicher',value===7?-1:1);
-    assert.equal(calls.length,0);
-    get('soll_soc_speicher').value=`${value}.0`;
-    await get('soll_soc_speicher').onchange();
-    assert.equal(get('soll_soc_speicher').value,String(value));
-    assert.equal(calls.length,0);
-  });
-}
-test('native bad-input state cannot accidentally clear a duration',async()=>{
-  const data=states(true);data['text.time']=state('grid_duration','A','01:30');
-  const {get,calls}=card(data);
-  get('grid_duration-hours').value='';get('grid_duration-minutes').value='';
-  get('grid_duration-hours').validity={badInput:true};
-  await get('grid_duration-hours').onchange();
-  assert.equal(calls.length,0);
-  assert.equal(get('error').hidden,false);
-});
-test('duration edit survives stale HA updates and preserves focused counterpart',async()=>{
-  const data=states(true);data['text.time']=state('grid_duration','A','');
-  const {card:c,get}=card(data);
-  let finish;c._hass.callService=()=>new Promise(resolve=>finish=resolve);
-  get('grid_duration-hours').value='24';
-  const pending=get('grid_duration-hours').onchange();
-  c.hass={...c._hass};
-  assert.equal(get('grid_duration-hours').value,'24');
-  assert.equal(get('grid_duration-minutes').value,'00');
-  c.shadowRoot.activeElement=get('grid_duration-minutes');
-  get('grid_duration-minutes').value='15';
-  c.hass={...c._hass};
-  assert.equal(get('grid_duration-minutes').value,'15');
-  finish();await pending;
-  assert.equal(get('grid_duration-minutes').value,'15');
-});
-
-test('NETZ restores compact power before reserve and timing',()=>{
-  const {get,card:c}=card(states(true)); const source=c.shadowRoot.innerHTML;
-  assert.equal(get('power-row').hidden,false);
-  assert.equal(get('power-label').textContent,'Requested charging power');
-  assert.ok(source.indexOf('id="power-row"')<source.indexOf('id="reserve-row"'));
-  assert.ok(source.indexOf('id="reserve-row"')<source.indexOf('id="grid_start_delay-row"'));
-  for(const id of ['power-down','power','power-up']) assert.ok(source.includes(`id="${id}"`));
-});
-for(const [minimum,maximum] of [[1.38,18.63],[1.84,11.04]]) test(`backend power bounds ${minimum}..${maximum}`,async()=>{
-  const data=states(true); Object.assign(data['number.renamed_power'].attributes,{technical_min_kw:minimum,technical_max_kw:maximum});
   const {card:c,get,calls}=card(data);
-  get('power').value=String(minimum); await c.stepNumber('power',-1); assert.equal(calls.length,0);
-  get('power').value=String(minimum+.01); await c.stepNumber('power',-1); assert.equal(calls.at(-1)[2].value,minimum);
-  get('power').value=String(maximum-.01); await c.stepNumber('power',1); assert.equal(calls.at(-1)[2].value,maximum);
-  const count=calls.length;
-  for(const value of [minimum-.01,maximum+.01]) {get('power').value=String(value); await c.editNumber('power');assert.equal(calls.length,count);}
-  get('power').value='9.87';await c.editNumber('power');assert.equal(calls.at(-1)[2].value,9.87); // Backend selects the representable OperatingPoint.
+  assert.equal(get('battery-soc').textContent,'69.0 % → 20.0 %');
+  for (const value of ['40','65','20','0']) {
+    data['number.e_reserve'].state=value; c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,`69.0 % → ${value}.0 %`);
+  }
+  assert.match(get('battery-soc')['aria-label'],/Current minimum reserve/);
+  assert.equal(get('error').textContent,'—');
+  assert.equal(calls.length,0);
 });
-test('power decimal boundary steps are reversible and clamp technical bounds',()=>{
-  const {step}=runtime();
-  assert.equal(step(9.8,1,18.63,1.38),9.9);
-  assert.equal(step(9.9,1,18.63,1.38),10);
-  assert.equal(step(10,-1,18.63,1.38),9.9);
-  assert.equal(step(10,1,18.63,1.38),11);
-  assert.equal(step(1.4,-1,18.63,1.38),1.38);
-  assert.equal(step(18,1,18.63,1.38),18.63);
+test('battery sides independently preserve zero and fractional locale values',()=>{
+  const data=batteryStates('E','69.125','40.5');
+  const {card:c,get,calls}=card(data,{},'de');
+  assert.equal(get('battery-label').textContent,'Hausspeicher');
+  assert.equal(get('battery-soc').textContent,'69,1 % → 40,5 %');
+  assert.match(get('battery-soc')['aria-label'],/Aktuelle Mindestreserve/);
+  for (const invalid of ['unknown','unavailable','',' ','NaN','Infinity','-1','101']) {
+    data['sensor.e_battery'].state=invalid; c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,'— → 40,5 %');
+    data['sensor.e_battery'].state='0'; data['number.e_reserve'].state=invalid; c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,'0,0 % → —');
+    data['number.e_reserve'].state='40.5';
+  }
+  data['sensor.e_battery'].attributes.restored=true; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'— → 40,5 %');
+  delete data['sensor.e_battery']; delete data['number.e_reserve']; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'— → —');
+  assert.equal(get('error').textContent,'—'); assert.equal(calls.length,0);
 });
-for(const [now,delay,duration] of [[1000,'00:01','00:02'],[1001,'00:01','00:02'],[1059.9,'00:01','00:02'],[1060,'','00:02'],[1060.1,'','00:02'],[1120,'','00:01'],[1179.9,'','00:01'],[1180,'','']]) test(`authoritative countdown at ${now}`,()=>{
-  const {context}=runtime(); const countdown=context.testHelpers.gridCountdown;
-  const attrs={grid_start_deadline:1060,grid_end_deadline:1180,grid_armed_duration_seconds:120};
-  assert.equal(countdown(attrs,'grid_start_delay',now),delay);
-  assert.equal(countdown(attrs,'grid_duration',now),duration);
+test('fixed SURPLUS target follows HA Number with independent missing SoC and target',()=>{
+  const data=batteryStates('E','69','20'); data['E.charging_profile'].state='PV_SURPLUS';
+  data['E.charging_profile'].attributes.pv_surplus_target={soc:40,maximum_reserve:38};
+  data['E.soll_soc_speicher'].state='40';
+  const {card:c,get,calls}=card(data);
+  assert.equal(get('battery-soc').textContent,'69.0 % → 40.0 %');
+  assert.match(get('battery-soc')['aria-label'],/Target SoC/);
+  data['sensor.e_battery'].state='unavailable'; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'— → 40.0 %');
+  data['E.soll_soc_speicher'].state='unavailable'; data['sensor.e_battery'].state='69'; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69.0 % → —');
+  data['E.soll_soc_speicher'].state='0'; data['number.e_reserve'].state='0';
+  data['E.charging_profile'].attributes.pv_surplus_target={soc:0,maximum_reserve:0}; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69.0 % → 0.0 %');
+  data['E.soll_soc_speicher'].state='55';
+  data['E.charging_profile'].attributes.pv_surplus_target={soc:55,maximum_reserve:53}; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69.0 % → 55.0 %');
+  assert.equal(card(data).get('battery-soc').textContent,'69.0 % → 55.0 %');
+  assert.equal(calls.length,0);
 });
-test('countdown replaces pending inputs, disables edits and reconstructs on card reload',async()=>{
-  const data=states(true), now=Date.now()/1000;
-  Object.assign(data['select.anything'].attributes,{grid_request_armed:true,grid_start_deadline:now+90,grid_end_deadline:now+7290,grid_armed_duration_seconds:7200});
-  data['text.delay']=state('grid_start_delay','A','');data['text.duration']=state('grid_duration','A','');
-  const first=card(data), second=card(data);
-  for(const ui of [first,second]) {
-    assert.equal(ui.get('grid_start_delay-hours').value,'00');assert.equal(ui.get('grid_start_delay-minutes').value,'02');
-    assert.equal(ui.get('grid_duration-hours').value,'02');assert.equal(ui.get('grid_duration-minutes').value,'00');
-    for(const id of ['grid_start_delay','grid_duration']) {
-      for(const part of ['hours','minutes','clear']) assert.equal(ui.get(`${id}-${part}`).disabled,true);
-      await ui.card.editDuration(id);assert.equal(ui.calls.length,0);
+test('battery-free SURPLUS has no fictional target or additional action gating',()=>{
+  const data=states(); data['E.charging_profile'].state='PV_SURPLUS';
+  data['E.charge_action'].attributes.charge_action_ready=true;
+  const {get,calls}=card(data);
+  assert.equal(get('battery-soc').textContent,'— → —');
+  assert.equal(get('charge-action').disabled,false);
+  assert.equal(get('profile').disabled,false); assert.equal(calls.length,0);
+});
+test('deferred OPTIMUM and MAXIMUM cannot invent effective targets from inputs',()=>{
+  const data=batteryStates(); const {card:c,get,calls}=card(data);
+  for (const profile of ['PV_OPTIMUM','PV_MAXIMUM']) {
+    data['E.charging_profile'].state=profile;
+    for (const phase of ['BEFORE_SURPLUS','DYNAMIC','FINISHED']) {
+      // Unimplemented planner inputs/old diagnostics cannot become an effective target.
+      Object.assign(data['E.charging_profile'].attributes,{planner_phase:phase,remaining_pv_energy:10000,local_day:'2026-10-25'});
+      data['number.e_reserve'].state='50'; c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,'69.0 % → —');
+      data['E.charging_profile'].attributes.local_day='2026-10-26';
+      data['E.charging_profile'].attributes.remaining_pv_energy=0; c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,'69.0 % → —');
     }
   }
-  Object.assign(data['select.anything'].attributes,{grid_start_deadline:now-90,grid_end_deadline:now-1});
-  first.card.hass={...first.card._hass,states:data};
-  for(const id of ['grid_start_delay','grid_duration']) for(const part of ['hours','minutes']) assert.equal(first.get(`${id}-${part}`).value,'');
+  assert.equal(calls.length,0);
+});
+test('five editors and their controls are absent for every profile',()=>{
+  const data=batteryStates(); const {card:c}=card(data);
+  for (const profile of ['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']) {
+    data['E.charging_profile'].state=profile; c.hass=c._hass;
+    for (const role of ['optimum_lower_soc','optimum_upper_soc','optimum_max_discharge_w','estimated_daily_house_consumption_kwh','soll_soc_speicher']) {
+      assert.doesNotMatch(c.shadowRoot.html,new RegExp(`id="${role}(?:-|\\")`));
+    }
+  }
+  assert.doesNotMatch(source,/optimumFields|optimum_lower_soc|optimum_upper_soc|optimum_max_discharge_w|estimated_daily_house_consumption_kwh/);
+});
+test('multiple cards use own HA mappings, survive offline OCPP and language switch',()=>{
+  const data={...batteryStates('A','69.5','40'),...batteryStates('B','75','65')};
+  const a=card(data,{entry_id:'A'}), b=card(data,{entry_id:'B'});
+  data['A.connected'].state='off'; data['sensor.a_battery'].state='70.25';
+  a.card.hass={...a.card._hass,language:'de'}; b.card.hass=b.card._hass;
+  assert.equal(a.get('battery-soc').textContent,'70,3 % → 40,0 %');
+  assert.equal(a.get('actual').textContent,'—');
+  assert.equal(b.get('battery-soc').textContent,'75.0 % → 65.0 %');
+  assert.equal(b.get('battery-label').textContent,'Home battery');
+  a.card.setConfig({entry_id:'B'});
+  assert.equal(a.get('battery-soc').textContent,'75,0 % → 65,0 %');
+  assert.equal(a.calls.length+b.calls.length,0);
 });
 
-test('PV Optimum shows independent controls, current target and no Grid or Surplus controls', async()=>{
-  const data=states(true);
-  data['select.anything'].state='PV_OPTIMUM';
-  Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS','PV_OPTIMUM'],battery_configured:true,optimum_target_soc:42.25});
-  for(const [key,value] of Object.entries({optimum_lower_soc:20,optimum_upper_soc:80,optimum_max_discharge_w:3500,estimated_daily_house_consumption_kwh:12.5})) data[`number.${key}`]=state(key,'A',String(value));
-  const {get,calls}=card(data);
-  assert.equal(get('power-row').hidden,true);
-  assert.equal(get('reserve-row').hidden,true);
-  assert.equal(get('soll_soc_speicher-row').hidden,true);
-  assert.equal(get('grid_duration-row').hidden,true);
-  assert.equal(get('optimum-target').textContent,'42.3 %');
-  assert.equal(get('optimum_max_discharge_w-row').hidden,false);
-  const input=get('estimated_daily_house_consumption_kwh');
-  input.value='15.5'; input.checkValidity=()=>true;
-  input.onchange();
-  assert.equal(calls[0][0],'number');
-  assert.equal(calls[0][2].entity_id,'number.estimated_daily_house_consumption_kwh');
-  assert.equal(calls[0][2].value,15.5);
+test('SURPLUS hides a formerly valid target after external reserve changes without clamping',()=>{
+  const data=batteryStates('E','69.25','20');
+  data['E.charging_profile'].state='PV_SURPLUS';
+  data['E.charging_profile'].attributes.pv_surplus_target={soc:40,maximum_reserve:38};
+  data['E.soll_soc_speicher'].state='40';
+  const {card:c,get,calls}=card(data);
+  for (const [reserve,reference] of [['20','40.0 %'],['38','40.0 %'],['38.01','—'],['65','—'],['unknown','—'],['unavailable','—'],['20','40.0 %']]) {
+    data['number.e_reserve'].state=reserve; c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,`69.3 % → ${reference}`);
+    assert.equal(data['E.soll_soc_speicher'].state,'40');
+    assert.equal(get('error').textContent,'—');
+  }
+  data['E.charging_profile'].attributes.pv_surplus_target=null; c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69.3 % → —');
+  assert.equal(calls.length,0);
 });
-
-for (const language of ['en','de']) {
-  for (const [status,en,de] of [
-    ['optimum_minimum_hold', /grid import may remain/, /Netzbezug ist möglich/],
-    ['optimum_pause_pending', /checking sustained/, /prüft anhaltend/],
-    ['optimum_deliberate_pause', /deliberately pauses/, /pausiert bewusst/],
-    ['optimum_no_positive_point', /No safe positive/, /Kein sicherer positiver/],
-    ['hard_budget_pause', /available power/, /verfügbare Leistung/],
-    ['hard_budget_unavailable', /valid measurements/, /gültige Messwerte/],
-    ['grid_import_pause', /excessive grid import/, /Zu hoher Netzbezug/],
-    ['stop_delay_expired', /stop delay expired/, /Stoppverzögerung/],
-  ]) test(`Optimum policy status ${status} in ${language}`,()=>{
-    const data=states(true);
-    data['select.anything'].state='PV_OPTIMUM';
-    Object.assign(data['select.anything'].attributes,{profile_status:status,options:['PV_OPTIMUM']});
-    const {card:c,get}=card(data);
-    c.hass={...c._hass,language};
-    assert.equal(get('status').hidden,false);
-    assert.match(get('status').textContent,language==='de'?de:en);
+for (const language of ['de','en']) for (const profile of ['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']) {
+  test(`battery one-decimal presentation and independent unavailable values ${language}/${profile}`,()=>{
+    const data=batteryStates('E','69','20');
+    data['E.charging_profile'].state=profile;
+    data['E.soll_soc_speicher'].state='40';
+    data['E.charging_profile'].attributes.pv_surplus_target={soc:40,maximum_reserve:38};
+    const {card:c,get,calls}=card(data,{},language);
+    const decimal=language==='de'?',':'.';
+    const target=profile==='NETZ'?`20${decimal}0 %`:profile==='PV_SURPLUS'?`40${decimal}0 %`:'—';
+    for (const [raw,display] of [['69',`69${decimal}0`],['69.25',`69${decimal}3`],['69.24',`69${decimal}2`],['0',`0${decimal}0`],['99.99',`100${decimal}0`]]) {
+      data['sensor.e_battery'].state=raw;c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,`${display} % → ${target}`);
+      assert.equal(data['sensor.e_battery'].state,raw);
+    }
+    data['sensor.e_battery'].state='unavailable';c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,`— → ${target}`);
+    data['sensor.e_battery'].state='69.25';data['number.e_reserve'].state='unavailable';c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,`69${decimal}3 % → —`);
+    if(profile==='NETZ') {
+      data['number.e_reserve'].state='40.25';c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,`69${decimal}3 % → 40${decimal}3 %`);
+    }
+    assert.equal(calls.length,0);
   });
 }
-
-test('one permission click and repeated busy rendering issue exactly one request',async()=>{
-  const {card:c,get}=card(states(true));
-  const calls=[];
-  let release;
-  c._hass.callService=(...args)=>{calls.push(args);return new Promise(resolve=>{release=resolve;});};
-  get('permission').onclick();
-  assert.equal(get('permission').disabled,true);
-  for(let n=0;n<5;n++) c.hass=c._hass;
-  assert.equal(calls.length,1);
-  assert.equal(calls[0][1],'turn_on');
-  release();
-  await Promise.resolve();
-  assert.equal(calls.length,1);
-});
-
-for(const language of ['en','de']) test(`pending enable is visible and cancellable in ${language}`,async()=>{
-  const data=states(true);
-  data['select.anything'].attributes.enable_pending=true;
-  data['switch.another_name'].attributes.enable_pending=true;
-  const {card:c,calls,get}=card(data);
-  c.hass={...c._hass,language};
-  assert.match(get('permission').textContent,language==='de'?/abbrechen/:/Cancel/);
-  assert.match(get('status').textContent,language==='de'?/vorgemerkt/:/pending/);
-  get('permission').onclick();
-  await Promise.resolve();
-  assert.equal(calls.length,1);
-  assert.equal(calls[0][1],'turn_off');
-});
-
-for (const language of ['en','de']) {
-  test(`PV Maximum exposes target and shared discharge limit in ${language}`, () => {
-    const data=states(true);
-    data['select.anything'].state='PV_MAXIMUM';
-    Object.assign(data['select.anything'].attributes,{options:['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM'],battery_configured:true,optimum_target_soc:7});
-    data['number.limit']=state('optimum_max_discharge_w','A','3500');
-    const {card:c,get}=card(data);
-    c.hass={...c._hass,language};
-    assert.equal(get('power-row').hidden,true);
-    assert.equal(get('reserve-row').hidden,true);
-    assert.equal(get('soll_soc_speicher-row').hidden,true);
-    assert.equal(get('optimum_lower_soc-row').hidden,true);
-    assert.equal(get('optimum_upper_soc-row').hidden,true);
-    assert.equal(get('estimated_daily_house_consumption_kwh-row').hidden,true);
-    assert.equal(get('optimum_max_discharge_w-row').hidden,false);
-    assert.equal(get('optimum-target-row').hidden,false);
-    assert.equal(get('optimum-target').textContent,'7 %');
+for (const language of ['de','en']) for (const profile of ['PV_OPTIMUM','PV_MAXIMUM']) {
+  test(`canonical effective PV target is displayed without frontend planning ${language}/${profile}`,()=>{
+    const data=batteryStates('E','69','20');
+    data['E.charging_profile'].state=profile;
+    const {card:c,get,calls}=card(data,{},language);
+    for (const [value,text] of [[40.25,language==='de'?'40,3 %':'40.3 %'],[0,language==='de'?'0,0 %':'0.0 %'],[100,language==='de'?'100,0 %':'100.0 %'],[null,'—'],[NaN,'—'],[101,'—'],[-1,'—'],['50','—']]) {
+      data['E.charging_profile'].attributes.effective_target_soc=value; c.hass=c._hass;
+      assert.equal(get('battery-soc').textContent,`${language==='de'?'69,0':'69.0'} % → ${text}`);
+    }
+    assert.equal(calls.length,0);
   });
 }

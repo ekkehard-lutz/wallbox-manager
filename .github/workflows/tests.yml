@@ -26,3 +26,4 @@ jobs:
       - run: .venv/bin/pytest
       - run: node --check custom_components/wallbox_manager/www/wallbox-manager-card.js
       - run: node tests/test_wallbox_card.cjs
+      - run: node tests/test_wallbox_card_layout.cjs

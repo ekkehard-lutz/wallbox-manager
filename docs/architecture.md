@@ -1,5 +1,12 @@
 # Wallbox Manager architecture
 
+**Historical implementation description:** Current passive v0.4 follows
+[WBM-ARCH-01–12](specifications/architecture-responsibility.md) and
+[V04-01–12](specifications/passive-v0.4.md). Older phase/permission freshness,
+sample-expiry and manager-side hardware safety/readback gates below are
+explicitly superseded by the 18 October 2026 responsibility decision.
+
+
 Status: design with initial pure-core implementation, 2026-09-23. Immutable
 identity/capability/request contracts, the operating-point solver and the
 protocol-independent control command boundary are implemented.
@@ -258,9 +265,17 @@ intent, evidence and endpoint are checked after queue waits
 and after the result. Desired power is retained on disable. Permission is never
 encoded as a zero-ampere profile. The observed charging state remains separate.
 
-An explicit enable prepares the transaction profile (including zero-current
-pause) before enabling permission. Zero-current support requires explicit verified
-evidence and does not change the hardware enable state. There is no automatic retry or resume after restore/reconnect.
+**Historical implementation / superseded ordering:** This implementation description
+previously required transaction-profile preparation before explicit permission ON.
+The approved 15 October 2026 [PV-OCPP-04 decision](specifications/pv-regulation.md#pv-ocpp-04--charging-permission-connection-readiness-and-physical-cp-observability-approved)
+replaces that dependency: general permission must be possible without a vehicle,
+transaction or prepared operating point, with supported enabled-state readback.
+Transaction-bound positive/zero-current control, verified zero-current capability,
+authority, electrical and lifecycle fences remain required. Recovery reconstructs
+state from supported queries/events; it grants no automatic positive restart or
+authority takeover. The earlier implementation described no automatic retry or
+resume after restore/reconnect; reconstruction alone authorizes neither. This
+documentation decision does not claim implementation.
 
 The solver receives explicit active-charging context. Only fresh positive measured
 charging with confirmed Enabled can retain its known physical mode; initial enable,

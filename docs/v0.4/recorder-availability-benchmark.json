@@ -1,0 +1,210 @@
+{
+  "base_commit": "3a122fdc13f4144c5e26a8bbadb364a1c77c891e",
+  "method": "Real HA entity writes and state_changed/state_reported event counters; deterministic source timestamps and manually driven real HA interval callbacks. Recorder rows are estimates equal to state_changed counts, excluding Recorder filters and metadata deduplication. No live HA modified.",
+  "before": {
+    "change_only_idle": {
+      "accepted": 0,
+      "control_commands": 0,
+      "ha_changes": 0,
+      "ha_writes": 0,
+      "unrelated_writes": 0,
+      "value_changes": 0,
+      "state_reported": 0,
+      "estimated_recorder_rows": 0
+    },
+    "changed_values": {
+      "accepted": 100,
+      "control_commands": 0,
+      "ha_changes": 100,
+      "ha_writes": 100,
+      "unrelated_writes": 0,
+      "value_changes": 100,
+      "state_reported": 0,
+      "estimated_recorder_rows": 100
+    },
+    "disconnect_reconnect": {
+      "accepted": 26,
+      "control_commands": 0,
+      "ha_changes": 52,
+      "ha_writes": 75,
+      "unrelated_writes": 0,
+      "value_changes": 26,
+      "state_reported": 23,
+      "estimated_recorder_rows": 52
+    },
+    "initial_sync": {
+      "accepted": 26,
+      "control_commands": 0,
+      "ha_changes": 39,
+      "ha_writes": 39,
+      "unrelated_writes": 0,
+      "value_changes": 26,
+      "state_reported": 0,
+      "estimated_recorder_rows": 39
+    },
+    "other_instance": {
+      "accepted": 0,
+      "control_commands": 0,
+      "ha_changes": 0,
+      "ha_writes": 0,
+      "unrelated_writes": 0,
+      "value_changes": 0,
+      "state_reported": 0,
+      "estimated_recorder_rows": 0
+    },
+    "same_value_reports": {
+      "accepted": 2000,
+      "control_commands": 0,
+      "ha_changes": 2000,
+      "ha_writes": 2000,
+      "unrelated_writes": 0,
+      "value_changes": 0,
+      "state_reported": 0,
+      "estimated_recorder_rows": 2000,
+      "timestamp_attributes": [
+        "observed_at",
+        "received_at"
+      ]
+    }
+  },
+  "after": {
+    "change_only_idle": {
+      "accepted": 0,
+      "control_commands": 0,
+      "estimated_recorder_rows": 0,
+      "ha_changes": 0,
+      "ha_writes": 0,
+      "state_reported": 0,
+      "unrelated_writes": 0,
+      "value_changes": 0
+    },
+    "changed_values": {
+      "accepted": 100,
+      "control_commands": 0,
+      "estimated_recorder_rows": 100,
+      "ha_changes": 100,
+      "ha_writes": 100,
+      "state_reported": 0,
+      "unrelated_writes": 0,
+      "value_changes": 100
+    },
+    "disconnect_reconnect": {
+      "accepted": 26,
+      "control_commands": 0,
+      "estimated_recorder_rows": 52,
+      "ha_changes": 52,
+      "ha_writes": 75,
+      "state_reported": 23,
+      "unrelated_writes": 0,
+      "value_changes": 3
+    },
+    "exact_energy_changes": {
+      "accepted": 1000,
+      "control_commands": 0,
+      "estimated_recorder_rows": 1000,
+      "ha_changes": 1000,
+      "ha_writes": 1000,
+      "state_reported": 0,
+      "unrelated_writes": 0,
+      "value_changes": 1000
+    },
+    "exact_voltage_changes": {
+      "accepted": 2000,
+      "control_commands": 0,
+      "estimated_recorder_rows": 2000,
+      "ha_changes": 2000,
+      "ha_writes": 2000,
+      "state_reported": 0,
+      "unrelated_writes": 0,
+      "value_changes": 2000
+    },
+    "initial_sync": {
+      "accepted": 26,
+      "control_commands": 0,
+      "estimated_recorder_rows": 39,
+      "ha_changes": 39,
+      "ha_writes": 39,
+      "state_reported": 0,
+      "unrelated_writes": 0,
+      "value_changes": 26
+    },
+    "native_unchanged_writes": {
+      "accepted": 0,
+      "control_commands": 0,
+      "estimated_recorder_rows": 0,
+      "ha_changes": 0,
+      "ha_writes": 2000,
+      "state_reported": 2000,
+      "unrelated_writes": 0,
+      "value_changes": 0
+    },
+    "other_instance": {
+      "accepted": 0,
+      "control_commands": 0,
+      "estimated_recorder_rows": 0,
+      "ha_changes": 0,
+      "ha_writes": 0,
+      "state_reported": 0,
+      "unrelated_writes": 0,
+      "value_changes": 0
+    },
+    "same_value_reports": {
+      "accepted": 2000,
+      "control_commands": 0,
+      "estimated_recorder_rows": 0,
+      "ha_changes": 0,
+      "ha_writes": 0,
+      "state_reported": 0,
+      "timestamp_attributes": [],
+      "unrelated_writes": 0,
+      "value_changes": 0
+    }
+  },
+  "phase": {
+    "before": {
+      "identical_reports": 2000,
+      "ha_writes": 2000,
+      "state_changed": 2000,
+      "state_reported": 0,
+      "estimated_recorder_rows": 2000,
+      "expiry_timer": true,
+      "timestamp_attributes": [
+        "observed_at",
+        "received_at",
+        "valid_until"
+      ]
+    },
+    "after": {
+      "identical_reports": 2000,
+      "ha_writes": 0,
+      "state_changed": 0,
+      "state_reported": 0,
+      "estimated_recorder_rows": 0,
+      "expiry_timer": false,
+      "timestamp_attributes": []
+    }
+  },
+  "duration_one_hour": {
+    "before": {
+      "interval_seconds": 1.0,
+      "ha_writes": 3600,
+      "state_changed": 3600,
+      "state_reported": 0,
+      "estimated_recorder_rows": 3600
+    },
+    "after": {
+      "interval_seconds": 60.0,
+      "ha_writes": 60,
+      "state_changed": 60,
+      "state_reported": 0,
+      "estimated_recorder_rows": 60
+    }
+  },
+  "notes": [
+    "Before state_reported counts are the original benchmark measured HA-write total minus its measured state_changed count.",
+    "Baseline duration test deliberately fails the new 60-change assertion after emitting its measured 3600-change count.",
+    "Same-value workload now keeps the source label identical too; beta.1 changed initial to meter on its first sample, but all 2000 samples changed timestamps. No value rounding or quantization.",
+    "New exact voltage/energy and native unchanged-write workloads have no baseline run. Reconnect value_changes differs because observations are retained and additional workloads change three values before reinitialization.",
+    "No live voltage samples for 2026-10-18 were supplied; the fraction of the reported 1748 voltage rows/hour due to genuine numeric changes is unknown."
+  ]
+}

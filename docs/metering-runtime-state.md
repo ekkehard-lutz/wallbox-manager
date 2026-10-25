@@ -1,5 +1,12 @@
 # Metering and reported runtime state
 
+**Historical implementation description:** Current passive v0.4 follows
+[WBM-ARCH-01–12](specifications/architecture-responsibility.md) and
+[V04-01–12](specifications/passive-v0.4.md). Older phase/permission freshness,
+sample-expiry and manager-side hardware safety/readback gates below are
+explicitly superseded by the 18 October 2026 responsibility decision.
+
+
 ## Boundary and scope
 
 Versioned OCPP adapters validate wire messages with ocpp 2.1.0 and normalize them

@@ -1,41 +1,30 @@
-"""Wallbox Manager entry lifecycle; imports leave the pure core dependency-free.
-
-Listener setup/unload pattern adapted from lbbrhzn/ocpp __init__.py at
-848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
-See THIRD_PARTY_NOTICES.md. Runtime is entry-owned, with observation and manual
-intent platforms. Entities use the generic control boundary.
-"""
-
-from __future__ import annotations
+"""Wallbox Manager lifecycle, one independent OCPP entry per station."""
 
 from dataclasses import dataclass
 from importlib import import_module
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.storage import Store
 
-    from .control.runtime import ControlRuntime
-    from .protocols.ocpp.common.transport import CentralSystem
-    from .runtime import Runtime
-    from .session_storage import SessionStorage
-
-from .const import DEFAULT_HOST, DEFAULT_PORT
-
-PLATFORMS = ("binary_sensor", "sensor", "switch", "number", "select", "button", "text")
+from .const import DEFAULT_HOST, DEFAULT_PORT, PLATFORMS
+from .entity import device_info
+from .migration import migrate
+from .session import document
+from .settings import REGULATION, Settings
+from .store import State
 
 
 @dataclass
 class EntryRuntime:
-    state: Runtime
-    server: CentralSystem
-    sessions: SessionStorage
-    control: ControlRuntime
-    profiles: object = None
-
-
-type WallboxManagerConfigEntry = ConfigEntry[EntryRuntime]
+    state: State
+    settings: Settings
+    server: object
+    session_store: Store
+    grid: object
+    battery: object
+    pv: object
 
 
 async def async_setup(hass, config):
@@ -45,122 +34,113 @@ async def async_setup(hass, config):
     return True
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: WallboxManagerConfigEntry
-) -> bool:
-    """Start listening immediately; an offline charger is not a setup failure."""
-    from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-    from homeassistant.exceptions import ConfigEntryNotReady
-
-    from .diagnostics import migrate_diagnostics
+async def async_setup_entry(hass, entry):
+    from . import session
     from .frontend import async_setup_assets
 
-    options = migrate_diagnostics(entry.options)
-    if options != dict(entry.options):
-        hass.config_entries.async_update_entry(entry, options=options)
-
-    # Library/schema module imports may read files; keep them off the HA loop.
-    transport = await hass.async_add_executor_job(
-        import_module, ".protocols.ocpp.common.transport", __package__
+    profiles_store = Store(
+        hass, 1, f"wallbox_manager.{entry.entry_id}.profiles", atomic_writes=True
     )
-    from .runtime import Runtime
+    profiles = await profiles_store.async_load() or {}
+    binding = migrate(hass, entry, profiles)
+    state = State(binding)
+    settings = Settings(hass, entry, binding, profiles_store, profiles)
+    await settings.initialize_grid()
+    session_store = await session.load(hass, entry.entry_id, state)
+    transport = await hass.async_add_executor_job(import_module, ".ocpp", __package__)
 
-    state = Runtime(entry)
-    server = transport.CentralSystem(
+    def update_device():
+        dr.async_get(hass).async_get_or_create(
+            config_entry_id=entry.entry_id, **device_info(entry, state)
+        )
+
+    update_device()
+    server = transport.Listener(
         state,
         entry.data.get("host", DEFAULT_HOST),
         entry.data.get("port", DEFAULT_PORT),
+        update_device,
+        options=lambda: entry.options,
     )
-    from .session_storage import SessionStorage
+    from .grid import Grid
+    from .grid_battery import GridBattery
+    from .pv import PV
 
-    storage = SessionStorage(hass, entry.entry_id, state.sessions)
-    await storage.load()
+    settings.state = state
+    grid = server.grid = Grid(server, settings)
+    if state.session:
+        grid.known_transaction = state.session.get("external_transaction_id")
+    battery = GridBattery(hass, entry, grid)
+    pv = grid.pv = PV(hass, entry, grid)
+    entry.runtime_data = EntryRuntime(
+        state, settings, server, session_store, grid, battery, pv
+    )
+    await pv.start()
+    await battery.start()
     try:
         await server.start()
     except OSError as exc:
-        await storage.close()
+        await pv.close()
+        await grid.close()
+        await battery.close()
+        await server.stop()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
-    from .battery import BatteryReserve
-    from .profiles import GridProfiles
-    from .protocols.ocpp.v21.control_runtime import create_control_runtime
-    from .station_config import EntryReference, setup_station_configuration
-
-    profiles = None
-    control = None
     try:
-        setup_station_configuration(hass, entry, state)
-        source = EntryReference(entry)
-        control = create_control_runtime(state, server, source)
-        from .ownership import async_get_ownership
-
-        ownership = await async_get_ownership(hass)
-        entry.async_on_unload(ownership.register(entry, control))
-        battery = BatteryReserve(hass, entry)
-        await battery.load(
-            preserve=bool(
-                ownership.record
-                and ownership.record["enabled_intent"]
-                and ownership.resolve(ownership.active_wallbox)[0] is control
-            )
-        )
-        profiles = GridProfiles(hass, entry, control, battery)
-        profiles.recovery_ready = False
-        await profiles.load()
-        control.profiles = profiles
-        entry.runtime_data = EntryRuntime(state, server, storage, control, profiles)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        profiles.recovery_ready = True
-        ownership.changed()
         await async_setup_assets(hass)
     except BaseException:
-        if profiles is not None:
-            await profiles.close()
-        if control is not None:
-            control.close()
+        await pv.close()
+        await grid.close()
+        await battery.close()
         await server.stop()
-        await storage.close()
         await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         raise
 
-    async def shutdown(event):
-        await profiles.close()
-        control.close()
-        await server.stop()
-        await storage.close()
+    async def options_updated(hass, updated_entry):
+        battery.changed()
+        pv.options_updated()
+        # Options update held preferences without reconnecting the transport.
+        for key in REGULATION:
+            if key in updated_entry.options:
+                value = updated_entry.options[key]
+                if settings.values.get(key) != value:
+                    settings.values[key] = value
+                    for listener in tuple(settings.listeners.get(key, ())):
+                        listener()
 
-    entry.async_on_unload(
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, shutdown)
-    )
+    entry.async_on_unload(entry.add_update_listener(options_updated))
+
+    async def stop(event):
+        await pv.close()
+        await grid.close()
+        await battery.close()
+        await server.stop()
+        if state.session:
+            await session_store.async_save(session.document(state))
+
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop))
     return True
 
 
-async def async_unload_entry(
-    hass: HomeAssistant, entry: WallboxManagerConfigEntry
-) -> bool:
-    """Close the listener and join owned sessions before completing unload."""
+async def async_unload_entry(hass, entry):
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    await entry.runtime_data.profiles.close()
-    entry.runtime_data.control.close()
+    await entry.runtime_data.pv.close()
+    await entry.runtime_data.grid.close()
+    await entry.runtime_data.battery.close()
     await entry.runtime_data.server.stop()
-    await entry.runtime_data.sessions.close()
+    if entry.runtime_data.state.session:
+        await entry.runtime_data.session_store.async_save(
+            document(entry.runtime_data.state)
+        )
     return True
 
 
-async def async_migrate_entry(
-    hass: HomeAssistant, entry: WallboxManagerConfigEntry
-) -> bool:
-    """Add endpoint defaults to the earlier empty scaffold entry."""
-    if entry.version == 1:
+async def async_migrate_entry(hass, entry):
+    if entry.version in (1, 2):
         hass.config_entries.async_update_entry(
             entry,
+            version=3,
             data={"host": DEFAULT_HOST, "port": DEFAULT_PORT, **entry.data},
-            version=2,
-        )
-    if entry.version == 2:
-        from .config_flow import migrate_options
-
-        hass.config_entries.async_update_entry(
-            entry, options=migrate_options(entry.options), version=3
         )
     return entry.version == 3

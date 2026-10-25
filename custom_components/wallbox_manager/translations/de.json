@@ -4,10 +4,13 @@
     "step": {
       "user": {
         "title": "Wallbox Manager",
-        "description": "OCPP-Endpunkt im vertrauenswürdigen lokalen Netzwerk. Manuelle Steuerung benötigt ausdrücklich verifizierte Fähigkeiten. Wallbox-Verbindung: ws://HA-address:port/station-id.",
+        "description": "Passiver OCPP-2.1-Endpunkt für genau eine Wallbox, einen EVSE und einen Anschluss. Keine Ladesteuerung.",
         "data": {
           "host": "Lokale Bind-Adresse",
-          "port": "WebSocket-Port"
+          "port": "WebSocket-Port",
+          "station_id": "OCPP-Stationskennung",
+          "evse_id": "EVSE-Kennung",
+          "connector_id": "Anschlusskennung"
         }
       }
     },
@@ -15,7 +18,7 @@
       "already_configured": "Wallbox Manager ist bereits eingerichtet."
     },
     "error": {
-      "invalid_listener": "Eine gültige IP-Adresse und einen Port zwischen 1 und 65535 eingeben."
+      "invalid_listener": "Gültige IP-Adresse, freien Port sowie Stations-, EVSE- und Anschlusskennung angeben."
     }
   },
   "entity": {
@@ -146,17 +149,8 @@
       "enable_disable": {
         "name": "{scope} Ladefreigabe unterstützt"
       },
-      "maximum_current_1": {
-        "name": "{scope} Maximaler Strom 1p"
-      },
-      "maximum_current_2": {
-        "name": "{scope} Maximaler Strom 2p"
-      },
-      "maximum_current_3": {
-        "name": "{scope} Maximaler Strom 3p"
-      },
       "maximum_current": {
-        "name": "{scope} Maximaler Strom"
+        "name": "Maximaler Strom"
       },
       "control_authority": {
         "name": "Steuerungsautorität",
@@ -168,19 +162,22 @@
       },
       "zero_current": {
         "name": "{scope} Nullstrom-Unterstützung"
+      },
+      "physical_phases": {
+        "name": "Zuletzt beobachtete Phasen"
+      },
+      "maximum_asymmetry_current": {
+        "name": "Maximaler Strom Schieflast"
       }
     },
     "switch": {
       "charging_enabled": {
-        "name": "{scope} Laden erlaubt"
+        "name": "{scope} Wallbox aktiviert"
       }
     },
     "number": {
       "desired_charging_power": {
         "name": "{scope} Gewünschte Leistung"
-      },
-      "phase_switch_deviation_pct": {
-        "name": "{scope} Max. Abweichung ohne Phasenumschaltung"
       },
       "allowed_current_1p": {
         "name": "{scope} Zulässiger Strom 1p"
@@ -206,12 +203,6 @@
       "regulation_interval": {
         "name": "Regelintervall"
       },
-      "pv_start_delay": {
-        "name": "PV-Startverzögerung"
-      },
-      "pv_stop_delay": {
-        "name": "PV-Stoppverzögerung"
-      },
       "optimum_lower_soc": {
         "name": "{scope} PV Optimum unterer Ziel-SoC"
       },
@@ -219,10 +210,31 @@
         "name": "{scope} PV Optimum oberer Ziel-SoC"
       },
       "optimum_max_discharge_w": {
-        "name": "Maximale PV-Speicherentladeleistung"
+        "name": "Maximale PV-Speicherentladeleistung (veraltet, ungenutzt)"
       },
       "estimated_daily_house_consumption_kwh": {
         "name": "{scope} PV Optimum täglicher Hausverbrauch ohne EV"
+      },
+      "pv_increase_interval_cycles": {
+        "name": "Hochregelintervall"
+      },
+      "pv_startup_hold_cycles": {
+        "name": "Einschwingzeit nach Ladestart"
+      },
+      "pv_grid_deadband_w": {
+        "name": "Netzpunkt-Totzone"
+      },
+      "pv_decrease_delay_cycles": {
+        "name": "Runterregelverzögerung"
+      },
+      "pv_grid_import_budget_wh": {
+        "name": "Zulässiger Netzbezug"
+      },
+      "pv_ev_uptake_threshold_pct": {
+        "name": "Mindestleistungsaufnahme Fahrzeug"
+      },
+      "pv_fast_restart_household_load_limit_w": {
+        "name": "FAST-Wiederanlauf: maximale Hauslast"
       }
     },
     "select": {
@@ -243,9 +255,6 @@
           "PV_MAXIMUM": "PV Maximum"
         }
       },
-      "active_wallbox": {
-        "name": "Aktive Wallbox"
-      },
       "pv_approximation": {
         "name": "PV-Leistungsannäherung",
         "state": {
@@ -257,6 +266,9 @@
     "button": {
       "take_control": {
         "name": "Steuerung übernehmen"
+      },
+      "charge_action": {
+        "name": "{scope} Ladefreigabe"
       }
     },
     "text": {
@@ -268,90 +280,99 @@
       }
     }
   },
+  "selector": {
+    "diagnostic_level": {
+      "options": {
+        "0": "Nur Fehler",
+        "1": "Ereignisse und Fehler",
+        "2": "Relevante Zustandsänderungen",
+        "3": "Detaillierte passive Diagnose"
+      }
+    }
+  },
   "options": {
     "step": {
       "init": {
         "title": "Wallbox Manager",
-        "description": "PV-Überschuss benötigt beide Leistungsreferenzen. Ohne Speicher-SoC arbeitet es ohne Speicher; die Entladereserve ist davon unabhängig.",
+        "description": "Messquellen und PV-Regelung konfigurieren.",
+        "data": {
+          "general": "Diagnose und Messwertquellen",
+          "regulation": "PV-Regelparameter"
+        },
         "sections": {
           "general": {
-            "name": "Allgemeine Parameter",
+            "name": "Diagnose und Messwertquellen",
             "data": {
-              "min_soc_speicher": "Mindestreserve",
-              "soc_speicher_aktuell": "Ladezustand",
-              "leistung_pv": "PV-Leistung",
-              "leistung_verbraucher": "Verbrauchsleistung",
-              "storage_discharge_power": "Speicher-Entladeleistung",
-              "storage_capacity": "Nennkapazität des Speichers (WHRtg)",
-              "remaining_pv_energy": "Erwartete verbleibende PV-Energie heute",
-              "grid_import_power": "Netzbezugsleistung",
-              "grid_export_power": "Netzeinspeiseleistung",
-              "diagnostic_level": "Diagnosestufe"
-            },
-            "data_description": {
-              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewählter Wallbox.",
-              "storage_discharge_power": "Tatsächliche nichtnegative Entladeleistung; null beim Laden.",
-              "storage_capacity": "Fronius Nennkapazität des Speichers: WHRtg / model_120_whrtg, in Wh oder kWh.",
-              "remaining_pv_energy": "Erwartete verbleibende PV-Produktion heute, in Wh oder kWh.",
-              "grid_import_power": "Nichtnegative aus dem Netz bezogene Leistung.",
-              "grid_export_power": "Nichtnegative ins Netz eingespeiste Leistung.",
-              "diagnostic_level": "Wallbox-Manager-Diagnosen: 0 aus, 1 Ereignisse und Fehler, 2 mit relevanten Daten, 3 vollständige Diagnosespur. Normale Warnungen und Fehler bleiben auch bei Stufe 0 aktiv. Standardmäßig deaktiviert."
+              "diagnostic_level": "Diagnosestufe",
+              "min_soc_speicher": "min soc speicher",
+              "soc_speicher_aktuell": "soc speicher aktuell",
+              "leistung_pv": "leistung pv",
+              "leistung_verbraucher": "Gesamtverbrauch einschließlich ausgewähltem EV",
+              "storage_discharge_power": "storage discharge power",
+              "storage_capacity": "storage capacity",
+              "remaining_pv_energy": "remaining pv energy",
+              "grid_import_power": "grid import power",
+              "grid_export_power": "grid export power",
+              "storage_charge_power": "Speicher-Ladeleistung"
             }
           },
           "regulation": {
-            "name": "Regelparameter",
+            "name": "PV-Regelparameter",
             "data": {
               "regulation_interval": "Regelintervall",
-              "pv_start_delay": "PV-Startverzögerung",
-              "pv_stop_delay": "PV-Stoppverzögerung",
               "soc_hysterese": "SoC-Hysterese und Ziel-Sicherheitsabstand",
-              "power_smoothing_window": "Leistungsglättung Zeitfenster"
+              "power_smoothing_window": "Glättungsfenster (Sekunden)",
+              "pv_increase_interval_cycles": "Hochregelintervall",
+              "pv_startup_hold_cycles": "Einschwingzeit nach Ladestart",
+              "pv_grid_deadband_w": "Netzpunkt-Totzone",
+              "pv_decrease_delay_cycles": "Runterregelverzögerung",
+              "pv_grid_import_budget_wh": "Zulässiger Netzbezug",
+              "pv_ev_uptake_threshold_pct": "Mindestleistungsaufnahme Fahrzeug",
+              "pv_fast_restart_household_load_limit_w": "FAST-Wiederanlauf: maximale Hauslast"
             }
           }
         }
       }
+    },
+    "error": {
+      "invalid_settings": "Ungültige oder widersprüchliche Einstellungen."
     }
   },
-  "config_subentries": {
-    "wallbox": {
-      "title": "Wallbox",
-      "initiate_flow": {
-        "user": "Wallbox",
-        "reconfigure": "Fähigkeiten konfigurieren"
-      },
-      "step": {
-        "reconfigure": {
-          "title": "Stationsfähigkeiten",
-          "description": "Nur fehlende OCPP-Angaben ergänzen. Ein leeres Formular benötigt keine Ergänzungen.",
-          "data": {
-            "reference_phases": "Unterstützte Phasenanzahlen (z. B. 1,3)",
-            "reference_min_a": "Minimaler Strom (A)",
-            "reference_step_a": "Stromschrittweite (A)",
-            "reference_phase_switching": "Phasenumschaltung unterstützt",
-            "reference_enable_disable": "Ladefreigabe unterstützt",
-            "reference_max_1a": "Maximaler Strom 1p (A)",
-            "reference_max_2a": "Maximaler Strom 2p (A)",
-            "reference_max_3a": "Maximaler Strom 3p (A)"
-          }
+  "services": {
+    "step_power": {
+      "name": "NETZ-Sollleistung schrittweise ändern",
+      "description": "Ändert den Entwurf um einen technischen Schritt, ohne Freigabe oder Ladestart. Benötigt die aktuelle Entwurfsrevision und Laufzeitkennung.",
+      "fields": {
+        "direction": {
+          "name": "Richtung"
+        },
+        "revision": {
+          "name": "Erwartete Entwurfsrevision"
+        },
+        "incarnation": {
+          "name": "Laufzeitkennung"
         }
-      },
-      "error": {
-        "invalid_reference": "Gültige Zuordnung und widerspruchsfreie Referenzwerte eingeben."
-      },
-      "abort": {
-        "reconfigure_successful": "Stationsfähigkeiten gespeichert.",
-        "discovered_automatically": "Wallboxen werden automatisch über OCPP angelegt."
-      },
-      "entry_type": "Wallbox"
-    }
-  },
-  "selector": {
-    "diagnostic_level": {
-      "options": {
-        "0": "Aus",
-        "1": "Ereignisse und Fehler",
-        "2": "Ereignisse mit relevanten Daten",
-        "3": "Vollständige Diagnosespur"
+      }
+    },
+    "edit_timing": {
+      "name": "NETZ-Zeitparameter bearbeiten",
+      "description": "Beide Zeitfelder mit aktueller Zeitrevision und Laufzeitkennung koordinieren. Begin hält Entwürfe; End startet das 15-Sekunden-Fenster; Update verändert nur den Zeitentwurf. Renew verlängert nur die aktive Editor-Lease.",
+      "fields": {
+        "action": {
+          "name": "Bearbeitungsschritt"
+        },
+        "owner": {
+          "name": "Editor-Kennung"
+        },
+        "revision": {
+          "name": "Erwartete Zeitrevision"
+        },
+        "incarnation": {
+          "name": "Laufzeitkennung"
+        },
+        "value": {
+          "name": "Neuer Zeitentwurf"
+        }
       }
     }
   }

@@ -1,0 +1,189 @@
+{
+  "reference": "v0.3.2-beta.18",
+  "note": "Literal public dictionary keys extracted from entity/projection methods; dynamic common joins are detailed in compatibility-inventory.md. This is source inventory, not retained implementation.",
+  "methods": [
+    {
+      "source": "capability_entity.py",
+      "method": "extra_state_attributes",
+      "line": 123,
+      "attribute_names": [
+        "evidence",
+        "source"
+      ]
+    },
+    {
+      "source": "session_entity.py",
+      "method": "extra_state_attributes",
+      "line": 124,
+      "attribute_names": [
+        "connector_id",
+        "duration_sampled_at",
+        "duration_valid_until",
+        "evse_id",
+        "external_transaction_id",
+        "observed_at",
+        "power_availability_reason",
+        "received_at",
+        "session_active",
+        "session_id",
+        "start_known",
+        "station_id",
+        "valid_until"
+      ]
+    },
+    {
+      "source": "pv_economy_control.py",
+      "method": "economic_attributes",
+      "line": 1113,
+      "attribute_names": [
+        "pv_actual_grid_import_w",
+        "pv_economic_activity_source",
+        "pv_economic_coverage_reason",
+        "pv_economic_inhibition",
+        "pv_economic_monitoring_active",
+        "pv_economic_off_in_flight",
+        "pv_economic_restart_required",
+        "pv_economic_state",
+        "pv_economic_stop_reason",
+        "pv_grid_import_below_seconds",
+        "pv_grid_import_energy_wh",
+        "pv_grid_import_threshold_w",
+        "pv_retained_current_inhibition",
+        "pv_technical_minimum_w",
+        "pv_transaction_bound_zero_identity_available",
+        "pv_unattributed_flow_duration_bounded"
+      ]
+    },
+    {
+      "source": "button.py",
+      "method": "extra_state_attributes",
+      "line": 39,
+      "attribute_names": [
+        "takeover_reason",
+        "takeover_status"
+      ]
+    },
+    {
+      "source": "grid_timing.py",
+      "method": "grid_attributes",
+      "line": 77,
+      "attribute_names": [
+        "grid_activation_time",
+        "grid_armed_duration_seconds",
+        "grid_duration_seconds",
+        "grid_end_deadline",
+        "grid_request_armed",
+        "grid_start_deadline",
+        "grid_start_delay_seconds",
+        "grid_timing_state"
+      ]
+    },
+    {
+      "source": "entity.py",
+      "method": "extra_state_attributes",
+      "line": 193,
+      "attribute_names": [
+        "runtime_incarnation",
+        "station_id",
+        "wallbox_manager_entry",
+        "wallbox_manager_role"
+      ]
+    },
+    {
+      "source": "sensor.py",
+      "method": "extra_state_attributes",
+      "line": 196,
+      "attribute_names": [
+        "observed_at",
+        "source"
+      ]
+    },
+    {
+      "source": "select.py",
+      "method": "extra_state_attributes",
+      "line": 86,
+      "attribute_names": [
+        "active_wallbox",
+        "ownership_status",
+        "profile_control_ready",
+        "transition_pending",
+        "wallbox_manager_entry",
+        "wallbox_manager_role",
+        "wallboxes"
+      ]
+    },
+    {
+      "source": "switch.py",
+      "method": "extra_state_attributes",
+      "line": 39,
+      "attribute_names": [
+        "enabled_observed_at",
+        "enabled_valid_until",
+        "state_represents"
+      ]
+    },
+    {
+      "source": "control_entity.py",
+      "method": "extra_state_attributes",
+      "line": 99,
+      "attribute_names": [
+        "connector_id",
+        "evse_id",
+        "state_represents",
+        "station_id",
+        "wallbox_manager_entry",
+        "wallbox_manager_role",
+        "wallbox_manager_target"
+      ]
+    },
+    {
+      "source": "profiles.py",
+      "method": "attributes",
+      "line": 334,
+      "attribute_names": [
+        "actual_charging",
+        "available_profiles",
+        "battery_configured",
+        "battery_reserve",
+        "battery_reserve_configured",
+        "battery_status",
+        "enable_pending",
+        "enable_wait_reason",
+        "optimum_mode",
+        "optimum_target_soc",
+        "profile_actively_charging",
+        "profile_control_ready",
+        "profile_start_pending",
+        "profile_status",
+        "pv_day_state",
+        "pv_measurement_status",
+        "pv_pause_reason",
+        "pv_restart_reason",
+        "retained_current_accounting",
+        "soc_mode",
+        "target_soc"
+      ]
+    },
+    {
+      "source": "control/runtime.py",
+      "method": "attributes",
+      "line": 602,
+      "attribute_names": [
+        "actual_enabled",
+        "applied_current_a",
+        "applied_offered_power_w",
+        "applied_phase_count",
+        "command_reason",
+        "command_status",
+        "control_authority",
+        "control_status",
+        "electrical_recovery_status",
+        "execution_blocked_reason",
+        "execution_ready",
+        "physical_phase_mode",
+        "physical_phase_valid_until",
+        "solver_reason"
+      ]
+    }
+  ]
+}

@@ -46,14 +46,33 @@ and whether it was accepted; physical feedback remains independent. No preferred
 point is queued, and expiry/telemetry causes no dispatch. A subsequent identical
 explicit power request runs the ordinary calculation again.
 
-## PV Optimum reachability
+## PV continuation and reachability
 
-Optimum additionally retains specific phase rejection as scoped runtime evidence.
+PV_SURPLUS, PV_OPTIMUM, and PV_MAXIMUM retain a specific phase rejection as
+scoped runtime evidence. For an already permitted charge with a positive
+confirmed offer, blocked execution can hold the minimum technically valid point
+on the fresh, matching physical mode. The minimum uses the actual voltage,
+device current grid, and all current limits. Only the startup half-step response
+reserve is skipped for continuation; an existing independent hard battery
+ceiling remains binding, without an added grid-import bonus. Authoritative fresh
+site import/export measurements enforce net import no greater than half that
+minimum power, using the existing 10-second confirmation grace and restart
+hysteresis. Configured battery SoC stops this fallback strictly below the
+existing target, with equality permitting continuation; the known lockout
+context preserves this stop rule even if phase feedback is temporarily unknown.
+Surplus's optional battery-free configuration has no SoC threshold to invent,
+but still requires fresh grid evidence. Normal energy policies and manual DOWN
+approximation remain unchanged outside the fallback.
+
 Energy-desired planning continues across verified modes using the fresh regulator
-budget. Only executable planning is constrained to the confirmed mode. Its
-minimum-positive policy can raise the soft request to that mode's safe minimum;
-it cannot exceed beta.9's independent hard power ceiling or grid-import allowance;
-this does not relax DOWN approximation for manual controls or other profiles.
+budget and ignores execution-only phase restrictions. Its policy evaluation
+copies regulator state so a different desired minimum cannot change the
+executable import grace. Only executable planning is constrained to the confirmed
+mode. A phase-changing acknowledgment also guards reversal while its physical
+response is pending, using the existing 20-second observation window per
+accepted corrective point. Response confirmation or expiry clears this context;
+genuine hard reductions and safety stops remain available.
+
 A task-scoped probe at the existing retry cadence may try the preferred transition
 again. The restriction remains known during the probe and is not cleared merely
 because 60 seconds passed. Successful different-mode application, changed physical

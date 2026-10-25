@@ -1,507 +1,160 @@
-# Wallbox Manager
+# Wallbox Manager — OCPP control, NETZ and PV Regulation V3
 
-Wallbox Manager is a Home Assistant custom integration for managing EV charging
-stations through a common, capability-based interface.
+Home Assistant integration domain: `wallbox_manager`.
 
-The integration is intended to work as a standalone wallbox manager while also
-providing a programmatic interface for a future higher-level Energy Manager.
+This **v0.4.0-beta.17 prerelease** provides the shared PV Regulation V3
+runtime for PV_SURPLUS, PV_OPTIMUM and PV_MAXIMUM, alongside the existing NETZ
+profile and OCPP **2.1** interface. See the [beta.17 release notes](docs/v0.4/release-notes-beta.17.md)
+for features, seven new tuning parameters, migration and supervised HACS/rollback
+instructions, and the [implementation report](docs/pv-v3-implementation.md) for
+source evidence and regression validation.
 
-![Wallbox Manager overview](docs/images/wallbox-manager-overview.png)
+The [beta.16 notes](docs/v0.4/release-notes-beta.16.md) retain the home-battery
+status and simplified PV card history. The [beta.15 notes](docs/v0.4/release-notes-beta.15.md)
+cover live NETZ schedules and the coordinated Stationary hardware-disable/CP
+correction; the [beta.14 notes](docs/v0.4/release-notes-beta.14.md) explain nominal
+NETZ power planning. The existing Stationary implementation identified in beta.15
+remains the interface baseline; **no Stationary update is part of beta.17**.
+Stationary retains physical and electrical safety ownership. The old Stationary
+capability inventory cannot satisfy current execution requirements.
+The [beta.6 notes](docs/v0.4/release-notes-beta.6.md) retain Idle/session migration
+history. Immutable
+[`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
+remains a historical source reference; it is not a guaranteed package-only rollback
+from V3 storage. Back up HA configuration and storage before upgrading.
 
-## Read-only integration
+Each config entry has exactly one explicitly bound station/EVSE/connector and
+one listener port. Multiple wallboxes require separate independent entries and
+nonconflicting ports. Configure the station's existing OCPP client URL as
+`ws://HA-address:port/station-id` in a separately authorized installation step.
+There is no active-wallbox selector or wallbox subentry workflow.
 
-Version 0.1.0 is the first stable release of the read-only integration. It provides
-an OCPP listener for 1.6J / 2.0.1 / 2.1, BootNotification, read-only discovery,
-dynamic station devices, diagnostics, reported metering/runtime state and persistent
-charging sessions.
+The integration receives measurements and reported status, performs supported
+read-only discovery/readbacks, and retains cumulative imported energy/statistics
+identities. Ordinary measurements remain valid until explicit invalidation or a
+connection/boot generation change. Silent, unchanged values do not expire.
 
-Add this repository as a HACS custom repository of type Integration and install
-Wallbox Manager once v0.1.0 is published. For manual installation, copy
-`custom_components/wallbox_manager` into your HA configuration's
-`custom_components` directory. Restart HA, then add Wallbox Manager under Settings
-→ Devices & services and configure the bind IP and port. Configure the wallbox URL
-as `ws://<HA-host>:<configured-port>/<station-id>`. Version 0.1.0 uses plain
-WebSocket on a trusted local network.
+Profile, Number, Select and Text entities persist per-connector configuration.
+The manager-owned **charge release / Ladefreigabe** starts OFF and resets on every
+actual profile change, reload or confirmed Remote-to-Local authority loss.
+An active NETZ business schedule continues across transport disconnection; its
+deadlines remain enforced, and reload never restores its previous release. The card has one charging
+action: **Start charging**, **Apply charging parameters** for meaningful pending NETZ
+drafts, or **Stop charging**. Applying consumes the first press; stopping takes the
+next press. Start atomically approves power/timing and creates an absolute business
+schedule even without an EV. Delay and duration run from the planned start,
+independently of actual power or connection. Apply changes timing on the current
+schedule: duration retains planned start; a changed delay establishes a new epoch
+and pauses authorized charging to 0 A. Duration expiry turns manager release OFF.
+Stop requests **0 A** where Remote authority and a transaction permit it. After
+reload, a reconnect while release is OFF, or explicit takeover, release OFF also
+reconciles a confirmed
+retained positive offer to 0 A; confirmed zero is not resent. A positive
+slider value resolving to zero cannot start. The selector's positive technical
+range is calculated from current station diagnostics and enabled phase caps.
 
-Each station appears as a device with learned manufacturer, model and firmware.
-Diagnostics include Connected, OCPP protocol version, Connection generation,
-Boot generation, Discovery evidence and Discovery revision. Station ID and runtime
-incarnation are attributes. Stations may connect after setup; reconnect updates
-the same entities. On disconnect Connected becomes false, metadata and last-known
-protocol/counters remain, and discovery evidence is invalidated. After integration
-reload known devices remain: Connected is false and other diagnostics are
-unavailable until a new connection supplies a snapshot.
+NETZ power planning uses fixed 230 V per phase. The editor displays one decimal
+kW and its +/- controls traverse
+each enabled phase mode's legal current series to its capped endpoint before
+changing phases. Actual measured power may differ from this nominal request.
+Missing/legacy-zero drafts initialize to the positive technical minimum after
+capability discovery, without starting charging. Reserve and approximation remain
+configurable through their HA entities; their card editors are removed. See
+[nominal steps, migration and validation](docs/grid-nominal-power-steps.md).
 
-Reported voltage/current/power per phase, explicit total import power and imported
-energy now create scoped HA sensors dynamically. Connector state and Charging
-state enums are the canonical operational state entities, preserving connected,
-charging and paused/suspended states without redundant boolean projections.
-Known meter values, including unchanged zero values, remain available while the
-connection is live. Missing/invalid data and boot/disconnect make operational
-entities unavailable while retaining IDs. The 120-second sample deadline remains
-for conservative session attribution and endpoint accounting, not ordinary HA
-meter availability.
-See [metering and runtime state](docs/metering-runtime-state.md) for scope, units,
-capability-driven entity creation, freshness and deliberately unsupported cases.
+The independent hardware **Wallbox enabled / Wallbox aktiviert** switch remains on
+the integration/device page and works under Local or Remote authority, without
+Take Control or changing manager release. Its Actual state always comes from the
+station; enabling hardware under Local can activate the station's retained target.
+Only explicit Take Control acquires Remote current/phase authority. WBM cannot stop
+locally controlled charging using manager release.
 
-Transaction lifecycle events now create exactly nine current-or-last session
-entities (without a separate Session Charging State entity) per
-observed EVSE/connector. Completed values stay visible until the next session;
-energy uses matching meter-register deltas. A sole connector session may use fresh
-parent-EVSE total power/energy; ambiguous multi-session attribution stays unknown.
-TransactionEvent samples feed sessions without creating duplicate ordinary meter
-entities. Existing beta.5 duplicates and beta.6 removed boolean/session-state entities may
-remain in HA's registry for manual cleanup; no automatic deletion is performed.
-Active sessions and all completed
-history survive reload/restart. Disconnect and boot do not end a session. See
-[session tracking and persistence](docs/session-tracking.md) for lifecycle,
-accounting, restoration, query access and limitations.
-
-OCPP 2.1 transaction-scoped charging OperatingPoint dispatch is implemented for
-explicitly bound EVSEs with verified device capabilities. One immediate TxProfile
-sets current and phase count together. Current bounds and resolution come from the
-EVSE's verified ChargingEnvelope; representable fractional currents are supported.
-Canonical phase counts identify EVSE-local modes; any required phase transition
-still needs separate verified operation evidence. `numberPhases` alone does not
-prove switching support. Fixed-phase devices can use their verified fixed mode.
-
-## Manual charging control (v0.2.x development)
-
-Known OCPP 2.1 connectors receive seven stable Home Assistant controls, named
-`EVSE N / M`: desired charging power, allowed current 1p/2p/3p, a hardware-backed charging-enabled switch,
-power approximation (DOWN/NEAREST/UP), and maximum deviation without phase
-switching (0–25%, default 5%). Targets and preferences survive offline periods and reloads; permission is read from hardware.
-Restoration, telemetry and reconnects never dispatch commands. Explicit edits can
-dispatch only while remote authority is confirmed.
-Missing allowed-current controls initialize once from verified connector maxima:
-the matching phase-specific maximum, then a generic maximum, then the highest
-known phase-specific maximum. Thus 20 A (1p) / 27 A (3p) initializes 20 / 27 / 27 A
-without creating 2p support. Existing saved values (including zero), live edits
-and already initialized values survive later capability changes and reconnects.
-Discovery may initialize them after startup; initialization never sends commands.
-HA restoration retains exact fractions alongside the displayed numeric state.
-Without trustworthy maxima, controls remain unset and impose no additional limit.
-Current limits accept
-non-negative fractions, including values above the device maximum and values for
-unsupported modes. Zero inhibits only that mode. They never establish capability.
-
-### Capabilities and reference fallback
-
-Each normalized capability is resolved independently: a verified current-generation
-OCPP observation wins; otherwise an explicitly configured operator reference fills
-that field; otherwise it remains unknown. Explicit unsupported or malformed OCPP
-observations fail closed and cannot be overridden by reference values. A reference
-maximum never adds a phase count excluded by the station. The solver intersects
-resolved capability envelopes with desired current limits using exact fractions;
-reachable points remain on the device's minimum-plus-step grid.
-
-Completed accepted OCPP 2.1 FullInventory reports recognize the descriptive
-extensions `SupportedPhaseModes`, `MinimumCurrent`, `CurrentStep` and
-`PhaseSwitchingSupported` on EVSE components, and `MaximumCurrent1Phase`,
-`MaximumCurrent2Phase`, `MaximumCurrent3Phase`, `ChargingEnableDisableSupported`
-on explicitly scoped Connector components. The implementation-defined connector
-extension `MaximumCurrent` (amperes) is also recognized for generic current-limit
-facts, with the same complete-inventory, scope and validation requirements. It is
-not an alias for arbitrary similarly named variables or evidence of any supported
-phase count, conductor mapping or switching support; it never creates an envelope.
-These extensions are not universal
-OCA variables. SmartChargingCtrlr/Available remains advertisement only.
-Reconnection and BootNotification invalidate discovered evidence and rediscover it.
-
-Read-only capability sensors use EVSE scope for supported phases, minimum and
-step, and connector scope for maxima and enable/disable support. Missing or
-unsupported maxima do not create sensors (in particular no invented 2p maximum).
-Existing entity identities remain in the registry offline. Diagnostic source and
-evidence attributes distinguish OCPP observations from configured operator fallback.
-
-Open the discovered wallbox configuration subentry to configure its missing
-fallback fields; no central station picker is needed. Complete OCPP inventory
-requires no manual entries. No vendor, model, firmware, serial or global
-verification checkbox is required. Decimal and fractional currents are accepted.
-References never override verified wallbox values. Normal current limits belong
-to the runtime controls, not the reference form.
-
-Supported phase counts construct canonical **EVSE-local** modes: 1p = L1,
-2p = L1+L2, 3p = L1+L2+L3. These labels do not identify the equally named
-building/grid conductors. No separate conductor-mapping extension or reference
-mapping is required. Existing reference options remain readable; the resolver
-uses canonical modes. The core can still represent arbitrary subsets for other
-adapters. Each mode requires fresh, positive voltage observations on all its local
-phases. Missing L2/L3 excludes affected modes while a valid L1 still permits 1p.
-Telemetry alone never dispatches; a new explicit control action recalculates.
-
-### Explicit control authority
-
-Authority is observed separately from actual charging permission: `unknown`,
-`local`, or `remote`. Normal control edits persist intent but cannot acquire
-authority. Actual power and permission dispatch requires confirmed remote authority;
-otherwise diagnostics report `no_authority`.
-
-Stations exposing the implementation-defined, station-scoped
-`WallboxController.ControlAuthority` gain one enum sensor **Control authority**
-(**Steuerungsautorität**) and one button **Take control** (**Steuerung übernehmen**).
-Their stable unique IDs are `<entry>:<station>:control_authority` and
-`<entry>:<station>:take_control`. They are not duplicated per connector. There is
-no authority switch or return-control action; return to local operation in the
-wallbox's own web UI.
-
-The OCPP 2.1 adapter discovers the exact writable Actual variable, sends
-SetVariables with `OCPP`, requires a matching Accepted response, and then confirms
-Actual `OCPP` with GetVariables. `Local` means local control; other values remain
-unknown. This descriptive extension is not a universal standardized OCPP variable.
-After authority confirmation, takeover explicitly sends charging permission OFF
-and confirms it, including when hardware was already OFF. It does not apply a
-stored operating target. Completion requires confirmed OFF; charging ON is a
-separate subsequent user action. The active-wallbox coordinator also stops the
-previous Remote wallbox before switching. Desired targets remain unchanged.
-
-Connection/boot generations, newer edits, concurrent takeover requests and local
-loss events fence queued work and late results. Discovery/telemetry/reconnects never
-automatically apply intent or retry takeover. Authority is valid within the current
-connection, using the inspected station's hard-wired local-loss NotifyEvent path;
-this assumes timely delivery of those events, not a remote ownership lease. A
-command already sent cannot be recalled. `wallbox-stationary` already supplies the
-read/write/readback and local-loss interface and needs no change. Hardware validation
-remains outstanding. Explicit active-wallbox selection and the Take control button
-use the same guarded operation. Ordinary profile selection never acquires authority.
-
-### Physical feedback and phase retention
-
-Fresh standard NotifyEvent `Connector.PhaseRotation`, with explicit EVSE and
-connector identity, maps `Rxx` to L1 and `RST` to L1/L2/L3. Unknown values invalidate
-that connector's physical mode. Reports expire after five seconds, are ordered by
-timestamp, and are fenced by connection/boot generation. There is no vendor or
-reference identity gate. Feedback proves position, not switching capability.
-Profiles, desired state and measured currents cannot prove physical phase position.
-
-Retention applies only to an active positive charging operating point. Disabled,
-zero-current or unconfirmed/inactive charging selects the globally best valid
-initial mode. Re-enabling explicitly bypasses retention from the idle relay
-position. The deviation is `abs(reachable - target) / target * 100`, evaluated only
-for positive targets after directional and electrical constraints. DOWN never
-exceeds the target; UP never undershoots it. There is no dwell timer.
-
-### Charging permission
-
-Charging enabled is confirmed hardware state, independent of actual energy flow.
-The switch retains its existing unique ID but ignores all legacy restored ON/OFF
-values. Targets, current limits and phase preferences remain persistent intent.
-Local changes update the switch under either authority without corrective writes.
-LOCAL switch requests are rejected with `no_authority`; they leave no deferred
-permission. Failed requests are never replayed.
-
-Actual `WallboxController.ChargingEnabled` is read after discovery/reconnect and
-by bounded, read-only polling (currently 5 seconds, an internal tuning constant).
-Accepted writes are followed by explicit GetVariables confirmation. Failed or
-invalid reads make state unknown; samples expire after an internal freshness
-window (currently 15 seconds). A disconnected switch is unavailable. Connected
-but unconfirmed state is unknown, never a restored value. The station must supply
-a hardware-confirmed reader; its descriptive inventory value is not used as live
-state. Polls never initiate charging, retries, takeover or target synchronization.
-
-Explicit ON is allowed only for the active, ready wallbox. It prepares the stored
-operating point first, then sends permission and reads actual state back. Missing transaction, capability or evidence prevents ON.
-OFF changes permission without changing the target and does not need a transaction.
-Writable station-scoped permission is usable only for one unambiguous connector.
-Queue, generation, authority, hardware-state and electrical safety fences apply.
-A newer sample with unchanged electrical values does not invalidate execution.
-
-A 0 W target uses an immediate transaction-scoped ampere TxProfile with `limit=0`
-and **no `numberPhases`**. It preserves Enabled, authority, transaction and parked
-phase mode. This requires explicit verified connector `ZeroCurrentSupported`
-evidence, an implementation-defined Device Model extension. It is never inferred
-from minimum current, profile advertisement or enable/disable support. Zero needs
-no voltage or phase-position measurement. Without that evidence execution reports
-`zero_current_unverified` and never substitutes a positive target.
-
-While Enabled, 0 W -> positive target sends the newly solved profile without a
-switch toggle. While Disabled, target edits only store intent. ON at a stored zero
-target prepares zero before enabling, so an old positive hardware target cannot
-resume inadvertently. CP and vehicle/plug detection remain entirely station-owned.
-There is no transaction-start operation, automatic corrective loop, configurable
-restart/phase-switch lockout or release change in this increment. Polling can miss
-brief local transitions and cannot recall a command already dispatched. Protocol
-acceptance confirms setpoints/permission, not measured energy flow.
-
-## Architecture
-
-See the [proposed architecture](docs/architecture.md) and the
-[pinned upstream OCPP adoption analysis](docs/upstream-ocpp-analysis.md) for module
-boundaries, ownership transitions, power solving and reuse decisions. These are
-design documents; the implemented subset now includes pure solving, a
-protocol-independent control command boundary and read-only OCPP
-transport/discovery, metering/runtime state and session tracking/persistence.
-The command boundary forwards resolved operating points to the OCPP 2.1 adapter
-and normalizes its outcomes; acceptance does not confirm measured power.
-
-Wallbox Manager separates charging strategy from wallbox-specific communication.
-
-~~~text
-Optional Energy Manager
-        |
-        | target charging power
-        v
-Wallbox Manager
-        |
-        | profiles, control logic and capability model
-        v
-Protocol adapters
-        |
-        +-- OCPP 1.6J
-        +-- OCPP 2.0.1
-        +-- OCPP 2.1
-        +-- future protocol adapters
-        |
-        v
-Wallbox
-~~~
-
-Standard OCPP functionality is preferred whenever possible. Vendor-specific
-functionality may be implemented through isolated OCPP DataTransfer extensions.
-
-## Grid charging profile (v0.3.x)
-
-The implemented **Grid (`NETZ`)** profile charges at a requested fixed power in kW.
-Exactly one backend-selected active wallbox is eligible for profile control.
-**Active wallbox does not mean charging enabled.** Other wallboxes may independently
-charge in Local; they are external site loads for the profile controller.
-
-With one wallbox, press **Take control**. With multiple wallboxes, select the active
-wallbox. Both are explicit authority requests: the backend stops/confirms the old
-Remote wallbox, acquires the selected station, explicitly sends OFF and confirms
-OFF before completing selection. **Every takeover forces charging permission OFF.**
-A separate user action starts charging. Startup/reload, profile selection and
-background events never acquire authority. Power edits while active/enabled apply after a one-second trailing-edge backend
-debounce; explicit permission changes bypass this debounce. Per-wallbox settings persist
-separately. With authority, profile selection disables permission; without authority,
-profile selection/settings are configuration-only and send no OCPP commands.
-
-The backend retains phase-lockout retries, bounded vehicle-current observation,
-station current limits and primitive safeguards. Optional battery references belong
-to the central integration; only the active actually charging wallbox owns a
-journaled temporary reserve, with restoration and external-change precedence.
-
-HACS installs the bundled card with the integration. After restart/browser refresh,
-add only:
+Automatic vehicle wake-up is configured only in Stationary's startup INI;
+WBM neither exposes a switch nor uses AutoWakeUpEnabled. The old wake-up switch
+and standalone NETZ SET registry identities are retired with exact ownership checks.
+PV V3 shares SoC hysteresis, FAST/BALANCE control, phase-aware technical steps,
+configurable timing and economic import pauses. BALANCE uses the mapped Fronius
+charge/discharge channels without additional measurement smoothing. The canonical
+target and PV_OPTIMUM daily planner continue on the existing single scheduler while
+release is OFF, independently of OCPP availability. Planning grants no charging
+permission and sends no operating-point commands. See the
+[implementation and verification report](docs/pv-v3-implementation.md),
+[approved requirements](docs/specifications/charge-release.md) and
+[implementation, migration, validation and operational procedure](docs/coordinated-control-redesign.md).
 
 ```yaml
 type: custom:wallbox-manager-card
+# Optional with one WBM entry; required with multiple entries:
+entry_id: YOUR_EXISTING_CONFIG_ENTRY_ID
 ```
 
-In storage resource mode, the integration automatically serves the JS and creates
-one Lovelace module resource. YAML resources require manual configuration (see
-the registration guide below). No entity mapping or
-copy to `/config/www` is required. Discovery uses stable backend role/identity
-metadata and survives entity renames. After verifying automatic loading, remove
-temporary manually registered copies such as `/local/wallbox-manager-card.js`.
-See [automatic registration verification](docs/frontend-registration.md).
+The two time fields show live countdowns and switch to drafts as one editing area.
+Active editors renew a backend lease without Recorder or storage churn. If the
+browser disappears, its 60-second lease expires and starts the same 15-second
+window. Refocus after a lost lease to claim fresh ownership.
+After editing ends, unapplied time changes expire after 15 seconds while the old
+schedule is active. An independent power draft survives. If duration ends first,
+release goes OFF and the entered time drafts remain for a new explicit Start.
+The Messages field shows the newest currently active warning/error; resolved
+conditions disappear, and ordinary waiting or command history stays in diagnostics.
+Session energy uses one locale decimal, actual power two; measurement precision
+and energy accounting are unchanged. See the [implementation and migration report](docs/live-netz-timing-and-status.md).
 
-The compact card shows requested charging power, discharge reserve, optional start
-delay and optional charging duration for NETZ, or only battery target SoC for PV Surplus. Technical regulation
-settings are in the integration options. Its two-column status section shows measured
-power, session duration as total `H:MM`, and the confirmed applied phase/current
-limit, including any phase-lockout substitute.
-Known backend technical limits bound requests. The optional battery control is
-labelled **Discharge reserve / Entladereserve**. Grid uses the per-wallbox
-`phase_switch_deviation_pct` preference without relaxing approximation policies;
-disabled charging and OFF/0 A do not retain the previous phase mode.
+The read-only **Hausspeicher / Home battery** block compares actual mapped
+battery SoC with the current profile reference. All battery percentages use exactly
+one HA-language decimal (German `69,3 % → 40,0 %`, English `69.3 % → 40.0 %`).
+NETZ shows the observed writable reserve, including confirmed overrides and
+external changes. PV_SURPLUS shows its configured target only while valid against
+the actual reserve and hysteresis; invalid or unavailable values show `—`.
+PV_OPTIMUM and PV_MAXIMUM display their canonical effective backend targets once
+calculated, including while release is OFF, and `—` while unavailable. The five PV
+tuning editors are removed from the card; their HA
+Number entities, services and saved settings remain available. See the
+[specification](docs/specifications/lovelace-home-battery-display.md) and
+[implementation report](docs/lovelace-home-battery-implementation.md).
 
-See [Grid profile, ownership, migration and card installation](docs/grid-profile.md)
-for the exact state model, guarded sequence, station-scoped capability subentries,
-battery lifecycle and failure behavior.
+The resource remains `/wallbox_manager/wallbox-manager-card.js`. A previously
+configured single-instance card can continue with only its existing type. With
+multiple entries, a configured `entity` belonging to the intended entry can
+also provide the binding. No global first-wallbox fallback exists.
 
-PV Surplus is implemented; see [PV regulation](docs/pv-surplus-profile.md).
-PV Optimum is described in [its profile documentation](docs/pv-optimum-design.md).
-All three PV profiles, including PV Maximum, use the [shared SoC policy](docs/pv-soc-policy.md).
-While FAST_DISCHARGE is active it holds the lowest reachable positive charging
-point instead of pausing on a low power calculation; this can leave grid import.
-The minimum depends on phase reachability and electrical limits. Near the target,
-PV_BALANCE can deliberately pause after sustained insufficient power using the
-configured stop delay. A zero-current pause can activate the wallbox's restart
-lockout; safety/control stops still take precedence.
-PV Maximum and the external Energy Manager interface remain deferred.
+Read the [compatibility inventory](docs/v0.4/compatibility-inventory.md),
+[architecture/migration report](docs/v0.4/passive-rebuild-report.md) and
+[approved milestone requirements](docs/specifications/passive-v0.4.md). The
+consolidated [V3 specification](docs/specifications/pv-regulation.md) remains
+DRAFT overall; its explicitly approved decisions and supersessions govern the
+implemented V3 runtime.
+Other historical implementation reports describe the tagged v0.3 code, not
+this new runtime.
 
-## Integration settings and profile timing
+Development checks:
 
-The native Home Assistant options form separates **General parameters / Allgemeine
-Parameter** (diagnostics, minimum reserve, battery SoC, PV power, consumption power)
-from **Regulation parameters / Regelparameter** (regulation interval, PV start/stop
-delays, SoC hysteresis, power smoothing window). Consumption means **total site
-consumption including the selected wallbox**. Existing settings are migrated;
-explicit central values win. Conflicting old per-wallbox values are selected by
-sorted stored target identity, per setting, with all originals archived in the
-options. No integration version change is needed. Diagnostic-only edits do not
-reload the integration.
+```
+.venv/bin/pytest -q -s
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+node --check custom_components/wallbox_manager/www/wallbox-manager-card.js
+node tests/test_wallbox_card.cjs
+node tests/test_wallbox_card_layout.cjs
+git diff --check
+```
 
-Power smoothing defaults to **5 seconds**; **0 disables it**. Only PV and total
-consumption power are averaged. This is a time-weighted moving window: 2000 W for
-4 seconds and 1000 W for 1 second produces 1800 W over 5 seconds. Startup averages
-only known time. Larger windows suppress short load spikes but respond more slowly.
-The regulation interval is independent: a 5-second interval can use a 15-second
-window. SoC, voltage, safety state and selected-wallbox actual power remain raw.
-Missing or stale readings pause decisions without synthesizing OFF; new readings
-cannot invalidate a dispatched command snapshot.
+Live HA CPU acceptance (target <=0.1 percentage points average increase) requires
+separately authorized, longer alternating real measurements. No unit-test or
+call-count result establishes that target. The station does not yet guarantee a
+complete immediate initial telemetry snapshot; missing fields remain explicit.
+For separately authorized installation and testing, select
+**v0.4.0-beta.17** in HACS. Keep manager release OFF, take a full pre-upgrade HA
+backup, verify installed manifest **0.4.0-beta.17** after the operator-managed
+restart, and refresh all dashboard caches. Follow the
+[beta.17 upgrade and rollback procedure](docs/v0.4/release-notes-beta.17.md#hacs-upgrade-and-rollback).
+A package-only downgrade to beta.16 cannot restore removed delay settings or
+carry back V3 economic STOP history. Publication does not install anything or
+establish physical acceptance. NETZ retains event-driven fixed-point execution;
+PV uses one clocked regulator behind the same explicit Start/Stop release.
+See the [NETZ validation boundary](docs/grid-fixed-profile-implementation.md).
+Automatic wake-up requires the matching Stationary implementation and explicit local startup configuration. Simulated sleeping-vehicle tests are the acceptance
+basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is
+unconfirmed, another explicit Take Control action reads authority again without repeating the write.
 
-NETZ **Start delay / Startverzögerung** and **Charging duration / Ladedauer** are
-optional relative durations in `hh:mm`, never local clock times. Hours can exceed
-23 (`24:00`, `120:15`); minutes must be 00–59. Empty means unset; `00:00` is zero
-(a zero charging duration expires immediately).
-
-| Start delay | Charging duration | Behavior |
-| --- | --- | --- |
-| Empty | Empty | Immediate, unlimited |
-| Set | Empty | Delayed, then unlimited |
-| Empty | Set | Immediate, stops after duration |
-| Set | Set | Delayed, duration counted from scheduled start |
-
-For example, `01:30` plus `02:00` waits 90 minutes from Charging Permission ON,
-then allows charging for two hours from the scheduled start. These are **one-shot**
-inputs for the next authorization. Editing or selecting NETZ does not start a timer.
-ON captures the values into a persisted request and clears the pending inputs.
-The existing hours/minutes fields then show deadline-derived countdowns, rounded
-up to whole minutes and disabled for editing. At each deadline the corresponding
-field becomes unset. Explicit zero duration immediately invokes permission OFF,
-even if a delay was entered.
-
-Duration expiry uses the same confirmed Charging Permission OFF path as the switch,
-not just a zero-power request. Failed disables retain a stopping request and retry
-at the existing 60-second interval; HA never assumes hardware permission is OFF.
-Manual OFF or profile selection cancels and consumes an armed request. Later ON
-is immediate/unlimited unless new timing values were entered. Requested power and
-discharge reserve remain persistent.
-
-Reload/restart preserves absolute start/end deadlines; downtime counts and recovery
-processes missed expiry through the normal authority/ownership/control fences.
-Beta.15 configured timings migrate as pending one-shot inputs for the next explicit
-ON; their old recurring activation timestamp is discarded. Consumed timings never
-become pending again. Profile attributes expose armed state, deadlines, captured
-duration, and idle/waiting/active/stopping/consumed/cancelled state.
-
-Requested power uses backend `technical_min_kw` / `technical_max_kw`, calculated
-from verified capability envelopes, exact current steps/limits, eligible phases
-and fresh observed voltages. No nominal voltage is assumed. The compact editor
-steps by 0.1 kW below 10 kW, by 1 kW above it, with reversible 9.9↔10.0 transitions
-and clamping to known bounds. Direct entry retains backend OperatingPoint selection.
-
-## Planned Energy Manager interface
-
-A future Energy Manager communicates with Wallbox Manager through a programmatic
-API rather than by manipulating Home Assistant entities.
-
-The Energy Manager requests charging intent, for example target power and a
-rounding direction. Wallbox Manager translates that request into a valid
-wallbox operating point according to the wallbox capabilities.
-
-The implemented pure solver supports these target-power directions:
-
-- DOWN
-- NEAREST
-- UP
-
-Standalone profiles handle simple current-day PV logic and energy-flow feedback.
-Advanced forecasts beyond the configured PV/linear household estimate, prices,
-departure/vehicle targets, learned behavior and site-wide optimization belong to the future Energy Manager, which supplies current power
-intent through REMOTE. Wallbox Manager retains technical operating-point solving.
-
-Home Assistant entities remain available for user interaction, display and
-automations.
-
-## Development status
-
-Version 0.1.0 establishes the stable read-only scope described above. Development
-now includes the first v0.2.x manual HA control path through the OCPP 2.1 adapter.
-The Grid, PV Surplus, PV Optimum and PV Maximum profiles build on these controls.
-PV Maximum and the planned Energy Manager interface remain future work.
-
-Immutable station/EVSE/connector identities, capability evidence and independent
-phase envelopes, voltage observations, power requests and solver results are
-implemented. The pure solver respects current steps and supplied electrical limits,
-uses actual per-phase voltages, and returns an offered operating point, logical OFF
-or an explicit unreachable reason. A deferred-result contract is reserved for the
-future phase-transition planner. It does not command a charger or claim measured
-EV consumption. Metering and runtime state are reported separately by adapters.
-External ownership leases remain future work.
-
-Run development checks with `.venv/bin/ruff check .`,
-`.venv/bin/ruff format --check .`, `.venv/bin/pytest`,
-`node --check custom_components/wallbox_manager/www/wallbox-manager-card.js` and
-`node tests/test_wallbox_card.cjs`. Core tests require no running
-Home Assistant instance; Python 3.14 CI runs these same checks.
-
-## Read-only OCPP endpoint
-
-Configure Wallbox Manager with a local bind IP and port (defaults `0.0.0.0:9000`).
-Point the wallbox at `ws://<HA-host>:<port>/<station-id>` and explicitly select
-OCPP 1.6J, 2.0.1 or 2.1. Multiple stations can connect to one endpoint. Missing or
-unsupported subprotocols are rejected. No station ID, vendor or current limit is
-hard-coded. The endpoint currently uses plain WebSocket without station
-authentication or TLS, for a trusted local network only.
-
-The integration loads without a connected wallbox. It accepts BootNotification,
-answers Heartbeat, learns identity/connector inventory, and reruns read-only
-discovery after reconnect/boot. Disconnect invalidates old evidence without
-requiring an integration reload. StatusNotification supplies scoped operational
-state and identity. OCPP 1.6 uses GetConfiguration; 2.x uses correlated, complete
-GetBaseReport/NotifyReport inventory. All three versions use their own schemas
-from `ocpp==2.1.0`; this is a tested foundation, not a full protocol implementation.
-
-Smart-charging advertisements remain distinct from verified behavior. Physical
-current envelopes, physical phase switching and stop support stay unknown; no
-nominal current/phase limits are invented. Generic immutable runtime snapshots are
-consumed by push-based HA diagnostics and observed meter/state entities. Manual
-intent controls are exposed for known OCPP 2.1 connectors. Hardware validation with wallbox-stationary has
-confirmed capability-driven metering entities, connection-generation/liveness
-handling, session tracking and persistence, and session meter attribution. An
-actual network black-hole/DROP test confirmed OCPP reconnect, preservation of an
-active charging session, and recovery of connector state and meter values after
-reconnect. This validation complements the automated fake/local-peer tests; it
-does not establish full protocol conformance or compatibility with every wallbox.
-Older empty scaffold entries migrate to the default endpoint configuration.
-
-## Upstream code and attribution
-
-The project may reuse or adapt MIT-licensed code from other open-source
-projects, including OCPP implementations.
-
-Any code that is copied or substantially adapted will retain the required
-copyright and license notices and will be documented appropriately.
-
-Selected transport, lifecycle, boot and discovery code/scenarios are now adapted
-from the pinned upstream. See the [adoption record](docs/upstream-ocpp-analysis.md)
-and [MIT notices](custom_components/wallbox_manager/THIRD_PARTY_NOTICES.md).
-
-## License
-
-Wallbox Manager is licensed under the MIT License. See `LICENSE`.
-
-### PV Surplus primitive profile
-
-The 0.3.x PV Surplus profile regulates charging from central PV/consumer power
-references, with optional battery SoC start/stop hysteresis. It reuses the common
-solver, explicit charging permission and active-wallbox ownership. See
-[PV Surplus configuration and behavior](docs/pv-surplus-profile.md).
-
-PV beta.2 refinements add backend profile availability, configuration without
-control authority, and separate PV start/stop delays (defaults 0/90 seconds).
-Profile settings remain stored when hidden. See the
-[PV profile documentation](docs/pv-surplus-profile.md) and
-[automatic card registration and verification](docs/frontend-registration.md),
-including migration of existing integration-path Lovelace resources.
-
-Wallbox Manager offers one integration-level **Diagnostic level** setting
-(German: **Diagnosestufe**): 0 off (default), 1 events and errors, 2 events with
-relevant data, 3 full trace. Levels 1/2 deduplicate unchanged decisions. Legacy
-boolean diagnostics migrate to 0/3, and level changes do not restart control.
-Detailed records use `WBMGR subsystem=pv` for PV evaluations and
-`WBMGR subsystem=recovery` for restart/reload recovery in any charging profile.
-See [diagnostic logging and recovery evidence](docs/diagnostic-logging.md) and
-[PV diagnostic fields](docs/pv-surplus-profile.md#opt-in-wallbox-manager-diagnostics).
-Source sensor freshness is independent of the controller interval; the inspected
-Fronius PV Manager currently polls every 30 seconds. Its proposed fast/slow design
-is [analysis only](docs/fronius-polling-analysis.md).
-
-The bundled card uses the Lovelace resource collection as its sole loader. Stale
-integration-path resources are updated automatically and duplicates are removed;
-one JavaScript module row remains in Resources. Restart Home Assistant after
-installing this fix to clear the previous extra-module registration, then fully
-reload the browser. See [lifecycle details](docs/frontend-registration.md).
+See [passive Recorder efficiency, availability and configuration](docs/v0.4/recorder-availability-report.md) for timestamp compatibility changes, diagnostics and measured before/after counts.

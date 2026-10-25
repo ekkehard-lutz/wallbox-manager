@@ -1,196 +1,293 @@
-"""Read-only discovery diagnostics and scoped runtime observations.
+"""Authentic measurements, reported status, diagnostics and passive sessions."""
 
-Entity description/category pattern adapted from pinned lbbrhzn/ocpp sensor.py,
-848407c11ff659ce59779a99ce69984bbb0e3ce1. Copyright (c) 2021 lbbrhzn, MIT.
-See THIRD_PARTY_NOTICES.md.
-"""
+from datetime import UTC, datetime, timedelta
 
-from datetime import datetime
-
-from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorEntityDescription,
-    SensorStateClass,
-)
+from homeassistant.components.sensor import SensorEntity
+from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.event import async_track_time_interval
 
-from .core.capabilities import EvidenceState
-from .core.telemetry import STATE_OPTIONS, Observation, Quantity, State
-from .entity import StationEntity, async_setup_station_entities
-from .observation_entity import ObservationEntity
-from .session_entity import setup_session_entities
+from .entity import WallboxEntity
+from .session import KEYS, view
 
-DESCRIPTIONS = tuple(
-    SensorEntityDescription(
-        key=key, translation_key=key, entity_category=EntityCategory.DIAGNOSTIC
-    )
-    for key in (
-        "protocol_version",
-        "connection_generation",
-        "boot_generation",
-        "revision",
-    )
-) + (
-    SensorEntityDescription(
-        key="discovery",
-        translation_key="discovery",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        device_class=SensorDeviceClass.ENUM,
-        options=[state.value for state in EvidenceState],
-    ),
+STATES = {
+    "connector_state": [
+        "unknown",
+        "available",
+        "occupied",
+        "reserved",
+        "unavailable",
+        "faulted",
+    ],
+    "charging_state": [
+        "unknown",
+        "idle",
+        "connected",
+        "preparing",
+        "charging",
+        "suspended_vehicle",
+        "suspended_station",
+        "finishing",
+    ],
+}
+DIAGNOSTICS = (
+    "protocol_version",
+    "connection_generation",
+    "boot_generation",
+    "revision",
+    "discovery",
+    "control_authority",
+    "physical_phases",
 )
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    from .capability_entity import setup_capability_entities
+async def async_setup_entry(hass, entry, add):
+    import json
 
-    setup_capability_entities(hass, entry, async_add_entities)
-    from .authority_entity import setup_authority_entities
+    state = entry.runtime_data.state
+    seen = set()
 
-    setup_authority_entities(
-        hass,
-        entry,
-        async_add_entities,
-        "control_authority",
-        lambda station: AuthoritySensor(
-            entry.runtime_data.state, entry.entry_id, station
-        ),
-    )
-    setup_session_entities(hass, entry, async_add_entities, binary=False)
-    async_setup_station_entities(
-        hass,
-        entry,
-        async_add_entities,
-        lambda runtime, entry_id, station: [
-            DiagnosticSensor(runtime, entry_id, station, description)
-            for description in DESCRIPTIONS
-        ],
-        observation_factory=lambda runtime, entry_id, channel: [
-            (
-                StateObservationSensor
-                if channel.quantity in STATE_OPTIONS
-                else ObservationSensor
-            )(runtime, entry_id, channel)
-        ],
-    )
+    def add_key(key):
+        if key in seen or not state.accepts(key[1]):
+            return
+        seen.add(key)
+        add([Reading(entry, *key)])
+
+    state.add_sensor = add_key
+    state.add_session = lambda scope: [
+        add_key(("session", tuple(scope), role)) for role in KEYS[:-1]
+    ]
+    entry.async_on_unload(lambda: setattr(state, "add_session", lambda scope: None))
+    entry.async_on_unload(lambda: setattr(state, "add_sensor", None))
+    for role in DIAGNOSTICS:
+        add_key(("station", (state.binding[0], None, None), role))
+    for key in state.observations:
+        if key[0] in ("observation", "capability"):
+            add_key(key)
+    for registered in er.async_entries_for_config_entry(
+        er.async_get(hass), entry.entry_id
+    ):
+        for family in ("observation", "capability", "session"):
+            prefix = f"{entry.entry_id}:{family}:"
+            if (
+                registered.unique_id.startswith(prefix)
+                and registered.domain == "sensor"
+            ):
+                parts = json.loads(registered.unique_id[len(prefix) :])
+                add_key((family, tuple(parts[:3]), parts[3]))
+    # Fixed single-connector session identity exists even before the first transaction.
+    scopes = set()
+    if state.session:
+        scopes.add(tuple(state.session["scope"]))
+    for scope in scopes:
+        for role in KEYS[:-1]:
+            add_key(("session", scope, role))
 
 
-class DiagnosticSensor(StationEntity, SensorEntity):
-    def __init__(self, runtime, entry_id, station, description):
-        super().__init__(runtime, entry_id, station, description.key)
-        self.entity_description = description
+class Reading(WallboxEntity, SensorEntity):
+    def __init__(self, entry, family, scope, role):
+        super().__init__(entry, family, scope, role)
+        self._refresh = None
+        self._attr_entity_category = (
+            EntityCategory.DIAGNOSTIC
+            if family in ("station", "capability") and role != "control_authority"
+            else None
+        )
+        if role in STATES or role in ("control_authority", "discovery"):
+            self._attr_device_class = "enum"
+            self._attr_options = (
+                ["unknown", "advertised", "verified", "unsupported", "degraded"]
+                if role == "discovery"
+                else STATES.get(role, ["unknown", "local", "remote"])
+            )
+        if family == "observation" and role not in STATES:
+            prefix = role.split("_")[0]
+            self._attr_device_class, self._attr_native_unit_of_measurement = {
+                "voltage": ("voltage", "V"),
+                "current": ("current", "A"),
+                "power": ("power", "W"),
+                "energy": ("energy", "kWh"),
+            }[prefix]
+            self._attr_state_class = (
+                "total_increasing" if role == "energy" else "measurement"
+            )
+        elif family == "capability" and "current" in role and role != "zero_current":
+            self._attr_native_unit_of_measurement = "A"
+        elif family == "session":
+            self._attr_device_class = {
+                "started": "timestamp",
+                "ended": "timestamp",
+                "duration": "duration",
+                "power": "power",
+                "energy": "energy",
+                "start_meter": "energy",
+                "end_meter": "energy",
+            }.get(role)
+            self._attr_native_unit_of_measurement = {
+                "duration": "s",
+                "power": "W",
+                "energy": "kWh",
+                "start_meter": "kWh",
+                "end_meter": "kWh",
+            }.get(role)
+            if role == "power":
+                self._attr_state_class = "measurement"
+
+    @property
+    def available(self):
+        if self.family == "observation" and self.role == "charging_state":
+            return self.observed.charging_value(self.scope) is not None
+        if self.family == "session":
+            session = self.observed.session
+            if not session or tuple(session["scope"]) != self.scope:
+                return False
+            if session["ended_at"] is not None or self.role not in (
+                "power",
+                "duration",
+            ):
+                return True
+            return view(self.observed, datetime.now(UTC))[self.role] is not None
+        if self.family == "station" and self.role in (
+            "protocol_version",
+            "connection_generation",
+            "boot_generation",
+            "revision",
+            "discovery",
+        ):
+            return True
+        if self.role == "physical_phases":
+            return self.observed.last_observed_value(self.key) is not None
+        return super().available
 
     @property
     def native_value(self):
-        if self.snapshot is None:
-            return None
-        match self.entity_description.key:
-            case "protocol_version":
-                return self.snapshot.protocol_version
-            case "connection_generation":
-                return self.snapshot.token.connection_generation
-            case "boot_generation":
-                return self.snapshot.token.boot_generation
-            case "revision":
-                return self.snapshot.capabilities.revision
-            case "discovery":
-                return self.snapshot.discovery.state.value
+        state = self.observed
+        if self.family == "observation" and self.role == "charging_state":
+            return state.charging_value(self.scope)
+        if self.family == "session":
+            return view(state, datetime.now(UTC))[self.role] if self.available else None
+        if self.family == "station":
+            match self.role:
+                case "connection_generation":
+                    return state.generation[0]
+                case "boot_generation":
+                    return state.generation[1]
+                case "protocol_version":
+                    return "2.1" if state.connected else None
+        if self.role == "physical_phases":
+            return state.last_observed_value(self.key)
+        return state.value(self.key)
 
     @property
     def extra_state_attributes(self):
         attrs = super().extra_state_attributes
-        if self.entity_description.key == "discovery" and self.snapshot is not None:
+        if self.role in STATES:
             attrs.update(
-                reason=self.snapshot.discovery.reason,
-                source=self.snapshot.discovery.source,
-                observed_at=self.snapshot.discovery.observed_at.isoformat(),
+                state_fresh=self.available,
+                state_represents="last_known_observation",
+                physical_observability="reported"
+                if self.available
+                else "awaiting_observation",
+                cp_observability="unverified",
+                physical_limit_since=None,
             )
+        if (
+            self.family == "observation"
+            and self.role == "charging_state"
+            and self.native_value == "idle"
+            and not self.observed.authentic_idle_current(self.scope)
+        ):
+            attrs.update(
+                source="wbm:registered_available",
+                connection_generation=self.observed.generation[0],
+                boot_generation=self.observed.generation[1],
+                state_represents="display_projection",
+                physical_observability="inferred_from_connector_status",
+            )
+        if self.family == "capability":
+            observation = self.observed.observations.get(self.key)
+            attrs["evidence"] = observation.status if observation else "unknown"
+        if self.family == "session" and self.available:
+            session = self.observed.session
+            active = session["ended_at"] is None
+            attrs.update(
+                session_id=session["session_id"],
+                external_transaction_id=session["external_transaction_id"],
+                session_active=view(self.observed, datetime.now(UTC))["active"],
+                start_known=session["started_at"] is not None,
+                valid_until=None,
+            )
+            if self.role == "power":
+                attrs["power_availability_reason"] = (
+                    "completed"
+                    if not active
+                    else "valid"
+                    if self.native_value is not None
+                    else "awaiting_observation"
+                )
+            if self.role == "power" and (channel := session.get("power_channel")):
+                observation = self.observed.observations.get(
+                    (channel[0], tuple(channel[1]), channel[2])
+                )
+                if observation:
+                    attrs["source"] = observation.source
+            elif self.role == "energy":
+                attrs["source"] = session.get("energy_source")
+            if self.role in ("start_meter", "end_meter"):
+                acquired = session.get(self.role + "_at")
+                event_at = session.get(
+                    "started_at" if self.role == "start_meter" else "ended_at"
+                )
+                attrs.update(
+                    measured_at=acquired,
+                    event_at=event_at,
+                    boundary_approximation=(acquired != event_at)
+                    if acquired and event_at
+                    else None,
+                )
+            if self.role == "duration":
+                attrs.update(
+                    started_at=session["started_at"], duration_valid_until=None
+                )
+        if self.role == "physical_phases":
+            attrs["state_represents"] = "last_known_observation"
+        if self.role == "discovery":
+            attrs["initialization"] = self.entry.runtime_data.server.initialization
         return attrs
 
-
-class ObservationSensor(ObservationEntity, SensorEntity):
-    def __init__(self, runtime, entry_id, channel):
-        super().__init__(runtime, entry_id, channel)
-        quantity = channel.quantity
-        if quantity in STATE_OPTIONS:
-            self._attr_device_class = SensorDeviceClass.ENUM
-            self._attr_options = [state.value for state in STATE_OPTIONS[quantity]]
-        else:
-            prefix = quantity.value.split("_")[0]
-            device_class, unit = {
-                "voltage": (SensorDeviceClass.VOLTAGE, "V"),
-                "current": (SensorDeviceClass.CURRENT, "A"),
-                "power": (SensorDeviceClass.POWER, "W"),
-                "energy": (SensorDeviceClass.ENERGY, "kWh"),
-            }[prefix]
-            self._attr_device_class = device_class
-            self._attr_native_unit_of_measurement = unit
-            self._attr_state_class = (
-                SensorStateClass.TOTAL_INCREASING
-                if quantity == Quantity.ENERGY
-                else SensorStateClass.MEASUREMENT
+    def refresh(self):
+        if self._refresh:
+            self._refresh()
+            self._refresh = None
+        if (
+            self.role == "duration"
+            and self.available
+            and self.observed.session
+            and self.observed.session["ended_at"] is None
+            and self.observed.session.get("generation")
+            == list(self.observed.generation)
+            and self.observed.connected
+        ):
+            self._refresh = async_track_time_interval(
+                self.hass, self.tick, timedelta(seconds=60)
             )
+        self.async_write_ha_state()
 
-    @property
-    def native_value(self):
-        observation = self.observation
-        if observation is None or observation.value is None:
-            return None
-        if self.channel.quantity in STATE_OPTIONS:
-            return observation.value.value
-        value = observation.value
-        if self.channel.quantity == Quantity.ENERGY:
-            value /= 1000
-        return float(value)
+    @callback
+    def tick(self, now):
+        self.async_write_ha_state()
 
-
-class StateObservationSensor(ObservationSensor, RestoreEntity):
-    """Persist only display enums, never transient electrical telemetry."""
+    def cancel_refresh(self):
+        if self._refresh:
+            self._refresh()
+            self._refresh = None
 
     async def async_added_to_hass(self):
-        await super().async_added_to_hass()
-        if self.physical_state and self.observation is None:
-            previous = await self.async_get_last_state()
-            if previous and previous.state not in ("unknown", "unavailable"):
-                try:
-                    at = datetime.fromisoformat(previous.attributes["observed_at"])
-                    self._last_known = Observation(
-                        self.channel,
-                        State(previous.state),
-                        at,
-                        at,
-                        None,
-                        "ha:last_known_display",
-                    )
-                except ValueError, TypeError, KeyError:
-                    pass
-
-
-class AuthoritySensor(StationEntity, SensorEntity):
-    """Observed authority; desired charging permission is a separate entity."""
-
-    _attr_device_class = SensorDeviceClass.ENUM
-    _attr_entity_category = None
-    _attr_options = ["unknown", "local", "remote"]
-
-    def __init__(self, runtime, entry_id, station):
-        super().__init__(runtime, entry_id, station, "control_authority")
-
-    @property
-    def available(self):
-        return bool(self.snapshot and self.snapshot.connected)
-
-    @property
-    def native_value(self):
-        return self.runtime.authority(self.station).value
-
-    @property
-    def extra_state_attributes(self):
-        observation = self.snapshot.authority if self.snapshot else None
-        return {
-            **super().extra_state_attributes,
-            "source": observation.source if observation else None,
-            "observed_at": observation.observed_at.isoformat() if observation else None,
-        }
+        if self.family == "session" and self.role == "duration":
+            await SensorEntity.async_added_to_hass(self)
+            self.async_on_remove(self.observed.watch(self.key, self.refresh))
+            self.async_on_remove(self.cancel_refresh)
+            self.refresh()
+        else:
+            await super().async_added_to_hass()

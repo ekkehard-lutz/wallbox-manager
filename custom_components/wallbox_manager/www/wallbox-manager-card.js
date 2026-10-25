@@ -1,28 +1,21 @@
 (() => {
 if (customElements.get("wallbox-manager-card")) return;
-/* Stable roles and backend scope joins survive entity and device renames. */
-function discoverWallboxManager(states) {
-  const entries = Object.entries(states || {});
-  const selector = entries.find(([, s]) => s.attributes.wallbox_manager_role === "active_wallbox" && s.state !== "unavailable");
-  const inventory = selector?.[1].attributes.wallboxes || {};
-  const active = selector?.[1].attributes.active_wallbox;
-  const keys = Object.keys(inventory);
-  const displayed = active && inventory[active] ? active : (!active && keys.length === 1 ? keys[0] : null);
+// No global first-wallbox choice: an ambiguous card requires entry_id.
+function discoverWallboxManager(states, config = {}) {
+  const entries = Object.entries(states || {}).filter(([,s]) => s.attributes.wallbox_manager_entry);
+  const ids = [...new Set(entries.map(([,s]) => s.attributes.wallbox_manager_entry))];
+  const specified = config.entry_id || (config.entity && states[config.entity]?.attributes.wallbox_manager_entry);
+  const entry = specified || (!config.entry_id && !config.entity && ids.length === 1 ? ids[0] : null);
   const roles = {}, ranks = {};
-  for (const [id, state] of entries) {
-    const a = state.attributes, role = a.wallbox_manager_role;
-    const rank = a.wallbox_manager_target === displayed ? 3 : a.wallbox_manager_targets?.includes(displayed) ? (a.wallbox_manager_scope === "evse" ? 2 : 1) : 0;
-    if (displayed && role && rank > (ranks[role] || 0)) { roles[role] = id; ranks[role] = rank; }
+  for (const [id,s] of entries) {
+    const a = s.attributes;
+    if (a.wallbox_manager_entry !== entry) continue;
+    const rank = a.wallbox_manager_scope === "connector" ? 3 : a.wallbox_manager_scope === "evse" ? 2 : 1;
+    if (rank > (ranks[a.wallbox_manager_role] || 0)) {
+      roles[a.wallbox_manager_role] = id; ranks[a.wallbox_manager_role] = rank;
+    }
   }
-  return {selector: selector?.[0], state: selector?.[1], inventory, active, displayed, roles, multiple: keys.length > 1};
-}
-
-function powerStep(value, direction, maximum = null, minimum = 0) {
-  // Integer decimal arithmetic prevents 9.8 + 0.1 becoming 9.899999… .
-  const step = value < 10 || (value === 10 && direction < 0) ? 0.1 : 1;
-  let next = Math.round((value + direction * step) * 1e6) / 1e6;
-  if ((value < 10 && next > 10) || (value > 10 && next < 10)) next = 10;
-  return Math.max(minimum, maximum === null ? next : Math.min(maximum, next));
+  return {entry, roles, ambiguous: !entry && ids.length > 1};
 }
 function parseInput(value, language) {
   const decimal = new Intl.NumberFormat(language).formatToParts(1.1).find(p => p.type === "decimal").value;
@@ -31,68 +24,18 @@ function parseInput(value, language) {
 }
 function available(state) { return state && !["unknown", "unavailable", ""].includes(state.state); }
 function durationAvailable(state) { return state && typeof state.state === "string" && (state.state === "" || /^[0-9]{2,}:[0-5][0-9]$/.test(state.state)); }
-// Absolute backend deadlines; round up so a live interval never shows zero early.
-function gridCountdown(attrs, id, now = Date.now() / 1000) {
-  const start = attrs.grid_start_deadline, end = attrs.grid_end_deadline;
-  if (attrs.grid_timing_state === "stopping" || (end != null && now >= end)) return "";
-  const seconds = id === "grid_start_delay" ? Math.max(0, start - now) :
-    end == null ? null : now < start ? attrs.grid_armed_duration_seconds : end - now;
-  if (seconds == null || seconds <= 0) return "";
-  const minutes = Math.ceil(seconds / 60);
-  return `${String(Math.floor(minutes / 60)).padStart(2,"0")}:${String(minutes % 60).padStart(2,"0")}`;
-}
-const optimumFields = {optimum_lower_soc:["Lower target SoC","Unterer Ziel-SoC","%"], optimum_upper_soc:["Upper target SoC","Oberer Ziel-SoC","%"], optimum_max_discharge_w:["Maximum storage discharge","Maximale Speicher-Entladeleistung","W"], estimated_daily_house_consumption_kwh:["Daily household consumption (without EV)","Täglicher Hausverbrauch (ohne EV)","kWh/d"]};
-function numberRole(id) { return id === "power" ? "soll_power" : id === "reserve" ? "min_soc" : id; }
-function fresh(state, now = Date.now()) {
-  return available(state) && state.attributes.connected !== false &&
-    (!state.attributes.observed_at || Date.parse(state.attributes.observed_at) <= now) &&
-    Number.isFinite(Date.parse(state.attributes.valid_until)) && Date.parse(state.attributes.valid_until) > now;
-}
-function sessionDuration(state, connected, now) {
-  if (!available(state) || state.attributes.start_known === false) return "—";
-  const factors = {s:1,min:60,h:3600,d:86400,ms:0.001,"µs":0.000001};
-  let seconds = Number(state.state) * factors[state.attributes.unit_of_measurement];
-  if (!Number.isFinite(seconds) || seconds < 0) return "—";
-  if (state.attributes.session_active === true) {
-    const sampled = Date.parse(state.attributes.duration_sampled_at || state.last_updated);
-    const deadline = state.attributes.duration_valid_until ? Date.parse(state.attributes.duration_valid_until) : sampled + 90000;
-    if (!connected || state.attributes.connected === false || !Number.isFinite(sampled) || sampled > now || !(now < deadline)) return "—";
-    seconds += (now - sampled) / 1000;
-  } else if (state.attributes.session_active !== false) return "—";
-  const minutes = Math.floor(seconds / 60);
-  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2,"0")}`;
-}
-
-function liveValues(states, discovery, language, now = Date.now()) {
-  const state = role => states[discovery.roles[role]];
-  const de = language?.startsWith("de"), empty = "—";
-  const number = value => new Intl.NumberFormat(language, {maximumFractionDigits: 1}).format(value);
-  const connected = discovery.inventory[discovery.displayed]?.connected;
-  const text = (role, labels) => available(state(role)) && (state(role).attributes.state_represents === "last_known_observation" || (connected && state(role).attributes.connected !== false && (!state(role).attributes.valid_until || fresh(state(role),now)))) ? (labels[state(role).state] || empty) : empty;
-  const connection = text("connector_state", de ? {available:"Frei", occupied:"Belegt", reserved:"Reserviert", faulted:"Störung"} : {available:"Available", occupied:"Occupied", reserved:"Reserved", faulted:"Faulted"});
-  const charging = text("charging_state", de ? {idle:"Bereit",connected:"Verbunden",preparing:"Vorbereitung",charging:"Lädt",suspended_vehicle:"Vom Fahrzeug pausiert",suspended_station:"Von Wallbox pausiert",finishing:"Beendet"} : {idle:"Idle",connected:"Connected",preparing:"Preparing",charging:"Charging",suspended_vehicle:"Paused by vehicle",suspended_station:"Paused by wallbox",finishing:"Finishing"});
-  const session = role => connected && available(state(role)) && state(role).attributes.connected !== false && state(role).attributes.session_active === true ? Number(state(role).state) : NaN;
-  const energy = fresh(state("session_energy"),now) ? session("session_energy") : NaN;
-  const powerState = state("power");
-  const power = connected && fresh(powerState, now) ? Number(powerState.state) / (powerState.attributes.unit_of_measurement === "kW" ? 1 : 1000) : NaN;
-  const applied = state("charging_profile")?.attributes || {};
-  const phases = applied.applied_phase_count, current = applied.applied_current_a;
-  let actual = empty;
-  if (connected && available(state("charging_profile")) && applied.profile_control_ready && discovery.state?.attributes.profile_control_ready && discovery.active === discovery.displayed && applied.actual_enabled === true && applied.control_authority === "remote" && typeof current === "number" && Number.isFinite(current)) {
-    if ([1,2,3].includes(phases) && current > 0) actual = `${phases}${de ? "-phasig" : "-phase"} · ${number(current)} A`;
-    else if (phases === null && current === 0) actual = `${de ? "Aus" : "Off"} · 0 A`;
-  }
-  return {connection,charging,energy:Number.isFinite(energy) ? `${number(energy)} kWh` : empty,
-    power:Number.isFinite(power) ? `${number(power)} kW` : empty,
-    duration:sessionDuration(state("session_duration"),connected,now), actual};
-}
-
+function numberRole(id) { return id === "power" ? "soll_power" : id; }
 class WallboxManagerCard extends HTMLElement {
   setConfig(config) {
+    if (this.powerQueue) this.powerQueue.cancelled = true;
+    if (this.powerStepPending) this.powerStepPending.reject(new Error("Card reconfigured"));
     this.stopHold();
+    this.cancelTiming();
+    this.localWarnings = new Map();
     this.config = config;
     this.edits = {};
     this.durationEdits = {};
+    this.draftWrites = new Set();
     if (!this.shadowRoot) this.attachShadow({mode: "open"});
     this.shadowRoot.innerHTML = `<style>
       :host {display:block;color:var(--primary-text-color)}
@@ -103,45 +46,45 @@ class WallboxManagerCard extends HTMLElement {
       #station {font-size:14px;font-weight:400;color:var(--secondary-text-color);margin-top:3px;overflow-wrap:anywhere}
       .row {display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0;font-size:14px}
       input,select,button {font:inherit;color:var(--primary-text-color);border:1px solid var(--divider-color);background:var(--card-background-color);border-radius:var(--ha-border-radius-sm,8px);box-sizing:border-box;min-height:40px}
-      select {padding:6px 8px;max-width:55%} #wallbox-row {margin:0;max-width:48%} #wallbox {max-width:100%;width:100%}
+      select {padding:6px 8px;max-width:55%}
       .numeric {display:flex;align-items:center;gap:4px;flex:none} input {width:4em;text-align:center;padding:6px 3px;font-variant-numeric:tabular-nums}
       #grid_start_delay-label,#grid_duration-label {min-width:0;overflow-wrap:anywhere}
       .duration-editor {display:flex;align-items:center;gap:4px;flex:none} .duration-editor input {text-align:left;width:4em;padding:6px 4px;appearance:auto} .duration-editor .clear {padding:0 6px} .duration-editor .colon {font-weight:600}
       .step {width:34px;padding:0;font-size:19px;touch-action:none;user-select:none;-webkit-user-select:none} .unit {color:var(--secondary-text-color);font-size:13px;width:2em}
       button {cursor:pointer} button:hover:not(:disabled) {background:var(--secondary-background-color)}
       :is(input,select,button):focus-visible {outline:2px solid var(--primary-color);outline-offset:2px}
-      :disabled {opacity:.5;cursor:default} #permission,#takeover {width:100%;padding:9px 12px;margin-top:6px;font-size:14px}
-      #permission {background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color);font-weight:500}
-      #permission:hover:not(:disabled) {filter:brightness(.95)}
+      :disabled {opacity:.5;cursor:default} #charge-action,#takeover {width:100%;padding:9px 12px;margin-top:6px;font-size:14px}
+      #charge-action {background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color);font-weight:500}
+      #charge-action:hover:not(:disabled) {filter:brightness(.95)}
       .live {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px}
       .caption {font-size:12px;color:var(--secondary-text-color);margin-bottom:3px} .reading {font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-      .section {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px} h3 {font-size:14px;font-weight:500;margin:0 0 8px} #messages:has(.notice:not([hidden])) #no-messages {display:none} .notice {font-size:13px;color:var(--error-color);line-height:1.4;margin:12px 0 0}
+      .details {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;container-type:inline-size}
+      @container (max-width:320px) {.details > section {grid-column:1 / -1}}
+      .section {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px} h3 {font-size:14px;font-weight:500;margin:0 0 8px} .notice {font-size:13px;color:var(--error-color);line-height:1.4;margin:12px 0 0}
       [hidden] {display:none!important}
-      @media(max-width:360px) {ha-card {padding:12px} .row {gap:8px} header {gap:8px;flex-wrap:wrap} #wallbox-row {max-width:100%;width:100%} .numeric {gap:2px} .step {width:32px}}
+      @media(max-width:360px) {ha-card {padding:12px} .row {gap:8px} header {gap:8px;flex-wrap:wrap} .numeric {gap:2px} .step {width:32px}}
     </style><ha-card>
-      <header><ha-icon icon="mdi:ev-station"></ha-icon><div class="heading"><h2 id="title"></h2><div id="station"></div></div><label id="wallbox-row"><select id="wallbox" aria-label="Active wallbox"></select></label></header>
+      <header><ha-icon icon="mdi:ev-station"></ha-icon><div class="heading"><h2 id="title"></h2><div id="station"></div></div></header>
       <button id="takeover"></button>
       <label class="row" id="profile-row"><span id="profile-label"></span><select id="profile"></select></label>
-      <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
-      <div class="row" id="reserve-row"><label id="reserve-label" for="reserve"></label><div class="numeric"><button id="reserve-down" class="step" type="button">−</button><input id="reserve" type="text" inputmode="numeric" autocomplete="off"><button id="reserve-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
-      <label class="row" id="approximation-row"><span id="approximation-label"></span><select id="approximation"></select></label>
-      <div class="row" id="soll_soc_speicher-row"><label id="soll_soc_speicher-label" for="soll_soc_speicher"></label><div class="numeric"><button id="soll_soc_speicher-down" class="step" type="button">−</button><input id="soll_soc_speicher" type="text" inputmode="numeric" autocomplete="off"><button id="soll_soc_speicher-up" class="step" type="button">+</button><span class="unit">%</span></div></div>
-      ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="—"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="—"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
-      ${Object.entries(optimumFields).map(([id,labels]) => `<div class="row" id="${id}-row"><label id="${id}-label" for="${id}"></label><div class="numeric"><input id="${id}" type="number" min="0" step="${id === "estimated_daily_house_consumption_kwh" ? "0.1" : "1"}"><span class="unit">${labels[2]}</span></div></div>`).join("")}
-      <div class="row" id="optimum-target-row"><span id="optimum-target-label"></span><span id="optimum-target"></span></div>
-      <button id="permission"></button>
+      <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" placeholder="—" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
+      ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="--"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="--"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
+      <button id="charge-action"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
-      <section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section>
-      <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><div class="reading" id="no-messages">-</div><p id="status" class="notice" role="status" hidden></p><p id="error" class="notice" role="alert" hidden></p></section>
+      <div class="details"><section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section><section class="section" aria-labelledby="battery-label"><h3 id="battery-label"></h3><div class="caption" id="battery-soc-label"></div><div class="reading" id="battery-soc" role="img"></div></section></div>
+      <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><p id="error" class="notice" role="status">—</p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
-    get("wallbox").onchange = e => this.activate(e.target.value);
-    get("takeover").onclick = () => this.activate(this.discovery.displayed);
+    get("takeover").onclick = () => this.call("button", "press", {entity_id:this.discovery.roles.take_control});
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
-    get("approximation").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.pv_approximation, option:e.target.value});
     for (const id of ["grid_start_delay", "grid_duration"]) {
       for (const part of ["hours", "minutes"]) {
+        get(`${id}-${part}`).onfocus = () => this.beginTiming();
+        get(`${id}-${part}`).oninput = () => this.editDuration(id);
         get(`${id}-${part}`).onchange = () => this.editDuration(id);
+        get(`${id}-${part}`).onblur = () => Promise.resolve().then(() => {
+          if (!this.timingFocused() && this.shadowRoot.activeElement !== get("charge-action")) this.endTiming();
+        });
         get(`${id}-${part}`).onkeydown = e => {
           if (e.key === "Enter") { e.preventDefault(); this.editDuration(id); }
         };
@@ -149,10 +92,10 @@ class WallboxManagerCard extends HTMLElement {
       get(`${id}-clear`).onclick = () => {
         if (get(`${id}-clear`).disabled) return;
         get(`${id}-hours`).value = get(`${id}-minutes`).value = "";
-        this.editDuration(id);
+        this.editDuration(id).then(() => { if (!this.timingFocused()) this.endTiming(); });
       };
     }
-    for (const id of ["power", "reserve", "soll_soc_speicher"]) {
+    for (const id of ["power"]) {
       get(id).onchange = () => this.editNumber(id);
       get(id).onkeydown = e => {
         if (["ArrowUp", "ArrowDown"].includes(e.key)) { e.preventDefault(); this.stepNumber(id, e.key === "ArrowUp" ? 1 : -1); }
@@ -178,31 +121,24 @@ class WallboxManagerCard extends HTMLElement {
         };
       }
     }
-    for (const id of Object.keys(optimumFields)) {
-      get(id).onchange = () => {
-        const input = get(id), value = Number(input.value);
-        if (input.disabled || input.value === "" || !input.checkValidity() || !Number.isFinite(value)) return;
-        this.call("number", "set_value", {entity_id:this.discovery.roles[id], value});
-      };
-    }
-    get("permission").onclick = () => {
-      const id = this.discovery.roles.charging_enabled;
-      this.call("switch", (this._hass.states[id]?.state === "on" || this._hass.states[id]?.attributes.enable_pending) ? "turn_off" : "turn_on", {entity_id:id});
+    get("charge-action").onclick = async () => {
+      // Moving focus from a time editor onto Apply must keep this first click.
+      if (this.timingEditing) await this.endTiming();
+      if (this.timingQueue) await this.timingQueue.tail;
+      return this.call("button", "press", {entity_id:this.discovery.roles.charge_action});
     };
     if (this._hass) this.hass = this._hass;
   }
   connectedCallback() {
-    this.disconnectedCallback();
-    this._blur = () => this.stopHold();
-    window.addEventListener("blur",this._blur);
-    // Expire displayed meter samples even when HA has no new state to push.
-    this.timer = setInterval(() => { if (this._hass) this.hass = this._hass; },1000);
+    this._blur = () => { this.stopHold(); this.endTiming(); };
+    window.addEventListener("blur", this._blur);
+    window.addEventListener("pagehide", this._blur);
   }
   disconnectedCallback() {
     this.stopHold();
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    if (this._blur) window.removeEventListener("blur",this._blur);
+    this.endTiming();
+    clearTimeout(this.countdownTimer);
+    if (this._blur) { window.removeEventListener("blur", this._blur); window.removeEventListener("pagehide", this._blur); }
     this._blur = null;
   }
   startHold(button, id, direction, event) {
@@ -229,54 +165,197 @@ class WallboxManagerCard extends HTMLElement {
     clearTimeout(hold.timer);
     if (hold.button.hasPointerCapture(hold.pointerId)) hold.button.releasePointerCapture(hold.pointerId);
   }
-  format(value) { return new Intl.NumberFormat(this._hass.language, {maximumFractionDigits:6,useGrouping:false}).format(value); }
+  format(value, digits = null) {
+    return new Intl.NumberFormat(this._hass.language, digits === null ? {maximumFractionDigits:6,useGrouping:false} : {minimumFractionDigits:digits,maximumFractionDigits:digits,useGrouping:false}).format(value);
+  }
   minimum(id) {
     const value = id === "power" ? this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_min_kw : this._hass.states[this.discovery.roles[id]]?.attributes.min;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
   }
   maximum(id) {
-    if (id === "reserve") return 100;
-    if (id === "soll_soc_speicher") return this._hass.states[this.discovery.roles[id]]?.attributes.max ?? 98;
     const value = this._hass.states[this.discovery.roles.soll_power]?.attributes.technical_max_kw;
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
   }
   stepNumber(id, direction) {
-    const input = this.shadowRoot.getElementById(id);
-    if (input.disabled) return;
-    const value = parseInput(input.value, this._hass.language);
-    if (!Number.isFinite(value) || (id !== "power" && !Number.isInteger(value))) return;
-    const next = id === "power" ? powerStep(value,direction,this.maximum(id),this.minimum(id)) : Math.min(this.maximum(id),Math.max(this.minimum(id),Math.round(value) + direction));
-    if (next === value) return;
-    input.value = this.format(next);
-    return this.editNumber(id);
+    return this.stepTechnical(direction);
+  }
+  stepTechnical(direction) {
+    const entity = this.discovery.roles.soll_power;
+    if (this.shadowRoot.getElementById("power").disabled || this.edits.power) return Promise.resolve();
+    let queue = this.powerQueue;
+    if (!queue || queue.entity !== entity) queue = this.powerQueue = {entity,revision:this._hass.states[entity]?.attributes.grid_draft_revision,tail:Promise.resolve(),count:0,cancelled:false};
+    queue.count++;
+    queue.tail = queue.tail.then(async () => {
+      if (queue.cancelled || entity !== this.discovery.roles.soll_power) return;
+      const state = this._hass.states[entity], point = state?.attributes[direction > 0 ? "power_step_up" : "power_step_down"];
+      if (!point) return;
+      if (!available(state) || state.attributes.grid_draft_revision !== queue.revision) throw new Error("NETZ selection changed; try again");
+      let pending;
+      const acknowledged = new Promise((resolve,reject) => { pending = {entity,revision:queue.revision,point,incarnation:state.attributes.runtime_incarnation,resolve,reject}; });
+      // Attach a handler before the asynchronous service may reject or HA may rebind.
+      const outcome = acknowledged.then(() => null, error => error);
+      this.powerStepPending = pending;
+      this.draftWrites.add(pending);
+      this.hass = this._hass;
+      try {
+        await this._hass.callService("wallbox_manager","step_power",{entity_id:entity,direction,revision:queue.revision,incarnation:state.attributes.runtime_incarnation});
+        this.acknowledgePowerStep();
+        const error = await outcome;
+        if (error) throw error;
+        queue.revision++;
+      } catch (error) { pending.reject(error); throw error; } finally {
+        if (this.powerStepPending === pending) this.powerStepPending = null;
+        this.draftWrites.delete(pending);
+        this.hass = this._hass;
+      }
+    }).catch(error => {
+      queue.cancelled = true;
+      if (entity === this.discovery.roles.soll_power) {
+        this.warn("power",error.message || String(error));
+      }
+    }).finally(() => { if (--queue.count === 0 && this.powerQueue === queue) this.powerQueue = null; });
+    return queue.tail;
+  }
+  acknowledgePowerStep() {
+    const pending = this.powerStepPending;
+    if (!pending) return;
+    const state = this._hass.states[pending.entity];
+    if (pending.entity !== this.discovery.roles.soll_power || !available(state) || state.attributes.runtime_incarnation !== pending.incarnation) {
+      pending.reject(new Error("NETZ selection unavailable or replaced")); return;
+    }
+    const revision = state.attributes.grid_draft_revision;
+    if (revision > pending.revision) {
+      if (revision === pending.revision + 1 && Number(state.state) === pending.point.power_kw && state.attributes.selected_phase_count === pending.point.power_phases) pending.resolve();
+      else pending.reject(new Error("NETZ selection changed; try again"));
+    }
   }
   async editNumber(id) {
     const input = this.shadowRoot.getElementById(id), get = key => this.shadowRoot.getElementById(key);
     if (input.disabled) return;
     const value = parseInput(input.value,this._hass.language), maximum = this.maximum(id);
     const de = this._hass.language?.startsWith("de");
-    if (!Number.isFinite(value) || value < this.minimum(id) || (maximum !== null && value > maximum) || (id !== "power" && !Number.isInteger(value))) {
-      get("error").textContent = de ? `Bitte einen gültigen Wert ab ${this.format(this.minimum(id))}${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben${id !== "power" ? " (ganze Prozent)" : ""}.` : `Enter a valid value from ${this.format(this.minimum(id))}${maximum === null ? "" : ` to ${this.format(maximum)}`}${id !== "power" ? " (whole percent)" : ""}.`;
-      get("error").hidden = false;
-      if (id === "soll_soc_speicher") input.value = this.format(Math.round(Number(this._hass.states[this.discovery.roles[id]].state)));
+    if (!Number.isFinite(value) || value < this.minimum(id) || (maximum !== null && value > maximum)) {
+      this.warn(id, de ? `Bitte einen gültigen Wert ab ${this.format(this.minimum(id))}${maximum === null ? "" : ` bis ${this.format(maximum)}`} eingeben.` : `Enter a valid value from ${this.format(this.minimum(id))}${maximum === null ? "" : ` to ${this.format(maximum)}`}.`);
       return;
     }
-    input.value = this.format(value);
+    input.value = this.format(value, id === "power" ? 1 : null);
     const entity = this.discovery.roles[numberRole(id)];
-    if ((!this.edits[id] && available(this._hass.states[entity]) && Number(this._hass.states[entity].state) === value) || (this.edits[id]?.entity === entity && this.edits[id].value === value)) return;
-    const edit = this.edits[id] = {entity,value};
-    input.value = this.format(value);
-    get("error").hidden = true;
+    if ((!this.edits[id] && available(this._hass.states[entity]) && Number(this._hass.states[entity].state) === value && (id !== "power" || !this._hass.states[entity].attributes.draft_phase_hint)) || (this.edits[id]?.entity === entity && this.edits[id].value === value)) return;
+    const edit = this.edits[id] = {entity,value,revision:this._hass.states[entity]?.attributes.grid_draft_revision ?? 0};
+    if (id === "power") this.draftWrites.add(edit);
+    input.value = this.format(value, id === "power" ? 1 : null);
+    this.clearWarning(id);
     this.hass = this._hass;
     try { await this._hass.callService("number","set_value",{entity_id:entity,value}); }
     catch (err) {
       if (this.edits[id] === edit && this.discovery.roles[numberRole(id)] === entity) {
         delete this.edits[id];
-        input.value = this.format(id === "soll_soc_speicher" ? Math.round(Number(this._hass.states[entity].state)) : Number(this._hass.states[entity].state));
-        get("error").textContent = err.message || String(err); get("error").hidden = false;
+        input.value = this.format(Number(this._hass.states[entity].state), id === "power" ? 1 : null);
+        this.warn(id,err.message || String(err));
       }
     }
-    finally { this.hass = this._hass; }
+    finally { edit.complete = true; this.draftWrites.delete(edit); this.hass = this._hass; }
+  }
+  timingAttributes() {
+    return this._hass?.states[this.discovery?.roles.grid_duration]?.attributes || {};
+  }
+  timingFocused() {
+    return ["grid_start_delay", "grid_duration"].some(id => ["hours", "minutes", "clear"].some(part => this.shadowRoot.activeElement === this.shadowRoot.getElementById(`${id}-${part}`)));
+  }
+  cancelTiming() {
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = null;
+    clearTimeout(this.countdownTimer);
+    if (this.timingQueue) this.timingQueue.cancelled = true;
+    if (this.timingPending) this.timingPending.reject(new Error("Timing editor replaced"));
+    this.timingQueue = null;
+    this.timingEditing = false;
+  }
+  beginTiming() {
+    if (this.timingEditing) return this.timingQueue?.tail || Promise.resolve();
+    const attrs = this.timingAttributes();
+    for (const id of ["grid_start_delay", "grid_duration"]) {
+      const state = this._hass.states[this.discovery.roles[id]];
+      const parts = (durationAvailable(state) && state.state ? state.state : ":").split(":");
+      for (const [index,part] of ["hours","minutes"].entries()) this.shadowRoot.getElementById(`${id}-${part}`).value = parts[index];
+    }
+    this.timingEditing = true;
+    if (!this.timingQueue || this.timingQueue.cancelled || (this.draftWrites.size === 0 && this.timingQueue.revision !== attrs.grid_timing_revision)) this.timingQueue = {owner:`card-${Date.now()}-${Math.random()}`,revision:attrs.grid_timing_revision,incarnation:attrs.runtime_incarnation,tail:Promise.resolve(),cancelled:false};
+    this.renderTiming();
+    return this.queueTiming("begin", "grid_start_delay");
+  }
+  endTiming() {
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = null;
+    if (!this.timingEditing) return Promise.resolve();
+    this.timingEditing = false;
+    return this.queueTiming("end", "grid_start_delay").finally(() => this.renderTiming());
+  }
+  scheduleTimingRenewal() {
+    const queue = this.timingQueue, edit = this.timingAttributes().grid_timing_edit;
+    if (!this.timingEditing || !queue || queue.cancelled || !edit?.active || edit.owner !== queue.owner) {
+      clearTimeout(this.leaseTimer); this.leaseTimer = null; return;
+    }
+    if (this.leaseTimer) return;
+    this.leaseTimer = setTimeout(() => {
+      this.leaseTimer = null;
+      // Serialize with real edits, but renewals need no HA state acknowledgement.
+      queue.tail = queue.tail.then(async () => {
+        if (!this.timingEditing || queue.cancelled || this.timingQueue !== queue) return;
+        const a = this.timingAttributes(), current = a.grid_timing_edit;
+        if (a.runtime_incarnation !== queue.incarnation || a.grid_timing_revision !== queue.revision || !current?.active || current.owner !== queue.owner) throw new Error("Timing editor expired or replaced; focus again");
+        await this._hass.callService("wallbox_manager","edit_timing",{entity_id:this.discovery.roles.grid_start_delay,action:"renew",owner:queue.owner,revision:queue.revision,incarnation:queue.incarnation});
+      }).catch(error => {
+        if (!queue.cancelled && this.timingQueue === queue) {
+          queue.cancelled = true; this.timingEditing = false;
+          this.warn("grid_duration",error.message || String(error));
+        }
+      }).finally(() => { this.scheduleTimingRenewal(); this.renderTiming(); });
+    },20000);
+  }
+  queueTiming(action, id, value="") {
+    const queue = this.timingQueue, entity = this.discovery.roles[id];
+    if (!queue) return Promise.resolve();
+    const write = {entity};
+    this.draftWrites.add(write);
+    queue.tail = queue.tail.then(async () => {
+      if (queue.cancelled) return;
+      const state = this._hass.states[entity];
+      if (entity !== this.discovery.roles[id] || state?.attributes.runtime_incarnation !== queue.incarnation || state?.attributes.grid_timing_revision !== queue.revision) throw new Error("Timing selection changed; try again");
+      if (action === "update" && state.state === value) return;
+      let pending;
+      const acknowledged = new Promise((resolve,reject) => { pending = {entity,revision:queue.revision,incarnation:queue.incarnation,value,action,resolve,reject}; });
+      const outcome = acknowledged.then(() => null, error => error);
+      this.timingPending = pending;
+      try {
+        await this._hass.callService("wallbox_manager","edit_timing",{entity_id:entity,action,owner:queue.owner,revision:queue.revision,incarnation:queue.incarnation,value});
+        this.acknowledgeTiming();
+        const error = await outcome;
+        if (error) throw error;
+        queue.revision++;
+        this.clearWarning(id);
+      } catch (error) { pending.reject(error); throw error; }
+      finally { if (this.timingPending === pending) this.timingPending = null; }
+    }).catch(error => {
+      if (!queue.cancelled) this.warn(id,error.message || String(error));
+      queue.cancelled = true;
+      if (this.timingQueue === queue) { this.timingEditing = false; this.durationEdits = {}; }
+    }).finally(() => { this.draftWrites.delete(write); this.hass = this._hass; });
+    this.hass = this._hass;
+    return queue.tail;
+  }
+  acknowledgeTiming() {
+    const pending = this.timingPending;
+    if (!pending) return;
+    const state = this._hass.states[pending.entity];
+    if (!state || state.attributes.runtime_incarnation !== pending.incarnation || !Object.values(this.discovery.roles).includes(pending.entity)) {
+      pending.reject(new Error("Timing runtime replaced")); return;
+    }
+    const revision = state.attributes.grid_timing_revision;
+    if (revision > pending.revision) {
+      if (revision === pending.revision + 1 && (pending.action !== "update" || state.state === pending.value)) pending.resolve();
+      else pending.reject(new Error("Timing selection changed; try again"));
+    }
   }
   async editDuration(id) {
     const get = key => this.shadowRoot.getElementById(key);
@@ -285,144 +364,195 @@ class WallboxManagerCard extends HTMLElement {
     const valid = (input, max = Number.MAX_SAFE_INTEGER) => !input.validity?.badInput &&
       (input.value === "" || (/^[0-9]+$/.test(input.value) && Number.isSafeInteger(Number(input.value)) && Number(input.value) <= max));
     if (!valid(hours) || !valid(minutes,59)) {
-      get("error").textContent = this._hass.language?.startsWith("de") ? "Ganze Stunden ab 0 und Minuten von 0 bis 59 eingeben." : "Enter whole hours from 0 and minutes from 0 to 59.";
-      get("error").hidden = false;
+      this.warn(id,this._hass.language?.startsWith("de") ? "Ganze Stunden ab 0 und Minuten von 0 bis 59 eingeben." : "Enter whole hours from 0 and minutes from 0 to 59.");
       return;
     }
     const value = hours.value === "" && minutes.value === "" ? "" : `${String(Number(hours.value || 0)).padStart(2,"0")}:${String(Number(minutes.value || 0)).padStart(2,"0")}`;
-    const entity = this.discovery.roles[id];
-    const edit = this.durationEdits[id] = {entity,value};
-    get("error").hidden = true;
+    this.beginTiming();
+    const edit = this.durationEdits[id] = {entity:this.discovery.roles[id],value};
+    this.clearWarning(id);
+    await this.queueTiming("update",id,value);
+    if (this.durationEdits[id] === edit) delete this.durationEdits[id];
     this.hass = this._hass;
-    try { await this._hass.callService("text","set_value",{entity_id:entity,value}); }
-    catch (err) {
-      if (this.durationEdits[id] === edit && this.discovery.roles[id] === entity) {
-        delete this.durationEdits[id];
-        get("error").textContent = err.message || String(err); get("error").hidden = false;
+  }
+  renderTiming() {
+    if (!this.discovery) return;
+    clearTimeout(this.countdownTimer);
+    const attrs = this.timingAttributes(), action = this._hass.states[this.discovery.roles.charge_action]?.attributes || {};
+    const schedule = attrs.grid_schedule, now = Date.now()/1000;
+    const live = action.charge_release && schedule;
+    const editing = this.timingEditing || attrs.grid_timing_edit || Object.keys(this.durationEdits).length > 0;
+    const text = seconds => { const minutes = Math.floor(Math.max(0,seconds)/60); return `${String(Math.floor(minutes/60)).padStart(2,"0")}:${String(minutes%60).padStart(2,"0")}`; };
+    for (const id of ["grid_start_delay", "grid_duration"]) {
+      const state = this._hass.states[this.discovery.roles[id]];
+      let value = this.durationEdits[id]?.value ?? (durationAvailable(state) ? state.state : "");
+      if (live && !editing) {
+        if (id === "grid_start_delay") value = schedule.start_at > now && schedule.start_at > schedule.epoch_at ? text(schedule.start_at-now) : "";
+        else value = schedule.end_at != null && schedule.end_at > now ? text(schedule.end_at-Math.max(now,schedule.start_at)) : "";
+      }
+      if (!live && !editing) {
+        const approved = attrs[id === "grid_start_delay" ? "grid_approved_start_delay" : "grid_approved_duration"];
+        const seconds = value ? value.split(":").reduce((h,m) => Number(h)*3600+Number(m)*60) : null;
+        if (approved === seconds) value = "";
+      }
+      const parts = value === "" ? ["", ""] : value.split(":");
+      for (const [index,part] of ["hours","minutes"].entries()) {
+        const input = this.shadowRoot.getElementById(`${id}-${part}`);
+        if (!this.timingEditing) input.value = parts[index];
       }
     }
-    finally { this.hass = this._hass; }
+    if (live && !editing) this.countdownTimer = setTimeout(() => this.renderTiming(),1000);
   }
-  activate(option) {
-    if (option && this.discovery.selector) return this.call("select", "select_option", {entity_id:this.discovery.selector,option});
+  warningSnapshot(id) {
+    const entity = this.discovery?.roles[numberRole(id)] || id;
+    const state = this._hass?.states[entity];
+    return JSON.stringify([state?.state,state?.attributes.command_status,state?.attributes.grid_approved_revision]);
+  }
+  warn(id,text) {
+    this.localWarnings.set(id,{text,raised_at:Date.now()/1000,snapshot:this.warningSnapshot(id)});
+    this.renderMessage();
+  }
+  clearWarning(id) { this.localWarnings.delete(id); this.renderMessage(); }
+  renderMessage() {
+    if (!this.discovery) return;
+    const canonical = this._hass.states[this.discovery.roles.charge_action]?.attributes.active_message;
+    const candidates = [...this.localWarnings.values(), ...(canonical ? [canonical] : [])];
+    const message = candidates.sort((a,b) => b.raised_at-a.raised_at)[0];
+    const field = this.shadowRoot.getElementById("error");
+    const german = {connection_lost:"OCPP-Verbindung unterbrochen.",connection_failed:"OCPP-Initialisierung fehlgeschlagen.",control_failed:"Wallbox-Steuerbefehl fehlgeschlagen.",grid_failed:"Ladebefehl fehlgeschlagen.",phase_lockout:"Phasenumschaltung vorübergehend gesperrt.",reenable_lockout:"Wiedereinschalten vorübergehend gesperrt.",capabilities:"NETZ-Fähigkeiten fehlen oder sind ungültig.",power_limited:"Angeforderte Leistung durch den Phasenmodus begrenzt.",settings_save:"Einstellungen konnten nicht gespeichert werden.",settings_value:"Einstellung wurde abgelehnt.",battery_reserve:"Batteriereserve konnte nicht gesetzt werden.",wallbox_fault:"Die Wallbox meldet eine Störung."};
+    field.textContent = message ? (this._hass.language?.startsWith("de") && german[message.code] || message.text) : "—";
+    field.hidden = false;
+    field.style.color = message ? "var(--error-color)" : "var(--secondary-text-color)";
   }
   async call(domain, service, data) {
-    const error = this.shadowRoot.getElementById("error");
-    error.textContent = ""; error.hidden = true;
+    const action = domain === "button" && service === "press" ? (data.entity_id === this.discovery.roles.charge_action ? "charge_action" : "take_control") : null;
+    if (action) {
+      const state = this._hass.states[this.discovery.roles[action]];
+      if (this.busy || !state || state.state === "unavailable" || (action === "charge_action" ? (state.attributes.charge_action_ready !== true || this.draftWrites.size > 0 || this.edits.power || Object.keys(this.durationEdits).length > 0) : state.attributes.execution_ready !== true) || data.entity_id !== this.discovery.roles[action]) return;
+    } else if (!["number", "select", "text"].includes(domain) || !Object.values(this.discovery.roles).includes(data.entity_id)) return;
+    const warningId = data.entity_id;
+    const binding = this.discovery.entry, runtime = this.runtime;
+    this.clearWarning(warningId);
     this.busy = true; this.hass = this._hass;
     try { await this._hass.callService(domain,service,data); }
-    catch (err) { error.textContent = err.message || String(err); error.hidden = false; }
+    catch (err) { if (this.discovery.entry === binding && this.runtime === runtime) this.warn(warningId,err.message || String(err)); }
     finally { this.busy = false; this.hass = this._hass; }
   }
   set hass(hass) {
     this._hass = hass;
     if (!this.config) return;
     const get = id => this.shadowRoot.getElementById(id), de = hass.language?.startsWith("de");
-    const previous = this.discovery?.displayed;
-    const d = this.discovery = discoverWallboxManager(hass.states);
-    if (previous !== d.displayed) { this.stopHold(); this.edits = {}; this.durationEdits = {}; get("error").hidden = true; }
-    const state = role => hass.states[d.roles[role]], attrs = state("charging_profile")?.attributes || {};
-    const ready = !!(attrs.profile_control_ready && d.state?.attributes.profile_control_ready && d.active === d.displayed);
-    const busy = !!(this.busy || d.state?.attributes.transition_pending);
-    const permission = state("charging_enabled"), enabled = permission?.state === "on";
+    const previous = this.discovery?.entry;
+    const d = this.discovery = discoverWallboxManager(hass.states, this.config);
+    if (previous !== d.entry || (this.runtime && this.runtime !== this.timingAttributes().runtime_incarnation)) { this.stopHold(); this.cancelTiming(); this.edits = {}; this.durationEdits = {}; this.localWarnings.clear(); }
+    this.runtime = this.timingAttributes().runtime_incarnation;
+    for (const [id,warning] of this.localWarnings) if (warning.snapshot && warning.snapshot !== this.warningSnapshot(id)) this.localWarnings.delete(id);
+    this.acknowledgeTiming();
+    const timing = this.timingAttributes(), editor = timing.grid_timing_edit;
+    if (this.timingEditing && this.timingQueue && this.draftWrites.size === 0 && !this.timingPending && (timing.grid_timing_revision !== this.timingQueue.revision || (editor && (!editor.active || editor.owner !== this.timingQueue.owner)))) {
+      this.cancelTiming(); this.durationEdits = {};
+    }
+    this.scheduleTimingRenewal();
+    this.acknowledgePowerStep();
+    const state = role => hass.states[d.roles[role]], busy = !!this.busy;
+    const connected = state("connected")?.state === "on";
+    const authority = connected && available(state("control_authority")) ? state("control_authority").state : null;
     get("title").textContent = this.config.name || "Wallbox Manager";
-    get("station").textContent = d.inventory[d.displayed]?.display_name || d.inventory[d.displayed]?.name || "—";
-    get("wallbox-row").hidden = !d.multiple;
-    get("wallbox").ariaLabel = de ? "Aktive Wallbox" : "Active wallbox";
-    this.options(get("wallbox"), [["",de ? "Wallbox auswählen" : "Select wallbox"], ...Object.entries(d.inventory).map(([key,value]) => [key,value.name])]);
-    get("wallbox").value = d.active || ""; get("wallbox").disabled = busy;
+    get("station").textContent = state("connected")?.attributes.station_id || "—";
     get("takeover").textContent = de ? "Steuerung übernehmen" : "Take control";
-    get("takeover").hidden = ready || !d.displayed; get("takeover").disabled = busy || !d.inventory[d.displayed]?.connected;
+    get("takeover").hidden = authority === "remote";
+    for (const [id,role] of [["takeover","take_control"]]) {
+      const s = state(role);
+      get(id).disabled = busy || !connected || !s || s.state === "unavailable" || s.attributes.execution_ready !== true;
+    }
+    get("takeover").disabled ||= !["local", "remote"].includes(authority);
     get("profile-label").textContent = de ? "Ladeprofil" : "Charging profile";
     get("power-label").textContent = de ? "Angeforderte Ladeleistung" : "Requested charging power";
-    get("reserve-label").textContent = de ? "Entladereserve" : "Discharge reserve";
-    get("soll_soc_speicher-label").textContent = de ? "Speicher-Ziel-SoC" : "Battery target SoC";
-    this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(value => [value,value === "NETZ" ? (de ? "Netz" : "Grid") : value === "PV_SURPLUS" ? (de ? "PV-Überschuss" : "PV Surplus") : value === "PV_OPTIMUM" ? "PV Optimum" : value === "PV_MAXIMUM" ? "PV Maximum" : value]));
+    this.options(get("profile"), (state("charging_profile")?.attributes.options || []).map(v => [v, {NETZ:de ? "Netz" : "Grid", PV_SURPLUS:de ? "PV-Überschuss" : "PV Surplus",PV_OPTIMUM:"PV Optimum",PV_MAXIMUM:"PV Maximum"}[v] || v]));
     get("profile").value = state("charging_profile")?.state || "";
-    get("profile-row").hidden = (state("charging_profile")?.attributes.options || []).length <= 1;
     get("profile").disabled = busy || !available(state("charging_profile"));
-    for (const [id,role] of [["power","soll_power"],["reserve","min_soc"],["soll_soc_speicher","soll_soc_speicher"]]) {
+    for (const [id,role] of [["power","soll_power"]]) {
       const s = state(role), edit = this.edits[id];
-      if (edit && (edit.entity !== d.roles[role] || (available(s) && Number(s.state) === edit.value))) delete this.edits[id];
-      if (previous !== d.displayed || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value) : available(s) ? this.format(id === "soll_soc_speicher" ? Math.round(Number(s.state)) : Number(s.state)) : "";
-      const disabled = busy || !available(s);
+      if (edit && (edit.entity !== d.roles[role] || (available(s) && (Number(s.state) === edit.value || (edit.complete && s.attributes.grid_draft_revision > edit.revision))))) delete this.edits[id];
+      if (previous !== d.entry || this.shadowRoot.activeElement !== get(id)) get(id).value = this.edits[id] ? this.format(this.edits[id].value, id === "power" ? 1 : null) : available(s) ? this.format(Number(s.state), id === "power" ? 1 : null) : "";
+      const disabled = busy || !available(s) || (id === "power" && this.maximum(id) === null), value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
       get(id).disabled = disabled;
-      const value = parseInput(get(id).value,hass.language), maximum = this.maximum(id);
-      for (const suffix of ["up","down"]) {
-        get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= this.minimum(id) : maximum !== null && value >= maximum);
-        get(`${id}-${suffix}`).ariaLabel = `${get(`${id}-label`).textContent} ${suffix === "up" ? (de ? "erhöhen" : "increase") : (de ? "verringern" : "decrease")}`;
-      }
+      for (const suffix of ["up","down"]) get(`${id}-${suffix}`).disabled = disabled || !Number.isFinite(value) || (suffix === "down" ? value <= this.minimum(id) : maximum !== null && value >= maximum) || (id === "power" && !s?.attributes[suffix === "down" ? "power_step_down" : "power_step_up"]);
     }
-    get("permission").disabled = busy || !ready || !available(permission);
-    get("permission").textContent = !ready ? (enabled ? (de ? "Ladefreigabe aktiv · keine Steuerung" : "Charging permission enabled · no control") : (de ? "Ladefreigabe inaktiv · keine Steuerung" : "Charging permission disabled · no control")) : busy ? (de ? "Bitte warten …" : "Please wait …") : attrs.enable_pending ? (de ? "Freigabe abbrechen" : "Cancel enabling charging") : enabled ? (de ? "Ladefreigabe deaktivieren" : "Disable charging permission") : (de ? "Laden freigeben" : "Enable charging permission");
-    const optimum = state("charging_profile")?.state === "PV_OPTIMUM";
-    const maximum = state("charging_profile")?.state === "PV_MAXIMUM";
-    const pv = optimum || maximum || state("charging_profile")?.state === "PV_SURPLUS";
-    for (const [id,labels] of Object.entries(optimumFields)) {
-      get(`${id}-row`).hidden = id === "optimum_max_discharge_w" ? !pv : !optimum;
-      get(`${id}-label`).textContent = labels[de ? 1 : 0];
-      const s = state(id), input = get(id);
-      input.disabled = busy || !available(s);
-      input.min = s?.attributes.min ?? 0;
-      input.max = s?.attributes.max ?? (id === "optimum_max_discharge_w" ? 100000 : id === "estimated_daily_house_consumption_kwh" ? 1000 : 100);
-      if (previous !== d.displayed || this.shadowRoot.activeElement !== input) input.value = available(s) ? s.state : "";
-    }
-    get("optimum-target-row").hidden = !pv;
-    get("optimum-target-label").textContent = de ? "Aktueller Ziel-SoC" : "Current target SoC";
-    get("optimum-target").textContent = typeof attrs.optimum_target_soc === "number" ? `${this.format(Math.round(attrs.optimum_target_soc * 10) / 10)} %` : "—";
+    const profile = state("charging_profile")?.state;
+    const pv = ["PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"].includes(profile);
     get("power-row").hidden = pv;
-    get("reserve-row").hidden = !(!pv && (attrs.battery_reserve_configured ?? attrs.battery_configured));
-    get("approximation-row").hidden = true;
-    get("approximation-label").textContent = de ? "Leistungsannäherung" : "Power approximation";
-    this.options(get("approximation"), [["up",de ? "Nicht unter Soll" : "Not below target"],["down",de ? "Nicht über Soll" : "Not above target"]]);
-    get("approximation").value = state("pv_approximation")?.state || "down";
-    get("approximation").disabled = busy || !available(state("pv_approximation"));
+    // Read mapped HA observations independently of the station connection.
+    // No requested reserve, battery journal or card-side PV planner is evidence.
+    const mappings = state("charging_profile")?.attributes || {};
+    const soc = hass.states[mappings.battery_soc_entity_id];
+    const reserve = hass.states[mappings.battery_reserve_entity_id];
+    const percentageValue = s => {
+      if (!available(s) || s.attributes.restored || typeof s.state !== "string" || !s.state.trim()) return null;
+      const value = Number(s.state);
+      return Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
+    };
+    const percent = value => value === null ? "—" : `${this.format(value,1)} %`;
+    const observedReserve = percentageValue(reserve);
+    const target = percentageValue(state("soll_soc_speicher"));
+    const envelope = mappings.pv_surplus_target;
+    // Compare full-precision HA reserve with the backend's validity envelope.
+    // Invalidated settings are unavailable, never clamped or replanned here.
+    const surplusTarget = mappings.battery_soc_entity_id && observedReserve !== null && target !== null &&
+      envelope?.soc === target && typeof envelope.maximum_reserve === "number" && Number.isFinite(envelope.maximum_reserve) && observedReserve <= envelope.maximum_reserve
+        ? target : null;
+    const reference = profile === "NETZ" ? percent(observedReserve)
+      : profile === "PV_SURPLUS" ? percent(surplusTarget)
+      : percent(typeof mappings.effective_target_soc === "number" && Number.isFinite(mappings.effective_target_soc) && mappings.effective_target_soc >= 0 && mappings.effective_target_soc <= 100 ? mappings.effective_target_soc : null);
+    const actualSoc = percent(percentageValue(soc));
+    const referenceLabel = profile === "NETZ" ? (de ? "Aktuelle Mindestreserve" : "Current minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
+    get("battery-label").textContent = de ? "Hausspeicher" : "Home battery";
+    get("battery-soc-label").textContent = de ? "Ladezustand" : "State of charge";
+    get("battery-soc").textContent = `${actualSoc} → ${reference}`;
+    get("battery-soc").title = `${de ? "Ladezustand" : "State of charge"}: ${actualSoc}; ${referenceLabel}: ${reference}`;
+    get("battery-soc").setAttribute("aria-label",get("battery-soc").title);
     for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
       get(`${id}-row`).hidden = pv;
       get(`${id}-label`).textContent = label;
-      const s = state(id), edit = this.durationEdits[id];
-      if (edit && (edit.entity !== d.roles[id] || s?.state === edit.value)) delete this.durationEdits[id];
-      const armed = !pv && attrs.grid_request_armed === true;
-      if (armed) delete this.durationEdits[id];
-      const value = armed ? gridCountdown(attrs,id) : this.durationEdits[id]?.value ?? (durationAvailable(s) ? s.state : "");
-      const parts = value === "" ? ["",""] : value.split(":");
-      const focused = [get(`${id}-hours`),get(`${id}-minutes`)].includes(this.shadowRoot.activeElement);
-      for (const [index,part] of ["hours","minutes"].entries()) {
-        const input = get(`${id}-${part}`);
-        if (armed || previous !== d.displayed || !focused) input.value = parts[index];
-        input.disabled = busy || armed || !durationAvailable(s);
-        input.ariaLabel = `${label}: ${part === "hours" ? (de ? "Stunden" : "hours") : (de ? "Minuten" : "minutes")}`;
-      }
-      get(`${id}-clear`).disabled = busy || armed || !durationAvailable(s);
-      get(`${id}-clear`).title = get(`${id}-clear`).ariaLabel = de ? `${label} zurücksetzen (nicht gesetzt)` : `Clear ${label} (unset)`;
+      const s = state(id);
+      for (const part of ["hours","minutes","clear"]) get(`${id}-${part}`).disabled = busy || !durationAvailable(s);
     }
-    get("soll_soc_speicher-row").hidden = optimum || maximum || !pv || !attrs.battery_configured;
-    if (this.hold && (this.hold.button.disabled || (["reserve","soll_soc_speicher"].includes(this.hold.id) && (!attrs.battery_configured || (this.hold.id === "reserve" ? pv : !pv))))) this.stopHold();
+    this.renderTiming();
+    const actionState = state("charge_action"), action = actionState?.attributes.charge_action;
+    get("charge-action").textContent = ({start: de ? "Ladung starten" : "Start charging", stop: de ? "Ladung beenden" : "Stop charging", apply: de ? "Ladeparameter übernehmen" : "Apply charging parameters"})[action] || (de ? "Ladung starten" : "Start charging");
+    get("charge-action").disabled = busy || !actionState || actionState.state === "unavailable" || actionState.attributes.charge_action_ready !== true || this.draftWrites.size > 0 || !!this.edits.power || Object.keys(this.durationEdits).length > 0;
+    get("charge-action").title = actionState?.attributes.charge_action_blocked_reason || (action === "stop" && authority !== "remote" ? (de ? "Lokale Ladung kann durch WBM nicht beendet werden" : "WBM cannot stop locally controlled charging") : "");
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
-    get("actual").title = de ? "Bestätigter Betriebspunkt · Stromlimit, kein Messwert" : "Confirmed operating point · current limit, not measured current";
-    const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Energie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Energy",power:"Power",duration:"Duration"};
-    for (const [key,value] of Object.entries(liveValues(hass.states,d,hass.language))) {
-      const id = key === "power" ? "live-power" : key;
-      get(id).textContent = value;
-      if (labels[key]) get(`${id}-label`).textContent = labels[key];
+    const point = state("soll_power")?.attributes;
+    const formatPoint = (phases, amps) => {
+      if (![1,2,3].includes(phases) || !Number.isInteger(amps) || amps < 0) return "—";
+      return `${de ? `${phases}-phasig` : `${phases}-phase`} ${amps}A`;
+    };
+    const actualPhases = point?.applied_phase_count;
+    const actualAmps = point?.applied_current_a;
+    const wantedPhases = point?.requested_phase_count ?? actualPhases;
+    const wantedAmps = point?.requested_current_a;
+    const actualPoint = connected ? formatPoint(actualPhases, actualAmps) : "—";
+    const wantedPoint = connected ? formatPoint(wantedPhases, wantedAmps) : "—";
+    get("actual").textContent = profile === "NETZ" && wantedAmps != null && actualPoint !== wantedPoint
+      ? `${actualPoint} → ${wantedPoint}` : actualPoint;
+    const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Sitzungsenergie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Session energy",power:"Power",duration:"Duration"};
+    const connectorLabels = de ? {available:"Frei",occupied:"Belegt",reserved:"Reserviert",faulted:"Störung"} : {available:"Available",occupied:"Occupied",reserved:"Reserved",faulted:"Faulted"};
+    const chargingLabels = de ? {idle:"Bereit",connected:"Verbunden",charging:"Lädt",suspended_vehicle:"Vom Fahrzeug pausiert",suspended_station:"Von Wallbox pausiert"} : {idle:"Idle",connected:"Connected",charging:"Charging",suspended_vehicle:"Paused by vehicle",suspended_station:"Paused by wallbox"};
+    for (const [id,role] of [["connection","connector_state"],["charging","charging_state"],["energy","session_energy"],["live-power","power"],["duration","session_duration"]]) {
+      const s = state(role); let text="—";
+      if (connected && available(s)) {
+        if (id === "connection") text = connectorLabels[s.state] || s.state;
+        else if (id === "charging") text = chargingLabels[s.state] || s.state;
+        else if (id === "duration") { const minutes=Math.floor(Number(s.state)/60); text=`${Math.floor(minutes/60)}:${String(minutes%60).padStart(2,"0")}`; }
+        else text = `${this.format(id === "live-power" ? Number(s.state)/1000 : Number(s.state), id === "live-power" ? 2 : 1)} ${id === "live-power" ? "kW" : "kWh"}`;
+      }
+      get(id).textContent = text; get(`${id}-label`).textContent = labels[id === "live-power" ? "power" : id];
     }
-    for (const [id, role] of [["connection", "connector_state"], ["charging", "charging_state"]]) {
-      const stale = state(role)?.attributes.state_fresh === false;
-      get(id).style.opacity = stale ? "0.5" : "1";
-      get(id).title = stale ? (de ? "Letzter bekannter Zustand · aktuell nicht beobachtbar" : "Last known state · not currently observable") : "";
-    }
-    const errors = de ? {previous_off_unconfirmed:"Vorherige Wallbox: Ladefreigabe OFF nicht bestätigt.",previous_wallbox_unavailable:"Vorherige Wallbox nicht erreichbar.",previous_authority_unknown:"Steuerung der vorherigen Wallbox unbekannt.",battery_restore_pending:"Batteriereserve konnte noch nicht wiederhergestellt werden.",takeover_failed:"Steuerungsübernahme fehlgeschlagen.",wallbox_unavailable:"Wallbox nicht erreichbar.",off_unconfirmed:"Ladefreigabe OFF nicht bestätigt.",takeover_stale:"Steuerungsübernahme bitte erneut ausführen.",transition_failed:"Wallbox-Wechsel fehlgeschlagen."} : {previous_off_unconfirmed:"Previous wallbox: charging permission OFF not confirmed.",previous_wallbox_unavailable:"Previous wallbox unavailable.",previous_authority_unknown:"Previous wallbox authority unknown.",battery_restore_pending:"Battery reserve restoration pending.",takeover_failed:"Control takeover failed.",wallbox_unavailable:"Wallbox unavailable.",off_unconfirmed:"Charging permission OFF not confirmed.",takeover_stale:"Please take control again.",transition_failed:"Wallbox switch failed."};
-    const blocked = de ? {voltage_unavailable:"Keine aktuellen Spannungswerte. Messdaten der Wallbox prüfen.",capabilities_unavailable:"Technische Grenzen fehlen. Verbindung und Wallbox-Konfiguration prüfen.",direction_unreachable:"Sollleistung mit der gewählten Annäherung nicht erreichbar. Sollleistung oder Annäherung anpassen.",zero_current_unverified:"Nullleistung wird nicht bestätigt unterstützt. Ladefreigabe deaktivieren, um zu stoppen.",electrical_limit:"Kein Ladepunkt innerhalb der Stromgrenzen. Einstellungen prüfen.",no_eligible_mode:"Keine unterstützte Phasenkonfiguration verfügbar. Wallbox-Konfiguration prüfen."} : {voltage_unavailable:"No fresh voltage readings. Check wallbox metering.",capabilities_unavailable:"Technical limits unavailable. Check connection and wallbox configuration.",direction_unreachable:"Requested power cannot meet the selected approximation policy. Adjust power or approximation.",zero_current_unverified:"Zero-power control is unverified. Disable charging permission to stop.",electrical_limit:"No charging point within current limits. Check settings.",no_eligible_mode:"No supported phase configuration available. Check wallbox configuration."};
-    const messages = [errors[d.state?.attributes.ownership_status], blocked[attrs.control_status],
-      d.displayed && d.inventory[d.displayed]?.connected === false ? (de ? "Wallbox nicht verbunden. Verbindung prüfen." : "Wallbox disconnected. Check its connection.") : "",
-      d.active && !d.inventory[d.active] ? (de ? "Aktive Wallbox fehlt. Bitte Verbindung prüfen." : "Active wallbox missing. Check its connection.") : "",
-      ["error","write_unconfirmed"].includes(attrs.battery_status) ? (de ? "Batteriereserve konnte nicht gesetzt werden. Batterie prüfen." : "Could not set battery reserve. Check the battery.") : "",
-      attrs.enable_pending ? (de ? "Ladefreigabe vorgemerkt. Warte auf sichere Vorbereitung; erneutes Drücken ist nicht nötig." : "Charging enable pending. Waiting for safe preparation; no second press is needed.") : "",
-      !attrs.enable_pending && ["failed","unsupported","temporarily_rejected"].includes(attrs.command_status) && !["phase_lockout","observing"].includes(attrs.profile_status) ? (de ? "Ladeeinstellung nicht angewendet. Verbindung und Wallbox prüfen." : "Charging setting not applied. Check the connection and wallbox.") : "",
-      ({grid_waiting:de ? "NETZ-Startverzögerung läuft." : "Waiting for Grid start delay.",grid_expired:de ? "NETZ-Ladedauer abgelaufen." : "Grid charging duration expired.",profile_unavailable:de ? "Profil nicht verfügbar. Warte auf bestätigtes OFF für den Wechsel zu Netz." : "Profile unavailable. Waiting for confirmed OFF before falling back to Grid.",pv_start_delay:de ? "PV-Startverzögerung läuft." : "Waiting for PV start delay.",pv_stop_delay:de ? "PV-Stoppverzögerung: Laden mit Mindestleistung." : "PV stop delay: charging at minimum power.",measurements_unavailable: de ? "PV-Regelung pausiert: Messwerte fehlen, sind ungültig oder veraltet." : "PV regulation paused: readings are missing, invalid or stale.",waiting_battery_soc:de ? "Warte auf Speicher-SoC über dem Zielwert." : "Waiting for battery SoC above target.",stopped_battery_soc:de ? "Laden wegen niedrigem Speicher-SoC gestoppt." : "Charging stopped due to low battery SoC.",optimum_minimum_hold:de ? "PV Optimum hält die erreichbare Mindestladeleistung; Netzbezug ist möglich." : "PV Optimum holds the reachable minimum charging power; grid import may remain.",optimum_pause_pending:de ? "PV Optimum hält die Mindestleistung und prüft anhaltend zu geringe PV-Leistung." : "PV Optimum holds minimum power while checking sustained insufficient PV.",optimum_deliberate_pause:de ? "PV Optimum pausiert bewusst wegen anhaltend zu geringer PV-Leistung." : "PV Optimum deliberately pauses for insufficient PV.",optimum_no_positive_point:de ? "Kein sicherer positiver Ladepunkt innerhalb der elektrischen Grenzen." : "No safe positive charging point within electrical limits.",hard_budget_pause:de ? "Laden pausiert: Die verfügbare Leistung reicht nicht für den Mindeststrom." : "Charging paused: available power is below the minimum charging point.",hard_budget_unavailable:de ? "Laden pausiert, bis gültige Messwerte verfügbar sind." : "Charging paused until valid measurements are available.",grid_import_pause:de ? "Laden pausiert: Zu hoher Netzbezug bei Mindestladeleistung." : "Charging paused: excessive grid import at minimum charging power.",stop_delay_expired:de ? "Laden nach Ablauf der Stoppverzögerung pausiert." : "Charging paused after the stop delay expired.",paused_insufficient_pv:de ? "Laden wegen zu geringer PV-Leistung pausiert." : "Charging paused due to insufficient PV power."})[attrs.profile_status] || "",
-      attrs.profile_status === "error" ? (de ? "Ladeprofil fehlgeschlagen. Wallbox prüfen." : "Charging profile failed. Check the wallbox.") : ""].filter(Boolean);
-    get("status").textContent = messages.join(" "); get("status").hidden = !messages.length;
+    if (d.ambiguous) this.localWarnings.set("binding",{text:de ? "Mehrere Instanzen: entry_id in der Kartenkonfiguration angeben." : "Multiple instances: configure this card's entry_id.",raised_at:0});
+    else this.localWarnings.delete("binding");
+    this.renderMessage();
   }
   options(select, options) {
     const signature = JSON.stringify(options);
@@ -435,6 +565,6 @@ class WallboxManagerCard extends HTMLElement {
 }
 if (!customElements.get("wallbox-manager-card")) customElements.define("wallbox-manager-card",WallboxManagerCard);
 window.customCards = window.customCards || [];
-if (!window.customCards.some(c => c.type === "wallbox-manager-card")) window.customCards.push({type:"wallbox-manager-card",name:"Wallbox Manager",description:"Automatically discovered wallboxes and primitive charging profiles"});
+if (!window.customCards.some(c => c.type === "wallbox-manager-card")) window.customCards.push({type:"wallbox-manager-card",name:"Wallbox Manager",description:"Single-wallbox observations, explicit control and Grid profile"});
 
 })();

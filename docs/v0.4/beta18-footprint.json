@@ -1,0 +1,9 @@
+{
+  "tag": "v0.3.2-beta.18",
+  "commit": "87963014c9af73416c438807f523a3da2a98bd22",
+  "python_modules": 77,
+  "python_lines": 18097,
+  "card_lines": 441,
+  "python_test_lines": 32129,
+  "javascript_test_lines": 871
+}
