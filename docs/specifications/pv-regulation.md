@@ -1,3 +1,5 @@
+**25 October 2026 BALANCE STOP amendment (latest user decision):** The corrected EV step direction is **below** the ideal point to recharge the battery when SoC is below its target deadband, and **above** to discharge when SoC is above. BALANCE has two STOP causes: (1) the desired *positive* battery charging cannot be attained even at the currently feasible minimum positive EV charging point; (2) `SoC < T-H` (strict). This supersedes the old `SoC <= T-H/2` STOP threshold for the future battery PV controller, subject to the full SoC matrix below being reconciled. An updated Solcast forecast can jump the dynamic T across the new threshold immediately. This documentation is not deployed control behavior.
+
 **25 October 2026 configurable PV economics:** The formerly fixed 50 Wh economic import STOP is now the shared integration parameter `pv_grid_import_budget_wh` (**default 50 Wh**), per [PV-TUNE-01–10](pv-operating-point-response.md). References below to “50 Wh” mean the configured budget, default 50 Wh, except historical quotes. The accumulated Wh, M/2 comparison, >15 s reset, STOP provenance and economic restart inhibition remain unchanged. Explicit economic STOP overrides ordinary startup and reduction timing. Configuration changes do not themselves restart economic charging.
 
 **25 October 2026 shared point and EV-settling requirements:** [PV-STEP-01–06 / PV-RESP-01–08](pv-operating-point-response.md) specify NETZ-like phase-series navigation, one upward legal point every third eligible regulation cycle, a nominal-230-V measured-consumption 50% gate, and a mandatory ten-cycle ordinary optimization hold after 0 A → positive. These apply **identically to FAST and BALANCE**; independent user/SoC stop and economic 50 Wh priority are not silently suspended. FAST deadband is configurable, default ±100 W; the two legacy PV delay settings are removed, replaced by shared cycle-based timing parameters. See PV-TUNE-01–10.
@@ -137,17 +139,22 @@ Evidence: Explicit user decision of 17 October 2026; [decision history](decision
 
 `R + H <= T <= 100 - H`.
 
-Three thresholds:
+**Revised thresholds:**
 
-- `L = T - H/2` (lower STOP threshold)
-- `M = T + H/2` (condition for starting with PV surplus)
-- `U = T + H` (FAST entry threshold)
+- `S = T-H` — lower BALANCE / common SoC STOP boundary, with **strict** `SoC < S` as the new requested criterion.
+- `L = T-H/2` — **lower target deadband boundary**, no longer the common STOP threshold.
+- `M = T+H/2` — **upper target deadband boundary**; existing PV-start evidence threshold remains subject to matrix reconciliation.
+- `U = T+H` — FAST entry threshold.
+
+**Compatibility:** Historical PV-SOC-01/02 and `pv_soc.py` used `SoC <= L` as STOP. That threshold is **superseded by the latest user direction**, but the complete hysteretic state transition table, especially equality at S and the previously STOP state between S and L, must be revised before implementation. Do not simultaneously enforce both STOP thresholds. The revised full matrix is **OPEN FOR CROSS-CHECK**, not silently marked approved.
 
 Do **not** introduce separate configuration parameters for “hysteresis” and “buffer”.
 
 Evidence: PDF pp. 133–145, 148; `docs/pv-soc-policy.md`.
 
-### PV-SOC-02 – Complete matrix dependent on previous state [APPROVED]
+### PV-SOC-02 – Complete matrix dependent on previous state [HISTORICAL TABLE; REVISION REQUIRED]
+
+**Conflict disclosure (25 October):** The table immediately below represents the *previous* approved matrix, which used `SoC <= L` for STOP. New BALANCE policy instead requires STOP when `SoC < T-H` and/or economically infeasible battery recharge at the smallest positive technical EV point. The old table must **not** be implemented unchanged. Retain it for traceability until we agree the updated complete transition matrix; first define restart from STOP for `T-H <= SoC < T-H/2`, the equality condition, and how the new minimum-point STOP interacts with configured restart inhibition. The historical matrix follows:
 
 | Battery SoC | Previously STOP / paused / new session | Previously PV_BALANCE | Previously FAST_DISCHARGE |
 |---|---|---|---|
@@ -156,7 +163,7 @@ Evidence: PDF pp. 133–145, 148; `docs/pv-soc-policy.md`.
 | `M <= SoC < U` | PV_BALANCE **only** if `PV > household consumption excluding the selected EV`; otherwise STOP | Continue PV_BALANCE | Continue FAST_DISCHARGE |
 | `SoC >= U` | Start FAST_DISCHARGE | Switch to FAST_DISCHARGE | Continue FAST_DISCHARGE |
 
-The PV surplus condition is **start evidence**, rather than a continuous requirement to STOP in BALANCE. It is **not** a prerequisite for FAST_DISCHARGE (which is also possible at night). If SoC falls below L, the SoC STOP takes precedence over economic waiting periods. Exact thresholds and equality cases follow `docs/pv-soc-policy.md` and the matrix above.
+The PV surplus condition is **start evidence**, rather than a continuous requirement to STOP in BALANCE. It is **not** a prerequisite for FAST_DISCHARGE (which is also possible at night). **Historical rule superseded:** the previous SoC STOP at/below L is being replaced with the new strict `SoC < T-H` criterion; full state/restart matrix remains to be approved. The SoC policy STOP still takes precedence over ordinary ramp/startup delays. Exact thresholds and equality cases follow `docs/pv-soc-policy.md` and the matrix above.
 
 Evidence: PDF pp. 92–99, 133–145; `docs/pv-soc-policy.md`.
 
@@ -255,6 +262,22 @@ All battery-equipped PV profiles share **one** BALANCE law and entry/exit SoC ma
 `P_battery_charge_reserve` is the nonnegative portion provisionally reserved to let a below-target storage SoC recover; when target has been attained it should approach zero. **Its exact SoC-to-reserve curve is OPEN**; the expression is NOT approval to implement a new arbitrary proportional controller, fixed gain or a requirement to hold the battery at exactly 0 W continuously. Use actual EV power, not offered/requested power, to avoid feed-forward double counting. Feasible points, smoothing and persistence belong to the shared controller.
 
 Battery-flow control must have a valid **bidirectional** HA battery power source and SoC (see PV-ARCH-03). Charging and discharging sign/units must be verified. A discharge-only source reporting 0 W is **not evidence of positive battery charging**. No new mandatory PV-generation or total-household-consumption mapping is justified merely to populate the battery-first controller. If the required battery source is explicitly unavailable, stop issuing fresh BALANCE proposals; preserve manager release, OCPP ownership, and truthful state (PV-ARCH-03/07). Battery-free PV_SURPLUS continues via PV-ARCH-02, not this law.
+
+### PV-BAL-06 – Target deadband, discrete EV bias and STOP [25 October AGREED DIRECTION; transition details OPEN]
+
+Let `B = P_storage_charge - P_storage_discharge`, with separate valid Fronius entities where one of the two nonnegative readings is zero. Positive B means battery charging; negative B discharging. Derive the instantaneous unquantized ideal EV point from actual EV power and B, **without assuming absent sensor data equals zero**. Then compare observed SoC against the **SoC deadband** `[T-H/2, T+H/2]`:
+
+- **Below** `T-H/2`: choose one feasible EV current step **below the ideal** (not above), leaving a small positive charging surplus for the home battery.
+- **Inside** the band, including endpoints: choose the ideal feasible EV point without a deliberate additional battery charge/discharge bias.
+- **Above** `T+H/2`: choose one feasible EV current step **above the ideal**, deliberately allowing slow battery discharge toward T. This is BALANCE behavior in the hysteretic state range; FAST takeover still occurs at U under the common state machine.
+
+Apply the existing 230 V nominal phase/current lattice and **phase-series retention** from PV-STEP-01–06; no cross-phase nearest-point search just to achieve a nominally finer bias. The ideal point is calculated at each regulation tick, but actual upward request changes still obey the common cycle interval and EV consumption threshold; ordinary reductions obey the configured decrease delay and startup hold. STOP/economic/authority overrides remain effective. A discrete phase step (230 W 1p or 690 W 3p at 1 A) is not an independently controlled exact battery charging power; battery/inverter loads can respond nonlinearly.
+
+**BALANCE STOP criterion A (charging infeasible):** If SoC is below the target deadband and **the intended positive battery-charging direction cannot be achieved even after offering the smallest *currently feasible* positive EV operating point**, request 0 A via the common PV policy instead of continuing to drain storage. Do not confuse “storage charge not yet measured after a change” with “impossible”: the test needs a response-observed or otherwise causally supported condition, phase-lockout-aware minimum and the already defined command/start settling. A speculative computed battery flow is not proof. **OPEN:** exact persistence or evidence criterion for deciding infeasibility (rather than a temporary cloud/load fluctuation) and positive restart eligibility.
+
+**BALANCE STOP criterion B (SoC lower bound):** If **`SoC < T-H`**, request SoC-policy STOP independently of whether minimum charging could restore the battery. Equality at `SoC = T-H` does not itself trip this strict test. This may be crossed unexpectedly if PV_OPTIMUM raises T sharply on Solcast forecast changes or raises it faster than SoC can follow. At fixed T, criterion A should normally stop earlier, but this is an intended operating hypothesis, not proof that criterion B is unreachable under all source/measurement disturbances.
+
+**Needs final state-machine reconciliation:** This criterion B supersedes the old `SoC <= T-H/2` STOP in PV-SOC-01/02, and criterion A introduces an additional BALANCE STOP cause. A STOP triggered by A at fixed T cannot be immediately auto-restarted solely because SoC remains above the numeric lower limit; define a coherent re-entry test and retain release, economic STOP history, phase response and no uncontrolled STOP/restart oscillation. No extra generic per-cycle STOP event may be added outside the canonical state machine.
 
 ### PV-BAL-02 – Stable adjustment and economic grid fallback [REVISED AGREED DIRECTION]
 
