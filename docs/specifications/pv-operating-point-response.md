@@ -2,7 +2,7 @@
 
 **Decision record:** 25 October 2026, operator's FAST discussion with explicit applicability to **both FAST and BALANCE**. **Status:** agreed FAST/BALANCE response and adjustable regulation parameters. Follow-up decision: the economic import-budget STOP overrides the 0 A startup hold; grid correction deadband defaults to ±100 W. Overall PV V3 remains DRAFT; documentation only.
 
-IDs: PV-STEP-01–06, PV-RESP-01–08, PV-TUNE-01–11.
+IDs: PV-STEP-01–06, PV-RESP-01–08, PV-TUNE-01–12.
 
 ## Common operating points (FAST and BALANCE)
 
@@ -62,11 +62,11 @@ Let `G = P_grid_import - P_grid_export` (+ import; − export). When `-pv_grid_d
 | --- | --- |
 | WBM-GRID-31–39, backend `grid_point.Envelope.navigate()` | Reuse phase-first technical **series** navigation, allowed modes/limits and nominal 230 V points. No universal nearest-watt phase switching; no new frontend solver. |
 | PV-FAST-01/03/04 | Adopt configurable upward cadence (default three cycles) and configurable EV-uptake test (default 50%); replace historical all-source generation lock for every increase. Preserve one outstanding action and legitimate immediate economic reduction after startup. |
-| PV-BAL-01–03 | The same ramp rate, technical navigation, startup exception and consumed-power gate apply to BALANCE, not a separate BALANCE increase policy. The later SoC target-recovery design remains separate and OPEN. |
-| PV-SOC-01–03 | Shared SoC matrix unchanged. Mandatory independent SoC policy STOP is not disabled by settling. |
+| PV-BAL-01–03 | The same ramp rate, technical navigation, startup exception and consumed-power gate apply to BALANCE, not a separate BALANCE increase policy. The target recovery step and shared SoC transitions are specified in PV-BAL-06 and PV-SOC-02. |
+| PV-SOC-01–03 | The revised strict S/L/M/U SoC matrix in PV-SOC-02 governs STOP/re-entry; no historical SoC<=L STOP. |
 | PV-ARCH-05–09, WBM-ARCH-01–12 | One clocked PV decision from held valid observations; no new sensor TTL, regulator loop, station safety system or duplicate per-event control pass. |
 | PV-ECO-01–09 | The economic STOP uses configured `pv_grid_import_budget_wh` (default 50 Wh), with unchanged scope, accounting, reset and restart provenance. It **overrides** startup/reduction timing, as explicitly approved. |
 | WBM-PV-RELEASE-01–07 | The manager Start/Stop gate and independent 0 A pause remain unchanged. |
-| PV-DIAG-01–10 | Log changed requested phase/current/SoC modes and relevant decision reason, including the 50%/10-tick settling **transition** when decision-driving; never log each identical tick. |
+| PV-DIAG-01–10 | Log changed requested phase/current/SoC modes and relevant decision reason, including configured EV-uptake/startup-hold **transitions** when decision-driving; never log each identical tick. |
 
-**Scope:** This document establishes the shared FAST/BALANCE operating-point and response design. It does not complete the separate BALANCE SoC/recharge law or the non-D economic restart design, and it authorizes **no** code/release/deployment change.
+**Scope:** This document establishes the shared FAST/BALANCE operating-point and response design. The BALANCE SoC/recharge law and non-D economic restart are now specified in PV-BAL-06/07 and PV-ECO-08. This document authorizes **no** code/release/deployment change; numerical replay and technical mapping verification remain.
