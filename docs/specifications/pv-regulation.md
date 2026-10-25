@@ -1,3 +1,5 @@
+**25 October 2026 agreed redesign direction — not yet an implementation authorization:** the operator accepted a simpler, shared three-profile PV regulator: preserved profile-specific target SoC, grid-point-led FAST with bounded active exploration, battery-power-led BALANCE with SoC recovery and a grid economic fallback, and withdrawal of the former configurable maximum storage-discharge power as an ordinary controller budget. Sections PV-FAST-01–04, PV-BAL-01–05, PV-ECO-06/08, PV-QA-01–03 and the cross-cutting review below are updated accordingly. Exact ramp/deadband/SoC recovery and post-50-Wh restart rules remain explicitly **OPEN**. The related [Level-2 decision diagnostics contract](pv-decision-diagnostics.md) is a documentation target, not deployed behavior. This is an individually approved architectural direction within an overall **DRAFT** V3; no release or implementation is authorized by this document.
+
 **Implemented feature-branch supersession (24 October 2026):** [charge-release.md](charge-release.md) and [implementation report](../coordinated-control-redesign.md) govern manager release, unified NETZ actions, authority-independent hardware enable, and removal of WBM automatic wake-up control. Conflicting older clauses below are historical. PV regulation algorithms remain deferred.
 
 **Narrow approval (24 October 2026):** [WBM-PV-RELEASE-01–07](charge-release.md) introduce a separate operator-controlled manager `charge_release` gate for the future PV profiles: manual Start/Stop, a computed 0 A while release is true is not an operator stop, and each profile change resets release to false. These requirements supersede only conflicting charging-permission/start-stop UI wording below. The broader PV V3 regulator and economics remain DRAFT pending separate approval.
@@ -15,11 +17,11 @@ and readback language below cannot reinstate those obligations. Actual/requested
 state, source/response causality for optimization, economic policy and authority,
 intent, transaction and generation fencing remain distinct. **V3 stays DRAFT.**
 
-**Updated:** 18 October 2026 (architecture precedence); original source reconciliation: 13 October 2026
+**Updated:** 25 October 2026 (FAST/BALANCE redesign direction, logging and open issues); architecture precedence: 18 October 2026; original source reconciliation: 13 October 2026
 
 **Reference:** `wallbox-manager` v0.3.2-beta.13 (release commit `aaef76d41295cf0b0255933f72b6d65448f6864a`), GitHub branch `develop` / release tag `v0.3.2-beta.13`
 
-**Work type:** Source reconciliation, English migration and separately approved PV-OCPP-04 (15 October) and PV-ARCH-05–08 (16 October) decisions; documentation only, no control-software, HA or station change.
+**Work type:** Source reconciliation, English migration, approved independent decisions and 25 October 2026 shared-regulator redesign review; **documentation only**, with no control-software, HA or station change.
 
 **Primary sources:** User-supplied PDF printout *Wallbox Modbus-Abendauswertung* (619 pages, discussion of 4–12 October 2026), particularly pp. 1–19, 67–83, 92–119, 132–148, 209–246, 266–320, 401–449, 460–480, 501–528, 529–545 and 566–619; repository documents, **especially the latest** `docs/pv-grid-import-policy-design.md` from `v0.3.2-beta.13` (see source list below). PV-OCPP-04 is sourced separately to the explicit user approval of 15 October 2026, recorded in the [decision history](decision-history.md#15-october-2026--charging-permission-connection-readiness-and-recovery-approved).
 
@@ -33,7 +35,9 @@ intent, transaction and generation fencing remain distinct. **V3 stays DRAFT.**
 - **OBSERVED:** Finding from a hardware log or discussion. Without comparison against the target specification, this does not authorize a change.
 - **OPEN:** No binding threshold or proven cause exists. Do not introduce an arbitrary new rule.
 
-**Precedence in a conflict:** (1) Latest explicitly confirmed decision in the discussion → (2) its detailed, approved realization in the beta.13 design/review report → (3) older current specifications that have not been superseded → (4) older draft/implementation reports as history. This precedence governs the **target behavior contract**; actual behavior and code require separate assessment. The 15 October 2026 decision supersedes only the permission-preparation dependency specified in PV-OCPP-04. The 16 October 2026 decisions specify event-fed input and one clocked PV regulator (PV-ARCH-05–08), count-based smoothing (PV-BAL-03), approximate 50 Wh detection (PV-ECO-09), and **explicitly replace the former 10-second measurement-report gap rule** with last-value-held validity (PV-ECO-05). Ordinary unchanged values remain valid until explicitly invalid, not merely until a report deadline. This does not remove the independent OCPP safety, command-acknowledgement, permission, transaction, physical evidence or economic recovery requirements. Neither decision approves the overall V3 draft.
+**Precedence in a conflict:** (1) Latest explicitly confirmed decision, including the 25 October 2026 FAST/BALANCE direction → (2) its detailed, approved realization in the beta.13 design/review report → (3) older current specifications that have not been superseded → (4) older draft/implementation reports as history. This precedence governs the **target behavior contract**; actual behavior and code require separate assessment. The 15 October 2026 decision supersedes only the permission-preparation dependency specified in PV-OCPP-04. The 16 October 2026 decisions specify event-fed input and one clocked PV regulator (PV-ARCH-05–08), count-based smoothing (PV-BAL-03), approximate 50 Wh detection (PV-ECO-09), and **explicitly replace the former 10-second measurement-report gap rule** with last-value-held validity (PV-ECO-05). Ordinary unchanged values remain valid until explicitly invalid, not merely until a report deadline. This does not remove the independent OCPP safety, command-acknowledgement, permission, transaction, physical evidence or economic recovery requirements. Neither decision approves the overall V3 draft.
+
+**25 October precedence:** The newly revised PV-FAST/BAL clauses supersede older D-limited power-regulation and all-source-generation increase gates **only for future PV regulator implementation**. The unchanged PV-SOC, PV-PLAN, PV-ECO-01–05/07/09, WBM-ARCH and WBM-PV-RELEASE provisions retain their own scope. The unresolved PV-ECO-08 restart test and signed battery measurement contract must be resolved **before commissioning active PV control**.
 
 **For every future change:** Identify the requirement ID, unchanged/superseded target behavior, observed actual behavior, deviation, effects on other IDs, concrete test cases, expected diagnostic evidence and, where applicable, *explicit* approval of a target-behavior change. No iteration may silently discard an approved requirement merely because a new log exists.
 
@@ -43,7 +47,7 @@ intent, transaction and generation fencing remain distinct. **V3 stays DRAFT.**
 
 ### PV-ARCH-01 – Shared regulator with a home battery [APPROVED]
 
-All three PV profiles with a home battery use **one shared** SoC state machine, FAST/BALANCE power regulation, technical operating-point selection, economic 50 Wh logic and OCPP execution. The profiles differ primarily **in their choice of battery target SoC T**, rather than using three separately copied power regulators. **PV_MAXIMUM and PV_SURPLUS must produce identical charging decisions and OCPP operating points when T and all other parameters are identical.**
+All three PV profiles with a home battery use **one shared** SoC state machine, FAST/BALANCE power regulation, technical operating-point selection, economic 50 Wh logic and OCPP execution. The profiles differ **only in selecting the profile-dependent target SoC T** for this common regulation path; they must not implement separate FAST/BALANCE policies, tuning or divergent OCPP behavior. **PV_MAXIMUM and PV_SURPLUS must produce identical charging decisions and OCPP operating points when T and all other parameters are identical.**
 
 Evidence: PDF pp. 19, 24, 134–145, 579–583; `docs/pv-soc-policy.md`, `docs/pv-grid-import-policy-design.md`.
 
@@ -67,6 +71,7 @@ Evidence: PDF pp. 575–580, 583, 608–609, 611–612; `docs/pv-grid-import-pol
 - **16 October approved clarification:** A PV profile lacking any mandatory currently valid input cannot perform new PV regulation. Only profiles using the missing input are affected. An independently configured battery-free `PV_SURPLUS` can remain eligible when valid grid import/export and selected EV power remain available, even without BYD SoC. **NETZ remains operational without Fronius, Smart Meter, PV or BYD HA measurements** when its own OCPP connection, verified authority, permission, capability and user prerequisites are met. Never automatically change from PV to NETZ or invent a missing measurement. Handling an already charging PV session when mandatory input becomes unavailable follows the existing safe execution/STOP rules; no new unconditional emergency permission-OFF or automatic NETZ fallback is approved.
 
 Evidence: PDF pp. 575–580, 609; `docs/pv-optimum-design.md`, `docs/pv-grid-import-policy-design.md`.
+**25 October measurement-contract change (direction approved; mapping design pending):** FAST uses the measured **signed grid exchange** (positive import, negative export) and selected EV actual power as its primary feedback; ordinary SoC and common eligibility remain required. BALANCE needs **bidirectional home-battery power** (charge positive, discharge negative) and valid SoC, plus measured grid exchange for the existing economic import policy and corrective fallback. The existing `storage_discharge_power` mapping is discharge-only and cannot by itself represent battery charge. Choose a single explicitly signed HA source or a correctly combined charge/discharge pair, after verifying the installed Fronius source semantics, units, sign and availability; do **not** infer charge from zero discharge or silently add a required PV/household production sensor. The mapped configuration and migration remain an implementation design decision. Battery-free PV_SURPLUS retains its exact special-case contract PV-ARCH-02. NETZ remains entirely independent.
 
 ### PV-ARCH-04 – Ownership boundary [APPROVED]
 
@@ -205,80 +210,63 @@ Evidence: PDF pp. 37–52, 101–119; `docs/pv-optimum-design.md`.
 
 ---
 
-## 4. FAST_DISCHARGE – Using battery headroom
+## 4. FAST_DISCHARGE – Grid-point-led utilization (25 October direction)
 
-### PV-FAST-01 – Purpose and baseline [APPROVED]
+### PV-FAST-01 – Purpose and bounded active exploration [REVISED AGREED DIRECTION]
 
-From U upwards, the vehicle should promptly, **but in a controlled manner**, use the permitted battery discharge power available **in addition to current household load**. Do not impose a blanket 9 A limit. With actual headroom evidence, regulation should increase beyond the minimum point. Full utilization down to the last watt is **not** a quality promise; a justified conservative reserve was explicitly accepted (beta.10 practical test, PDF p. 476).
+Once the shared SoC state machine admits FAST (including at night above its threshold), FAST should **actively seek more useful EV charging power**, even when net grid exchange is already approximately 0 W and the battery is presently supporting household or EV demand. Do not wait for positive export as the sole reason to increase. Grid exchange is the **primary regulating feedback**: import is positive, export negative. Evaluate signed grid exchange and actual selected EV power from the canonical snapshot once per configured PV tick. Use the existing feasible 1p/3p operating-point solver and station proposals, not independently calculated electrical safety limits. No FAST sub-profile.
 
-### PV-FAST-02 – The configured discharge limit is economic [APPROVED; important correction to V2]
+An **active exploration step** is allowed only while SoC/profile/manager release, common economic restart, authority/transaction eligibility and ordinary OCPP command/response state permit it. Do not stack unacknowledged setpoint changes or assume an offered current equals measured charging. Once a candidate has been sent, allow asynchronous physical response to settle for optimization; keep progressing at subsequent eligible ticks even if unrelated *unchanged valid* HA sources produce no new report. Do not require all source generation counters to advance to make any new upward progress. A limit/rejection or repeated unsatisfied response is not permission to blindly increase.
 
-The user-specific battery-discharge limit `D` (e.g. 3,500 or 4,500 W in tests) is **the ordinary economic budget for total actual battery discharge**, including other household load. It is **not a physical battery protection cutoff that WBM can guarantee**. Ordinary positive operating points above the minimum must respect this budget. **At exactly the smallest technically executable positive operating point**, it may temporarily be exceeded as a *narrow economic exception*; the shared 50 Wh decision then limits economic continuation solely through **actual measured grid import**. Actual current, phase, device/inverter safety limits must never be relabeled “economic” and bypassed.
+### PV-FAST-02 – No configurable battery-discharge budget [REVISED AGREED DIRECTION; replaces old economic D]
 
-Evidence: PDF pp. 568–571; `docs/pv-grid-import-policy-design.md`, decision hierarchy. **Note:** 50 Wh refers exclusively to **grid import**, rather than battery-discharge energy.
+The former `optimum_max_discharge_w` / `D` is **not used as a positive EV-power ceiling, FAST ramp authorization, BALANCE cap or economic STOP exception**. WBM does not guarantee a maximum instantaneous physical battery discharge; installed battery/inverter controls and Stationary retain their respective physical limits. FAST instead follows valid SoC thresholds and the measured grid-point correction plus the common measured-import 50 Wh economic policy. Brief grid/SoC deviations are optimization effects to correct in subsequent ticks, **not** a new WBM hardware-safety violation.
 
-### PV-FAST-03 – Temporal feedback and asymmetry [APPROVED]
+**Compatibility/migration:** Preserve the existing HA Number entity identity, service contract and persisted value initially for compatibility, mark it deprecated and unused by the **new** PV control policy; remove/retire it only in a separately reviewed migration decision. This supersedes the 24 October UI-only removal as to future **functional use**, not as to the currently shipped beta.16 behavior. Never interpret the old saved value as a new zero-current safety constraint.
 
-- Measured EV power is **not** the offered or acknowledged OCPP setpoint.
-- A new increase requires enough **new** relevant source information and the defined evidence of physical response; repeated HA reports alone must not fabricate an upward ramp.
-- Each measurement generation is used at most once as new evidence for an increase. No further ordinary increase while a current change remains unanswered.
-- **Increase slowly; reduce quickly and sufficiently** for uncovered grid import, actual budget exceedance or consumption/PV steps. A safety reduction must not wait for an increase timer.
-- Existing response/settling and grid-import tolerances of the functional FAST policy remain in force **except where explicitly superseded by the newer shared 50 Wh STOP policy**.
-- No new universal fixed 20/30 s increase interval or “+1 A per measurement report” without evidence that it fits this architecture.
+### PV-FAST-03 – Asymmetric response and grid correction [REVISED AGREED DIRECTION]
 
-Evidence: PDF pp. 31–40, 209–246, 266–320, 400–426; `docs/beta9-implementation-report.md`, `custom_components/wallbox_manager/pv_regulators.py`.
+- A modest import/export **deadband** prevents constant one-ampere hunting. FAST increases in controlled discrete feasible steps; the rate/step/band are shared settings or well-documented controller constants, **not per-profile parameters**. Their exact numeric tuning is OPEN, to be established with replay and hardware measurements.
+- If observed grid import rises materially, reduce quickly, potentially by multiple feasible current steps relative to the actual observed EV power, rather than blindly subtracting 1 A per tick. A short inverter/battery response transient is tolerable, but continuing economic grid import is corrected and is still accounted toward the nominal 50 Wh rule. No separate instantaneous grid-import STOP timer.
+- Use one canonical per-tick snapshot. Respect asynchronous request/accepted/confirmed/measured distinctions and the current-generation command fences; *confirmation* is not measured load response. A prompt downward correction need not wait for the upward-ramp timer or every unrelated measurement to refresh.
+- An unchanged valid observation may be reused on successive regulation ticks; no fake new sensor report is created. Prevent upward runaway by at most one outstanding intended change, observed response/settling evidence and a bounded exploration cadence rather than historical all-source generation locks.
+- Do not add a second feedback loop, parallel grid-correction task or manager-side hardware safety state machine.
 
-### PV-FAST-04 – Measurement discipline and hard operating-point limits [TECHNICALLY SPECIFIED]
+### PV-FAST-04 – Technical points, limits and economics [REVISED DIRECTION; details OPEN]
 
-The beta.9 budget calculation uses fresh raw power measurements, a 100 W economic uncertainty reserve, source generations, a conservative EV baseline for asynchronous EV/site measurements and separate feedback following OCPP confirmation. A positive target power alone must not bypass discrete current/phase limits or the currently valid **ordinary** power ceiling. Minimum-exception evidence is restricted **exactly to the technical minimum**, rather than other operating points or unconfirmed physical state. The newer beta.13 policy replaced economic minimum STOP with 50 Wh; this must be explicitly accounted for when applying the original beta.9 formulas.
+Shared electrical candidate selection (including actual offered/applied distinctions), phase-change handling, physical response observations and Stationary protection remain intact. Existing `PV-ECO-01–07/09` nominal 50 Wh import accounting is unaffected by removing `D`. The former rule “only the technical minimum may exceed D” is obsolete because D no longer exists; any technical minimum exception is now an **economic continuation/STOP decision**, not permission to exceed physical limits. `PV-ECO-08` restart math must be re-specified before automatic post-economic-STOP restart can be implemented; no stale D formula or unconditional reset-based restart.
 
-Evidence: `docs/beta9-implementation-report.md`, `docs/pv-grid-import-policy-design.md`.
+**Design basis, not imported code:** WBM v0.3.2-beta.18 `pv_regulators.py` provided overly tight generation/response and discharge-budget coupling; `wallbox-stationary` `services/dynamic_amps.py` + `control/amps.py` demonstrate a simpler tick/feedback structure but do not fully solve active grid-zero exploration or phase selection. openWB software2 PV charging documents the EVU/grid exchange as a central control input with storage priorities, **not** a universal storage-only or grid-only controller; see the source review below.
 
----
+## 5. PV_BALANCE – Battery-flow-led target maintenance (25 October direction)
 
-## 5. PV_BALANCE – Surplus utilization and stability
+### PV-BAL-01 – Common battery-flow feedback [REVISED AGREED DIRECTION]
 
-### PV-BAL-01 – Battery configuration [APPROVED]
+All battery-equipped PV profiles share **one** BALANCE law and entry/exit SoC matrix. BALANCE responds primarily to the **signed measured battery power**: positive means battery charging and permits more EV demand; negative means battery discharging and calls for less EV demand. As a conceptual **unsaturated** starting point:
 
-With a home battery, shared power regulation applies. `PV_BALANCE` follows available surplus, accounts for measured **total consumption including the selected wallbox**, and corrects for **its actual charging power**, without incorrectly subtracting other EVs:
+`P_EV_candidate = P_EV_actual + P_storage_signed - P_battery_charge_reserve`
 
-`P_Balance = P_PV - P_Gesamtverbrauch_inkl_ausgewählter_EV + P_ausgewählte_EV_ist`.
+`P_battery_charge_reserve` is the nonnegative portion provisionally reserved to let a below-target storage SoC recover; when target has been attained it should approach zero. **Its exact SoC-to-reserve curve is OPEN**; the expression is NOT approval to implement a new arbitrary proportional controller, fixed gain or a requirement to hold the battery at exactly 0 W continuously. Use actual EV power, not offered/requested power, to avoid feed-forward double counting. Feasible points, smoothing and persistence belong to the shared controller.
 
-The original formula identifiers are retained: balance power = PV power − total consumption including the selected EV + actual power of the selected EV.
+Battery-flow control must have a valid **bidirectional** HA battery power source and SoC (see PV-ARCH-03). Charging and discharging sign/units must be verified. A discharge-only source reporting 0 W is **not evidence of positive battery charging**. No new mandatory PV-generation or total-household-consumption mapping is justified merely to populate the battery-first controller. If the required battery source is explicitly unavailable, stop issuing fresh BALANCE proposals; preserve manager release, OCPP ownership, and truthful state (PV-ARCH-03/07). Battery-free PV_SURPLUS continues via PV-ARCH-02, not this law.
 
-Where the economic battery allocation calls for BALANCE without intentional battery discharge, the renewed economic assessment uses `D = 0`. For battery-free `PV_SURPLUS`, **PV-ARCH-02** applies instead of this additional PV/consumption mapping contract.
+### PV-BAL-02 – Stable adjustment and economic grid fallback [REVISED AGREED DIRECTION]
 
-Evidence: PDF pp. 19–27, 579–583; `docs/pv-optimum-design.md`, `docs/pv-grid-import-policy-design.md`.
+A small charge/discharge deadband and optional tick-based smoothing can prevent oscillation. Positive corrections are controlled; meaningful negative battery flow or material grid import reduces demand sufficiently promptly. **Grid exchange remains an independent economic guard and corrective fallback, not a competing per-tick second controller**: a battery at its own discharge limit or holding at 0 W can coincide with grid import; BALANCE must not claim that 0 W battery flow alone proves an economically acceptable operating point. The grid import observation feeds the shared 50 Wh estimate; any grid-based correction must be composed into the **same** target decision with a single reason and single request. Do not react to every tiny sign change, substitute raw PV minus household load as the new primary law, or copy historical FAST response/generation gates into BALANCE.
 
-### PV-BAL-02 – Asymmetric, stable regulation [APPROVED]
+A SoC below T should preferentially allow PV energy to recharge storage; do not consume all available charging power in the EV and indefinitely strand storage below T. How much positive storage charging is reserved, when BALANCE may continue from hysteresis L..U, and the response near T are **OPEN quantitative design parameters**, subordinate to the existing L/M/U state matrix. No new independent SoC STOP threshold is approved.
 
-Wallbox power should increase only in a controlled manner, but **decrease promptly and as needed** for real power deficits, clouds and sudden household loads. Do not counteract every apparent sensor step or the delayed measurement pattern created by the wallbox's own commands. Repeated measurement combinations and unmeasured OCPP responses must cause neither unjustified increases nor repeated frantic direction changes. Measurement freshness, source generation, actuator response and temporal asynchrony must be treated **separately**.
+### PV-BAL-03 – Regulation-cycle smoothing [UNCHANGED APPROVED METHOD; INPUT ADAPTATION OPEN]
 
-**Actual-implementation review point:** Sophisticated beta.9 source/response discipline is well developed in the documented `FastDischargeRegulator`; whether `PV_BALANCE` is equally protected across all currently relevant regulator paths requires assessment against beta.13 code and the pv6 log. This **does not authorize** copying FAST logic or changing STOP policy.
+Keep the approved **regulation interval in seconds** and independent integer smoothing length **N in PV cycles** (`N=1` off), with correctly versioned migration from the legacy seconds-based `power_smoothing_window` option. In the new battery-first law the previous mandatory `PV + total-household-consumption` smoothing scope no longer matches the primary inputs. Adapt smoothing, if needed, **only to an expressly selected optimization-only battery-power/EV-preference path**; never smooth SoC thresholds, unsmoothed grid-import energy evidence, authority, OCPP response or urgent downward corrections. Whether battery power needs smoothing, and its default N, remain **OPEN**; do not silently reinterpret or remove persisted configuration.
 
-Evidence: PDF pp. 209–246, 401–426, 529–535, 540–545; hardware test `pv6` current at the original reconciliation.
+### PV-BAL-04 – One common 50 Wh economic STOP policy [UNCHANGED APPROVED]
 
-### PV-BAL-03 – Freshness and smoothing [APPROVED; revised 16 October 2026]
+The historical 90-second deficit STOP, separate 10-second import STOP and instantaneous discharge-limit economic stop remain superseded. BALANCE and FAST use **only** the common measured-import 50 Wh rule for economic OFF, in addition to independent SoC/intent/OCPP conditions. `pv_stop_delay` is legacy persisted compatibility state, **not** a second economic timer.
 
-**Revised requirement (16 October 2026):** The **regulation interval** remains independently configurable **in seconds** (for example 5 s). Replace the previous smoothing **time window in seconds** with **"Power smoothing – number of regulation cycles"**, an integer N >= 1. On each PV regulation tick, sample the current valid PV and household/consumer power once and calculate their rolling mean across at most the most recent N tick samples. **N=1 means no smoothing**; **N=3 with a 5 s tick** corresponds to three samples over approximately 15 s. N remains the same if the user changes the regulation interval. Do not smooth SoC, EV response, grid-import economic evidence, voltage or safety/physical proof; averaging must not hide prompt necessary downward adjustment. A cached sample reused on a tick is not a new physical measurement generation.
+### PV-BAL-05 – Acceptance criteria to resolve [OPEN]
 
-**Migration:** The existing option `power_smoothing_window` currently stores **seconds**, with 0=off and a default of 5 s. A stored 5 s value must **not** be interpreted as five regulation ticks (25 s at T=5 s). The implementation must migrate the units using a versioned option or new key, preserving comparable effective behavior wherever possible. With the revised count semantics N=1 replaces legacy 0=off. Any change of the factory default requires a separate explicit decision.
-
-**Historical rule superseded:** The earlier seconds-based time-weighted window was approved as an existing parameter; it is deliberately superseded here. The existing PV-only and household-only smoothing scope and the separate configurable regulation interval are retained.
-
-Evidence: PDF pp. 31–40, 209–246, 529–535; `README.md` (Regulation parameters).
-
-### PV-BAL-04 – Shared economic STOP policy only [APPROVED]
-
-The old BALANCE/SURPLUS “90 seconds of continuously insufficient surplus” STOP is **replaced by the shared 50 Wh rule** wherever its measured grid-import evidence exists. The configuration value `pv_stop_delay` may remain stored for compatibility, but is **no longer the economic STOP timer**. Distinguish this from ordinary SoC STOPs, physical zero-current OFF and technical startup restrictions.
-
-Evidence: PDF pp. 542–545, 566–600, 606–613; `docs/pv-grid-import-policy-design.md`.
-
-### PV-BAL-05 – Review criteria for the next hardware iteration [OPEN]
-
-Reliable quantitative limits for direction changes per unit time, correction time following a load step, minimum potential required for an increase or maximum acceptable PV-surplus losses have **not** been agreed. These will be defined only after measurement/causality analysis. The already approved qualitative asymmetry remains binding.
-
----
+Quantify acceptable current reversals after simulated PV/household steps, load-step settling, battery power integral/SoC recovery toward T, allowed grid import before correction and behavior when storage is charging, holding, constrained or discharging. Test zero-ampere/start transitions, active response and phase lockouts. The initial replay must demonstrate a **non-oscillating response to the wallbox's own load change**, including source lag and last-value-held inputs, and no sustained grid import simply because the battery is holding at 0 W.
 
 ## 6. Technical minimum, phase restrictions and OCPP
 
@@ -558,13 +546,11 @@ During valid, actively eligible PV charging, the regulator uses current **unsmoo
 
 **Supersession:** Later explicit [16 October decision](decision-history.md#16-october-2026--remove-10-second-metering-gap-rule-and-separate-profile-availability-approved) replaces the formerly APPROVED and TECHNICALLY SPECIFIED 10-second accounting contract. Earlier tagged sources and decision-history quotations remain historical evidence, not parallel active policy.
 
-### PV-ECO-06 – Narrow technical-minimum exception [APPROVED]
+### PV-ECO-06 – Economic minimum continuation without D [REVISED DIRECTION; exact recovery OPEN]
 
-**18 October precedence:** WBM-ARCH-09/11 supersedes the physical pre-send recheck below. M is a policy/optimization estimate from held observations and station outcomes, not an independent safety certification.
+**18 October WBM-ARCH-01/09/11 precedence remains binding:** Stationary owns electrical safety; WBM owns economic policy. With the former discharge budget `D` withdrawn, there is no longer an “above D only at exactly M” test. A technically feasible positive minimum is still relevant when balancing a brief import against a costly zero-current pause/restart; continuation at a lawful requested minimum is governed by valid SoC/manager-release/authority/transaction eligibility and the **same** 50 Wh grid-import policy. Do not react to grid import with a separate immediate STOP merely because storage power momentarily exceeds an arbitrary old D. This does not expand hardware current or phase limits, or bypass confirmed command/response distinctions.
 
-If the ordinary economic budget permits no positive point, an **already permitted** charging process may continue at **exactly M**, even if this temporarily exceeds `D`; **no arbitrarily higher point** may invoke this exception. Startup-response reserve, OFF-response evidence, SoC/profile thresholds, actual current/phase limits and authority/OCPP fences remain mandatory. Recheck correct physical determination of M before sending. Economic continuation ends only through the 50 Wh rule or an **independently valid** other STOP reason.
-
-**15 October boundary:** These conditions govern manager operating-point control and economic continuation. They are not a transaction-bound preparation prerequisite for general permission under PV-OCPP-04. Temporarily retained legal startup current is separately permitted there; it is not an expansion of the exact-M economic exception or authorization to bypass existing STOP/restart inhibition.
+**OPEN:** The behavior when the currently calculated economic preference lies below the technical minimum, including continuation vs 0 A at the moment of a newly permitted start, must be verified with the already approved WBM-PV-RELEASE-02/03 and existing phase/restart consequences. No additional minimum-exception control branch may be invented without tests.
 
 ### PV-ECO-07 – STOP provenance and transaction binding [APPROVED + TECHNICALLY SPECIFIED]
 
@@ -572,24 +558,13 @@ Grid-import energy, activity/pending/in-flight/paused state, STOP cause and rest
 
 Under PV-OCPP-04, general permission without a real transaction creates no accounting scope and clears no history. The approved Q1/Q2 decisions in [section 6.4.4](#644-transaction-bound-control-and-economic-accounting) require prospective real-transaction-scoped observational accounting, reconciled persisted history and explicit diagnosis of accepted unattributed flow; no retrospective pre-identity replay or reset is authorized. Observational activation cannot authorize restart or clear STOP provenance. Recovery inhibition of automatic positive points does not mean general permission must await transaction preparation.
 
-### PV-ECO-08 – Automatic economic restart [APPROVED]
+### PV-ECO-08 – Automatic economic restart after 50 Wh [REVISED DESIGN OPEN; prior eligibility invariants retained]
 
-A decrease in grid import alone, a mere 15 s budget reset, a new measurement event or expiry of a waiting period causes **no** restart following economic STOP. Restart additionally requires **all** profile/SoC/authority/permission/transaction/electrical/startup conditions, valid fresh measurements and a **material improvement** in the economic situation compared with the reference saved at the first proven STOP. Battery support must not be rejected by assuming “zero available”; an additional mandatory PV-only sensor or invented restart timer is prohibited. First assess the ordinary preferred point and, where applicable, the exact technically reachable minimum.
+**Preserved:** An economic STOP is session-/authority-/transaction-bound, does **not** release a new start merely because grid import falls, the `>15 s` reset occurs, a delay expires or measurements change. Preserve positive-intent eligibility, actual OFF/EV response distinction, STOP reference/provenance and persistence, no cross-transaction replay, and a **meaningful improvement** relative to the previous STOP before allowing a new positive economic attempt. Battery-supported FAST must be able to restart when conditions genuinely improve, including at night if SoC permits; a PV-production-only condition is not valid.
 
-The condition **technically specified** with beta.13 and requiring verification is:
+**Superseded by 25 October D removal:** The historical exact candidate formula `C=min(E+D-B-G, E+D+PV-L)-100 W`, the “increased D” restart test, and any implicit notion that D is available battery power are **HISTORICAL**, not an active formula for the future controller. Battery availability is not measured by grid flow alone when the site is approximately balanced.
 
-```
-C_now - max(W_candidate, M_now) > C_stop - M_stop + 100 W
-```
-
-With `E` = measured EV power, `I` = grid import, `X` = grid export, `G=I-X`, `B` = measured battery discharge, `PV` = generation, `L` = total consumer power including EV, `D` = configured economic battery allocation in FAST (in BALANCE `D=0`):
-
-- Without battery: `C = E - G`.
-- With battery: `C = min(E + D - B - G, E + D + PV - L) - 100 W`.
-
-The comparison uses actual EV power and a physically executable minimum. A hypothetical later phase switch is not a cheaper current operating point. Before comparison, EV and site measurements must be unambiguously **after** confirmed OFF, including EV zero-response evidence (current threshold ≤100 W). Equality or a change of only 100 W is insufficient. This contract is a **model**, rather than a promise that the battery will respond immediately on the next start; subsequent 50 Wh monitoring therefore remains necessary.
-
-Evidence for PV-ECO-01 through -08: PDF pp. 539–545, 566–583, 595–600, 605–613; `docs/pv-grid-import-policy-design.md`, sections *Decision hierarchy*, *Accounting convention*, *Model-based restart*, *Persistence and recovery*. The targeted later permission/accounting clarification is PV-OCPP-04.
+**OPEN / BLOCKING BEFORE IMPLEMENTATION:** Specify a single non-D, evidence-based economic restart test that can recognize (a) material new grid export, (b) battery charging/headroom and below-/above-target SoC, (c) improved load conditions even with zero grid flow, and (d) an optional bounded technical-minimum probing attempt without creating a 50 Wh STOP/restart oscillation. It must use the same canonical snapshot and actual/OCPP response causality, record the prior STOP reference, and retain the previously agreed strict-improvement intent (historical >100 W margin to be explicitly retained or recalibrated). Do not silently reintroduce the former D capacity calculation, relax to unconditional re-start at budget reset, invent a fresh sensor TTL or declare this open test passed. Separate approval of a proposed formula or deterministic attempt policy is required.
 
 ---
 
@@ -609,6 +584,8 @@ Source: [16 October 2026 user decision](decision-history.md#16-october-2026--smo
 
 ### PV-QA-01 – Do not confuse diagnostics with effectiveness [APPROVED]
 
+**New 25 October diagnostics amendment:** [PV-DIAG-01–10](pv-decision-diagnostics.md) defines minimal **Level 2: meaningful regulation state/decision changes**, with the small subset of measurements actually consumed by that decision, and no per-tick or per-source log stream. Existing OCPP Level 0/1/2/3 classifications remain compatible.
+
 Logs distinguish planned, sent, accepted, confirmed and **physically measured effective** operating points. OCPP `Accepted` does not establish an appropriate grid/battery balance. Diagnostics include source generation, time basis, measurement age, economic `M`, `T_import`, energy in Wh, reset progress, previous STOP reference, state transition, request/applied point and reason. Diagnostic levels 0–3 remain distinct; level 3 must not trigger a second sensor query or cause unnecessary load.
 
 For PV-OCPP-04, also distinguish permission intent/ACK/readback, transaction identity, physical connection/charging state, CP observability, OCPP connectivity, observation source/time/freshness and missing reconstruction prerequisites. An accepted permission command is neither profile confirmation nor physical vehicle evidence.
@@ -619,14 +596,14 @@ Evidence: PDF pp. 99–119, 235–252, 529–535; `docs/pv-surplus-profile.md`, 
 
 1. Shared SoC matrix with exact L/M/U boundaries, nighttime FAST, START versus continuation, identical PV_MAXIMUM/PV_SURPLUS results for the same T.
 2. DYNAMIC/FINISHED latch, local midnight/DST, forecast steps in either direction, 300 s replanning, stale forecast without unnecessary Solcast requests.
-3. FAST: use a new sensor set only once; EV response before further increase; enough economic headroom; no indefinite response lock; fast actual reduction.
-4. BALANCE: constant sunlight/load, deliberate PV/household steps, asynchronous reports, configurable smoothing, no self-induced 5 s 6 A/14 A oscillation.
+3. FAST: bounded active exploration while grid flow is near zero (also night/high SoC), no requirement that every upstream source report a new generation each tick, at most one outstanding positive adjustment, observed-response-aware increase, quick proportionate grid-import reduction, no use of former D, no indefinite response lock or 9 A plateau absent a real policy explanation.
+4. BALANCE: signed charge/discharge power and verified sign/units, SoC recovery when below T, battery hold and discharge-limit conditions, small reversals and large PV/household steps, asynchronous EV/battery observations, optional tick smoothing (units migration unchanged), no self-induced 5 s 6 A/14 A oscillation, and economic grid fallback without a competing loop.
 5. 1p↔3p phase switching with lockout; retain 3p minimum during confirmed 3p restriction; no immediate reversal or fabricated lockout-expiry time.
 6. Dynamic technically **reachable** minimum and 50% threshold, including changed voltages/phase evidence; no minimum exception above M.
 7. 50 Wh energy: complete valid raw grid-import power only for P>T; strictly >15 s reset; 30 s or 30 min **without changes** still permits counting a last-known valid value. No 10 s report-gap limit. Test explicit unavailable/unknown, downtime, duplicate messages, startup and OFF/late-ACK behavior.
 8. Economic STOP priority: no old 10 s, 90 s, H-minimum or other independent economic OFF path; genuine SoC/safety STOPs remain.
 9. Persistence: HA restart/reload, active scope, genuine transaction end, profile change, authority/connection change, late ACK/checkpoints and failure cases.
-10. Restart: strict `>` model comparison, 100 W margin, phase minimum and increased D, zero-response/source causality, unchanged situation blocked, real improvement allowed.
+10. Restart: exercise previous STOP reference, economic reset without automatic restart, valid actual-OFF evidence, unchanged situation blocked, measurable improvement allowed and battery-supported nighttime recovery; the historical exact `D` model / `increased D` check is superseded. **Detailed non-D decision test remains OPEN; do not implement without its sign-off.**
 11. Battery-free SURPLUS using **only** grid import/export + EV mapping; incomplete configuration remains blocked.
 12. No automatic Local→Remote takeover, no unauthorized commands, authority takes status priority.
 13. PV-OCPP-04 acceptance matrix: permission without transaction/preparation; retained legal current; normal live vehicle-absent standby; CP-blocked/probe/disconnection evidence; all restart/reconnect cases; explicit OFF, transaction-scoped persistence and unresolved interface limitations. Keep command request, ACK, confirmed state, physical observation and dashboard presentation separate in verification.
@@ -639,11 +616,31 @@ Evidence: PDF pp. 99–119, 235–252, 529–535; `docs/pv-surplus-profile.md`, 
 20. PV-OCPP-05: Wallbox keeps reporting connected during CP pause; unplug while CP blocked. WBM shows last station report with no synthetic expiry/grey overlay until the next successful hourly CP probe triggers an explicit changed report; never infer unplug on 0 A/no transaction.
 21. PV-OCPP-06: Verify the WBM initiates exactly one bootstrap after each accepted connection/BootNotification, including wallbox/station-service/HA restart and reconnect after network disruption. Populate all supported state changed-while-offline but then stable (including L2/L3 at zero); test supported readback versus guaranteed station reports, unavailable fields, missing query capability, generation fencing of late responses and return to change-only operation.
 
+22. PV-DIAG-01–10: with level 2, log only changed decisions/reasons or genuine state transitions with their actual decision-input subset and candidate/applied distinction. Across hundreds of unchanged ticks and unchanged HA measurements, produce no ongoing level-2 PV logs or recorder entities; threshold crossings must log once. Level 3 permits bounded opt-in diagnostic detail without new polling. Confirm no credentials, raw payloads, transaction IDs, duplicated OCPP transition messages, or spurious warning/error severity.
+23. Without an actual signed storage source, BALANCE must not silently interpret discharge-only `0 W` as charging or manufacture a target; no battery sensor requirement may be added to battery-free PV_SURPLUS or NETZ.
+
 ### PV-QA-03 – Hardware acceptance criteria [OPEN]
 
 The **intent** is binding, rather than an unsupported fixed number: fast economically useful discharge in FAST; a stable control loop and appropriate disturbance response in BALANCE; no unnecessary zero-current pauses with 600 s charging-reenable lockout; traceable grid-import energy rather than instantaneous peaks. Before the next algorithmic change, define realistic target metrics for command changes, maximum deficit-correction time, energy utilization and restart reliability, preferably from controlled load-step/cloud scenarios.
 
 ---
+
+## 8A. Cross-references and supersession review (25 October 2026)
+
+This review changes **only the future PV target contract**, not beta.16's NETZ execution, Stationary, HA entity identities or current card display.
+
+| Existing text or implementation | New decision / disposition |
+| --- | --- |
+| PV-FAST-02 budget `D`, beta.18 `pv_regulators.py` hard_max, FAST gain/grace | **Superseded for future regulation:** grid-point feedback + bounded active probing; no D ceiling. Existing module is historical reference, not current develop runtime. |
+| PV-BAL-01 PV generation minus total load, beta.18 `balance_request()`/battery budget | **Superseded as primary battery-equipped controller:** signed battery-flow BALANCE with a grid economic fallback. Battery-free PV_SURPLUS PV-ARCH-02 unchanged. |
+| PV-BAL-03 N-tick smoothing formerly over PV/total load | N-tick units/migration remain valid; the smoothing input and default need explicit new design approval. |
+| PV-ARCH-03 mapping `storage_discharge_power` | Not bidirectional; signed storage charging **and** discharging contract must be wired. No fictitious source/zero. |
+| PV-ECO-06 minimum-exceeds-D exception and PV-ECO-08 D restart math | D-dependent clauses superseded; common 50 Wh estimate/reset/persistence retained; replacement evidence-based restart definition **OPEN / blocking**. |
+| WBM-ARCH-01–12 and WBM-RELEASE-01–14 / WBM-PV-RELEASE-01–07 | Preserve Stationary physical safety, manager release Start/Stop, OCPP fences and the fact that a computed 0 A is not operator OFF. |
+| WBM-HS-UI-01–15 | Lovelace PV_OPTIMUM/MAXIMUM targets remain `—` until a canonical effective target exists; percentage formatting and preserved HA entities unchanged. |
+| Diagnostic Level 2 previously OCPP significant status changes only | Extend with **deduplicated meaningful PV regulation decisions**, not raw measurements/tick logs: PV-DIAG-01–10. Retain previous OCPP log families. |
+
+**Provenance:** Reviewed user approval on 25 October 2026 of the proposed shared FAST/BALANCE simplification, earlier v0.3.2-beta.18 files `pv_soc.py`, `pv_optimum.py`, `pv_regulators.py`, Stationary `services/dynamic_amps.py` and `control/amps.py`, and openWB software2's public EVU-point/PV-battery priority documentation (https://wiki.openwb.de/doku.php?id=openwb%3Avc%3A2.1.9%3Asoftware%3Aeinstell-konfig%3Aladeeinstellungen%3Apv-laden-speicherbeachtung). Those systems are **conceptual comparisons**, not imported implementation, normative external dependencies or evidence of real WBM performance.
 
 ## 9. Observations from beta.13 – explicitly no silent target-behavior changes
 
