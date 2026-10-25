@@ -7,6 +7,15 @@ from .grid_point import number
 from .pv_soc import clamp_target, target_bounds
 
 
+def strict_surplus(production, total_consumption, ev_power=None):
+    """Prove surplus from total load, or subtract a genuinely observed EV load."""
+    if production is None or total_consumption is None:
+        return False
+    if production > total_consumption:
+        return True  # Household excluding a nonnegative EV cannot exceed total load.
+    return ev_power is not None and production > max(0, total_consumption - ev_power)
+
+
 def validate_target_inputs(profile, settings, reserve, *, forecast=None, capacity=None):
     """Validate calculation dependencies without running the daily planner."""
     lower, upper = target_bounds(reserve, settings["soc_hysterese"])
@@ -74,6 +83,14 @@ class Planner:
         forecast=None,
         capacity=None,
     ):
+        if profile == "PV_OPTIMUM":
+            # The local day and actual first-surplus observation are independent
+            # of release and of whether a forecast currently permits calculating T.
+            date = now.date().isoformat()
+            if self.date != date:
+                self.date, self.phase, self.signature = date, "BEFORE_SURPLUS", None
+            if self.phase == "BEFORE_SURPLUS" and surplus:
+                self.phase = "DYNAMIC"
         h = settings["soc_hysterese"]
         lower_bound, _ = validate_target_inputs(
             profile, settings, reserve, forecast=forecast, capacity=capacity
@@ -84,11 +101,6 @@ class Planner:
             return number(settings["soll_soc_speicher"])
         lower = clamp_target(settings["optimum_lower_soc"], reserve, h)
         upper = max(lower, clamp_target(settings["optimum_upper_soc"], reserve, h))
-        date = now.date().isoformat()
-        if self.date != date:
-            self.date, self.phase, self.signature = date, "BEFORE_SURPLUS", None
-        if self.phase == "BEFORE_SURPLUS" and surplus:
-            self.phase = "DYNAMIC"
         house = remaining_house_energy(
             settings["estimated_daily_house_consumption_kwh"],
             remaining_day_seconds(now),

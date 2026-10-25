@@ -80,6 +80,10 @@ async def async_setup_entry(hass, entry):
     try:
         await server.start()
     except OSError as exc:
+        await pv.close()
+        await grid.close()
+        await battery.close()
+        await server.stop()
         raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

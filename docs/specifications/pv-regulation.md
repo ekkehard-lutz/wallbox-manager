@@ -95,11 +95,25 @@ Keep value, identity, source time, receipt time, validity and OCPP connection/bo
 
 ### PV-ARCH-06 – One periodic PV regulation step with a current snapshot [APPROVED]
 
+**25 October 2026 release-independent planning amendment [EXPLICITLY APPROVED]:**
+A selected battery-equipped PV profile maintains its canonical target SoC and, for
+PV_OPTIMUM, the daily planning phase independently of `charge_release`, OCPP connection,
+transaction, Remote authority, hardware enable or actual charging. Use the **same single
+PV scheduler**, with an initial read-only setup calculation and subsequent configured
+cycles. With release OFF it performs only observational planning, meaningful publication
+and durable day/phase updates, then exits before FAST/BALANCE, economic accounting,
+operating-point selection or OCPP execution. No additional acquisition, forecast API,
+regulation loop, execution worker or planning entity is introduced. Invalid calculation
+inputs make T unavailable; valid retained HA inputs and target-formula independence from
+actual SoC remain governed by WBM-ARCH and WBM-HS-UI. Release/authority/transaction guards
+still apply unchanged to every charging request. NETZ performs no PV planning;
+battery-free SURPLUS gains no battery-target dependency.
+
 An active authorized **automatic PV profile** runs **one configurable regulation cycle**, for example every **5 seconds**; this is an illustration, not a new fixed timing parameter. Each cycle reads a consistent snapshot, applies the existing shared profile, SoC, FAST/BALANCE, electrical and 50 Wh policies, and submits a new target only when required. Ordinary changes in PV, grid, battery, vehicle connection or profile selection are reflected in the **next** cycle, not in an additional event-triggered control pass. An unchanged target must not cause redundant OCPP commands; queued and confirmed states remain separate. No competing duplicate PV loop or per-event power recalculation is permitted.
 
 Smoothing, where justified, is owned by the regulator and samples configured inputs once per control cycle. For example three consecutive 5-second cycle samples form a three-element sliding average; they do **not** establish three independent physical OCPP/HA measurement generations. **PV-BAL-03** continues to define independent regulation-interval/averaging settings and smoothing scope (PV and total consumer power, not SoC, EV response, voltage or safety evidence). **Revised PV-ECO-05** permits energy counting and the strictly >15 s reset condition across control ticks with the same still-valid grid-import value, without pretending those ticks create new sensor reports. Actual unavailable values, missing accounting eligibility and HA/WBM downtime remain excluded.
 
-When WBM only observes, when authority is absent, or when no automatic PV control is active, there is **no background cyclic PV policy evaluation** merely because battery SoC or other inputs are configured. Fixed/manual control does not need a continuously running PV regulator. Genuine time-based obligations (e.g. roughly 300-second forecast planning, local-midnight transition, permitted dwell/lockouts) remain scheduled as needed. The older **PV-PLAN-04** allowance for immediate recalculation on defined measurement events no longer authorizes a parallel ordinary PV power-regulation path; immediate exceptional processing is limited by PV-ARCH-07.
+When WBM only observes, when authority is absent, or when no automatic PV control is active, there is **no cyclic FAST/BALANCE operating-point or economic policy evaluation** merely because battery SoC or other inputs are configured. The explicitly approved observational target/day planner above continues for a selected battery PV profile, including release OFF; that calculation grants no charging authority. Fixed/manual control does not need a continuously running PV regulator. Genuine time-based obligations (e.g. roughly 300-second forecast planning, local-midnight transition, permitted dwell/lockouts) remain scheduled as needed. The older **PV-PLAN-04** allowance for immediate recalculation on defined measurement events no longer authorizes a parallel ordinary PV power-regulation path; immediate exceptional processing is limited by PV-ARCH-07.
 
 ### PV-ARCH-07 – Immediate safety and asynchronous OCPP execution [APPROVED]
 
@@ -199,7 +213,7 @@ Evidence: PDF pp. 1–19, 92–114; confirmation in the discussion current at th
 2. `DYNAMIC`: From that first event, the target SoC is calculated regularly. A cloud or temporarily negative instantaneous balance does not revoke the start.
 3. `FINISHED`: As soon as `remaining_PV_Wh <= remaining_house_Wh`, immediately set the target to the upper limit and retain this daily state **until midnight**, even if a later forecast improves.
 
-The local date change resets the daily latch. Daily state is persisted with versioning; a reload must not fabricate a first PV surplus.
+The local date change resets the daily latch. Daily state is persisted with versioning; a reload must not fabricate a first PV surplus. The daily planner observes these transitions while release is OFF as well as ON; release transitions never reset its day/phase. A valid total-consumption measurement includes the selected EV, so `PV > total_consumption` already proves strict surplus without inventing EV power. Otherwise, subtract only a genuinely valid selected-EV observation to establish household demand; release OFF is never evidence of EV=0. Missing surplus evidence retains BEFORE_SURPLUS without inventing a past event. Day reset remains independent of source availability; a missing forecast/capacity/reserve keeps T unavailable.
 
 **Superseded:** “First PV >=100 W”, “100 W for five minutes”, sunrise, fixed sunset or sunset minus 1 h as the planning start/end. See the supersession register.
 

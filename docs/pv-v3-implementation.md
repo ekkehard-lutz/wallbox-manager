@@ -383,3 +383,105 @@ fixed-target/display and zero-ideal bias decisions; no upstream algorithm or his
 SoC threshold was restored. No new threshold, smoothing, economic STOP condition,
 restart cooldown, obsolete delay option or independent control loop was added.
 The earlier external hardware/physical-bootstrap acceptance limitations remain unchanged.
+
+## Release-independent target planning amendment — 25 October 2026
+
+This change continues `feature/pv-regulation-v3-runtime` from reviewed commit
+`06053d42dee047cc3f9192b8c68a3565254cdc91`, verified against the fetched remote before
+editing. It implements the operator's explicit planning amendment to PV-ARCH-06,
+PV-PLAN-02, WBM-HS-UI-05 and WBM-PV-RELEASE-02/04. The earlier verification sections
+above describe their respective historical changes.
+
+### Cause and implementation
+
+`PV.active()` previously required charging release, so lifecycle cancellation stopped
+the only PV clock while release was OFF. Normal planning also followed OCPP eligibility
+checks; a separate provisional outage path could not observe first surplus. Consequently
+a selected PV_OPTIMUM profile could retain its initial target until Start.
+
+`pv.py` now distinguishes selected battery-profile planning from release-authorized
+regulation. Setup calculates the initial target using the same tracked task that the
+existing single periodic scheduler uses. Every cycle captures canonical HA/configuration
+inputs once, calculates the target and day phase, persists meaningful journal changes,
+then exits if release is OFF. FAST/BALANCE, transaction-budget binding and sampling,
+point proposals and dispatch remain after the release and existing OCPP/hardware guards.
+The old provisional target path is removed. NETZ has no PV clock; battery-free SURPLUS
+has no idle battery planner or new required inputs. A listener bind failure closes the
+newly started planner and other runtime owners before setup retries.
+
+`pv_plan.py` observes the local date and genuinely proven first surplus independently
+of target-formula validity. Missing reserve, capacity or forecast exposes canonical
+`None`; recovery recalculates the target. Actual battery SoC remains independently
+valid. DYNAMIC retains bidirectional forecast updates and the 300-second cadence;
+FINISHED remains latched until local midnight. Release changes do not reset these
+states. Existing timezone-aware 23/25-hour day calculations are unchanged.
+
+The strict-surplus helper accepts valid PV greater than valid total consumer power as
+sufficient evidence, even with unknown EV power. Otherwise it subtracts only genuinely
+observed EV power. The planner can use current-generation canonical EVSE power without
+a transaction; the power controller still requires its existing transaction measurement.
+Release OFF never supplies an assumed EV zero, and unavailable evidence never creates
+a past first-surplus event.
+
+The existing serialized journal stores date/phase without resetting or authorizing the
+economic budget. Unchanged records cause no storage write. Storage failure reports
+`journal_write_failed`, retains the previous successfully saved checkpoint and retries
+on the existing clock; it grants no control permission. No second scheduler, measurement
+poller, forecast client, HA automation, entity or execution worker was added. Semantic
+target diagnostics and canonical publication deduplication remain in use.
+
+### Source verification
+
+The actual Fronius source was inspected at
+`b464f91154091c232b25d37343b3a592f5a20eaf`,
+`custom_components/fronius_pv_manager/sensor.py` (consumption-power calculation around
+lines 598–639). Its consumption is site load including EV: inverter AC plus import
+minus export, bounded below by zero. This supports the conservative total-load proof.
+Actual openWB/core at `809ac7425348dc4a0a2e080e742dfcd2f3cfc992`,
+`packages/control/algorithm/surplus_controlled.py` and `packages/control/bat_all.py`,
+was cross-checked for surplus and battery-control context. Historical WBM beta.18 at
+`4c9a13b812792aa3eb245f4e2aa9c8c6cd29c090`, `pv_optimum.py` (local-day reset and
+first-surplus observation around lines 258–294), was checked for proven daily behavior.
+These are supporting checks; no historical or upstream runtime was restored.
+
+### Regression evidence
+
+Before implementation, `test_optimum_forecast_and_phase_advance_without_start` was
+added to `tests/test_pv_planning_release.py` and run against unchanged `06053d4`.
+It failed as intended (**1 failed**, 5 dependency warnings, 1.87 seconds): selected
+PV_OPTIMUM, valid HA sources, release OFF and a changed forecast did not advance the
+phase/target. It passes after correction.
+
+The new file contains 21 regressions covering initial targets without OCPP, all three
+battery profiles, invalid targets and recovery, daily phases and forecast directions,
+unknown EV evidence, measurement gaps, 300-second cadence, DST/midnight, journal reload
+and failure, release/profile transitions, Local authority/hardware disabled/no transaction,
+disconnect/reconnect without queued commands, economic STOP/Wh preservation, one-task
+coalescing, stable publication/logging, battery-free SURPLUS and listener-bind retry.
+A direct forbidden-call test proves release-OFF planning never enters controller,
+submission or execution. Two old timer assertions now enforce continued planning and
+no power regulation while OFF; their other control/economic assertions remain intact.
+The prior 67 review regressions remain unchanged.
+
+Final amendment verification:
+
+| Command | Result |
+| --- | --- |
+| `.venv/bin/pytest -q --cov=custom_components.wallbox_manager --cov-report=term-missing` | **786 passed, 0 failed, 5 dependency warnings**, 133.68 seconds; **93%** coverage (4,027 statements, 279 missed) |
+| `.venv/bin/pytest -q tests/test_pv_planning_release.py` | **21 passed**, 5 dependency warnings, 3.88 seconds; final verification after making test setup clocks independent of execution date |
+| `.venv/bin/ruff check .` | All checks passed |
+| `.venv/bin/ruff format --check .` | 159 files already formatted |
+| `node --check custom_components/wallbox_manager/www/wallbox-manager-card.js` | Passed |
+| `node tests/test_wallbox_card.cjs` | **78 passed, 0 failed** |
+| `node tests/test_wallbox_card_layout.cjs` | **1 passed, 0 failed**, real headless Chrome |
+| `git diff --check` | Passed |
+
+The five warnings are the previously recorded Home Assistant/backoff dependency
+warnings; no tests were skipped. The complete suite preserves the four earlier review
+corrections, NETZ, battery-free SURPLUS, economic STOP and explicit charging release.
+Only the approved planning contract changes normative text. Frontend code, configuration
+and entity identities, OCPP execution, Stationary and charging-policy thresholds remain
+unchanged. Localhost simulated OCPP peers provide command-level evidence; physical
+wallbox timing, uptake and installation acceptance still require the separate authorized
+hardware review. No merge, tag, release, installation, deployment or hardware command
+was performed. Pre-existing untracked investigation files were excluded and preserved.

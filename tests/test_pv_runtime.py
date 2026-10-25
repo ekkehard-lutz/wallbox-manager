@@ -286,7 +286,9 @@ async def test_journal_survives_reload_without_downtime_or_release(ha):
     assert pv.budget.wh == 51 and pv.budget.stopped
     assert pv.budget.previous is None and not pv.budget.reset
     assert not entry.runtime_data.settings.get("charge_release")
-    assert pv.timer is None
+    # The approved planner continues without release; power regulation does not.
+    assert pv.timer is not None and pv.target == 50
+    assert pv.grid.requested is None and pv.core.up_cycles == 0
 
 
 async def test_runtime_setting_changes_no_second_tick_budget_edit_and_cycle_validation(
@@ -551,7 +553,11 @@ async def test_one_clock_only_and_inactive_has_no_periodic_regulation(ha):
         await g.stop_release()
         count = len(station.profiles)
         await clock.advance(500)
-        assert len(station.profiles) == count and pv.timer is None
+        await pv.task
+        # OFF stops EV regulation, while the same clock maintains read-only T.
+        assert len(station.profiles) == count and pv.timer is not None
+        assert not pv.regulation_active() and pv.core.up_cycles == 0
+        assert len([h for h in clock.calls if not h.cancelled]) == 1
 
 
 async def test_soc_stop_is_independent_of_unreconciled_economic_scope(ha):

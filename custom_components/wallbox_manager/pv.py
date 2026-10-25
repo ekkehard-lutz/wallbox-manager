@@ -16,7 +16,7 @@ from .config_flow import SOURCES, diagnostic_level
 from .grid_point import envelope
 from .pv_core import ZERO, Controller, Inputs, signed_storage
 from .pv_economics import Budget
-from .pv_plan import Planner, validate_target_inputs
+from .pv_plan import Planner, strict_surplus, validate_target_inputs
 from .pv_soc import PV_PROFILES, soc_policy
 
 _LOGGER = logging.getLogger(__name__)
@@ -128,6 +128,10 @@ class PV:
         ):
             self.removers.append(self.state.watch(key, self.ev_observed))
         self.lifecycle()
+        if self.planning_selected():
+            # Initial read-only projection shares the scheduler's in-flight task.
+            self.task = self.hass.async_create_task(self.tick(), "PV initial planning")
+            await self.task
 
     def ev_observed(self):
         if self.ev_power() is None:
@@ -190,13 +194,22 @@ class PV:
         mapping = {role: self.entry.options.get(role) for role in SOURCES}
         if mapping != self.mapping:
             self.observe_inputs()
+            self.lifecycle()
 
-    def active(self):
-        return (
-            not self.closed
-            and self.settings.get("charging_profile") in PV_PROFILES
-            and self.settings.get("charge_release") is True
+    def selected(self):
+        return not self.closed and self.settings.get("charging_profile") in PV_PROFILES
+
+    def planning_selected(self):
+        return self.selected() and (
+            self.settings.get("charging_profile") != "PV_SURPLUS"
+            or bool(self.mapping.get("soc_speicher_aktuell"))
         )
+
+    def scheduled(self):
+        return self.planning_selected() or self.regulation_active()
+
+    def regulation_active(self):
+        return self.selected() and self.settings.get("charge_release") is True
 
     def lifecycle(self):
         context = (
@@ -227,13 +240,13 @@ class PV:
                 self.checkpoint()
         if not self.grid.eligible():
             self.budget.interrupt()
-        if not self.active():
+        if not self.scheduled():
             if self.timer:
                 self.timer.cancel()
                 self.timer = None
             self.next_due = None
             return
-        # A temporary outage retains the cadence but earns no eligible cycles.
+        # Planning retains the cadence without granting any regulation eligibility.
         if self.timer is None:
             self.arm()
 
@@ -249,7 +262,7 @@ class PV:
 
     def fire(self):
         self.timer = None
-        if self.active():
+        if self.scheduled():
             # Arm before an eager HA task can publish or recover readiness.
             self.arm()
             if self.task is None or self.task.done():
@@ -416,63 +429,97 @@ class PV:
             self.pending_restart = None
             self.checkpoint(restart=restart)
 
-    def provisional_target(self):
-        """HA-only outage planning, never a deferred operating-point request."""
-        values = dict(self.values)
-        profile = self.settings.get("charging_profile")
-        if profile == "PV_SURPLUS" and not self.mapping.get("soc_speicher_aktuell"):
+    def plan_target(self, profile, values, config, ev, now, elapsed):
+        """One observational target calculation, shared by every eligibility state."""
+        if not self.planning_selected():
             self.target = None
-            return
-        reserve = values.get("min_soc_speicher")
-        if reserve is None:
-            self.invalidate_unavailable_target()
-            return
-        try:
-            self.target = float(
-                self.planner.calculate(
-                    profile,
-                    self.settings.values,
-                    reserve,
-                    self.now(),
-                    self.monotonic(),
-                    forecast=values.get("remaining_pv_energy"),
-                    capacity=values.get("storage_capacity"),
-                )
+            return None
+        target = float(
+            self.planner.calculate(
+                profile,
+                config,
+                values.get("min_soc_speicher"),
+                now,
+                elapsed,
+                surplus=strict_surplus(
+                    values.get("leistung_pv"), values.get("leistung_verbraucher"), ev
+                ),
+                forecast=values.get("remaining_pv_energy"),
+                capacity=values.get("storage_capacity"),
             )
-        except ValueError, TypeError, OverflowError:
-            self.target = None
-        event = (self.target, self.planner.phase)
-        if self.target is not None and event != self.last_target_event:
+        )
+        self.target = target
+        event = (target, self.planner.phase)
+        if event != self.last_target_event:
             self.last_target_event = event
-            self.diagnostic(
-                "pv_target",
-                "provisional_target",
-                target_soc_pct=self.target,
-                phase=self.planner.phase,
-            )
-        self.grid.publish()
+            fields = dict(target_soc_pct=target, phase=self.planner.phase)
+            if profile == "PV_OPTIMUM":
+                from .pv_plan import remaining_day_seconds, remaining_house_energy
+
+                fields.update(
+                    remaining_pv_wh=values.get("remaining_pv_energy"),
+                    capacity_wh=values.get("storage_capacity"),
+                    remaining_house_wh=float(
+                        remaining_house_energy(
+                            config["estimated_daily_house_consumption_kwh"],
+                            remaining_day_seconds(now),
+                        )
+                    ),
+                )
+            self.diagnostic("pv_target", "target_changed", **fields)
+        return target
 
     async def tick(self):
-        if not self.active():
+        if not self.scheduled():
             return
         self.invalidate_unavailable_target()
         g, s = self.grid, self.settings
-        if not g.eligible():
-            self.problem("control_unavailable")
-            if not self.state.connected and g.last_authority == "remote":
-                self.provisional_target()
-                try:
-                    await self.persist()
-                except OSError:
-                    self.problem("journal_write_failed")
+        # Capture planning and control inputs once, before any persistence await.
+        profile = s.get("charging_profile")
+        values = dict(self.values)
+        config = {key: s.get(key) for key in s.values}
+        epoch, adapter, tx = g.epoch, g.listener.adapter, g.transaction()
+        ev = self.ev_power()
+        planning_ev = ev
+        if planning_ev is None:
+            station, evse, _ = self.state.binding
+            planning_ev = self.state.value(
+                ("observation", (station, evse, None), "power")
+            )
+        planning_error = None
+        planning_valid = True
+        target = None
+        try:
+            target = self.plan_target(
+                profile, values, config, planning_ev, self.now(), self.monotonic()
+            )
+        except (ValueError, TypeError, OverflowError) as exc:
+            self.target = self.last_target_event = None
+            planning_error = str(exc)
+            planning_valid = False
+        # Daily observations can change even when T cannot currently be calculated.
+        # The same serialized journal preserves economics without granting a scope.
+        try:
+            await self.persist()
+        except OSError:
+            planning_error = "journal_write_failed"
+        if planning_error:
+            self.problem(planning_error)
+            g.publish()
+            if not planning_valid:
+                return
+        if not self.regulation_active():
+            self.problem(planning_error)
+            g.publish()
+            return
+        if not g.valid(epoch, adapter, tx):
+            self.problem(planning_error or "control_unavailable")
+            g.publish()
             return
         if self.state.value(g.listener.control.key("ChargingEnabled")) is not True:
-            self.problem("hardware_disabled")
+            self.problem(planning_error or "hardware_disabled")
+            g.publish()
             return
-        epoch, adapter, tx = g.epoch, g.listener.adapter, g.transaction()
-        values = dict(self.values)  # one canonical held-value snapshot per tick
-        config = {key: s.get(key) for key in s.values}
-        ev = self.ev_power()
         current = None if g.point_uncertain else g.current_point()
         busy = bool(g.task and not g.task.done())
         pending = busy or bool(g.point_uncertain)
@@ -481,54 +528,13 @@ class PV:
             or s.get("charging_profile") != "PV_SURPLUS"
         )
         try:
-            target = soc = storage = None
+            soc, storage = values.get("soc_speicher_aktuell"), None
             pv, load = values.get("leistung_pv"), values.get("leistung_verbraucher")
-            # Fronius total-consumer power includes the selected EV, as in beta.18.
             household = (
                 max(0, load - ev) if load is not None and ev is not None else None
             )
-            surplus = pv is not None and household is not None and pv > household
+            surplus = strict_surplus(pv, load, ev)
             if battery:
-                reserve, soc = (
-                    values.get("min_soc_speicher"),
-                    values.get("soc_speicher_aktuell"),
-                )
-                if reserve is None:
-                    raise ValueError("battery_soc_reserve")
-                target = float(
-                    self.planner.calculate(
-                        s.get("charging_profile"),
-                        config,
-                        reserve,
-                        self.now(),
-                        self.monotonic(),
-                        surplus=surplus,
-                        forecast=values.get("remaining_pv_energy"),
-                        capacity=values.get("storage_capacity"),
-                    )
-                )
-                self.target = target
-                target_event = (target, self.planner.phase)
-                if target_event != self.last_target_event:
-                    self.last_target_event = target_event
-                    plan_fields = dict(target_soc_pct=target, phase=self.planner.phase)
-                    if s.get("charging_profile") == "PV_OPTIMUM":
-                        from .pv_plan import (
-                            remaining_day_seconds,
-                            remaining_house_energy,
-                        )
-
-                        plan_fields.update(
-                            remaining_pv_wh=values.get("remaining_pv_energy"),
-                            capacity_wh=values.get("storage_capacity"),
-                            remaining_house_wh=float(
-                                remaining_house_energy(
-                                    config["estimated_daily_house_consumption_kwh"],
-                                    remaining_day_seconds(self.now()),
-                                )
-                            ),
-                        )
-                    self.diagnostic("pv_target", "target_changed", **plan_fields)
                 if soc is None:
                     raise ValueError("battery_soc_reserve")
                 # Mandatory SoC STOP remains possible despite an unrelated invalid
@@ -721,7 +727,7 @@ class PV:
                     return  # Failed storage inhibits positives, never required OFF.
             else:
                 self.problem(None)
-            if not g.valid(epoch, adapter, tx) or not self.active():
+            if not g.valid(epoch, adapter, tx) or not self.regulation_active():
                 return
             self.decision_event(d)
             self.submit(
