@@ -1,3 +1,5 @@
+**Latest approved Lovelace display amendment (25 October 2026):** [WBM-HS-UI-01–15](lovelace-home-battery-display.md) adds a read-only home-battery SoC → profile target/current NETZ reserve comparison and removes five PV tuning inputs only from the card. Existing HA Number entities, permissions, persistence, backend profile algorithms and battery-free PV_SURPLUS remain unchanged. The PV V3 draft remains a draft.
+
 **Latest approved operational amendment (24 October 2026):** [WBM-DISP-01–03 / MSG-01–07 / TIME-01–24](operational-display-and-timing.md) specifies one-decimal session-energy presentation, newest active warning/error only, wall-clock NETZ countdowns and time-edits acting on running schedules with a 15-second approval window. Documentation only; supersedes only conflicting historical timing/card-text requirements.
 
 **Latest approved NETZ amendment:** [WBM-GRID-31–40](grid-profile.md#amendment--nominal-netz-steps-and-navigation-24-october-2026) fixes planning at nominal 230 V, defines rounded technical steps and backend phase-aware navigation. Older measured-voltage/UI-step clauses are superseded only as listed there.
@@ -19,6 +21,7 @@ V3 remains DRAFT overall.
 | --- | --- | --- |
 | [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, with explicit supersession register | **APPROVED independently** |
 | [Active OCPP control foundation](active-ocpp-control.md) | Explicit takeover and independent charging permission; successor milestone | **User-authorized implementation scope; hardware acceptance separate** |
+| [Lovelace home battery and simplified PV controls](lovelace-home-battery-display.md) | Profile-dependent home battery status, removal of five card-only editors, compatibility and tests | **APPROVED UI requirements; implementation separate** |
 | [NETZ / Grid fixed-point profile](grid-profile.md) | Next event-driven NETZ control, phase range/limits, recognized lockout retry, battery reserve | **APPROVED target; not yet implemented** |
 | [Automatic vehicle wake-up](automatic-vehicle-wakeup.md) | Historical remote-setting scope; superseded by local Stationary INI | **Superseded configuration ownership** |
 | [Legacy manual compatibility](manual-vehicle-wakeup.md) | Station DataTransfer only; no manual HA button | Superseded UI scope |
