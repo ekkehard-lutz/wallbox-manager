@@ -299,3 +299,8 @@ After either BALANCE STOP cause (insufficient positive battery recharge at the f
 ## 25 October 2026 – BALANCE minimum-current STOP A accepted [APPROVED]
 
 No extra STOP timer or repeated-sample counter: on the next ordinary PV tick, if SoC is **strictly below T-H/2**, the truly applied/physically valid operating point is **1p/6 A**, initial 0 A→positive settling has finished, and measured battery charge minus discharge power is **strictly negative**, BALANCE requests 0 A. Battery power at 0 or positive is not cause A. A mere requested/OCPP-accepted or phase-locked point is not valid proof. The shared SoC STOP→BALANCE/FAST thresholds in PV-SOC-02 apply; independent SoC STOP at SoC<T-H and economic Wh STOP are not weakened. See PV-BAL-06. Documentation only.
+
+
+## 25 October 2026 – Configurable household-load threshold for FAST economic restart [AGREED]
+
+A battery charging with **any measured positive power (>0 W, even 1 W)** is sufficient economic recovery evidence, subject to existing import budget reset and all SoC/OCPP/operator gates. For battery-backed FAST (including night operation), user added a second alternative: valid household demand **excluding EV** strictly **below** an **integration-configurable threshold, default 500 W**. Typical local night house load is about 200–300 W; this justifies the local default but is not a universal proof of inverter/battery available power. The historical 100 W relative modeled recovery margin and storage-discharge budget D formula are superseded for this proposed controller. Stop provenance and physical OFF still matter, and unchanged evidence should not cause unbounded retry. See [PV-ECO-08](pv-regulation.md) and [PV-TUNE-12](pv-operating-point-response.md). Only documentation branch modified.
