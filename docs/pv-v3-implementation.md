@@ -12,7 +12,8 @@ release, installation or hardware acceptance.
 
 - `pv_soc.py`: common exact S/L/M/U matrix. The beta.18 inclusive L STOP is replaced
   by strict SoC<S; STOP restarts BALANCE strictly above M with surplus, or FAST at U.
-- `pv_plan.py`: profile-specific T, bounded against reserve/H; preserved remaining-day
+- `pv_plan.py`: profile-specific T: fixed SURPLUS is validated without clamping,
+  MAXIMUM uses R+H, and OPTIMUM remains bounded against reserve/H; preserved remaining-day
   energy calculation, first-surplus daily latch, FINISHED latch, local midnight/DST,
   300-second planning and immediate forecast-change replanning on the next PV tick.
 - `pv_core.py`: one pure FAST/BALANCE policy, unsmoothed signed storage power, SoC
@@ -57,8 +58,10 @@ economic exhaustion override normal timing. Storage failure inhibits new positiv
 never prevents a required zero request. No 10-second or 90-second economic timer is added.
 
 For ongoing FAST/BALANCE charging, a saturated ideal retains a feasible positive minimum
-until shared SoC/economic policy requires a pause. A zero/nonpositive computed ideal does
-not create a new positive session. BALANCE A requires a genuinely applied, enabled/legal
+until shared SoC/economic policy requires a pause. An ordinary zero/nonpositive computed
+ideal does not force a new positive session. An explicitly applicable BALANCE upward SoC
+bias can choose the first legal point above a zero ideal, with the usual start evidence
+and all common execution/timing guards. BALANCE A requires a genuinely applied, enabled/legal
 1p/6 A, SoC<L, completed startup hold, and valid negative signed storage power; a mere ACK
 or phase-locked desired minimum is insufficient. A real phase lockout retains the current
 series minimum and prices M accordingly until a changed phase is actually established.
@@ -198,7 +201,7 @@ headless Chrome require running outside this workspace's network-restricted sand
 The initial sandbox-only integration/browser attempts were interrupted or failed on local
 socket restrictions and are not counted as successful verification.
 
-Final verification, 25 October 2026:
+Original implementation verification (reviewed commit `d394d6b`), 25 October 2026:
 
 | Command | Exact result |
 | --- | --- |
@@ -234,3 +237,149 @@ real import Wh detection latency, real restart cycles, and agreed PV-QA-03 perfo
 metrics. The existing interface does not guarantee a complete immediate physical telemetry
 burst; missing observations stay unknown and are not manufactured. No Stationary changes,
 hardware commands, installation, merge, tag, release or deployment were performed.
+
+
+## Independent review corrections after d394d6b
+
+Reviewed baseline: `d394d6b23d0eb5f4f84d759d6a5beb1074e6f6d0` on the same
+`feature/pv-regulation-v3-runtime` branch. The remote branch was fetched and matched
+that exact commit before corrections. These changes address the four independent
+findings without modifying normative specifications, NETZ, OCPP wire dispatch,
+configuration/entity identities, or Stationary.
+
+### Finding 1: fixed SURPLUS target validation
+
+Root cause: `Planner.calculate()` reused dynamic-target `clamp_target()` for the fixed
+user SURPLUS target. When an external reserve change invalidated that target, it produced
+a substituted T. The planner now validates the original number against the full-precision
+`R+H <= T <= 100-H` interval and rejects it unchanged if invalid. MAXIMUM's intentional
+R+H and OPTIMUM's bounded dynamic calculation remain unchanged.
+
+`validate_target_inputs()` is shared by the planner and the read-only validity projection;
+it does not advance planning state or execute control. Regression coverage crosses both
+interval boundaries and fractional reserve edges, and demonstrates invalidation and
+recovery without new positive commands, setting mutation or release/authority changes.
+
+### Finding 2: effective-target validity and publication
+
+Root cause: invalid calculation inputs raised/returned before replacing an earlier
+`effective_target_soc`. Required input invalidation now clears that canonical value to
+`None`, resets its semantic target-event signature and publishes the validity transition.
+HA callbacks perform validation only; they never compute a regulation point or issue a
+command. Recovery is calculated by the existing ordinary/provisional PV tick. Profile
+changes also retire the previous profile's canonical target.
+
+Dependency distinctions are explicit:
+
+- All battery targets require a valid reserve and valid hysteresis/target interval.
+- OPTIMUM additionally requires its valid remaining forecast and positive capacity.
+- SURPLUS/MAXIMUM do not gain a forecast or capacity dependency.
+- Actual battery SoC remains mandatory for **regulation**, but is not an input to any
+  target formula. Its unavailable left-hand display and an otherwise calculable T remain
+  independent under WBM-HS-UI-09. No zero SoC is invented and no regulation proceeds from
+  missing SoC.
+- OCPP disconnect alone does not clear valid HA-derived T. Provisional calculation and HA
+  invalidation/recovery continue on the original PV cadence without an OCPP command.
+
+Tests cover missing/deleted and unavailable inputs in all three profiles, unchanged held
+values, disconnected recovery, and 300 unchanged invalid ticks with no further target
+publications, PV diagnostic records or commands.
+
+### Finding 3: accepted economic restart durability
+
+Root cause: `PV.accepted()` cleared economic STOP in memory without scheduling a journal
+checkpoint, leaving the durable state dependent on a later tick/unload. It now initiates
+an immediate checkpoint through the existing serialized PV journal mechanism. The
+checkpoint captures **live state after acquiring the journal lock**, not an old queued
+restart snapshot. It does not reset Wh or equate ACK with applied current/consumed power.
+
+Checkpoint write errors (including a swallowed save failure detected by file verification)
+and cancellation are handled explicitly. If the same budget/scope/context still owns the
+restart and no newer STOP has superseded it, failure conservatively restores its STOP
+provenance while retaining current Wh. A newer operator action, economic STOP or transaction
+scope is never rolled back. The existing input-problem channel exposes `journal_write_failed`
+with transition-only diagnostics. Any required zero request remains on the normal guarded
+control path; a checkpoint failure does not fabricate a physically stopped wallbox.
+
+Cancellation drains an already started journal write while retaining the journal lock.
+An older executor write therefore cannot finish after and overwrite a completed newer
+STOP/operator/transaction journal write. This is I/O serialization inside the existing
+persistence operation, not a new regulation loop, worker or retry cooldown.
+
+Tests cover immediate disk state without another regulation tick, subsequent HA reload
+and retained Wh, raised and unverified save failures, cancellation before/during writing,
+queued/in-flight older checkpoints versus newer STOP/operator/transaction state, and a
+late positive ACK rejected by the existing Grid intent fence after explicit Stop.
+
+**Unavoidable crash boundary:** station acceptance and local journal persistence are not
+atomic. A crash after the positive ACK but before verified checkpoint completion can
+restore the older economic STOP conservatively; accepted, reported applied and measured
+power still require separate reconstruction. A storage/verification error may leave the
+last verified or an unverified completed disk write; memory/physical/disk state cannot be
+claimed identical during such a fault. Reload still retires manager release, re-establishes
+current-generation OCPP evidence and applies the existing conservative scope/recovery
+policy. No new time-based retry restriction or fictitious physical OFF is introduced.
+
+### Finding 4: BALANCE bias above a zero ideal
+
+Root cause: the `candidate.amps > 0` guard skipped the deliberate upward SoC bias when the
+ideal quantized to zero. The bias now uses zero itself as its basis for **exactly zero
+ideal power** when SoC>M, selecting the next legal lattice point. This also avoids adding
+a second step to the ordinary continuation floor of an already positive point.
+
+This is a deliberate SoC regulation decision, not a forced ordinary technical minimum.
+Below/inside the band, STOP without surplus evidence, a negative ideal, battery-free
+SURPLUS, economic STOP, pending command and startup hold retain their existing semantics.
+The current lattice, disabled modes, phase navigation, uptake/cadence gates and downward
+delay are reused. Tests cover the exact reviewed 51.5%/T=50/H=2/zero-EV/zero-storage case,
+M boundaries, 0 A and ongoing 1p/3p points, actual advertised 2p/3p-only capabilities,
+common guards and execution through a real localhost OCPP peer.
+
+### Regression proof and final correction verification
+
+Four tests were added **before changing implementation**:
+
+- `test_review_1_surplus_rejects_invalid_fixed_target`
+- `test_review_2_invalid_forecast_clears_canonical_target`
+- `test_review_3_accepted_restart_checkpoints_without_another_tick`
+- `test_review_4_balance_bias_can_start_above_zero_ideal`
+
+Against the unchanged reviewed implementation, the command
+`.venv/bin/pytest -q tests/test_pv_review_regressions.py` produced **4 failed, 0 passed,
+5 dependency warnings in 2.70 seconds**, each detecting its respective finding. All four
+pass after correction. The expanded review tests live in that same file; existing tests
+were not weakened or removed.
+
+Correction verification, 25 October 2026:
+
+| Command | Result |
+| --- | --- |
+| `.venv/bin/pytest -q --cov=custom_components.wallbox_manager --cov-report=term-missing` | **765 passed, 0 failed, 5 dependency warnings**, 131.52 seconds; **93%** total coverage (4,000 statements, 287 missed) |
+| `.venv/bin/ruff check .` | All checks passed |
+| `.venv/bin/ruff format --check .` | 158 files already formatted |
+| `node --check custom_components/wallbox_manager/www/wallbox-manager-card.js` | Passed |
+| `node tests/test_wallbox_card.cjs` | **78 passed, 0 failed** |
+| `node tests/test_wallbox_card_layout.cjs` | **1 passed, 0 failed**, real headless Chrome |
+| `git diff --check` | Passed |
+
+The correction file adds **67 passing regression cases** to the unchanged existing suite.
+PV adapter coverage is now 93%, planner 98%, and core 94%. The same five dependency
+warnings remain: Home Assistant's `web.Application` inheritance and `backoff` use of
+`asyncio.iscoroutinefunction`. No tests were skipped and no failures remain. Localhost
+OCPP peers and headless Chrome were run with the required sandbox socket permissions;
+no physical station, HA installation or deployment was contacted.
+
+Final diff review confirms unchanged specifications, configuration/entity identities,
+NETZ code, Grid/OCPP authority and transaction guards, and Stationary. All four corrections
+are ready for another independent review on the pushed implementation branch. Pre-existing
+untracked investigation files remain excluded and untouched.
+
+The source cross-check was repeated against actual openWB/core commit
+`809ac7425348dc4a0a2e080e742dfcd2f3cfc992`,
+`packages/control/algorithm/surplus_controlled.py` and `packages/control/bat_all.py`
+(including `get_charge_mode_vehicle_charge()`), and historical WBM beta.18 `pv_soc.py`
+at `4c9a13b812792aa3eb245f4e2aa9c8c6cd29c090`. Those sources do not override the latest
+fixed-target/display and zero-ideal bias decisions; no upstream algorithm or historical
+SoC threshold was restored. No new threshold, smoothing, economic STOP condition,
+restart cooldown, obsolete delay option or independent control loop was added.
+The earlier external hardware/physical-bootstrap acceptance limitations remain unchanged.

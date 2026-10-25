@@ -16,7 +16,7 @@ from .config_flow import SOURCES, diagnostic_level
 from .grid_point import envelope
 from .pv_core import ZERO, Controller, Inputs, signed_storage
 from .pv_economics import Budget
-from .pv_plan import Planner
+from .pv_plan import Planner, validate_target_inputs
 from .pv_soc import PV_PROFILES, soc_policy
 
 _LOGGER = logging.getLogger(__name__)
@@ -108,6 +108,10 @@ class PV:
         self.observe_inputs()
         self.removers.append(self.settings.watch("charge_release", self.lifecycle))
         self.removers.append(self.settings.watch("charging_profile", self.lifecycle))
+        for role in ("soll_soc_speicher", "soc_hysterese"):
+            self.removers.append(
+                self.settings.watch(role, self.invalidate_unavailable_target)
+            )
         station, _, _ = self.state.binding
         for key in (
             ("station", (station, None, None), "control_authority"),
@@ -143,6 +147,7 @@ class PV:
             self.hass, entities, self.observed
         )
         self.budget.interrupt()
+        self.invalidate_unavailable_target()
 
     @callback
     def observed(self, event):
@@ -153,7 +158,33 @@ class PV:
                 except ValueError:
                     self.values[role] = None
                     self.budget.interrupt()
+        self.invalidate_unavailable_target()
         # No target calculation, OCPP command or new timer here.
+
+    def invalidate_unavailable_target(self):
+        """Publish only a validity transition, never an event-driven PV decision.
+
+        Actual SoC gates regulation, but is not an input to the target formula.
+        Its missing display value must remain independent of a calculable T.
+        """
+        profile = self.settings.get("charging_profile")
+        try:
+            if profile not in PV_PROFILES or (
+                profile == "PV_SURPLUS" and not self.mapping.get("soc_speicher_aktuell")
+            ):
+                raise ValueError("no_battery_target")
+            validate_target_inputs(
+                profile,
+                self.settings.values,
+                self.values.get("min_soc_speicher"),
+                forecast=self.values.get("remaining_pv_energy"),
+                capacity=self.values.get("storage_capacity"),
+            )
+        except ValueError, TypeError, OverflowError:
+            if self.target is not None:
+                self.target = self.last_target_event = None
+                self.diagnostic("pv_target", "target_unavailable")
+                self.grid.publish()
 
     def options_updated(self):
         mapping = {role: self.entry.options.get(role) for role in SOURCES}
@@ -175,6 +206,8 @@ class PV:
             self.grid.transaction(),
         )
         if context != self.context:
+            if self.context and self.context[0] != context[0]:
+                self.target = self.last_target_event = None
             if self.context and self.context[0] in PV_PROFILES and context[0] == "NETZ":
                 self.budget = Budget(cause="netz_scope_exit")
                 self.station_identity = None
@@ -290,12 +323,43 @@ class PV:
                 self.last_mode = decision.mode
             self.diagnostic("pv_decision", decision.reason, **fields)
 
-    def checkpoint(self):
+    def checkpoint(self, *, restart=None):
         if self.closed:
             return
-        task = self.hass.async_create_task(self.persist(), "PV journal checkpoint")
+        task = self.hass.async_create_task(
+            self.save_checkpoint(restart), "PV journal checkpoint"
+        )
         self.checkpoints.add(task)
-        task.add_done_callback(self.checkpoints.discard)
+
+        def finished(task):
+            self.checkpoints.discard(task)
+            if task.cancelled():
+                self.checkpoint_failed(restart)
+
+        task.add_done_callback(finished)
+        return task
+
+    async def save_checkpoint(self, restart):
+        """Save live state under the journal lock, never a queued old snapshot."""
+        try:
+            await self.persist()
+        except OSError:
+            self.checkpoint_failed(restart)
+
+    def checkpoint_failed(self, restart):
+        if restart:
+            budget, context, scope, cause = restart
+            if (
+                self.budget is budget
+                and self.context == context
+                and budget.scope == scope
+                and not budget.stopped
+            ):
+                # ACK established an attempted restart, not durable history.
+                # Retain live Wh and never undo a newer STOP or scope change.
+                budget.stopped, budget.reset, budget.cause = True, False, cause
+        self.problem("journal_write_failed")
+        self.grid.publish()
 
     async def operator_stop(self):
         self.budget = Budget(cause="operator_stop")
@@ -304,7 +368,17 @@ class PV:
 
     async def persist(self):
         async with self.journal_lock:
-            await self._persist()
+            # A cancelled caller must not release the lock while its executor
+            # write can still finish later and overwrite a newer journal write.
+            write = asyncio.create_task(self._persist())
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                try:
+                    await write
+                except OSError:
+                    pass  # The cancelled checkpoint handles conservative recovery.
+                raise
 
     async def _persist(self):
         record = dict(
@@ -319,29 +393,39 @@ class PV:
         await self.store.async_save(record)
 
         def verify():
-            with open(self.store.path, encoding="utf-8") as handle:
-                if json.load(handle).get("data") != record:
-                    raise OSError("PV journal was not durably stored")
+            try:
+                with open(self.store.path, encoding="utf-8") as handle:
+                    saved = json.load(handle)
+            except ValueError as exc:
+                raise OSError("PV journal was not durably stored") from exc
+            if not isinstance(saved, dict) or saved.get("data") != record:
+                raise OSError("PV journal was not durably stored")
 
         await self.hass.async_add_executor_job(verify)
         self.last_saved = record
 
     def accepted(self, point, previous):
+        if self.closed:
+            return
         self.core.sent(point, previous)
         if point.amps > 0 and self.pending_restart:
             # The journal is deliberately cleared only by an accepted authorized
             # restart, never by mere observed activity or budget reset.
+            restart = (self.budget, self.context, self.budget.scope, self.budget.cause)
             self.budget.restarted()
             self.pending_restart = None
+            self.checkpoint(restart=restart)
 
     def provisional_target(self):
         """HA-only outage planning, never a deferred operating-point request."""
         values = dict(self.values)
         profile = self.settings.get("charging_profile")
         if profile == "PV_SURPLUS" and not self.mapping.get("soc_speicher_aktuell"):
+            self.target = None
             return
         reserve = values.get("min_soc_speicher")
         if reserve is None:
+            self.invalidate_unavailable_target()
             return
         try:
             self.target = float(
@@ -371,6 +455,7 @@ class PV:
     async def tick(self):
         if not self.active():
             return
+        self.invalidate_unavailable_target()
         g, s = self.grid, self.settings
         if not g.eligible():
             self.problem("control_unavailable")
@@ -408,7 +493,7 @@ class PV:
                     values.get("min_soc_speicher"),
                     values.get("soc_speicher_aktuell"),
                 )
-                if reserve is None or soc is None:
+                if reserve is None:
                     raise ValueError("battery_soc_reserve")
                 target = float(
                     self.planner.calculate(
@@ -444,6 +529,8 @@ class PV:
                             ),
                         )
                     self.diagnostic("pv_target", "target_changed", **plan_fields)
+                if soc is None:
+                    raise ValueError("battery_soc_reserve")
                 # Mandatory SoC STOP remains possible despite an unrelated invalid
                 # power source; it never waits for ordinary settling or readback.
                 if soc < target - config["soc_hysterese"]:

@@ -158,11 +158,14 @@ class Controller:
             ideal, reason = i.ev - grid, "grid_surplus"
             context = dict(grid_w=grid, ev_actual_w=i.ev)
         candidate = ranges.regulation_target(ideal, c)
-        if self.mode == "BALANCE" and candidate.amps > 0:
+        if self.mode == "BALANCE":
             bias = -1 if i.soc < policy.low else 1 if i.soc > policy.middle else 0
-            if bias:
+            # A deliberate step above a zero ideal is a SoC decision, not the
+            # ordinary minimum continuation floor for an already positive offer.
+            basis = ZERO if ideal == 0 and bias > 0 else candidate
+            if bias and (basis.amps > 0 or bias > 0 and ideal == 0):
                 candidate = (
-                    ranges.navigate(candidate.display_watts, candidate.phases, bias)
+                    ranges.navigate(basis.display_watts, basis.phases, bias)
                     or candidate
                 )
                 reason = "soc_recharge" if bias < 0 else "soc_discharge"

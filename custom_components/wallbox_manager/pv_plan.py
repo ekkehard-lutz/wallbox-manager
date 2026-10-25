@@ -7,6 +7,18 @@ from .grid_point import number
 from .pv_soc import clamp_target, target_bounds
 
 
+def validate_target_inputs(profile, settings, reserve, *, forecast=None, capacity=None):
+    """Validate calculation dependencies without running the daily planner."""
+    lower, upper = target_bounds(reserve, settings["soc_hysterese"])
+    if profile == "PV_SURPLUS":
+        if not lower <= number(settings["soll_soc_speicher"]) <= upper:
+            raise ValueError("surplus_target_outside_interval")
+    elif profile == "PV_OPTIMUM":
+        if forecast is None or capacity is None or capacity <= 0:
+            raise ValueError("remaining_pv_energy/storage_capacity")
+    return lower, upper
+
+
 def remaining_day_seconds(now):
     midnight = datetime.combine(
         now.date() + timedelta(days=1), datetime.min.time(), now.tzinfo
@@ -63,13 +75,13 @@ class Planner:
         capacity=None,
     ):
         h = settings["soc_hysterese"]
-        lower_bound, _ = target_bounds(reserve, h)
+        lower_bound, _ = validate_target_inputs(
+            profile, settings, reserve, forecast=forecast, capacity=capacity
+        )
         if profile == "PV_MAXIMUM":
             return lower_bound
         if profile == "PV_SURPLUS":
-            return clamp_target(settings["soll_soc_speicher"], reserve, h)
-        if forecast is None or capacity is None or capacity <= 0:
-            raise ValueError("remaining_pv_energy/storage_capacity")
+            return number(settings["soll_soc_speicher"])
         lower = clamp_target(settings["optimum_lower_soc"], reserve, h)
         upper = max(lower, clamp_target(settings["optimum_upper_soc"], reserve, h))
         date = now.date().isoformat()
