@@ -54,6 +54,30 @@ def reading(state, role):
     return value * factor
 
 
+def power_context(values, ev):
+    """Bounded diagnostic watts from held canonical inputs, without acquisition."""
+    imported, exported = (
+        values.get("grid_import_power"),
+        values.get("grid_export_power"),
+    )
+    load = values.get("leistung_verbraucher")
+    try:
+        storage = signed_storage(
+            values.get("storage_charge_power"), values.get("storage_discharge_power")
+        )
+    except ValueError:
+        storage = None
+    return dict(
+        ev_actual_w=ev,
+        grid_w=imported - exported
+        if imported is not None and exported is not None
+        else None,
+        pv_w=values.get("leistung_pv"),
+        battery_w=storage,
+        household_w=max(0, load - ev) if load is not None and ev is not None else None,
+    )
+
+
 class PV:
     def __init__(self, hass, entry, grid):
         self.hass, self.entry, self.grid = hass, entry, grid
@@ -287,9 +311,16 @@ class PV:
             pv_proposed_phase_count=self.proposed.phases if self.proposed else None,
         )
 
-    def diagnostic(self, event, reason, **fields):
+    def diagnostic(self, event, reason, *, powers=None, **fields):
         try:
             if diagnostic_level(self.entry.options) >= 2:
+                # Merge first: cause-specific fields may already contain power keys.
+                # Snapshot context is authoritative; never serialize duplicate keys.
+                fields.update(
+                    power_context(self.values, self.ev_power())
+                    if powers is None
+                    else powers
+                )
                 _LOGGER.info(
                     "WBMGR subsystem=pv %s",
                     json.dumps(
@@ -309,14 +340,14 @@ class PV:
         except Exception:
             pass
 
-    def problem(self, reason):
+    def problem(self, reason, *, powers=None):
         if reason != self.input_problem:
             self.input_problem = reason
-            self.diagnostic("pv_inputs", reason or "inputs_recovered")
+            self.diagnostic("pv_inputs", reason or "inputs_recovered", powers=powers)
         if reason:
             self.budget.interrupt()
 
-    def decision_event(self, decision):
+    def decision_event(self, decision, *, powers=None):
         point = decision.point
         point_key = (point.phases, point.amps)
         # Delays and unchanged HOLD decisions produce at most one transition,
@@ -334,7 +365,7 @@ class PV:
             if self.last_mode != decision.mode:
                 fields.update(previous_mode=self.last_mode)
                 self.last_mode = decision.mode
-            self.diagnostic("pv_decision", decision.reason, **fields)
+            self.diagnostic("pv_decision", decision.reason, powers=powers, **fields)
 
     def checkpoint(self, *, restart=None):
         if self.closed:
@@ -429,7 +460,7 @@ class PV:
             self.pending_restart = None
             self.checkpoint(restart=restart)
 
-    def plan_target(self, profile, values, config, ev, now, elapsed):
+    def plan_target(self, profile, values, config, ev, now, elapsed, *, powers=None):
         """One observational target calculation, shared by every eligibility state."""
         if not self.planning_selected():
             self.target = None
@@ -466,7 +497,12 @@ class PV:
                         )
                     ),
                 )
-            self.diagnostic("pv_target", "target_changed", **fields)
+            self.diagnostic(
+                "pv_target",
+                "target_changed",
+                powers=power_context(values, ev) if powers is None else powers,
+                **fields,
+            )
         return target
 
     async def tick(self):
@@ -480,6 +516,7 @@ class PV:
         config = {key: s.get(key) for key in s.values}
         epoch, adapter, tx = g.epoch, g.listener.adapter, g.transaction()
         ev = self.ev_power()
+        powers = power_context(values, ev)
         planning_ev = ev
         if planning_ev is None:
             station, evse, _ = self.state.binding
@@ -491,7 +528,13 @@ class PV:
         target = None
         try:
             target = self.plan_target(
-                profile, values, config, planning_ev, self.now(), self.monotonic()
+                profile,
+                values,
+                config,
+                planning_ev,
+                self.now(),
+                self.monotonic(),
+                powers=powers,
             )
         except (ValueError, TypeError, OverflowError) as exc:
             self.target = self.last_target_event = None
@@ -504,20 +547,20 @@ class PV:
         except OSError:
             planning_error = "journal_write_failed"
         if planning_error:
-            self.problem(planning_error)
+            self.problem(planning_error, powers=powers)
             g.publish()
             if not planning_valid:
                 return
         if not self.regulation_active():
-            self.problem(planning_error)
+            self.problem(planning_error, powers=powers)
             g.publish()
             return
         if not g.valid(epoch, adapter, tx):
-            self.problem(planning_error or "control_unavailable")
+            self.problem(planning_error or "control_unavailable", powers=powers)
             g.publish()
             return
         if self.state.value(g.listener.control.key("ChargingEnabled")) is not True:
-            self.problem(planning_error or "hardware_disabled")
+            self.problem(planning_error or "hardware_disabled", powers=powers)
             g.publish()
             return
         current = None if g.point_uncertain else g.current_point()
@@ -546,7 +589,7 @@ class PV:
                     try:
                         await self.persist()
                     except OSError:
-                        self.problem("journal_write_failed")
+                        self.problem("journal_write_failed", powers=powers)
                     if g.valid(epoch, adapter, tx):
                         from .pv_core import Decision
 
@@ -560,7 +603,7 @@ class PV:
                                 stop_pct=target - config["soc_hysterese"],
                             ),
                         )
-                        self.decision_event(d)
+                        self.decision_event(d, powers=powers)
                         self.submit(d.point, current, urgent=True)
                     return
             scope = [*self.state.binding, "remote", tx]
@@ -573,10 +616,10 @@ class PV:
                 and not ended
                 and any(identity.get(k) != v for k, v in self.station_identity.items())
             ):
-                self.problem("economic_station_identity_mismatch")
+                self.problem("economic_station_identity_mismatch", powers=powers)
                 return
             if not self.budget.bind(scope, ended=ended):
-                self.problem("economic_scope_unreconciled")
+                self.problem("economic_scope_unreconciled", powers=powers)
                 return
             self.station_identity = dict(identity)
             imported, exported = (
@@ -721,15 +764,15 @@ class PV:
                     self.persist()
                 )  # Preserve provenance before the wire when possible.
             except OSError:
-                self.problem("journal_write_failed")
+                self.problem("journal_write_failed", powers=powers)
                 if d.point.amps > 0:
                     g.publish()
                     return  # Failed storage inhibits positives, never required OFF.
             else:
-                self.problem(None)
+                self.problem(None, powers=powers)
             if not g.valid(epoch, adapter, tx) or not self.regulation_active():
                 return
-            self.decision_event(d)
+            self.decision_event(d, powers=powers)
             self.submit(
                 d.point,
                 current,
@@ -738,7 +781,7 @@ class PV:
             )
             g.publish()
         except (ValueError, TypeError, OverflowError, OSError) as exc:
-            self.problem(str(exc))
+            self.problem(str(exc), powers=powers)
             g.publish()
 
     def submit(self, point, current, *, urgent=False):
