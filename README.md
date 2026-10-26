@@ -2,19 +2,28 @@
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This **v0.4.0-beta.17 prerelease** provides the shared PV Regulation V3
-runtime for PV_SURPLUS, PV_OPTIMUM and PV_MAXIMUM, alongside the existing NETZ
-profile and OCPP **2.1** interface. See the [beta.17 release notes](docs/v0.4/release-notes-beta.17.md)
-for features, seven new tuning parameters, migration and supervised HACS/rollback
-instructions, and the [implementation report](docs/pv-v3-implementation.md) for
-source evidence and regression validation.
+This **v0.4.0-beta.18 prerelease** adds the complete five-value PV power
+context to sparse Level-2 decision logs: actual EV, signed grid, PV production,
+signed battery and household demand excluding EV. It is an **observability
+release**; the shared PV Regulation V3 FAST/BALANCE runtime, NETZ and OCPP **2.1**
+interface are unchanged from beta.17. See the
+[beta.18 release notes](docs/v0.4/release-notes-beta.18.md),
+[release validation](docs/v0.4/release-validation-beta.18.md) and
+[FAST analysis](docs/pv-fast-power-diagnostics.md).
+
+The [beta.17 release notes](docs/v0.4/release-notes-beta.17.md) describe the
+shared PV runtime, seven tuning parameters and original V3 migration. All seven
+parameters and defaults are unchanged in beta.18; no data/schema migration is
+added. The [implementation report](docs/pv-v3-implementation.md) retains V3 source
+evidence and regression validation. Physical FAST optimization remains open until
+the operator captures the new five-value hardware log; no live setting is changed.
 
 The [beta.16 notes](docs/v0.4/release-notes-beta.16.md) retain the home-battery
 status and simplified PV card history. The [beta.15 notes](docs/v0.4/release-notes-beta.15.md)
 cover live NETZ schedules and the coordinated Stationary hardware-disable/CP
 correction; the [beta.14 notes](docs/v0.4/release-notes-beta.14.md) explain nominal
 NETZ power planning. The existing Stationary implementation identified in beta.15
-remains the interface baseline; **no Stationary update is part of beta.17**.
+remains the interface baseline; **no Stationary update is part of beta.18**.
 Stationary retains physical and electrical safety ownership. The old Stationary
 capability inventory cannot satisfy current execution requirements.
 The [beta.6 notes](docs/v0.4/release-notes-beta.6.md) retain Idle/session migration
@@ -144,10 +153,10 @@ separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
 For separately authorized installation and testing, select
-**v0.4.0-beta.17** in HACS. Keep manager release OFF, take a full pre-upgrade HA
-backup, verify installed manifest **0.4.0-beta.17** after the operator-managed
+**v0.4.0-beta.18** in HACS. Keep manager release OFF, take a full pre-upgrade HA
+backup, verify installed manifest **0.4.0-beta.18** after the operator-managed
 restart, and refresh all dashboard caches. Follow the
-[beta.17 upgrade and rollback procedure](docs/v0.4/release-notes-beta.17.md#hacs-upgrade-and-rollback).
+[beta.18 upgrade and rollback notes](docs/v0.4/release-notes-beta.18.md#hacs-upgrade-and-rollback).
 A package-only downgrade to beta.16 cannot restore removed delay settings or
 carry back V3 economic STOP history. Publication does not install anything or
 establish physical acceptance. NETZ retains event-driven fixed-point execution;
