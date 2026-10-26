@@ -2,6 +2,32 @@
 
 **Decision:** 25 October 2026. **Status:** approved *scope and log-minimization intent*, with exact event taxonomy and numeric filtering thresholds subject to implementation review. **IDs:** PV-DIAG-01–10. Complements [PV regulation V3](pv-regulation.md), [WBM-ARCH-01–12](architecture-responsibility.md) and current [passive diagnostics](../v0.4/recorder-availability-report.md). Requirements-only; no runtime logging changes in beta.16.
 
+## Approved five-power-value expansion — 26 October 2026
+
+The PV FAST Analysis and Complete Level-2 Power Diagnostics task explicitly
+supersedes the measurement-subset restriction in PV-DIAG-04 for five fields.
+Every relevant PV decision, STOP/restart, target and mode-transition event in
+PV_MAXIMUM, PV_OPTIMUM and battery-equipped PV_SURPLUS includes:
+
+| Field | Canonical watts contract |
+| --- | --- |
+| `ev_actual_w` | Actual measured selected EV charging power; never offered power. |
+| `grid_w` | Grid import minus export: positive import, negative export. Both source values must be available. |
+| `pv_w` | Positive total PV production from `leistung_pv`. |
+| `battery_w` | Existing signed storage normalization: charge minus discharge; positive charging, negative discharging. Both positive yields effective zero; either unavailable yields `null`. |
+| `household_w` | `max(0, leistung_verbraucher - ev_actual_w)`, following Fronius total consumption including selected EV. Either unavailable yields `null`. |
+
+Use the decision's existing input snapshot, including across persistence awaits.
+Target validity changes outside a tick use the held observations at that event.
+Unavailable values are JSON `null`; measured zero remains zero. Include each key
+exactly once, alongside the existing cause-specific thresholds and technical
+points. Do not substitute planning-only EV fallback power for unavailable selected
+EV diagnostics. This bounded context is explicitly approved even when one field
+is not a direct cause of that event; other unrelated source dumps remain excluded.
+The expansion does not change semantic signatures, filtering, event identifiers,
+measurement acquisition, polling, Recorder publication or control behavior.
+PV-DIAG-02/05–10 retain their sparse, side-effect-free contract.
+
 ## Objective and existing levels
 
 Level 2 (**relevant state changes**) must leave enough information to reconstruct **why a charging-regulation decision changed**, with the **minimum actual relevant measurements and reference values**. A log is for decisions, not a time series. Sensor measurements continue to be observable in HA; Level 2 does not reproduce Recorder, each sensor update, each PV tick or unchanged "holding" statuses. Keep the preexisting OCPP/connection/permission/authority/phase level taxonomy and events.
@@ -11,7 +37,7 @@ Level 2 (**relevant state changes**) must leave enough information to reconstruc
 | **PV-DIAG-01** | Level 0 reports genuine faults; Level 1 adds significant initialization/connection/recovery events; **Level 2** adds material **PV target, SoC mode, FAST/BALANCE decision, economic stop/restart and actual requested/applied divergence transitions**; Level 3 may expose more bounded debug detail on explicit selection. This is an additive PV event family, not a reclassification of all raw OCPP input as a Level-2 event. Retain existing subsystem identity, severity filtering and existing OCPP diagnostics. |
 | **PV-DIAG-02** | Level-2 decision events are **change driven**, not tick- or input-event driven. Emit when a canonical decision state, reason, target SoC, materially distinct requested feasible operating point, or economic state **actually changes**; log a relevant unsuccessful/denied transition only when its cause or outcome changes. An unchanged decision or repeated sensor report emits nothing. Pure command ACK and physical observation may be reported in existing OCPP families: avoid duplicate PV events for the same cause. |
 | **PV-DIAG-03** | Each event contains minimal context: timestamp from logging facility, entry/connector's stable non-secret identifier (without transaction ID), PV profile, SoC mode **previous → new** when changing, event kind, reason code, and affected reference or operating point as relevant. Use a bounded, consistent structured payload with machine-readable stable keys. Avoid prose-only or huge nested snapshots. |
-| **PV-DIAG-04** | Include **only measurements actually used to cause the decision**, in their original canonical units and consistent signs, plus the required comparison threshold or reference. **Target/SoC transition:** actual SoC, target T and hysteresis thresholds involved; **FAST adjustment:** signed grid exchange, actual selected EV power, old/new requested operating point and applied comparison band; **BALANCE adjustment:** effective signed home-battery power, actual selected EV power, actual SoC/target when deadband bias caused it, old/new operating point, and one-step direction; for a both-positive charge/discharge pair that actually changes the decision, log a compact transition reason rather than a full sensor dump; **economic Wh STOP:** measured raw grid import, threshold `M/2`, accumulated Wh and configured Wh limit (default 50), STOP/reset provenance and reason; **economic restart:** measured battery charge power (>0 W) or FAST-only house load excluding EV and its configured strict W threshold (default 500 W), if that branch caused the decision; **dynamic target:** newly selected T, planning phase and only the deciding forecast/household/capacity inputs. Include a missing-value/reason marker instead of invented zero. Do not attach battery/PV/forecast/etc. fields unrelated to the specific decision. |
+| **PV-DIAG-04** | Subject to the approved five-power-value expansion above, include **only additional measurements actually used to cause the decision**, in their original canonical units and consistent signs, plus the required comparison threshold or reference. **Target/SoC transition:** actual SoC, target T and hysteresis thresholds involved; **FAST adjustment:** signed grid exchange, actual selected EV power, old/new requested operating point and applied comparison band; **BALANCE adjustment:** effective signed home-battery power, actual selected EV power, actual SoC/target when deadband bias caused it, old/new operating point, and one-step direction; for a both-positive charge/discharge pair that actually changes the decision, log a compact transition reason rather than a full sensor dump; **economic Wh STOP:** measured raw grid import, threshold `M/2`, accumulated Wh and configured Wh limit (default 50), STOP/reset provenance and reason; **economic restart:** measured battery charge power (>0 W) or FAST-only house load excluding EV and its configured strict W threshold (default 500 W), if that branch caused the decision; **dynamic target:** newly selected T, planning phase and only the deciding forecast/household/capacity inputs. Include a missing-value/reason marker instead of invented zero. Do not attach battery/PV/forecast/etc. fields unrelated to the specific decision. |
 | **PV-DIAG-05** | Never include every raw sensor, OCPP MeterValues packet, value-change callback, full source-generation vectors, repeated readiness check, user tokens/credentials, URL, access token, full transaction ID or unrestricted entity attributes. A compact cause code can express "response pending", "unavailable source", "grid import" or "SoC limit" without copying the underlying protocol trace. Level 3 may offer opt-in bounded detailed measurement/source diagnostics, but must not introduce another acquisition/polling loop. |
 | **PV-DIAG-06** | Deduplicate on **semantic decision signature** per bound connector: mode, reason, effective target/feasible point and economic/action state, **not every floating-point measurement digit**. A changing sensor value with no decision transition does not generate a new event. Repeated validation failure produces one event on transition into failure and one on recovery, not a warning every five seconds. Do not emit a separate event for each partial processing stage of the same canonical tick. |
 | **PV-DIAG-07** | Significant target/point changes should record meaningful differences at the **real actuator resolution** (e.g. a changed discrete ampere/phase selection), not sub-watt noise or shifting fractions that resolve to the same executable point. SoC-target or planning-phase transitions remain event-worthy even if the actual charging point has not yet changed. No arbitrary numeric quantization may alter sensor values, policy calculations or the Recorder; event-only formatting can be compact. |
@@ -30,7 +56,7 @@ These examples demonstrate **minimum per-cause context**, not required keys, exa
 
 An unchanged both-positive source pair normalized to 0 W, a held 1p/6 A decision or a stable restart eligibility state does **not** produce repeated Level-2 PV logs. Actual policy STOP or restart emits one relevant cause/threshold record. No additional sampling or smoothing is used just for logging.
 
-A Level-2 log is **not** required to list every measurement that was present in the snapshot, only the measurements and thresholds that explain that particular decision.
+A Level-2 log includes the five approved power fields above, plus the measurements and thresholds that explain that particular decision; it does not list every source in the snapshot.
 
 ## Precedence, migration, and unresolved decisions
 
