@@ -1,8 +1,14 @@
 # PV regulation decision diagnostics — Level 2 contract
 
-**Decision:** 25 October 2026. **Status:** approved *scope and log-minimization intent*, with exact event taxonomy and numeric filtering thresholds subject to implementation review. **IDs:** PV-DIAG-01–10. Complements [PV regulation V3](pv-regulation.md), [WBM-ARCH-01–12](architecture-responsibility.md) and current [passive diagnostics](../v0.4/recorder-availability-report.md). Requirements-only; no runtime logging changes in beta.16.
+**Decision:** 25 October 2026. **Status:** approved *scope and log-minimization intent*, with exact event taxonomy and numeric filtering thresholds subject to implementation review. **IDs:** PV-DIAG-01–10. Complements [PV regulation V3](pv-regulation.md), [WBM-ARCH-01–12](architecture-responsibility.md) and current [passive diagnostics](../v0.4/recorder-availability-report.md). Historical beta.16 status was requirements-only. Sparse diagnostics were published in beta.17; the explicitly approved five-value expansion below is implemented for beta.18.
 
 ## Approved five-power-value expansion — 26 October 2026
+
+**Operator rationale:** Level-2 diagnostics must reconstruct the entire available
+energy-system power situation at each relevant regulation decision, including
+EV, grid, PV, battery and household power, so inverter/home-battery/household/EV
+interaction can provide evidence for future FAST optimization. This is broader
+than immediately causal inputs and does not authorize continuous measurements.
 
 The PV FAST Analysis and Complete Level-2 Power Diagnostics task explicitly
 supersedes the measurement-subset restriction in PV-DIAG-04 for five fields.

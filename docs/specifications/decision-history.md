@@ -1,6 +1,6 @@
 **24 October 2026 — approved supersession:** Automatic wake-up configuration moves entirely to Stationary local INI, with no WBM AutoWakeUpEnabled OCPP variable or HA switch. Hardware ChargingEnabled remains an independent whole-wallbox switch accessible from the HA device page without Remote current/phase authority. A new manager-owned `charge_release` gates current/phase dispatch and becomes the single Lovelace action. NETZ's standalone SET is replaced by the three-state action; PV profiles eventually use Start/Stop even when computing 0 A. See [normative specification](charge-release.md). This is a documentation-only decision.
 
-# Wallbox Manager – Decision History and Supersession Register (4–25 October 2026)
+# Wallbox Manager – Decision History and Supersession Register (4–26 October 2026)
 
 **Purpose:** Historical traceability for the consolidated requirements baseline V3; this is **INFORMATIVE / NON-NORMATIVE**, rather than a second specification. The original record refers to the 619-page PDF printout of the linked discussion uploaded on 13 October 2026. Page numbers refer to that printout. The sequence follows **later explicit user decisions**, rather than interim proposals or Codex reports alone. The separately sourced 15 October entry records an individually approved decision and does not approve the overall V3 draft.
 
@@ -319,3 +319,66 @@ The user specified **no extra BALANCE smoothing initially**; evaluate future fil
 ## 25 October 2026 – Consolidated PV Lastenheft reconciliation [DOCUMENTATION REVIEW]
 
 All target-critical October decisions are now consolidated in [pv-regulation.md](pv-regulation.md), [pv-operating-point-response.md](pv-operating-point-response.md) and [pv-decision-diagnostics.md](pv-decision-diagnostics.md). The older historical statements about an open BALANCE reserve curve, missing SoC matrix, unapproved grid deadband, fixed 50 Wh threshold, default 50% uptake gate, N-cycle BALANCE smoothing, mandatory >100 W modeled restart improvement, speculative retry suppression and unresolved technical minimum are **not** parallel current requirements. Current target: S=T-H strict SoC STOP; BALANCE recovery one EV step below/above ideal outside the T±H/2 band; no extra smoothing; charge/discharge two-source mapping and zero when both positive; economic STOP configured default 50 Wh; restart battery charge >0 W or FAST household load below configured default 500 W with all normal eligibility, no extra anti-retry timer; technical minimum as PV-ECO-06. Approved hardware and OCPP safeguards remain. No production code change or formal overall V3 approval is implied.
+
+
+## 25 October 2026 — Shared PV V3 published in beta.17 [IMPLEMENTED]
+
+The separately authorized implementation and publication produced
+[v0.4.0-beta.17](../v0.4/release-notes-beta.17.md). The approved shared SoC
+matrix, FAST grid exploration/correction, BALANCE signed-storage response,
+phase-first point selection, economic Wh STOP/restart and release-independent
+PV target/day planning are implemented. Beta.17 introduced **seven** new tuning
+parameters: increase interval, startup hold, grid deadband, decrease delay,
+import Wh budget, EV uptake threshold and FAST restart household threshold.
+The earlier entries saying “documentation only” describe their authorization
+at that time; they do not describe the published runtime. The overall V3
+requirements document remains DRAFT; physical acceptance is separate.
+
+## 26 October 2026 — Five-value PV power decision context [APPROVED]
+
+**Source:** Explicit operator task, PV FAST Analysis and Complete Level-2 Power
+Diagnostics, followed by explicit beta.18 finalization/publication authorization.
+This narrowly supersedes the earlier PV-DIAG-04 causal-input-only restriction.
+
+> Level-2 diagnostics must allow reconstruction of the entire available energy-system power situation at each relevant regulation decision, including EV, grid, PV, battery and household power. The objective is to understand the interaction of the inverter, home battery, household and EV, providing evidence for future FAST optimization.
+
+Each applicable decision, STOP/restart, target and mode-transition event includes
+`ev_actual_w`, `grid_w`, `pv_w`, `battery_w` and `household_w`, even when a field
+is not an immediate cause. Use the existing captured decision snapshot and held
+canonical observations; unknown values are JSON `null`. Grid positive means
+import, battery positive means charge. Household excludes the selected EV under
+the Fronius total-consumption contract. Preserve signed-storage normalization,
+unique keys, levels, signatures, sparse semantic events and no extra polling,
+control cycles, persistence or Recorder churn. See the normative
+[diagnostics contract](pv-decision-diagnostics.md).
+
+Reviewed diagnostics implementation `f09310d62a2310664331f5b852e99a79747e1f51`
+is preserved for beta.18, an observability release. FAST/BALANCE, NETZ,
+SoC/economic STOP, authority, release and all seven parameter defaults remain
+unchanged. Finalization, normal history-preserving merges, annotated tag and
+GitHub prerelease publication are explicitly authorized in this task after all
+mandatory checks. Installation, deployment and hardware operation are excluded.
+
+### Future FAST optimization [OPEN; NO NEW ALGORITHM APPROVED]
+
+The supplied beta.17 PV_MAXIMUM excerpts show upward exploration near zero grid
+power, short positive import excursions and immediate potentially multi-step
+reductions, repeatedly around 1p/8–10 A. EV power was well below the approximately
+4,800 W battery-discharge capability known from practical experience. That number
+is empirical context, not a confirmed inverter register, current measurement,
+real-time available capability or approved software limit.
+
+The missing concurrent context leaves open whether the battery responds more
+slowly than the EV, discharge is physically limited, PV production changes,
+household demand changes, or asynchronous Fronius/OCPP observations create an
+apparent imbalance. Preserve the manufacturer/source/inference distinctions in
+[the analysis](../pv-fast-power-diagnostics.md), including inspected openWB
+revision `809ac7425348dc4a0a2e080e742dfcd2f3cfc992`.
+
+The existing shared `pv_decrease_delay_cycles` may be tested at **2** in a
+separately controlled hardware experiment after a baseline five-value capture.
+Neither its default nor a live setting changes here; it also affects BALANCE.
+The report's narrower FAST-only proposal remains OPEN and requires evidence and
+separate approval. No new cap, grid-target controller, loop, filter, freshness
+timeout, SoC threshold, economic STOP condition or battery-safety logic follows.
+Stationary and installed inverter/battery hardware retain physical safety.
