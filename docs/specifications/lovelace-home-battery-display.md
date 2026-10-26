@@ -4,15 +4,16 @@
 **IDs:** WBM-HS-UI-01–15. This approval does **not** approve the overall
 [PV regulation V3](pv-regulation.md) DRAFT or authorize implementing PV control
 algorithms. It is a separately approved Lovelace presentation change.
-Documentation first; implementation, review, merge, release and deployment
-are separate stages.
+The base display is published in beta.18. The explicit 26 October caption
+refinement authorizes implementation/tests on a feature branch only; independent
+review, merge, release and deployment remain separate.
 
 ## Operator-facing layout
 
 | ID | Requirement |
 | --- | --- |
 | **WBM-HS-UI-01** | In the existing Lovelace wallbox card add a read-only **Hausspeicher** (English: **Home battery**) status block in the right-hand column, beneath the live **Ladezustand / Leistung** column, horizontally aligned with the existing lower-left **Wallboxparameter** block and its `x-phasig yA` value. Preserve the existing wallbox-parameter display, including its applicable actual → requested representation. On narrow cards, stack the blocks legibly; do not require horizontal scrolling. |
-| **WBM-HS-UI-02** | Under **Hausspeicher**, show **Ladezustand** (English: **State of charge**) and the compact value `69,0 % → 40,0 %` (German) / `69.0 % → 40.0 %` (English): actual home-battery SoC on the left; the **currently applicable profile-dependent target/reference** on the right. The arrow indicates a comparison, **not** charging direction, a promised battery action or a battery-control command. Display-only; never editable in this block. |
+| **WBM-HS-UI-02** | **26 October 2026 approved refinement:** show the **Hausspeicher / Home battery** heading directly above the compact `69,0 % → 40,0 %` / `69.0 % → 40.0 %` pair, without a separate visible **Ladezustand / State of charge** caption or empty placeholder. Actual battery SoC remains left, applicable profile target/reference right. Keep informative accessible labeling and tooltip identifying actual SoC and target/reference (PV target versus NETZ observed minimum reserve). The arrow is a comparison, not charging direction or a battery-control command. The separate upper live **Ladezustand / Charging state** caption stays. Display-only; all other behavior and WBM-HS-UI-01, 03–15 remain unchanged. |
 | **WBM-HS-UI-03** | Actual SoC comes from the already configured HA battery-SoC mapping (`soc_speicher_aktuell` in the existing NETZ/storage mapping terminology), not the EV SoC, a configured desired reserve or inferred grid power. If unavailable, show `—` for the missing side rather than assuming zero; a valid 0 % is a real zero. Valid HA values remain held according to WBM-ARCH-05/09, not expired by an invented frontend TTL. |
 | **WBM-HS-UI-04** | **PV_SURPLUS with storage:** right side is the profile's applicable fixed target `T` from the existing `soll_soc_speicher` setting under PV-SOC-01/03. Show the effective validated target, not a pending, invalid or fabricated value. Recheck the full-precision observed reserve against PV-SOC-01 (`R + H <= T <= 100 - H`); if an external reserve change invalidates a saved target or reserve is unavailable, show `—` without modifying or clamping that setting. Do not introduce a second target parameter. |
 | **WBM-HS-UI-05** | **PV_OPTIMUM:** right side is the **current effective dynamic target `T`** provided by the canonical PV planner according to PV-PLAN-02/03. This includes the upper target in `BEFORE_SURPLUS`, the calculated target in `DYNAMIC`, and the upper target in latched `FINISHED`. The canonical planner maintains this target while the selected PV profile has charging release OFF, so the operator can inspect it before Start; no OCPP connection, authority or transaction is required solely for T. Never implement/reproduce planning, forecasts, time arithmetic, midnight resets or SoC smoothing in JavaScript merely to populate the card. |
@@ -55,9 +56,9 @@ are separate stages.
 | WBM-ARCH-01–12, PV-ARCH-05/06, WBM-DISP-01–03 | Backend owns regulation and source state; card is a projection, with no second loop, implied safety gate or changed session-energy/live-power precision. |
 | WBM-RELEASE-01–14, WBM-PV-RELEASE-01–07, WBM-TIME-01–24 | Unified button, manager release and NETZ timing are unchanged. |
 
-**Implementation boundary:** Current `develop` card contains the five editors.
-The consolidated PV regulation V3 remains a **DRAFT** and the active-control
-specification explicitly defers PV regulator implementation. An effective
-PV_OPTIMUM/PV_MAXIMUM target must not be invented just to make the new card
-show a number. The separate implementation task must report exactly which
-values are currently available and which cannot yet be displayed truthfully.
+**Implementation boundary:** Beta.18 already provides the home-battery display,
+canonical PV target projection and simplified editors. The 26 October refinement
+removes only the redundant battery caption element and assignment. The canonical
+backend target, source mappings, entity APIs, locale formatting, unavailable-value
+semantics and responsive layout remain unchanged. V3's overall document status
+remains DRAFT; this presentation decision approves no control algorithm.

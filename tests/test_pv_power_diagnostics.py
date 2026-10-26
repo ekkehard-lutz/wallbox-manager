@@ -102,7 +102,7 @@ async def test_target_decision_stop_restart_and_mode_context(ha, caplog, profile
             "restart_battery_charging",
             "soc_stop",
             "target_unavailable",
-        } <= {r["reason"] for r in logged}
+        } <= {r.get("reason") for r in logged}
         for record in logged:
             assert POWERS <= record.keys()
         first = next(r for r in logged if r["event"] == "pv_decision")
@@ -188,7 +188,13 @@ async def test_logging_levels_have_identical_regulation_and_publications(
         await power(station, 1380)
         current = g.current_point()
         traces = []
-        for level in (0, 2):
+        for level, failure in (
+            (0, False),
+            (1, False),
+            (2, False),
+            (3, False),
+            (2, True),
+        ):
             ha.config_entries.async_update_entry(
                 entry, options={**entry.options, "diagnostic_level": level}
             )
@@ -198,6 +204,11 @@ async def test_logging_levels_have_identical_regulation_and_publications(
             pv.values.update(soc_speicher_aktuell=soc, grid_export_power=0)
             submitted, published = [], []
             with monkeypatch.context() as patch:
+                if failure:
+                    patch.setattr(
+                        "custom_components.wallbox_manager.pv._LOGGER.info",
+                        Mock(side_effect=ValueError("diagnostic failure")),
+                    )
                 patch.setattr(g, "current_point", lambda: current)
                 patch.setattr(
                     pv,
@@ -224,7 +235,7 @@ async def test_logging_levels_have_identical_regulation_and_publications(
                         )
                         await tick(pv)
             traces.append((submitted, published))
-        assert traces[0] == traces[1]
+        assert all(trace == traces[0] for trace in traces[1:])
         for r in records(caplog):
             assert POWERS <= r.keys()
             assert len(json.dumps(r)) < 1500
@@ -259,3 +270,182 @@ def test_fast_observed_shape_and_existing_two_cycle_delay(imported):
     core.decide(inputs(ev=2200), settings, ranges(), current)
     assert core.down_cycles is None
     assert core.decide(demand, settings, ranges(), current).reason == "decrease_delay"
+
+
+SAMPLE_KEYS = POWERS | {"event", "station", "evse", "connector", "profile", "mode"}
+
+
+@pytest.mark.parametrize(
+    "profile,battery,mode",
+    [
+        ("PV_MAXIMUM", True, "FAST"),
+        ("PV_MAXIMUM", True, "BALANCE"),
+        ("PV_OPTIMUM", True, "FAST"),
+        ("PV_OPTIMUM", True, "BALANCE"),
+        ("PV_SURPLUS", True, "FAST"),
+        ("PV_SURPLUS", True, "BALANCE"),
+        ("PV_SURPLUS", False, "SURPLUS"),
+    ],
+)
+async def test_full_or_sample_per_cycle_and_captured_powers(
+    ha, caplog, profile, battery, mode
+):
+    entry = await install(ha, battery=battery)
+    async with peer(entry, station_type=GridStation) as station:
+        _, pv = await release(entry, station, profile=profile)
+        await tick(pv)
+        await power(station, 100)
+        pv.core.startup = None
+        pv.core.mode = mode
+        if battery:
+            pv.values["soc_speicher_aktuell"] = pv.target + (
+                10 if mode == "FAST" else 0
+            )
+        pv.values.update(
+            grid_import_power=0,
+            grid_export_power=0,
+            storage_charge_power=0,
+            storage_discharge_power=0,
+            leistung_pv=0,
+            leistung_verbraucher=500,
+        )
+        pv.last_event = None
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            await tick(pv)
+            decisions = [
+                r for r in records(caplog) if r["event"] in ("pv_decision", "pv_sample")
+            ]
+            assert len(decisions) == 1 and decisions[0]["event"] == "pv_decision"
+            assert "reason" in decisions[0] and POWERS <= decisions[0].keys()
+            expected = []
+            original = pv.persist
+            for n in range(5):
+                await power(station, 100 + n)
+                pv.values.update(
+                    grid_import_power=n,
+                    grid_export_power=4 - n,
+                    storage_charge_power=0 if n % 2 else n,
+                    storage_discharge_power=n if n % 2 else 0,
+                    leistung_pv=None if n == 4 else n * 10,
+                    leistung_verbraucher=None if n == 4 else 500 + n,
+                )
+                if not battery:
+                    pv.values.update(
+                        storage_charge_power=None,
+                        storage_discharge_power=None,
+                        leistung_pv=None,
+                        leistung_verbraucher=None,
+                    )
+                if mode != "BALANCE" and n == 4:
+                    pv.values["storage_charge_power"] = None
+                expected.append(power_context(dict(pv.values), pv.ev_power()))
+
+                async def mutation_after_snapshot():
+                    await original()
+                    pv.values["leistung_verbraucher"] = 99999
+                    pv.values["leistung_pv"] = 99999
+
+                # Exercise a real persistence await without rereading live values.
+                pv.persist = mutation_after_snapshot
+                await tick(pv)
+                pv.persist = original
+        decisions = [
+            r for r in records(caplog) if r["event"] in ("pv_decision", "pv_sample")
+        ]
+        assert len(decisions) == 6
+        assert [r["event"] for r in decisions] == ["pv_decision"] + ["pv_sample"] * 5
+        for sample, powers in zip(decisions[1:], expected, strict=True):
+            assert sample.keys() == SAMPLE_KEYS
+            assert {key: sample[key] for key in POWERS} == powers
+            assert sample["mode"] == mode and sample["profile"] == profile
+        assert decisions[-1]["pv_w"] is None and decisions[-1]["household_w"] is None
+
+
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+@pytest.mark.parametrize(
+    "reason",
+    ["response_pending", "startup_hold", "increase_interval", "decrease_delay"],
+)
+async def test_held_reason_full_once_then_compact_at_configured_level(
+    ha, caplog, level, reason
+):
+    from test_pv_core import point
+
+    from custom_components.wallbox_manager.pv_core import Decision
+
+    entry = await install(ha)
+    ha.config_entries.async_update_entry(
+        entry, options={**entry.options, "diagnostic_level": level}
+    )
+    pv = entry.runtime_data.pv
+    pv.core.mode = "FAST"
+    decision = Decision(point(), "FAST", reason, {"hold_cycles": 10})
+    powers = power_context({}, None)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        pv.decision_event(decision, powers=powers)
+        for _ in range(5):
+            pv.decision_event(decision, powers=powers)
+    logged = records(caplog)
+    if level < 2:
+        assert logged == []
+    else:
+        assert [r["event"] for r in logged] == ["pv_decision"] + ["pv_sample"] * 5
+        assert logged[0]["reason"] == reason and logged[0]["hold_cycles"] == 10
+        assert all(r.keys() == SAMPLE_KEYS for r in logged[1:])
+        assert all({k: r[k] for k in POWERS} == dict.fromkeys(POWERS) for r in logged)
+
+
+@pytest.mark.parametrize(
+    "context", ["release_off", "netz", "unavailable_control", "invalid_source"]
+)
+async def test_no_cycle_samples_without_eligible_regulation(
+    ha, caplog, monkeypatch, context
+):
+    entry = await install(ha)
+    async with peer(entry, station_type=GridStation) as station:
+        g, pv = await release(entry, station, profile="PV_OPTIMUM")
+        await tick(pv)
+        if context == "release_off":
+            await g.stop_release()
+        elif context == "netz":
+            await g.settings.set("charging_profile", "NETZ")
+        elif context == "unavailable_control":
+            monkeypatch.setattr(g, "valid", lambda *args: False)
+        else:
+            pv.values["grid_import_power"] = None
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            for _ in range(5):
+                await tick(pv)
+        assert not any(
+            r["event"] in ("pv_sample", "pv_decision") for r in records(caplog)
+        )
+
+
+async def test_compact_logging_uses_no_io_or_persistence(ha, caplog, monkeypatch):
+    from test_pv_core import point
+
+    from custom_components.wallbox_manager.pv_core import Decision
+
+    entry = await install(ha)
+    pv = entry.runtime_data.pv
+    pv.core.mode = "FAST"
+    decision = Decision(point(), "FAST", "startup_hold", {"hold_cycles": 10})
+    powers = power_context({}, None)
+    pv.decision_event(decision, powers=powers)
+    guarded = [Mock(side_effect=AssertionError("diagnostic I/O")) for _ in range(6)]
+    with monkeypatch.context() as patch:
+        patch.setattr(pv, "ev_power", guarded[0])
+        patch.setattr(type(ha.states), "get", guarded[1])
+        patch.setattr(pv.grid, "publish", guarded[2])
+        patch.setattr(pv, "persist", guarded[3])
+        patch.setattr(pv, "submit", guarded[4])
+        patch.setattr(pv.store, "async_save", guarded[5])
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            pv.decision_event(decision, powers=powers)
+        assert len(records(caplog)) == 1 and records(caplog)[0]["event"] == "pv_sample"
+    for surface in guarded:
+        surface.assert_not_called()

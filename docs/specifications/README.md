@@ -1,3 +1,17 @@
+**26 October 2026 — later cycle-sample and caption refinement:** The operator now
+approves exactly one compact `pv_sample` for each otherwise unchanged eligible
+active PV decision, as a bounded exception to beta.18's sparse-only policy.
+Changed decisions retain their complete record; inactive/passive planning stays
+change driven. No extra acquisition, control cycle or Recorder work is introduced.
+The Home Battery heading sits directly above its percentage pair, without a
+redundant visible caption; accessible SoC/reference text and the upper charging
+caption remain. See [PV-DIAG](pv-decision-diagnostics.md) and
+[WBM-HS-UI-02](lovelace-home-battery-display.md). That feature task authorized implementation only. The subsequent beta.19
+publication task explicitly authorizes release preparation, validated normal
+merges, annotated tag and GitHub prerelease publication; it authorizes no new
+algorithm, deployment, hardware activity or live setting change. See the
+[beta.19 release notes](../v0.4/release-notes-beta.19.md).
+
 **26 October 2026 — publication status and approved diagnostic expansion:**
 The approved shared PV Regulation V3 runtime was implemented and published in
 [beta.17](../v0.4/release-notes-beta.17.md), including **seven new PV regulation
@@ -28,13 +42,13 @@ V3 remains DRAFT overall.
 | --- | --- | --- |
 | [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, with explicit supersession register | **APPROVED independently** |
 | [Active OCPP control foundation](active-ocpp-control.md) | Explicit takeover and independent charging permission; successor milestone | **User-authorized implementation scope; hardware acceptance separate** |
-| [Lovelace home battery and simplified PV controls](lovelace-home-battery-display.md) | Profile-dependent home battery status, removal of five card-only editors, compatibility and tests | **APPROVED; published by beta.17; physical acceptance separate** |
+| [Lovelace home battery and simplified PV controls](lovelace-home-battery-display.md) | Profile-dependent home battery status, removal of five card-only editors, compatibility and tests | **Base published by beta.17; caption refinement approved after beta.18** |
 | [NETZ / Grid fixed-point profile](grid-profile.md) | Implemented event-driven NETZ control, phase range/limits, recognized lockout retry, battery reserve | **APPROVED; published before beta.17; unchanged in beta.18** |
 | [Automatic vehicle wake-up](automatic-vehicle-wakeup.md) | Historical remote-setting scope; superseded by local Stationary INI | **Superseded configuration ownership** |
 | [Legacy manual compatibility](manual-vehicle-wakeup.md) | Station DataTransfer only; no manual HA button | Superseded UI scope |
 | [Passive v0.4](passive-v0.4.md) | Current passive milestone | **APPROVED, subject to WBM-ARCH-01–12** |
 | [Shared PV operating points and EV settling](pv-operating-point-response.md) | Configurable cycle timing, phase-first navigation, EV uptake, 100 W default grid deadband, Wh budget and 500 W default FAST restart house load | **Approved decisions implemented in beta.17; physical acceptance outstanding** |
-| [Level-2 PV decision diagnostics](pv-decision-diagnostics.md) | Five-power-value context for changed PV decisions; suppression of unchanged ticks | **APPROVED five-value expansion implemented for beta.18; physical capture pending** |
+| [Level-2 PV decision diagnostics](pv-decision-diagnostics.md) | Full transitions plus compact five-power context for unchanged eligible active cycles | **Beta.18 five-value expansion published; later compact-cycle exception approved** |
 | [PV regulation – Requirements baseline V3](pv-regulation.md) | Current consolidated target specification draft with stable requirement IDs, acceptance criteria, sources and open issues | **DRAFT overall; approved runtime published in beta.17** |
 | [Decision history, October 2026](decision-history.md) | NON-NORMATIVE history: approved decisions, superseded interim solutions and explicitly rejected approaches | Reference / history |
 

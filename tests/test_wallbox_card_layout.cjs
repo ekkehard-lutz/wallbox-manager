@@ -26,6 +26,14 @@ test('home battery aligns with wallbox parameters and stacks by card width',()=>
         results.push({language,width,stacked:b.top>p.bottom,aligned:Math.abs(b.top-p.top)<1 && b.left>p.right,
           overflow:c.scrollWidth>c.clientWidth, battery:root.getElementById('battery-soc').textContent,
           point:root.getElementById('actual').textContent,
+          heading:root.getElementById('battery-label').textContent,
+          liveLabel:root.getElementById('charging-label').textContent,
+          captionAbsent:!root.getElementById('battery-soc-label') && !battery.querySelector('.caption'),
+          directPair:root.getElementById('battery-label').nextElementSibling===root.getElementById('battery-soc') && battery.children.length===2,
+          aria:root.getElementById('battery-soc').getAttribute('aria-label'),
+          tooltip:root.getElementById('battery-soc').title,
+          pairAligned:Math.abs(root.getElementById('battery-soc').getBoundingClientRect().top-root.getElementById('actual').getBoundingClientRect().top)<1,
+          headingGap:root.getElementById('battery-soc').getBoundingClientRect().top-root.getElementById('battery-label').getBoundingClientRect().bottom,
           afterLive:b.top>=root.querySelector('.live').getBoundingClientRect().bottom});
       }
       document.body.innerHTML='<pre id="results">'+JSON.stringify(results)+'</pre>';
@@ -43,6 +51,14 @@ test('home battery aligns with wallbox parameters and stacks by card width',()=>
       assert.equal(r.width<=320?r.stacked:r.aligned,true,JSON.stringify(r));
       assert.match(r.point,/6A → .*17A/);
       assert.equal(r.battery,r.language==='de'?'69,1 % → 40,0 %':'69.1 % → 40.0 %');
+      assert.equal(r.heading,r.language==='de'?'Hausspeicher':'Home battery');
+      assert.equal(r.liveLabel,r.language==='de'?'Ladezustand':'Charging state');
+      assert.equal(r.captionAbsent,true);
+      assert.equal(r.directPair,true);
+      assert.equal(r.aria,r.tooltip);
+      assert.match(r.aria,r.language==='de'?/Ladezustand: .*Aktuelle Mindestreserve:/:/State of charge: .*Current minimum reserve:/);
+      assert.ok(Math.abs(r.headingGap-8)<1,JSON.stringify(r));
+      if (r.aligned) assert.equal(r.pairAligned,true,JSON.stringify(r));
     }
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });

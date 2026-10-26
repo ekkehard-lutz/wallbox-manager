@@ -944,3 +944,18 @@ for (const language of ['de','en']) for (const profile of ['PV_OPTIMUM','PV_MAXI
     assert.equal(calls.length,0);
   });
 }
+
+for (const language of ['de','en']) {
+  test(`home battery has heading and pair without a caption, retaining live label and accessibility ${language}`,()=>{
+    const {card:c,get}=card(batteryStates('E','63.3','40'),{},language);
+    const de=language==='de';
+    assert.equal(get('battery-label').textContent,de?'Hausspeicher':'Home battery');
+    assert.equal(get('battery-soc').textContent,de?'63,3 % → 40,0 %':'63.3 % → 40.0 %');
+    assert.equal(get('charging-label').textContent,de?'Ladezustand':'Charging state');
+    assert.equal(c.shadowRoot.html.includes('battery-soc-label'),false);
+    assert.match(c.shadowRoot.html,/<h3 id="battery-label"><\/h3><div class="reading" id="battery-soc"/);
+    const value=get('battery-soc');
+    assert.equal(value['aria-label'],value.title);
+    assert.match(value.title,de?/Ladezustand: 63,3 %; Aktuelle Mindestreserve: 40,0 %/:/State of charge: 63.3 %; Current minimum reserve: 40.0 %/);
+  });
+}
