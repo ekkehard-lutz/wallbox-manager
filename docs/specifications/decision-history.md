@@ -382,3 +382,62 @@ The report's narrower FAST-only proposal remains OPEN and requires evidence and
 separate approval. No new cap, grid-target controller, loop, filter, freshness
 timeout, SoC threshold, economic STOP condition or battery-safety logic follows.
 Stationary and installed inverter/battery hardware retain physical safety.
+
+
+## 26 October 2026 — Compact eligible-cycle samples and battery caption [APPROVED AFTER BETA.18]
+
+**Source:** Explicit operator task, PV Level-2 Cycle Samples and Home Battery
+Card Cleanup. Beta.18's earlier sparse-only approval is historical; this later
+approval deliberately changes its unchanged-decision suppression.
+
+> The regulator's behavior must be analyzable across consecutive regulation cycles, including cycles in which the decision and requested charging point remain unchanged. In particular, EV, grid, PV, battery and household power must remain observable throughout a configured downward-regulation delay and during the physical response of the inverter, home battery and vehicle.
+
+Preserve the existing semantic signature and complete changed `pv_decision`.
+For each otherwise unchanged eligible active decision, emit one INFO `pv_sample`
+with identity/profile/mode and the five canonical power values, without reason,
+threshold or point structures. Full and compact records are mutually exclusive
+for the same decision; independent transitions remain valid. Include both battery
+and battery-free PV_SURPLUS under existing eligibility, plus PV_MAXIMUM/OPTIMUM.
+Release OFF, NETZ, passive planning and unavailable contexts without a valid
+decision create no cyclic samples. Levels 0/1 are unchanged; Level 3 reuses the
+same stream. Captured snapshots, signs, nulls and held observations remain.
+No extra timer, source read, OCPP request, persistence, publication, entity,
+controller state or control action is approved. Update PV-DIAG-02/05/06/08/10
+and the 300-cycle acceptance from silence to compact samples without repeated
+full transitions; see [current contract](pv-decision-diagnostics.md).
+
+For [WBM-HS-UI-02](lovelace-home-battery-display.md), remove only the redundant
+visible Home Battery `Ladezustand / State of charge` caption and its element.
+Keep the section heading directly above the locale-aware percentage pair and
+arrow, all four profile reference meanings, independent missing values,
+accessible actual/reference text and tooltip, responsive alignment and the
+separate upper `Ladezustand / Charging state` label. No backend mapping or entity
+change follows. WBM-HS-UI-01 and 03–15 remain unchanged.
+
+Authorization covers implementation, tests, English documentation and feature
+branch commit/push. The manifest remains beta.18. Independent review, any beta.19
+preparation, merge/release, installation and hardware acceptance remain separate.
+FAST/BALANCE, SoC, economics, NETZ, seven parameter defaults, authority/release and
+Stationary physical safety responsibility are unchanged.
+
+
+## 26 October 2026 — Beta.19 publication authorization [RELEASE SCOPE]
+
+Following independent approval of feature commit
+`29d19eacf4dd24c468ed818338da4cb56ea9a799`, the operator explicitly authorizes
+release preparation, full validation, history-preserving develop/main merges,
+annotated `v0.4.0-beta.19` tag and GitHub prerelease publication in one workflow,
+without further approval between successful gates. This supersedes the preceding
+feature task's publication boundary for this release only; it does not rewrite
+the historical sparse-only diagnostic approval or introduce new behavior.
+
+The accepted scope includes repeated compact samples for valid STOP decisions
+while manager release remains ON. Do not add another suppression condition.
+The operator reports an already configured `pv_decrease_delay_cycles=2` for a
+separate supervised FAST experiment. Preserve that value and all existing
+settings; the default remains 0 and no live configuration is changed here.
+Future FAST optimization and physical FAST/BALANCE acceptance remain open.
+Installation, HA/Stationary restart, browser-cache intervention, authority/release
+changes, charging commands and inverter/battery actions remain excluded. See
+[release notes](../v0.4/release-notes-beta.19.md) for the separately authorized
+installation boundary and frontend-cache check.

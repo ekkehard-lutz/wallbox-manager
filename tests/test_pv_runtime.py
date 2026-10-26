@@ -235,7 +235,7 @@ async def test_balance_stop_a_only_real_applied_after_hold(ha):
         assert g.settings.get("charge_release")
 
 
-async def test_sparse_300_ticks_noise_and_invalid_recovery(caplog, ha):
+async def test_300_ticks_compact_samples_noise_and_invalid_recovery(caplog, ha):
     entry = await install(ha)
     async with peer(entry, station_type=GridStation) as station:
         _, pv = await release(entry, station)
@@ -257,7 +257,12 @@ async def test_sparse_300_ticks_noise_and_invalid_recovery(caplog, ha):
             for n in range(300):
                 pv.values["storage_charge_power"] = n % 2
                 await tick(pv)
-            assert len(caplog.records) == count
+            assert len(caplog.records) == count + 300
+            samples = [
+                json.loads(r.getMessage().split("subsystem=pv ")[1])
+                for r in caplog.records[count:]
+            ]
+            assert all(r["event"] == "pv_sample" for r in samples)
             assert len(station.profiles) == requests
             pv.values["storage_charge_power"] = None
             await tick(pv)

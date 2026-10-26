@@ -71,7 +71,7 @@ class WallboxManagerCard extends HTMLElement {
       ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="--"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="--"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
       <button id="charge-action"></button>
       <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
-      <div class="details"><section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section><section class="section" aria-labelledby="battery-label"><h3 id="battery-label"></h3><div class="caption" id="battery-soc-label"></div><div class="reading" id="battery-soc" role="img"></div></section></div>
+      <div class="details"><section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section><section class="section" aria-labelledby="battery-label"><h3 id="battery-label"></h3><div class="reading" id="battery-soc" role="img"></div></section></div>
       <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><p id="error" class="notice" role="status">—</p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
@@ -507,7 +507,6 @@ class WallboxManagerCard extends HTMLElement {
     const actualSoc = percent(percentageValue(soc));
     const referenceLabel = profile === "NETZ" ? (de ? "Aktuelle Mindestreserve" : "Current minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
     get("battery-label").textContent = de ? "Hausspeicher" : "Home battery";
-    get("battery-soc-label").textContent = de ? "Ladezustand" : "State of charge";
     get("battery-soc").textContent = `${actualSoc} → ${reference}`;
     get("battery-soc").title = `${de ? "Ladezustand" : "State of charge"}: ${actualSoc}; ${referenceLabel}: ${reference}`;
     get("battery-soc").setAttribute("aria-label",get("battery-soc").title);
