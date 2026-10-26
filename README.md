@@ -2,18 +2,22 @@
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This **v0.4.0-beta.18 prerelease** adds the complete five-value PV power
-context to sparse Level-2 decision logs: actual EV, signed grid, PV production,
-signed battery and household demand excluding EV. It is an **observability
-release**; the shared PV Regulation V3 FAST/BALANCE runtime, NETZ and OCPP **2.1**
-interface are unchanged from beta.17. See the
-[beta.18 release notes](docs/v0.4/release-notes-beta.18.md),
-[release validation](docs/v0.4/release-validation-beta.18.md) and
-[FAST analysis](docs/pv-fast-power-diagnostics.md).
+This **v0.4.0-beta.19 prerelease** adds compact PV cycle diagnostics and removes
+the redundant visible Home Battery caption. Changed semantic decisions retain
+full `pv_decision` records; otherwise unchanged eligible active decisions emit
+one eleven-key `pv_sample` with actual EV, signed grid, PV production, signed
+battery and household demand excluding EV. At a 5-second cadence, unchanged
+eligible regulation can produce approximately **720 compact samples/hour**.
+Release OFF, passive planning and NETZ create no cyclic PV samples. This is a
+**diagnostic observability and minor Lovelace presentation release**; FAST/BALANCE
+and all charging algorithms remain unchanged. See the
+[beta.19 release notes](docs/v0.4/release-notes-beta.19.md),
+[release validation](docs/v0.4/release-validation-beta.19.md) and
+[feature report](docs/pv-cycle-diagnostics-card-cleanup.md).
 
 The [beta.17 release notes](docs/v0.4/release-notes-beta.17.md) describe the
 shared PV runtime, seven tuning parameters and original V3 migration. All seven
-parameters and defaults are unchanged in beta.18; no data/schema migration is
+parameters and defaults are unchanged in beta.19; no data/schema migration is
 added. The [implementation report](docs/pv-v3-implementation.md) retains V3 source
 evidence and regression validation. Physical FAST optimization remains open until
 the operator captures the new five-value hardware log; no live setting is changed.
@@ -23,7 +27,7 @@ status and simplified PV card history. The [beta.15 notes](docs/v0.4/release-not
 cover live NETZ schedules and the coordinated Stationary hardware-disable/CP
 correction; the [beta.14 notes](docs/v0.4/release-notes-beta.14.md) explain nominal
 NETZ power planning. The existing Stationary implementation identified in beta.15
-remains the interface baseline; **no Stationary update is part of beta.18**.
+remains the interface baseline; **no Stationary update is part of beta.19**.
 Stationary retains physical and electrical safety ownership. The old Stationary
 capability inventory cannot satisfy current execution requirements.
 The [beta.6 notes](docs/v0.4/release-notes-beta.6.md) retain Idle/session migration
@@ -153,10 +157,11 @@ separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
 For separately authorized installation and testing, select
-**v0.4.0-beta.18** in HACS. Keep manager release OFF, take a full pre-upgrade HA
-backup, verify installed manifest **0.4.0-beta.18** after the operator-managed
-restart, and refresh all dashboard caches. Follow the
-[beta.18 upgrade and rollback notes](docs/v0.4/release-notes-beta.18.md#hacs-upgrade-and-rollback).
+**v0.4.0-beta.19** in HACS. Keep manager release OFF, take a full pre-upgrade HA
+backup, verify installed manifest **0.4.0-beta.19** after the operator-managed
+restart. Check that each browser loads the current frontend resource rather than
+an older cached card; any cache refresh is a separate operator action. Follow the
+[beta.19 upgrade and rollback notes](docs/v0.4/release-notes-beta.19.md#hacs-upgrade-and-rollback).
 A package-only downgrade to beta.16 cannot restore removed delay settings or
 carry back V3 economic STOP history. Publication does not install anything or
 establish physical acceptance. NETZ retains event-driven fixed-point execution;

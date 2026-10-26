@@ -6,8 +6,11 @@ change driven. No extra acquisition, control cycle or Recorder work is introduce
 The Home Battery heading sits directly above its percentage pair, without a
 redundant visible caption; accessible SoC/reference text and the upper charging
 caption remain. See [PV-DIAG](pv-decision-diagnostics.md) and
-[WBM-HS-UI-02](lovelace-home-battery-display.md). Feature implementation only;
-no new algorithm, version, merge, release, deployment or live setting is authorized.
+[WBM-HS-UI-02](lovelace-home-battery-display.md). That feature task authorized implementation only. The subsequent beta.19
+publication task explicitly authorizes release preparation, validated normal
+merges, annotated tag and GitHub prerelease publication; it authorizes no new
+algorithm, deployment, hardware activity or live setting change. See the
+[beta.19 release notes](../v0.4/release-notes-beta.19.md).
 
 **26 October 2026 — publication status and approved diagnostic expansion:**
 The approved shared PV Regulation V3 runtime was implemented and published in

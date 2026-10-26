@@ -419,3 +419,25 @@ branch commit/push. The manifest remains beta.18. Independent review, any beta.1
 preparation, merge/release, installation and hardware acceptance remain separate.
 FAST/BALANCE, SoC, economics, NETZ, seven parameter defaults, authority/release and
 Stationary physical safety responsibility are unchanged.
+
+
+## 26 October 2026 — Beta.19 publication authorization [RELEASE SCOPE]
+
+Following independent approval of feature commit
+`29d19eacf4dd24c468ed818338da4cb56ea9a799`, the operator explicitly authorizes
+release preparation, full validation, history-preserving develop/main merges,
+annotated `v0.4.0-beta.19` tag and GitHub prerelease publication in one workflow,
+without further approval between successful gates. This supersedes the preceding
+feature task's publication boundary for this release only; it does not rewrite
+the historical sparse-only diagnostic approval or introduce new behavior.
+
+The accepted scope includes repeated compact samples for valid STOP decisions
+while manager release remains ON. Do not add another suppression condition.
+The operator reports an already configured `pv_decrease_delay_cycles=2` for a
+separate supervised FAST experiment. Preserve that value and all existing
+settings; the default remains 0 and no live configuration is changed here.
+Future FAST optimization and physical FAST/BALANCE acceptance remain open.
+Installation, HA/Stationary restart, browser-cache intervention, authority/release
+changes, charging commands and inverter/battery actions remain excluded. See
+[release notes](../v0.4/release-notes-beta.19.md) for the separately authorized
+installation boundary and frontend-cache check.
