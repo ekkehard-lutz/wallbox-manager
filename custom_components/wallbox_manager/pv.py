@@ -311,7 +311,7 @@ class PV:
             pv_proposed_phase_count=self.proposed.phases if self.proposed else None,
         )
 
-    def diagnostic(self, event, reason, *, powers=None, **fields):
+    def diagnostic(self, event, reason=None, *, powers=None, **fields):
         try:
             if diagnostic_level(self.entry.options) >= 2:
                 # Merge first: cause-specific fields may already contain power keys.
@@ -321,6 +321,8 @@ class PV:
                     if powers is None
                     else powers
                 )
+                if reason is not None:
+                    fields["reason"] = reason
                 _LOGGER.info(
                     "WBMGR subsystem=pv %s",
                     json.dumps(
@@ -331,7 +333,6 @@ class PV:
                             profile=self.settings.get("charging_profile"),
                             mode=self.core.mode,
                             event=event,
-                            reason=reason,
                             **fields,
                         ),
                         sort_keys=True,
@@ -350,8 +351,8 @@ class PV:
     def decision_event(self, decision, *, powers=None):
         point = decision.point
         point_key = (point.phases, point.amps)
-        # Delays and unchanged HOLD decisions produce at most one transition,
-        # never measurement-digit signatures or per-tick logs.
+        # Measurement digits never turn a held decision into a full transition.
+        # Each unchanged eligible decision gets only the compact power context.
         signature = (decision.mode, decision.reason, point_key, self.budget.stopped)
         if signature != self.last_event:
             old = self.last_event
@@ -366,6 +367,8 @@ class PV:
                 fields.update(previous_mode=self.last_mode)
                 self.last_mode = decision.mode
             self.diagnostic("pv_decision", decision.reason, powers=powers, **fields)
+        else:
+            self.diagnostic("pv_sample", powers=powers)
 
     def checkpoint(self, *, restart=None):
         if self.closed:
