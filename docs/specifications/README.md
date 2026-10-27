@@ -1,3 +1,12 @@
+**27 October 2026 — beta.20 publication scope:** The separately authorized
+release task packages approved feature `f4df7ac34a7f87acc170ee008362a43c067e2e65`
+without implementation or policy changes. Normal history-preserving merges,
+annotated tag and GitHub prerelease publication are authorized after successful
+candidate/develop/main/tag validation. Installation, HA restart, configuration and
+hardware actions remain excluded. See the [beta.20 release notes](../v0.4/release-notes-beta.20.md)
+and [release validation](../v0.4/release-validation-beta.20.md). Earlier feature-only
+approval boundaries below retain their historical meaning.
+
 **27 October 2026 — approved observability amendment:** A dedicated
 [PV Target SoC sensor](pv-target-soc-sensor.md) projects the canonical target with
 change-only HA publication (WBM-PV-TARGET-01–06). The

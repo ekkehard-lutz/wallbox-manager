@@ -468,3 +468,22 @@ STOP policies remain unchanged. Snapshot capture precedes persistence awaits.
 No additional stream, polling, timers, regulation parameters, battery-limit
 learning, physical protection or OCPP action is authorized. Beta.19 history is
 not retroactively rewritten; the manifest remains 0.4.0-beta.19.
+
+
+## 27 October 2026 — Beta.20 publication authorization [RELEASE SCOPE]
+
+Following independent approval of feature commit
+`f4df7ac34a7f87acc170ee008362a43c067e2e65`, the operator authorizes beta.20 release
+preparation, complete validation, normal non-fast-forward develop/main merges,
+an annotated tag and GitHub prerelease publication after exact-SHA CI gates.
+The approved feature and tests remain unchanged. Only manifest version, README,
+release notes/validation and genuine publication-status references are added.
+This later release authorization does not rewrite earlier release restrictions
+or change WBM-PV-TARGET, PV-DIAG, SoC or charging-release requirements.
+
+Existing manager charging release resets OFF on integration reload/restart;
+operator reauthorization after separately managed installation remains necessary.
+No deployment, HACS action, HA restart, live setting/authority/release change,
+Stationary/Fronius operation or hardware test is authorized. See
+[release notes](../v0.4/release-notes-beta.20.md) and
+[validation](../v0.4/release-validation-beta.20.md).
