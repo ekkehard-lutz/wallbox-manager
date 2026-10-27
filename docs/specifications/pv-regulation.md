@@ -1,3 +1,12 @@
+**27 October 2026 observability amendment [APPROVED]:**
+[WBM-PV-TARGET-01–06](pv-target-soc-sensor.md) exposes the canonical T independently
+of charging release; [PV-DIAG-01–10 pause context](pv-decision-diagnostics.md#approved-pause-context-extension--27-october-2026)
+adds actual SoC, T, surplus evidence and economic STOP to existing compact pause
+samples, with sparse H provenance. PV-SOC-01–03 strict/inclusive comparisons,
+FAST/BALANCE, target formulas and economic restart are unchanged. This later
+approval supersedes older sparse-only and eleven-key-only logging restrictions
+only within its stated scope; historical release claims below remain intact.
+
 **25 October 2026 BALANCE STOP amendment (latest user decision):** The corrected EV step direction is **below** the ideal point to recharge the battery when SoC is below its target deadband, and **above** to discharge when SoC is above. BALANCE has two STOP causes: (1) the desired *positive* battery charging cannot be attained even at the currently feasible minimum positive EV charging point; (2) `SoC < T-H` (strict). **Both use the shared STOP→BALANCE restart only above `T+H/2` (with proven PV surplus), or STOP→FAST at/above `T+H`.** This supersedes the historical `SoC <= T-H/2` STOP and the old restart equality at M; the revised matrix below is authoritative for the new design. An updated Solcast forecast can jump the dynamic T across the new threshold immediately. This documentation is not deployed control behavior.
 
 **25 October 2026 configurable PV economics:** The formerly fixed 50 Wh economic import STOP is now the shared integration parameter `pv_grid_import_budget_wh` (**default 50 Wh**), per [PV-TUNE-01–12](pv-operating-point-response.md). References below to “50 Wh” mean the configured budget, default 50 Wh, except historical quotes. The accumulated Wh, M/2 comparison, >15 s reset, STOP provenance and economic restart inhibition remain unchanged. Explicit economic STOP overrides ordinary startup and reduction timing. Configuration changes do not themselves restart economic charging.

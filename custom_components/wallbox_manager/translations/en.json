@@ -31,6 +31,9 @@
       }
     },
     "sensor": {
+      "effective_target_soc": {
+        "name": "PV Target SoC"
+      },
       "protocol_version": {
         "name": "OCPP protocol version"
       },

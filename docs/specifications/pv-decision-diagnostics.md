@@ -2,6 +2,63 @@
 
 **Decision:** 25 October 2026. **Status:** approved sparse full transitions, five-value context and the later bounded active-cycle sample exception below. **IDs:** PV-DIAG-01–10. Complements [PV regulation V3](pv-regulation.md), [WBM-ARCH-01–12](architecture-responsibility.md) and current [passive diagnostics](../v0.4/recorder-availability-report.md). Historical beta.16 status was requirements-only. Sparse diagnostics were published in beta.17; the explicitly approved five-value expansion below is implemented for beta.18.
 
+## Approved pause-context extension — 27 October 2026
+
+**Source:** Operator task, PV Target SoC Sensor and Extended Pause Diagnostics.
+This is a later observability-only amendment to PV-DIAG-01–10. The historical
+26 October eleven-key schema below is preserved as provenance; its exact-key
+restriction is now superseded **only for unchanged eligible pause decisions**.
+
+Keep the same full/compact split and existing semantic signature. When the
+existing decision has mode `STOP` **or its operating point has zero amps**, add
+exactly these four keys to the existing compact `pv_sample`:
+
+| Field | Captured-tick meaning |
+| --- | --- |
+| `soc_pct` | Actual observed battery SoC; no zero fallback. |
+| `target_soc_pct` | Canonical effective target T from that planning/control cycle. |
+| `pv_surplus_proven` | Existing `strict_surplus` evidence used by the controller; absent evidence is false, never proven surplus. |
+| `economic_stopped` | Existing economic STOP provenance after that tick's budget decision, captured before persistence. |
+
+For battery-free PV_SURPLUS the first three fields are `null` (battery policy
+inapplicable); the economic state remains a boolean. Missing powers remain
+`null`. The original five powers, their signs and their captured-snapshot
+contract are unchanged. Values survive asynchronous persistence without rereading
+HA sensors, live target or settings. Positive FAST/BALANCE samples keep exactly
+the previous eleven keys. Full `pv_decision` records, reasons and thresholds are
+unchanged; the first semantic STOP/restart transition remains full. Target drift
+still emits the independent `pv_target`, never a full decision solely for digits.
+
+Never include `soc_stop_pct`, `balance_restart_pct` or `fast_restart_pct` in compact
+samples. H (`soc_hysterese`) is also absent there. No existing PV configuration
+record reliably supplies H historically, so emit sparse `pv_config` with H on
+the first eligible Level-2 decision in a context and when captured H changes.
+Context boundaries are the existing profile/release/generation/transaction
+lifecycle, integration startup/reload and disabling/re-enabling diagnostics.
+It uses the existing decision path, without another scheduler or source read.
+No power dump is attached to this configuration-only record. Repeated H produces
+no repeated configuration record. Changes during inactivity are recorded on the
+next eligible decision, not as a periodic passive stream.
+
+The unchanged policy is strict SoC STOP `SoC < T-H`; STOP→BALANCE strictly
+`SoC > T+H/2` with proven PV surplus; STOP→FAST inclusively `SoC >= T+H`.
+Minimum-positive-point BALANCE STOP enters the existing SoC STOP mode. Economic
+STOP can instead hold zero amps while the SoC mode remains FAST or BALANCE;
+`economic_stopped` distinguishes this independent inhibition. A zero-current hold
+needs no new pause state machine.
+
+Levels 0/1, inactive/passive/release-OFF silence and Level-3 inheritance remain.
+At five seconds there are still at most about 720 **decision-related** records
+per continuous eligible hour, plus independently meaningful target/input changes
+and sparse configuration context. This amendment increases pause-record size,
+not the number of per-cycle records. No change to charging behavior is approved.
+
+The [sensor specification](pv-target-soc-sensor.md#hardware-evidence-and-scope)
+records the operator's 27 October PV_OPTIMUM hardware findings and external
+Fronius restart. Acceptance extends PV-DIAG-10 with 300 STOP cycles, snapshot
+mutation during persistence, moving T/SoC, sparse H, economic zero-point and
+minimum BALANCE pauses, missing evidence/nulls and identical control outputs.
+
 ## Approved five-power-value expansion — 26 October 2026
 
 **Operator rationale:** Level-2 diagnostics must reconstruct the entire available
@@ -81,9 +138,9 @@ or create physical measurement samples. Preserve existing OCPP diagnostic taxono
 | --- | --- |
 | **PV-DIAG-01** | Level 0 reports genuine faults; Level 1 adds significant initialization/connection/recovery events. Level 2 adds material PV target, SoC mode, FAST/BALANCE, economic STOP/restart and divergence transitions, plus the approved compact unchanged-cycle context. Level 3 includes these records and may expose bounded selected debug detail. Preserve existing subsystem, severity filtering and OCPP events. |
 | **PV-DIAG-02** | Full decision records remain **semantic and change driven**. A changed existing signature emits one full `pv_decision`; an unchanged eligible active decision emits exactly one compact `pv_sample` instead. Never emit both for the same decision. Repeated sensor reports alone emit neither. Legitimate independent target/input transitions remain separate; do not duplicate OCPP ACK/observation events. |
-| **PV-DIAG-03** | Use bounded stable keys and non-secret station/EVSE/connector identity, profile and mode. Full records retain reason, relevant previous mode, reference and operating points. The compact exception uses exactly the eleven listed keys, with no reason, threshold, point structure or transaction ID. The logging facility supplies timestamp. |
+| **PV-DIAG-03** | Use bounded stable keys and non-secret station/EVSE/connector identity, profile and mode. Full records retain reason, relevant previous mode, reference and operating points. The compact exception uses the eleven base keys plus the four approved pause-only keys where applicable, with no reason, threshold, point structure or transaction ID. The logging facility supplies timestamp. |
 | **PV-DIAG-04** | Subject to the approved five-power-value expansion above, include **only additional measurements actually used to cause the decision**, in their original canonical units and consistent signs, plus the required comparison threshold or reference. **Target/SoC transition:** actual SoC, target T and hysteresis thresholds involved; **FAST adjustment:** signed grid exchange, actual selected EV power, old/new requested operating point and applied comparison band; **BALANCE adjustment:** effective signed home-battery power, actual selected EV power, actual SoC/target when deadband bias caused it, old/new operating point, and one-step direction; for a both-positive charge/discharge pair that actually changes the decision, log a compact transition reason rather than a full sensor dump; **economic Wh STOP:** measured raw grid import, threshold `M/2`, accumulated Wh and configured Wh limit (default 50), STOP/reset provenance and reason; **economic restart:** measured battery charge power (>0 W) or FAST-only house load excluding EV and its configured strict W threshold (default 500 W), if that branch caused the decision; **dynamic target:** newly selected T, planning phase and only the deciding forecast/household/capacity inputs. Include a missing-value/reason marker instead of invented zero. Do not attach battery/PV/forecast/etc. fields unrelated to the specific decision. |
-| **PV-DIAG-05** | Never dump raw sensors, OCPP MeterValues, callbacks, generation vectors, readiness checks, credentials/tokens/URLs, transaction IDs or unrestricted attributes. The only repeated Level-2 measurement context is the bounded five-value `pv_sample` for an unchanged eligible active decision. Level 3 must not add a competing stream or acquisition/polling loop. |
+| **PV-DIAG-05** | Never dump raw sensors, OCPP MeterValues, callbacks, generation vectors, readiness checks, credentials/tokens/URLs, transaction IDs or unrestricted attributes. The only repeated Level-2 measurement context is the bounded `pv_sample` with five powers and, during pauses, the four approved SoC/economic fields. Level 3 must not add a competing stream or acquisition/polling loop. |
 | **PV-DIAG-06** | Keep the existing semantic decision signature per connector: mode, reason, feasible point and economic/action state, **not floating-point measurement digits**. Measurement drift alone produces compact samples, never new full transitions. An unchanged validation failure stays silent after its transition; recovery logs once. No extra full/compact record for partial stages of the same decision. |
 | **PV-DIAG-07** | Significant target/point changes should record meaningful differences at the **real actuator resolution** (e.g. a changed discrete ampere/phase selection), not sub-watt noise or shifting fractions that resolve to the same executable point. SoC-target or planning-phase transitions remain event-worthy even if the actual charging point has not yet changed. No arbitrary numeric quantization may alter sensor values, policy calculations or the Recorder; event-only formatting can be compact. |
 | **PV-DIAG-08** | Full records remain **operationally sparse**. Each otherwise unchanged eligible active decision emits one compact sample, including held delay/pending states. Inactive/non-authoritative contexts without a valid decision, release OFF and passive planning create no cyclic samples; unchanged HA callbacks create none. No independent heartbeat, summary, timer or second diagnostic stream is permitted. |
@@ -101,12 +158,12 @@ These examples demonstrate **minimum per-cause context**, not required keys, exa
 
 An unchanged both-positive pair normalized to 0 W, a held 1p/6 A point or a stable valid STOP/restart decision produces compact samples on eligible active cycles, not repeated full transitions. Changed STOP/restart retains the full cause/threshold record. No extra physical sampling or smoothing is introduced.
 
-A full Level-2 decision log includes the five approved power fields and its deciding measurements/thresholds. A compact sample uses exactly the eleven approved keys and omits thresholds/reason. Neither lists every source in the snapshot.
+A full Level-2 decision log includes the five approved power fields and its deciding measurements/thresholds. A compact sample uses the eleven base keys plus the four approved pause-only fields when applicable, and omits thresholds/reason. Neither lists every source in the snapshot.
 
 ## Precedence, migration, and unresolved decisions
 
 - Existing Level 0–3 passive/OCPP semantics are not deleted; PV level-2 decision events augment existing real status transitions, rather than creating a new log category number.
 - The diagnostics text in [PV-QA-01](pv-regulation.md#pv-qa-01--do-not-confuse-diagnostics-with-effectiveness-approved) previously mentioned many fields as generally available. Interpret that as **diagnosable on demand**, not a mandate to log the entire field inventory in every Level-2 event. If detailed trace is needed, use bounded Level 3.
-- Historical v0.3.2 beta detailed/debug dumps remain excluded. The new eleven-key compact active-cycle record is the sole approved unchanged-decision exception.
+- Historical v0.3.2 beta detailed/debug dumps remain excluded. The compact active-cycle record, with the later four-field pause extension, is the sole approved unchanged-decision exception.
 - Preserve the implemented semantic signature, point resolution and INFO severity.
   This exception does not approve retuning target significance or control behavior.
