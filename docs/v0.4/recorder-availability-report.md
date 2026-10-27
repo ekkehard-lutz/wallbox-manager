@@ -167,3 +167,14 @@ DeprecationWarnings remain. The existing five-second permission poll and its
 public timestamp/deadline writes are intentionally retained. There is no active
 regulation, no release/tag, no live HA change, no station modification and no
 Recorder data deletion.
+
+
+## 27 October 2026 canonical PV target sensor extension
+
+The historical passive benchmark above retains its original scope and counts.
+The separately approved [target sensor contract](../specifications/pv-target-soc-sensor.md)
+adds a normal recorded percent measurement, with no battery device class. The
+canonical target alone drives its value/availability; identity attributes stay
+stable. No update is published for unchanged PV cycles, grid/session activity or
+OCPP generation broadcasts. Initial setup/reload and real value/availability
+changes publish normally. No recording exclusion or force-update is used.

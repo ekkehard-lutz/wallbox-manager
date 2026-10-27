@@ -2,22 +2,36 @@
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This **v0.4.0-beta.19 prerelease** adds compact PV cycle diagnostics and removes
-the redundant visible Home Battery caption. Changed semantic decisions retain
-full `pv_decision` records; otherwise unchanged eligible active decisions emit
-one eleven-key `pv_sample` with actual EV, signed grid, PV production, signed
-battery and household demand excluding EV. At a 5-second cadence, unchanged
-eligible regulation can produce approximately **720 compact samples/hour**.
-Release OFF, passive planning and NETZ create no cyclic PV samples. This is a
-**diagnostic observability and minor Lovelace presentation release**; FAST/BALANCE
-and all charging algorithms remain unchanged. See the
-[beta.19 release notes](docs/v0.4/release-notes-beta.19.md),
-[release validation](docs/v0.4/release-validation-beta.19.md) and
-[feature report](docs/pv-cycle-diagnostics-card-cleanup.md).
+This **v0.4.0-beta.20 prerelease** adds the native **PV Target SoC / PV Ziel-SoC**
+Home Assistant sensor. It projects the existing canonical effective target in `%`,
+without recalculation or rounding, and supports normal Recorder/history graphs.
+State publication follows exact target/availability changes; unchanged regulation
+cycles produce no redundant sensor writes. Valid passive target planning remains
+active while manager charging release is OFF.
+
+At diagnostic Level 2, existing unchanged eligible STOP/zero-current `pv_sample`
+records gain actual battery SoC, target SoC, proven surplus evidence and economic
+STOP state. Economic STOP can hold zero current while the SoC mode remains FAST
+or BALANCE. Positive-current FAST/BALANCE samples retain their eleven-key schema
+and five power values. Sparse `pv_config` events establish configured hysteresis
+at context start or change; no derived SoC thresholds or H are repeated in samples.
+There is no second cyclic diagnostic stream: the existing 5-second cadence still
+allows approximately **720 decision-related records/hour**. Release OFF, passive
+planning and NETZ create no cyclic PV samples. FAST/BALANCE regulation and manager
+charging-release behavior remain unchanged. See the
+[beta.20 release notes](docs/v0.4/release-notes-beta.20.md),
+[release validation](docs/v0.4/release-validation-beta.20.md) and
+[approved implementation report](docs/pv-target-sensor-pause-diagnostics.md).
+
+The [beta.19 notes](docs/v0.4/release-notes-beta.19.md) retain the original compact
+cycle samples and Home Battery caption change; the
+[beta.18 notes](docs/v0.4/release-notes-beta.18.md) document five-power decision
+context. Their [earlier feature report](docs/pv-cycle-diagnostics-card-cleanup.md)
+and immutable release descriptions remain historical.
 
 The [beta.17 release notes](docs/v0.4/release-notes-beta.17.md) describe the
 shared PV runtime, seven tuning parameters and original V3 migration. All seven
-parameters and defaults are unchanged in beta.19; no data/schema migration is
+parameters and defaults are unchanged in beta.20; no data/schema migration is
 added. The [implementation report](docs/pv-v3-implementation.md) retains V3 source
 evidence and regression validation. Physical FAST optimization remains open until
 the operator captures the new five-value hardware log; no live setting is changed.
@@ -27,7 +41,7 @@ status and simplified PV card history. The [beta.15 notes](docs/v0.4/release-not
 cover live NETZ schedules and the coordinated Stationary hardware-disable/CP
 correction; the [beta.14 notes](docs/v0.4/release-notes-beta.14.md) explain nominal
 NETZ power planning. The existing Stationary implementation identified in beta.15
-remains the interface baseline; **no Stationary update is part of beta.19**.
+remains the interface baseline; **no Stationary update is part of beta.20**.
 Stationary retains physical and electrical safety ownership. The old Stationary
 capability inventory cannot satisfy current execution requirements.
 The [beta.6 notes](docs/v0.4/release-notes-beta.6.md) retain Idle/session migration
@@ -157,11 +171,13 @@ separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
 For separately authorized installation and testing, select
-**v0.4.0-beta.19** in HACS. Keep manager release OFF, take a full pre-upgrade HA
-backup, verify installed manifest **0.4.0-beta.19** after the operator-managed
+**v0.4.0-beta.20** in HACS. Keep manager release OFF, take a full pre-upgrade HA
+backup, verify installed manifest **0.4.0-beta.20** after the operator-managed
 restart. Check that each browser loads the current frontend resource rather than
 an older cached card; any cache refresh is a separate operator action. Follow the
-[beta.19 upgrade and rollback notes](docs/v0.4/release-notes-beta.19.md#hacs-upgrade-and-rollback).
+[beta.20 upgrade and rollback notes](docs/v0.4/release-notes-beta.20.md#hacs-upgrade-and-rollback).
+The existing release reset turns manager charging release OFF after integration
+reload/restart; the operator must explicitly authorize charging again if required.
 A package-only downgrade to beta.16 cannot restore removed delay settings or
 carry back V3 economic STOP history. Publication does not install anything or
 establish physical acceptance. NETZ retains event-driven fixed-point execution;
