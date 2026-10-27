@@ -1,3 +1,11 @@
+**27 October 2026 — approved observability amendment:** A dedicated
+[PV Target SoC sensor](pv-target-soc-sensor.md) projects the canonical target with
+change-only HA publication (WBM-PV-TARGET-01–06). The
+[pause extension](pv-decision-diagnostics.md#approved-pause-context-extension--27-october-2026)
+adds four captured fields to existing unchanged eligible pause samples and sparse
+H configuration provenance (PV-DIAG-01–10; PV-SOC-01–03 unchanged). No regulation,
+merge, release, deployment or hardware action follows from this approval.
+
 **26 October 2026 — later cycle-sample and caption refinement:** The operator now
 approves exactly one compact `pv_sample` for each otherwise unchanged eligible
 active PV decision, as a bounded exception to beta.18's sparse-only policy.
@@ -48,6 +56,7 @@ V3 remains DRAFT overall.
 | [Legacy manual compatibility](manual-vehicle-wakeup.md) | Station DataTransfer only; no manual HA button | Superseded UI scope |
 | [Passive v0.4](passive-v0.4.md) | Current passive milestone | **APPROVED, subject to WBM-ARCH-01–12** |
 | [Shared PV operating points and EV settling](pv-operating-point-response.md) | Configurable cycle timing, phase-first navigation, EV uptake, 100 W default grid deadband, Wh budget and 500 W default FAST restart house load | **Approved decisions implemented in beta.17; physical acceptance outstanding** |
+| [Dedicated PV target SoC sensor](pv-target-soc-sensor.md) | Canonical target, identity, availability and Recorder efficiency | **APPROVED 27 October 2026** |
 | [Level-2 PV decision diagnostics](pv-decision-diagnostics.md) | Full transitions plus compact five-power context for unchanged eligible active cycles | **Beta.18 five-value expansion published; later compact-cycle exception approved** |
 | [PV regulation – Requirements baseline V3](pv-regulation.md) | Current consolidated target specification draft with stable requirement IDs, acceptance criteria, sources and open issues | **DRAFT overall; approved runtime published in beta.17** |
 | [Decision history, October 2026](decision-history.md) | NON-NORMATIVE history: approved decisions, superseded interim solutions and explicitly rejected approaches | Reference / history |

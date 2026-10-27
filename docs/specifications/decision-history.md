@@ -441,3 +441,30 @@ Installation, HA/Stationary restart, browser-cache intervention, authority/relea
 changes, charging commands and inverter/battery actions remain excluded. See
 [release notes](../v0.4/release-notes-beta.19.md) for the separately authorized
 installation boundary and frontend-cache check.
+
+
+## 27 October 2026 — PV target sensor and extended pause context [APPROVED]
+
+The operator authorizes observability-only implementation on a dedicated feature
+branch from develop, tests, English documentation, commit and push. Independent
+review, merge, version/tag/release, deployment and hardware acceptance are separate.
+
+The reported PV_OPTIMUM test showed expected moving T, correct strict SoC STOP,
+and battery recovery that did not catch the moving restart threshold during the
+recorded period. The Fronius inverter restart was external hardware activity,
+not a WBM regulation fault. These supplied analysis findings motivate continuous
+SoC/target history and pause context; no new hardware examination is claimed.
+
+[WBM-PV-TARGET-01–06](pv-target-soc-sensor.md) adds one normal HA sensor for exactly
+the existing effective target, including passive planning, profile-specific
+availability and exact change-driven publication. Existing entity identities and
+card target remain. [PV-DIAG-01–10](pv-decision-diagnostics.md#approved-pause-context-extension--27-october-2026)
+extends unchanged STOP/zero-current samples with `soc_pct`, `target_soc_pct`,
+`pv_surplus_proven`, `economic_stopped`. H is emitted only at eligible diagnostic
+context establishment or real change. Derived STOP/BALANCE/FAST thresholds and H
+are deliberately absent from cyclic samples. The existing strict SoC<T-H,
+strict SoC>T+H/2 plus proven surplus, inclusive SoC>=T+H and independent economic
+STOP policies remain unchanged. Snapshot capture precedes persistence awaits.
+No additional stream, polling, timers, regulation parameters, battery-limit
+learning, physical protection or OCPP action is authorized. Beta.19 history is
+not retroactively rewritten; the manifest remains 0.4.0-beta.19.

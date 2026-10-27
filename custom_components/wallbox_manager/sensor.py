@@ -54,6 +54,7 @@ async def async_setup_entry(hass, entry, add):
         seen.add(key)
         add([Reading(entry, *key)])
 
+    add([PVTarget(entry)])
     state.add_sensor = add_key
     state.add_session = lambda scope: [
         add_key(("session", tuple(scope), role)) for role in KEYS[:-1]
@@ -291,3 +292,42 @@ class Reading(WallboxEntity, SensorEntity):
             self.refresh()
         else:
             await super().async_added_to_hass()
+
+
+class PVTarget(WallboxEntity, SensorEntity):
+    """Change-driven projection of the planner's canonical battery target."""
+
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = "measurement"
+
+    def __init__(self, entry):
+        super().__init__(
+            entry, "pv", entry.runtime_data.state.binding, "effective_target_soc"
+        )
+
+        self._published_target = self.native_value
+
+    def changed(self):
+        # State generation resets notify every subscriber. They do not change
+        # this HA-only planning value and must not cause redundant state writes.
+        target = self.native_value
+        if target != self._published_target:
+            self._published_target = target
+            self.async_write_ha_state()
+
+    @property
+    def native_value(self):
+        return self.entry.runtime_data.pv.target
+
+    @property
+    def available(self):
+        # Planning is independent of release, station connection and authority.
+        return self.native_value is not None
+
+    @property
+    def extra_state_attributes(self):
+        attrs = super().extra_state_attributes
+        # A planning entity carries identity only, never live station metadata.
+        attrs.pop("connected", None)
+        attrs.pop("runtime_incarnation", None)
+        return attrs

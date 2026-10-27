@@ -94,7 +94,8 @@ class PV:
         self.context = None
         self.monotonic = time.monotonic
         self.now = lambda: dt_util.as_local(datetime.now(UTC))
-        self.target = None
+        self._target = None
+        self.last_config_event = None
         self.input_problem = None
         self.last_saved = None
         self.last_event = None
@@ -107,6 +108,18 @@ class PV:
         self.checkpoints = set()
         self.pending_restart = None
         self.station_identity = None
+
+    @property
+    def target(self):
+        return self._target
+
+    @target.setter
+    def target(self, value):
+        # The existing canonical target is also a read-only HA projection.
+        # Only value/availability transitions notify its dedicated subscriber.
+        if value != self._target:
+            self._target = value
+            self.state.publish(("pv", self.state.binding, "effective_target_soc"))
 
     async def start(self):
         record = await self.store.async_load()
@@ -215,8 +228,11 @@ class PV:
                 self.grid.publish()
 
     def options_updated(self):
+        if diagnostic_level(self.entry.options) < 2:
+            self.last_config_event = None
         mapping = {role: self.entry.options.get(role) for role in SOURCES}
         if mapping != self.mapping:
+            self.target = self.last_target_event = None
             self.observe_inputs()
             self.lifecycle()
 
@@ -243,6 +259,7 @@ class PV:
             self.grid.transaction(),
         )
         if context != self.context:
+            self.last_config_event = None
             if self.context and self.context[0] != context[0]:
                 self.target = self.last_target_event = None
             if self.context and self.context[0] in PV_PROFILES and context[0] == "NETZ":
@@ -348,7 +365,13 @@ class PV:
         if reason:
             self.budget.interrupt()
 
-    def decision_event(self, decision, *, powers=None):
+    def decision_event(self, decision, *, powers=None, pause=None, hysteresis=None):
+        # Configuration provenance is sparse and shares the eligible decision path.
+        if diagnostic_level(self.entry.options) < 2:
+            self.last_config_event = None
+        elif hysteresis is not None and hysteresis != self.last_config_event:
+            self.last_config_event = hysteresis
+            self.diagnostic("pv_config", powers={}, soc_hysterese=hysteresis)
         point = decision.point
         point_key = (point.phases, point.amps)
         # Measurement digits never turn a held decision into a full transition.
@@ -368,7 +391,11 @@ class PV:
                 self.last_mode = decision.mode
             self.diagnostic("pv_decision", decision.reason, powers=powers, **fields)
         else:
-            self.diagnostic("pv_sample", powers=powers)
+            self.diagnostic(
+                "pv_sample",
+                powers=powers,
+                **(pause or {}) if decision.mode == "STOP" or point.amps == 0 else {},
+            )
 
     def checkpoint(self, *, restart=None):
         if self.closed:
@@ -580,6 +607,12 @@ class PV:
                 max(0, load - ev) if load is not None and ev is not None else None
             )
             surplus = strict_surplus(pv, load, ev)
+            pause = dict(
+                soc_pct=soc if battery else None,
+                target_soc_pct=target if battery else None,
+                pv_surplus_proven=surplus if battery else None,
+                economic_stopped=self.budget.stopped,
+            )
             if battery:
                 if soc is None:
                     raise ValueError("battery_soc_reserve")
@@ -606,7 +639,12 @@ class PV:
                                 stop_pct=target - config["soc_hysterese"],
                             ),
                         )
-                        self.decision_event(d, powers=powers)
+                        self.decision_event(
+                            d,
+                            powers=powers,
+                            pause=pause,
+                            hysteresis=config["soc_hysterese"],
+                        )
                         self.submit(d.point, current, urgent=True)
                     return
             scope = [*self.state.binding, "remote", tx]
@@ -761,6 +799,7 @@ class PV:
                 and values["storage_discharge_power"] > 0
             ):
                 d.fields["storage_pair_normalized"] = True
+            pause["economic_stopped"] = self.budget.stopped
             self.proposed = d.point
             try:
                 await (
@@ -775,7 +814,9 @@ class PV:
                 self.problem(None, powers=powers)
             if not g.valid(epoch, adapter, tx) or not self.regulation_active():
                 return
-            self.decision_event(d, powers=powers)
+            self.decision_event(
+                d, powers=powers, pause=pause, hysteresis=config["soc_hysterese"]
+            )
             self.submit(
                 d.point,
                 current,
