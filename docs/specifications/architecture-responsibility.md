@@ -67,3 +67,12 @@ unverified interface gap. No station modification or deployment is authorized.
 Passive v0.4 still sends no physical control. Future active control must resolve
 supported command/outcome interfaces, optimization response causality and economic
 policy without rebuilding station protection in WBM.
+
+
+## 27 October 2026 target publication application
+
+[WBM-PV-TARGET-01–06](pv-target-soc-sensor.md) applies WBM-ARCH-05/06/12 to the
+canonical planning target: one scoped HA sensor, no volatile telemetry attributes,
+no unchanged-cycle writes, no extra target calculation, acquisition or timer.
+OCPP generation broadcasts do not republish an unchanged HA-only target. This
+observability extension does not alter the architecture responsibility boundary.
