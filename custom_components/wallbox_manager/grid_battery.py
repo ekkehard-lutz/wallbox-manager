@@ -14,6 +14,7 @@ class GridBattery:
         self.hass, self.entry, self.grid = hass, entry, grid
         self.reserve = BatteryReserve(hass, entry)
         self.task = None
+        self.preview = None
         self.dirty = self.closed = False
         self.removers = []
         self.input_remove = lambda: None
@@ -63,9 +64,20 @@ class GridBattery:
             self.reserve.failed_restore = False
         self.changed()
 
+    def publish_preview(self):
+        preview = (
+            self.reserve.preview(self.grid.settings.get("min_soc"))
+            if self.grid.settings.get("charging_profile") == "NETZ"
+            else None
+        )
+        if preview != self.preview:
+            self.preview = preview
+            self.grid.state.publish(("battery", self.grid.state.binding, "preview"))
+
     def changed(self):
         if self.closed:
             return
+        self.publish_preview()
         self.dirty = True
         if self.task is None or self.task.done():
             self.task = self.hass.async_create_task(
@@ -135,6 +147,7 @@ class GridBattery:
             await self.reserve.update(
                 self.grid.settings.get("min_soc") if charging else None
             )
+            self.publish_preview()
             messages = state.messages
             if self.reserve.status == "error" or (
                 self.reserve.status == "write_unconfirmed"

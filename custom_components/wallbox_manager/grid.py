@@ -1,6 +1,8 @@
 """Event-driven NETZ intent, serialized OCPP dispatch and one-shot deadlines."""
 
 import asyncio
+import hashlib
+import json
 import re
 import time
 
@@ -36,6 +38,8 @@ class Grid:
         self.attempted_edit_revision = None
         self.task_epoch = None
         self.action_task = None
+        self.action_lock = asyncio.Lock()
+        self.action_generation = 0
         self.allow_issue = False
         self.known_transaction = None
         self.last_authority = None
@@ -126,6 +130,7 @@ class Grid:
         self.publish()
 
     def release_changed(self):
+        self.action_generation += 1
         self.allow_issue = True
         self.invalidate()
         self.signature = None
@@ -148,7 +153,7 @@ class Grid:
         )
         reason = None
         if action != "stop":
-            if not grid and not self.eligible():
+            if not grid and not self.manager_ready():
                 reason = "control_unavailable"
             elif not grid and (
                 self.state.value(self.listener.control.key("ChargingEnabled"))
@@ -175,6 +180,7 @@ class Grid:
                     reason = "no_positive_point"
         return {
             "charge_release": released,
+            "charge_action_revision": self.action_revision(),
             "charge_action": action,
             "charge_action_ready": reason is None,
             "charge_action_blocked_reason": reason,
@@ -190,18 +196,79 @@ class Grid:
             selected=values.get("power_phases"),
         )
 
+    def action_revision(self):
+        """Opaque runtime-scoped context; no persisted revision or cyclic churn."""
+        context = (
+            self.state.runtime_id,
+            self.action_generation,
+            self.state.generation,
+            self.transaction(),
+            self.settings.get("charging_profile"),
+            self.settings.get("charge_release"),
+            self.settings.values.get("grid_draft_revision"),
+            self.settings.approval_attributes()["grid_approved_revision"],
+            self.manager_ready(),
+            tuple(
+                self.settings.get(role)
+                for role in (
+                    "power_approximation",
+                    "allowed_current_1p",
+                    "allowed_current_2p",
+                    "allowed_current_3p",
+                )
+            ),
+            self.state.value(self.listener.control.key("ChargingEnabled")),
+        )
+        return hashlib.sha256(json.dumps(context).encode()).hexdigest()
+
+    async def explicit_action(self, action, profile, revision, incarnation):
+        """Reject stale intent without reinterpreting its direction."""
+
+        def validate():
+            if (
+                self.closed
+                or incarnation != self.state.runtime_id
+                or profile != self.settings.get("charging_profile")
+                or revision != self.action_revision()
+                or action not in ("start", "stop", "apply")
+                or (action != "stop" and action != self.action_state()["charge_action"])
+            ):
+                raise ValueError("Superseded charge action")
+
+        if action == "stop":
+            # Stop must supersede a slow approval/dispatch, not queue behind it.
+            validate()
+            self.action_generation += 1
+            self.invalidate()
+            await self.stop_release()
+            self.publish()
+            return
+        async with self.action_lock:
+            validate()
+            await self._action(action, validate)
+
     async def action(self):
         # Concurrent cards share one in-flight action, avoiding start-then-stop.
         if self.action_task and not self.action_task.done():
             return await asyncio.shield(self.action_task)
-        self.action_task = asyncio.create_task(self._action())
+        self.action_task = asyncio.create_task(self.legacy_action())
         return await asyncio.shield(self.action_task)
 
-    async def _action(self):
+    async def legacy_action(self):
+        """Compatibility-only generic HA button; the card never uses this toggle."""
+        async with self.action_lock:
+            await self._action()
+
+    async def _action(self, intended=None, validate=lambda: None):
         if self.settings.get("charge_release") and self.phase()[0] == "expired":
+            if intended is not None:
+                # The business scheduler owns expiry; stale Apply is never Stop.
+                raise ValueError("Superseded charge action")
             await self.stop_release()
             return
         state = self.action_state()
+        if intended is not None:
+            state = {**state, "charge_action": intended}
         if not state["charge_action_ready"]:
             raise ValueError(state["charge_action_blocked_reason"])
         if state["charge_action"] == "stop":
@@ -218,6 +285,7 @@ class Grid:
                 # Capture the epoch after acquiring the settings lock. A preceding
                 # stop may still be completing its durable write when Start arrives.
                 if not epochs:
+                    validate()
                     if state["charge_action"] == "apply" and (
                         not self.settings.get("charge_release")
                         or self.settings.values.get("grid_request") != previous_request
@@ -255,7 +323,27 @@ class Grid:
                 self.committed(equivalent, timing_only=timing_only)
         else:
             # PV Start grants release; the next regular tick decides its point.
-            await self.settings.save_runtime({"charge_release": True})
+            async with self.settings.lock:
+                validate()
+                epoch = self.epoch
+                profile = self.settings.get("charging_profile")
+                await self.settings._save(
+                    {**self.settings.values, "charge_release": True}
+                )
+                if (
+                    self.closed
+                    or epoch != self.epoch
+                    or profile != self.settings.get("charging_profile")
+                ):
+                    self.settings.values["charge_release"] = False
+                    await self.settings._save(
+                        {**self.settings.values, "charge_release": False}
+                    )
+                    self.release_changed()
+                    raise ValueError("Superseded charge action")
+                self.settings.notify("charge_release")
+            # Preparatory authorization succeeded; electrical outcomes are separate.
+            return
         if self.task and self.eligible():
             await asyncio.shield(self.task)
         if self.status in ("rejected", "communication_failure", "unsupported"):
@@ -485,7 +573,7 @@ class Grid:
             return s["external_transaction_id"]
         return None
 
-    def eligible(self):
+    def manager_ready(self):
         adapter = self.listener.adapter
         return bool(
             not self.closed
@@ -494,8 +582,10 @@ class Grid:
             and self.state.current(self.state.registered_generation)
             and self.state.value(self.listener.control.key("ControlAuthority"))
             == "remote"
-            and self.transaction()
         )
+
+    def eligible(self):
+        return self.manager_ready() and bool(self.transaction())
 
     def fingerprint(self):
         return (
@@ -579,6 +669,7 @@ class Grid:
             self.publish()
             return
         self.launch()
+        self.publish()
 
     def edited(self, role):
         if role.startswith("allowed_current_"):

@@ -377,6 +377,24 @@
           "name": "New draft time"
         }
       }
+    },
+    "charge_action": {
+      "name": "Explicit charging action",
+      "description": "Execute Start, Stop or Apply in the current profile and runtime context. Stale requests are rejected.",
+      "fields": {
+        "action": {
+          "name": "Action"
+        },
+        "profile": {
+          "name": "Expected profile"
+        },
+        "revision": {
+          "name": "Expected action revision"
+        },
+        "incarnation": {
+          "name": "Runtime incarnation"
+        }
+      }
     }
   }
 }

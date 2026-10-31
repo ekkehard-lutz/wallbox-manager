@@ -1,3 +1,19 @@
+**31 October 2026 — approved review follow-up:**
+[PV Start acknowledgement](charge-release.md#approved-follow-up--pv-start-acknowledgement-31-october-2026)
+adds WBM-ACTION-SAFE-09 / WBM-RELEASE-PREP-06.
+[Status layout and source power](lovelace-home-battery-display.md#approved-follow-up--status-layout-and-source-power-31-october-2026)
+adds WBM-HS-LAYOUT-01–04 / WBM-HS-POWER-01–06 and explicitly supersedes the
+identified historical layout/caption clauses. Planned NETZ reserve and all control
+algorithms remain unchanged. Feature commit/push only; no merge or deployment.
+
+**31 October 2026 — approved safe-action/state/preview correction:**
+[WBM-ACTION-SAFE-01–08 and WBM-RELEASE-PREP-01–05](charge-release.md#approved-correction--safe-explicit-actions-and-preparatory-release-31-october-2026)
+and [WBM-HS-UI-SYNC-01–04 / WBM-HS-UI-NETZ-01–06](lovelace-home-battery-display.md#approved-synchronization-and-netz-preview-amendment-31-october-2026)
+supersede only the identified historical transaction-absence and observed-only
+NETZ display clauses. Implementation/tests/feature push are authorized; review,
+merge, version, release, deployment and hardware operations remain separate.
+WBM-ARCH-01–12 and control algorithms remain unchanged.
+
 **27 October 2026 — beta.20 publication scope:** The separately authorized
 release task packages approved feature `f4df7ac34a7f87acc170ee008362a43c067e2e65`
 without implementation or policy changes. Normal history-preserving merges,

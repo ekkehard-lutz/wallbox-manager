@@ -377,6 +377,24 @@
           "name": "Neuer Zeitentwurf"
         }
       }
+    },
+    "charge_action": {
+      "name": "Explizite Ladeaktion",
+      "description": "Start, Stop oder Übernehmen im aktuellen Profil und Laufzeitkontext ausführen. Veraltete Anfragen werden abgelehnt.",
+      "fields": {
+        "action": {
+          "name": "Aktion"
+        },
+        "profile": {
+          "name": "Erwartetes Profil"
+        },
+        "revision": {
+          "name": "Erwartete Aktionsrevision"
+        },
+        "incarnation": {
+          "name": "Laufzeitkennung"
+        }
+      }
     }
   }
 }

@@ -68,3 +68,29 @@ edit_timing:
       name: New draft time
       selector:
         text:
+
+charge_action:
+  name: Explicit charging action
+  description: Execute only the intended Start, Stop or Apply with the current connector button context. Stale requests fail without changing direction. Generic button.press remains legacy state-dependent compatibility.
+  target:
+    entity:
+      integration: wallbox_manager
+      domain: button
+  fields:
+    action:
+      required: true
+      selector:
+        select:
+          options: [start, stop, apply]
+    profile:
+      required: true
+      selector:
+        text:
+    revision:
+      required: true
+      selector:
+        text:
+    incarnation:
+      required: true
+      selector:
+        text:
