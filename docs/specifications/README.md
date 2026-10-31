@@ -1,3 +1,15 @@
+**31 October 2026 — beta.21 publication scope:** Independent review approved
+feature `a024c8ebfa6ae76a9e5d3ac993bdb75baafe8414`, including predecessor
+`e61a16d4c4c3fe671a2ccb2086c48c0b76979219`. The operator separately authorizes
+release preparation, complete validation, history-preserving develop/main merges,
+an annotated tag and GitHub prerelease publication after exact-SHA CI gates.
+The existing layout and **kW with two locale-aware decimals** are explicitly
+accepted without further changes. No new requirement or control behavior is added.
+Installation, HA restart/reload and hardware actions remain excluded. See
+[beta.21 release notes](../v0.4/release-notes-beta.21.md) and
+[release validation](../v0.4/release-validation-beta.21.md). Earlier feature-only
+boundaries below retain their historical meaning.
+
 **31 October 2026 — approved review follow-up:**
 [PV Start acknowledgement](charge-release.md#approved-follow-up--pv-start-acknowledgement-31-october-2026)
 adds WBM-ACTION-SAFE-09 / WBM-RELEASE-PREP-06.
