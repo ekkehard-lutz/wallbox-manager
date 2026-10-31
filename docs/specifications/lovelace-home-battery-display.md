@@ -62,3 +62,45 @@ removes only the redundant battery caption element and assignment. The canonical
 backend target, source mappings, entity APIs, locale formatting, unavailable-value
 semantics and responsive layout remain unchanged. V3's overall document status
 remains DRAFT; this presentation decision approves no control algorithm.
+
+
+## Approved synchronization and NETZ preview amendment (31 October 2026)
+
+This explicitly supersedes the display-only observed-reserve requirement in
+WBM-HS-UI-07 and its examples/NETZ labels in 02/09/15. Historical text above is
+retained as provenance. WBM-GRID-15 physical ownership/write/restoration remains
+binding; WBM-TIME-01–24 and charging eligibility are unchanged.
+
+| ID | Normative requirement |
+| --- | --- |
+| WBM-HS-UI-SYNC-01 | OPTIMUM/MAXIMUM display the latest canonical target in every planner/control phase, including STOP, release OFF, absent vehicle and unavailable OCPP. |
+| WBM-HS-UI-SYNC-02 | Preserve WBM-PV-TARGET-01–06 sensor identity/precision/change-only publication; invalidate stale targets promptly. A reliable backend compatibility projection is permitted. |
+| WBM-HS-UI-SYNC-03 | No JavaScript planner; format one locale-aware decimal only at presentation. |
+| WBM-HS-UI-SYNC-04 | Publish meaningful target/action changes from early returns; 300 unchanged cycles create no redundant sensor or Select writes. |
+| WBM-HS-UI-NETZ-01 | NETZ right-hand value is the planned effective reserve even before Start, sharing BatteryReserve.desired arithmetic: max(original, step-floor(min(configured reserve, actual SoC))). |
+| WBM-HS-UI-NETZ-02 | Use actual valid reserve before ownership; use durable original during confirmed WBM ownership. Pending/recovering/invalid ownership evidence makes preview unavailable. External changes win. |
+| WBM-HS-UI-NETZ-03 | Share Number minimum/maximum/step and validation. Invalid/missing mapping, SoC, reserve or range yields unavailable, never invented zero. |
+| WBM-HS-UI-NETZ-04 | Tooltip/accessibility distinguishes actual battery SoC, planned NETZ reserve and observed/confirmed reserve; planned is not applied. |
+| WBM-HS-UI-NETZ-05 | Update change-only on config, SoC, original reserve and ownership transitions; multiple cards share one backend projection. |
+| WBM-HS-UI-NETZ-06 | Preview is pure: no writes, journal mutation, ownership, session start, OCPP or additional electrical prerequisite. Actual override remains gated by existing active confirmed charging prerequisites. |
+
+
+## Approved follow-up — status layout and source power (31 October 2026)
+
+This later operator approval supersedes only the layout/alignment portions of
+WBM-HS-UI-01/02/13/15 and the 26 October caption-free refinement. The removed
+redundant battery caption “Ladezustand” stays absent; the new caption below is
+explicitly approved. Canonical targets and WBM-HS-UI-NETZ-01–06 remain binding.
+
+| ID | Normative requirement |
+| --- | --- |
+| WBM-HS-LAYOUT-01 | Add Wallbox Status / Wallbox status heading. Upper left: connection status, session energy, duration. Upper right: charging state, EV Leistung / EV power, Wallboxparameter / Wallbox parameters. Preserve their existing precision and behavior. |
+| WBM-HS-LAYOUT-02 | Lower left: Hausspeicher / Home battery heading, small Ladung Ist → Soll / Charge actual → target caption, then actual SoC → canonical target/planned reserve. Keep the observed NETZ reserve separately identified in tooltip/accessibility text. |
+| WBM-HS-LAYOUT-03 | Lower right: profile-dependent read-only power block. Messages remain below the status area. Keep responsive columns, narrow-card stacking, stable unavailable layout, informative text/tooltips and no horizontal overflow. |
+| WBM-HS-LAYOUT-04 | Preserve release-OFF/STOP/unplugged canonical target and planned NETZ preview behavior; this is presentation only. |
+| WBM-HS-POWER-01 | All PV profiles use the existing separate mapped HA storage charge/discharge powers. Positive discharge paired with valid zero charge shows Entladeleistung / Discharging power; positive charge paired with valid zero discharge shows Ladeleistung / Charging power. |
+| WBM-HS-POWER-02 | NETZ uses mapped grid import/export power. Positive import paired with valid zero export shows Netzbezugsleistung / Grid import power; positive export paired with valid zero import shows Netzeinspeiseleistung / Grid export power. |
+| WBM-HS-POWER-03 | Discharge/import uses HA error color; charge/export uses HA success color. Include direction in text, never color alone. Neutral uses secondary text color. |
+| WBM-HS-POWER-04 | Both zero, either missing/unknown/unavailable/restored/invalid, unsupported units, or both positive show neutral —, never an invented signed/net/zero power. Use stable Speicherleistung / Battery power or Netzleistung / Grid power heading and explain invalid/ambiguous inputs accessibly. |
+| WBM-HS-POWER-05 | Normalize finite nonnegative W/kW/MW observations to kW and display two locale-aware decimals. Tooltips identify both reported directions and ambiguity/unavailability; no source rounding or mutation. |
+| WBM-HS-POWER-06 | Expose only mapped source entity IDs on the existing profile Select if needed. Mapping changes publish once; source power changes render from HA states without WBM Recorder writes, polling, timers, a new sensor or control effects. |

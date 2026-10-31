@@ -38,3 +38,12 @@ provide the complementary captured-tick log context. Preserve strict STOP
 `SoC >= T+H`, plus independent economic STOP/restart. FAST/BALANCE mathematics,
 planning, settings/defaults, technical restrictions, OCPP and journal formats
 remain unchanged. No release, merge, deployment or hardware action is authorized.
+
+
+## Publication clarification — 31 October 2026
+
+WBM-HS-UI-SYNC-01–04 requires the card's compatibility projection on the
+charging-profile Select to be published from SoC STOP and other early exits as
+well as normal decisions. WBM-PV-TARGET-01–06 and the dedicated sensor identity,
+full precision, availability and exact-change notifications are unchanged. The
+projection uses the same canonical value; no frontend or backend second planner.
