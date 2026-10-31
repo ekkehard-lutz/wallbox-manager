@@ -943,14 +943,17 @@ for (const language of ['de','en']) for (const profile of ['PV_OPTIMUM','PV_MAXI
 }
 
 for (const language of ['de','en']) {
-  test(`home battery has heading and pair without a caption, retaining live label and accessibility ${language}`,()=>{
+  test(`home battery has approved actual-target caption, retaining live label and accessibility ${language}`,()=>{
     const {card:c,get}=card(batteryStates('E','63.3','40'),{},language);
     const de=language==='de';
     assert.equal(get('battery-label').textContent,de?'Hausspeicher':'Home battery');
     assert.equal(get('battery-soc').textContent,de?'63,3 % → 40,0 %':'63.3 % → 40.0 %');
     assert.equal(get('charging-label').textContent,de?'Ladezustand':'Charging state');
     assert.equal(c.shadowRoot.html.includes('battery-soc-label'),false);
-    assert.match(c.shadowRoot.html,/<h3 id="battery-label"><\/h3><div class="reading" id="battery-soc"/);
+    assert.match(c.shadowRoot.html,/<h3 id="battery-label"><\/h3><div class="caption" id="battery-caption"><\/div><div class="reading" id="battery-soc"/);
+    assert.equal(get('battery-caption').textContent,de?'Ladung Ist → Soll':'Charge actual → target');
+    assert.equal(get('wallbox-status-label').textContent,de?'Wallbox Status':'Wallbox status');
+    assert.equal(get('live-power-label').textContent,de?'EV Leistung':'EV power');
     const value=get('battery-soc');
     assert.equal(value['aria-label'],value.title);
     assert.match(value.title,de?/Ladezustand: 63,3 %; Geplante NETZ-Mindestreserve: 40,0 %/:/State of charge: 63.3 %; Planned NETZ minimum reserve: 40.0 %/);
@@ -986,4 +989,60 @@ test('canonical compatibility target transition and invalidation during STOP',()
   assert.equal(get('battery-soc').textContent,'69.0 % → 73.6 %');
   data['E.charging_profile'].attributes.effective_target_soc=null;c.hass=c._hass;
   assert.equal(get('battery-soc').textContent,'69.0 % → —');
+});
+
+for (const language of ['de','en']) for (const profile of ['PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM','NETZ']) {
+  test(`directional source power is localized, themed and read-only ${language}/${profile}`,()=>{
+    const data=batteryStates(), grid=profile==='NETZ', de=language==='de';
+    data['E.charging_profile'].state=profile;
+    const roles=grid?['grid_import_power','grid_export_power']:['storage_discharge_power','storage_charge_power'];
+    const labels=grid?(de?['Netzbezugsleistung','Netzeinspeiseleistung']:['Grid import power','Grid export power']):(de?['Entladeleistung','Ladeleistung']:['Discharging power','Charging power']);
+    for(const role of roles) data['E.charging_profile'].attributes[`${role}_entity_id`]=`sensor.${role}`;
+    const set=(a,b,unitA='W',unitB='W')=>{
+      data[`sensor.${roles[0]}`]={state:a,attributes:{unit_of_measurement:unitA}};
+      data[`sensor.${roles[1]}`]={state:b,attributes:{unit_of_measurement:unitB}};
+    };
+    set('1330','0');const {card:c,get,calls}=card(data,{},language);
+    for(const [a,b,direction,unitA,unitB] of [['1330','0',0,'W','W'],['0','1.33',1,'W','kW'],['0.00133','0',0,'MW','W']]) {
+      set(a,b,unitA,unitB);c.hass=c._hass;
+      assert.equal(get('flow-label').textContent,labels[direction]);
+      assert.equal(get('flow-power').textContent,de?'1,33 kW':'1.33 kW');
+      assert.equal(get('flow-power').style.color,direction===0?'var(--error-color)':'var(--success-color)');
+      assert.equal(get('flow-power')['aria-label'],get('flow-power').title);
+      assert.ok(get('flow-power').title.includes(labels[0])&&get('flow-power').title.includes(labels[1]));
+    }
+    for(const [a,b] of [['0','0'],['1','2'],['unknown','0'],['0','unavailable'],['4','unavailable'],['unavailable','4'],['-1','0'],['0','NaN'],['Infinity','0'],['','0'],[' ','0']]) {
+      set(a,b);c.hass=c._hass;
+      assert.equal(get('flow-power').textContent,'—');
+      assert.equal(get('flow-power').style.color,'var(--secondary-text-color)');
+      assert.equal(get('flow-label').textContent,grid?(de?'Netzleistung':'Grid power'):(de?'Speicherleistung':'Battery power'));
+      if(a==='1'&&b==='2') assert.match(get('flow-power').title,de?/Mehrdeutige/:/Ambiguous/);
+    }
+    for(const mutate of [
+      ()=>delete data[`sensor.${roles[0]}`],
+      ()=>data[`sensor.${roles[1]}`].attributes.restored=true,
+      ()=>data[`sensor.${roles[0]}`].attributes.unit_of_measurement='A',
+      ()=>data[`sensor.${roles[0]}`].state=42,
+      ()=>data[`sensor.${roles[0]}`].state='1e309',
+      ()=>delete data['E.charging_profile'].attributes[`${roles[1]}_entity_id`],
+    ]) {
+      set('1330','0');mutate();c.hass=c._hass;
+      assert.equal(get('flow-power').textContent,'—');
+    }
+    assert.equal(calls.length,0);
+  });
+}
+test('power display switches profile and mapping without retaining another direction or card',()=>{
+  const data={...batteryStates('A'),...batteryStates('B')};
+  Object.assign(data['A.charging_profile'].attributes,{grid_import_power_entity_id:'sensor.a_in',grid_export_power_entity_id:'sensor.a_out',storage_charge_power_entity_id:'sensor.a_charge',storage_discharge_power_entity_id:'sensor.a_discharge'});
+  Object.assign(data['B.charging_profile'].attributes,{grid_import_power_entity_id:'sensor.b_in',grid_export_power_entity_id:'sensor.b_out'});
+  for(const [id,value] of Object.entries({a_in:'1500',a_out:'0',a_charge:'2000',a_discharge:'0',b_in:'0',b_out:'3000'})) data[`sensor.${id}`]={state:value,attributes:{unit_of_measurement:'W'}};
+  const a=card(data,{entry_id:'A'}),b=card(data,{entry_id:'B'});
+  assert.equal(a.get('flow-label').textContent,'Grid import power');
+  assert.equal(b.get('flow-label').textContent,'Grid export power');
+  data['A.charging_profile'].state='PV_OPTIMUM';a.card.hass=a.card._hass;
+  assert.equal(a.get('flow-label').textContent,'Charging power');assert.equal(a.get('flow-power').textContent,'2.00 kW');
+  data['A.charging_profile'].attributes.storage_charge_power_entity_id='sensor.absent';a.card.hass=a.card._hass;
+  assert.equal(a.get('flow-power').textContent,'—');assert.equal(b.get('flow-power').textContent,'3.00 kW');
+  assert.equal(a.calls.length+b.calls.length,0);
 });

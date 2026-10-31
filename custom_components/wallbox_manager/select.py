@@ -58,6 +58,15 @@ class SettingSelect(SettingEntity, SelectEntity, RestoreEntity):
                 battery_reserve_entity_id=self.entry.options.get("min_soc_speicher"),
                 pv_surplus_target=self.surplus_target(),
                 planned_grid_reserve=self.entry.runtime_data.battery.preview,
+                **{
+                    f"{role}_entity_id": self.entry.options.get(role)
+                    for role in (
+                        "storage_charge_power",
+                        "storage_discharge_power",
+                        "grid_import_power",
+                        "grid_export_power",
+                    )
+                },
             )
         return attrs
 
@@ -73,7 +82,14 @@ class SettingSelect(SettingEntity, SelectEntity, RestoreEntity):
             def mappings():
                 return tuple(
                     self.entry.options.get(key)
-                    for key in ("soc_speicher_aktuell", "min_soc_speicher")
+                    for key in (
+                        "soc_speicher_aktuell",
+                        "min_soc_speicher",
+                        "storage_charge_power",
+                        "storage_discharge_power",
+                        "grid_import_power",
+                        "grid_export_power",
+                    )
                 )
 
             previous = mappings()

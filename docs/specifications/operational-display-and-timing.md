@@ -94,3 +94,12 @@ WBM-TIME-01–24 remains unchanged: accepted NETZ Start creates the same absolut
 business schedule without requiring a vehicle; Apply retains the existing
 power/timing approval and deadline rules. Ending an editor lease alone does not
 change the action revision because it changes neither draft nor approval intent.
+
+
+## Approved status presentation follow-up — 31 October 2026
+
+[WBM-HS-LAYOUT-01–04 / WBM-HS-POWER-01–06](lovelace-home-battery-display.md#approved-follow-up--status-layout-and-source-power-31-october-2026)
+rearranges the status area and adds read-only mapped directional power. Existing
+session energy/live EV precision, active warning lifecycle and WBM-TIME-01–24
+business timing remain unchanged. Successful preparatory PV Start acknowledges
+durable release rather than an immediate electrical result (WBM-ACTION-SAFE-09).

@@ -56,7 +56,7 @@ class WallboxManagerCard extends HTMLElement {
       :disabled {opacity:.5;cursor:default} #charge-action,#takeover {width:100%;padding:9px 12px;margin-top:6px;font-size:14px}
       #charge-action {background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color);font-weight:500}
       #charge-action:hover:not(:disabled) {filter:brightness(.95)}
-      .live {border-top:1px solid var(--divider-color);padding-top:12px;margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px}
+      .live {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px}
       .caption {font-size:12px;color:var(--secondary-text-color);margin-bottom:3px} .reading {font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
       .details {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;container-type:inline-size}
       @container (max-width:320px) {.details > section {grid-column:1 / -1}}
@@ -70,8 +70,8 @@ class WallboxManagerCard extends HTMLElement {
       <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" placeholder="—" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
       ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="--"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="--"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
       <button id="charge-action"></button>
-      <div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div></div>
-      <div class="details"><section class="section" aria-labelledby="parameters-label"><h3 id="parameters-label"></h3><div class="reading" id="actual"></div></section><section class="section" aria-labelledby="battery-label"><h3 id="battery-label"></h3><div class="reading" id="battery-soc" role="img"></div></section></div>
+      <section class="section" aria-labelledby="wallbox-status-label"><h3 id="wallbox-status-label"></h3><div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div><div><div class="caption" id="parameters-label"></div><div class="reading" id="actual"></div></div></div>
+      <div class="details"><section class="section" aria-labelledby="battery-label"><h3 id="battery-label"></h3><div class="caption" id="battery-caption"></div><div class="reading" id="battery-soc" role="img"></div></section><section class="section" aria-labelledby="flow-label"><h3 id="flow-label"></h3><div class="reading" id="flow-power" role="img"></div></section></div></section>
       <section class="section" id="messages" aria-labelledby="messages-label"><h3 id="messages-label"></h3><p id="error" class="notice" role="status">—</p></section>
     </ha-card>`;
     const get = id => this.shadowRoot.getElementById(id);
@@ -445,6 +445,33 @@ class WallboxManagerCard extends HTMLElement {
     catch (err) { if (this.discovery.entry === binding && this.runtime === runtime && profile === this._hass.states[this.discovery.roles.charging_profile]?.state) this.warn(warningId,err.message || String(err)); }
     finally { this.busy = false; this.hass = this._hass; }
   }
+  renderSourcePower(profile,mappings) {
+    const de = this._hass.language?.startsWith("de"), grid = profile === "NETZ";
+    const roles = grid ? ["grid_import_power","grid_export_power"] : ["storage_discharge_power","storage_charge_power"];
+    const labels = grid ? (de ? ["Netzbezugsleistung","Netzeinspeiseleistung"] : ["Grid import power","Grid export power"])
+      : (de ? ["Entladeleistung","Ladeleistung"] : ["Discharging power","Charging power"]);
+    const values = roles.map(role => {
+      const state = this._hass.states[mappings[`${role}_entity_id`]];
+      if (!available(state) || state.attributes.restored || typeof state.state !== "string" || !state.state.trim()) return null;
+      const value = Number(state.state), factor = {W:0.001,kW:1,MW:1000}[state.attributes.unit_of_measurement];
+      const kw = value * factor;
+      return Number.isFinite(value) && value >= 0 && Number.isFinite(kw) ? kw : null;
+    });
+    const validProfile = grid || ["PV_SURPLUS","PV_OPTIMUM","PV_MAXIMUM"].includes(profile);
+    const direction = validProfile && values[0] > 0 && values[1] === 0 ? 0
+      : validProfile && values[1] > 0 && values[0] === 0 ? 1 : null;
+    const display = value => value === null ? "—" : `${this.format(value,2)} kW`;
+    const heading = direction === null ? (grid ? (de ? "Netzleistung" : "Grid power") : (de ? "Speicherleistung" : "Battery power")) : labels[direction];
+    const field = this.shadowRoot.getElementById("flow-power");
+    this.shadowRoot.getElementById("flow-label").textContent = heading;
+    field.textContent = direction === null ? "—" : display(values[direction]);
+    field.style.color = direction === null ? "var(--secondary-text-color)" : direction === 0 ? "var(--error-color)" : "var(--success-color)";
+    const reason = values.some(value => value === null) || !validProfile ? (de ? "Nicht verfügbar" : "Unavailable")
+      : values.every(value => value > 0) ? (de ? "Mehrdeutige Übergangswerte" : "Ambiguous transitional values")
+      : direction === null ? (de ? "Kein gerichteter Leistungsfluss" : "No directional power flow") : "";
+    field.title = `${heading}: ${field.textContent}; ${labels[0]}: ${display(values[0])}; ${labels[1]}: ${display(values[1])}${reason ? `; ${reason}` : ""}`;
+    field.setAttribute("aria-label",field.title);
+  }
   set hass(hass) {
     this._hass = hass;
     if (!this.config) return;
@@ -514,10 +541,13 @@ class WallboxManagerCard extends HTMLElement {
       : percent(typeof mappings.effective_target_soc === "number" && Number.isFinite(mappings.effective_target_soc) && mappings.effective_target_soc >= 0 && mappings.effective_target_soc <= 100 ? mappings.effective_target_soc : null);
     const actualSoc = percent(percentageValue(soc));
     const referenceLabel = profile === "NETZ" ? (de ? "Geplante NETZ-Mindestreserve" : "Planned NETZ minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
+    get("wallbox-status-label").textContent = de ? "Wallbox Status" : "Wallbox status";
+    get("battery-caption").textContent = de ? "Ladung Ist → Soll" : "Charge actual → target";
     get("battery-label").textContent = de ? "Hausspeicher" : "Home battery";
     get("battery-soc").textContent = `${actualSoc} → ${reference}`;
     get("battery-soc").title = `${de ? "Ladezustand" : "State of charge"}: ${actualSoc}; ${referenceLabel}: ${reference}${profile === "NETZ" ? `; ${de ? "Beobachtete Mindestreserve" : "Observed minimum reserve"}: ${percent(observedReserve)}` : ""}`;
     get("battery-soc").setAttribute("aria-label",get("battery-soc").title);
+    this.renderSourcePower(profile,mappings);
     for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
       get(`${id}-row`).hidden = pv;
       get(`${id}-label`).textContent = label;
@@ -544,7 +574,7 @@ class WallboxManagerCard extends HTMLElement {
     const wantedPoint = connected ? formatPoint(wantedPhases, wantedAmps) : "—";
     get("actual").textContent = profile === "NETZ" && wantedAmps != null && actualPoint !== wantedPoint
       ? `${actualPoint} → ${wantedPoint}` : actualPoint;
-    const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Sitzungsenergie",power:"Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Session energy",power:"Power",duration:"Duration"};
+    const labels = de ? {connection:"Anschlussstatus",charging:"Ladezustand",energy:"Sitzungsenergie",power:"EV Leistung",duration:"Dauer"} : {connection:"Connection status",charging:"Charging state",energy:"Session energy",power:"EV power",duration:"Duration"};
     const connectorLabels = de ? {available:"Frei",occupied:"Belegt",reserved:"Reserviert",faulted:"Störung"} : {available:"Available",occupied:"Occupied",reserved:"Reserved",faulted:"Faulted"};
     const chargingLabels = de ? {idle:"Bereit",connected:"Verbunden",charging:"Lädt",suspended_vehicle:"Vom Fahrzeug pausiert",suspended_station:"Von Wallbox pausiert"} : {idle:"Idle",connected:"Connected",charging:"Charging",suspended_vehicle:"Paused by vehicle",suspended_station:"Paused by wallbox"};
     for (const [id,role] of [["connection","connector_state"],["charging","charging_state"],["energy","session_energy"],["live-power","power"],["duration","session_duration"]]) {

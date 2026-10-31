@@ -342,6 +342,8 @@ class Grid:
                     self.release_changed()
                     raise ValueError("Superseded charge action")
                 self.settings.notify("charge_release")
+            # Preparatory authorization succeeded; electrical outcomes are separate.
+            return
         if self.task and self.eligible():
             await asyncio.shield(self.task)
         if self.status in ("rejected", "communication_failure", "unsupported"):

@@ -136,3 +136,11 @@ WBM-NETZ-ACTION-01–13 remain subject to WBM-TIME-01–24.
 | WBM-RELEASE-PREP-03 | Every electrical request still requires a valid transaction, Remote authority and ordinary hardware/capability/lockout and mandatory measurement policy. |
 | WBM-RELEASE-PREP-04 | Later connection uses the ordinary clocked PV cycle, with no event-triggered regulator or additional Start. |
 | WBM-RELEASE-PREP-05 | Stop before connection disarms; profile change/authority loss/reload and existing transport recovery fences remain. NETZ business scheduling is unchanged. |
+
+
+## Approved follow-up — PV Start acknowledgement (31 October 2026)
+
+| ID | Normative requirement |
+| --- | --- |
+| WBM-ACTION-SAFE-09 | Successful preparatory PV Start is acknowledged by accepted, durably persisted manager release. A prior rejected/communication_failure/unsupported electrical result must not fail that service invocation or require an immediate OCPP point/current transition. Existing electrical diagnostics remain truthful and separate. |
+| WBM-RELEASE-PREP-06 | PV Start returns after durable acceptance and lifecycle revalidation, without waiting for an older electrical task. Validation, persistence and supersession failures still fail. NETZ electrical execution, explicit Stop/Apply, authority restrictions and ordinary PV regulation remain unchanged. |
