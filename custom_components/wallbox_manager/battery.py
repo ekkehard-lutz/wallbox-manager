@@ -176,7 +176,7 @@ class BatteryReserve:
         finally:
             remove()
 
-    def desired(self, requested, original):
+    def plan(self, requested, original):
         soc = self.read(self.soc)
         state = self.hass.states.get(self.reserve)
         step = Fraction(str(state.attributes.get("step", 1)))
@@ -187,10 +187,36 @@ class BatteryReserve:
         bounded = min(Fraction(str(requested)), Fraction(str(soc)), maximum)
         value = minimum + ((bounded - minimum) // step) * step
         temporary = max(original, float(value))
+        if not minimum <= temporary <= maximum:
+            raise ValueError("reserve outside entity range")
+        return temporary
+
+    def preview(self, requested):
+        """Pure ownership-aware policy projection; never acknowledge pending writes."""
+        try:
+            if not self.configured or self.recovering or self.failed_restore:
+                return None
+            current = self.read(self.reserve)
+            original = current
+            if self.record:
+                if (
+                    self.record["entity"] != self.reserve
+                    or self.record.get("pending") is not None
+                    or self.status not in ("active", "preserved")
+                    or current != self.record["temporary"]
+                ):
+                    return None
+                original = self.record["original"]
+            return self.plan(requested, original)
+        except ValueError, TypeError, OverflowError, ZeroDivisionError, KeyError:
+            return None
+
+    def desired(self, requested, original):
+        temporary = self.plan(requested, original)
         self.diagnostics.update(
             original_reserve=original,
             profile_reserve=requested,
-            battery_soc=soc,
+            battery_soc=self.read(self.soc),
             desired_reserve=temporary,
         )
         return temporary

@@ -84,3 +84,13 @@ editing intent, never to observation validity, OCPP authority or electrical safe
 Use deterministic fake wall-clock and monotonic editor clocks; test unplugged/start-without-vehicle, cable attach during delay, lockouts and missed power window, offline/reconnect, HA reload, delay/duration zero/unset, extend/shorten/remove duration, apply while charging, expiry during editing, multiple cards/direct text edits, lost/replaced revisions, persistent write failures, warning prioritization/clearance, one-decimal session energy and no increased measurement Recorder rate. Preserve OCPP authority, Stationary safety, manager release OFF, phase switching, battery reserve and PV semantics.
 
 **Documentation phase only. No source implementation, merge, release, deployment or service restart here.**
+
+
+## Safe action API clarification — 31 October 2026
+
+[WBM-ACTION-SAFE-01–08](charge-release.md#approved-correction--safe-explicit-actions-and-preparatory-release-31-october-2026)
+replaces the card's ambiguous toggle call with explicit Start/Stop/Apply intent.
+WBM-TIME-01–24 remains unchanged: accepted NETZ Start creates the same absolute
+business schedule without requiring a vehicle; Apply retains the existing
+power/timing approval and deadline rules. Ending an editor lease alone does not
+change the action revision because it changes neither draft nor approval intent.

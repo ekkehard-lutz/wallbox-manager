@@ -122,10 +122,16 @@ class WallboxManagerCard extends HTMLElement {
       }
     }
     get("charge-action").onclick = async () => {
+      const entity = this.discovery.roles.charge_action;
+      const snapshot = {...this._hass.states[entity]?.attributes};
+      const action = snapshot.charge_action, profile = this._hass.states[this.discovery.roles.charging_profile]?.state;
+      const incarnation = snapshot.runtime_incarnation, revision = snapshot.charge_action_revision;
       // Moving focus from a time editor onto Apply must keep this first click.
       if (this.timingEditing) await this.endTiming();
       if (this.timingQueue) await this.timingQueue.tail;
-      return this.call("button", "press", {entity_id:this.discovery.roles.charge_action});
+      const current = this._hass.states[entity]?.attributes || {};
+      if (entity !== this.discovery.roles.charge_action || incarnation !== current.runtime_incarnation || profile !== this._hass.states[this.discovery.roles.charging_profile]?.state || action !== current.charge_action) return;
+      return this.call("wallbox_manager", "charge_action", {entity_id:entity,action,profile,revision,incarnation});
     };
     if (this._hass) this.hass = this._hass;
   }
@@ -425,17 +431,18 @@ class WallboxManagerCard extends HTMLElement {
     field.style.color = message ? "var(--error-color)" : "var(--secondary-text-color)";
   }
   async call(domain, service, data) {
-    const action = domain === "button" && service === "press" ? (data.entity_id === this.discovery.roles.charge_action ? "charge_action" : "take_control") : null;
+    const action = domain === "wallbox_manager" && service === "charge_action" ? "charge_action" : domain === "button" && service === "press" ? (data.entity_id === this.discovery.roles.charge_action ? "charge_action" : "take_control") : null;
+    if (domain === "button" && data.entity_id === this.discovery.roles.charge_action) return;
     if (action) {
       const state = this._hass.states[this.discovery.roles[action]];
       if (this.busy || !state || state.state === "unavailable" || (action === "charge_action" ? (state.attributes.charge_action_ready !== true || this.draftWrites.size > 0 || this.edits.power || Object.keys(this.durationEdits).length > 0) : state.attributes.execution_ready !== true) || data.entity_id !== this.discovery.roles[action]) return;
     } else if (!["number", "select", "text"].includes(domain) || !Object.values(this.discovery.roles).includes(data.entity_id)) return;
     const warningId = data.entity_id;
-    const binding = this.discovery.entry, runtime = this.runtime;
+    const binding = this.discovery.entry, runtime = this.runtime, profile = this._hass.states[this.discovery.roles.charging_profile]?.state;
     this.clearWarning(warningId);
     this.busy = true; this.hass = this._hass;
     try { await this._hass.callService(domain,service,data); }
-    catch (err) { if (this.discovery.entry === binding && this.runtime === runtime) this.warn(warningId,err.message || String(err)); }
+    catch (err) { if (this.discovery.entry === binding && this.runtime === runtime && profile === this._hass.states[this.discovery.roles.charging_profile]?.state) this.warn(warningId,err.message || String(err)); }
     finally { this.busy = false; this.hass = this._hass; }
   }
   set hass(hass) {
@@ -501,14 +508,15 @@ class WallboxManagerCard extends HTMLElement {
     const surplusTarget = mappings.battery_soc_entity_id && observedReserve !== null && target !== null &&
       envelope?.soc === target && typeof envelope.maximum_reserve === "number" && Number.isFinite(envelope.maximum_reserve) && observedReserve <= envelope.maximum_reserve
         ? target : null;
-    const reference = profile === "NETZ" ? percent(observedReserve)
+    const plannedReserve = typeof mappings.planned_grid_reserve === "number" && Number.isFinite(mappings.planned_grid_reserve) && mappings.planned_grid_reserve >= 0 && mappings.planned_grid_reserve <= 100 ? mappings.planned_grid_reserve : null;
+    const reference = profile === "NETZ" ? percent(plannedReserve)
       : profile === "PV_SURPLUS" ? percent(surplusTarget)
       : percent(typeof mappings.effective_target_soc === "number" && Number.isFinite(mappings.effective_target_soc) && mappings.effective_target_soc >= 0 && mappings.effective_target_soc <= 100 ? mappings.effective_target_soc : null);
     const actualSoc = percent(percentageValue(soc));
-    const referenceLabel = profile === "NETZ" ? (de ? "Aktuelle Mindestreserve" : "Current minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
+    const referenceLabel = profile === "NETZ" ? (de ? "Geplante NETZ-Mindestreserve" : "Planned NETZ minimum reserve") : (de ? "Ziel-SoC" : "Target SoC");
     get("battery-label").textContent = de ? "Hausspeicher" : "Home battery";
     get("battery-soc").textContent = `${actualSoc} → ${reference}`;
-    get("battery-soc").title = `${de ? "Ladezustand" : "State of charge"}: ${actualSoc}; ${referenceLabel}: ${reference}`;
+    get("battery-soc").title = `${de ? "Ladezustand" : "State of charge"}: ${actualSoc}; ${referenceLabel}: ${reference}${profile === "NETZ" ? `; ${de ? "Beobachtete Mindestreserve" : "Observed minimum reserve"}: ${percent(observedReserve)}` : ""}`;
     get("battery-soc").setAttribute("aria-label",get("battery-soc").title);
     for (const [id,label] of Object.entries(de ? {grid_start_delay:"Startverzögerung",grid_duration:"Ladedauer"} : {grid_start_delay:"Start delay",grid_duration:"Charging duration"})) {
       get(`${id}-row`).hidden = pv;

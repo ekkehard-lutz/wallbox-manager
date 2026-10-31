@@ -62,3 +62,24 @@ removes only the redundant battery caption element and assignment. The canonical
 backend target, source mappings, entity APIs, locale formatting, unavailable-value
 semantics and responsive layout remain unchanged. V3's overall document status
 remains DRAFT; this presentation decision approves no control algorithm.
+
+
+## Approved synchronization and NETZ preview amendment (31 October 2026)
+
+This explicitly supersedes the display-only observed-reserve requirement in
+WBM-HS-UI-07 and its examples/NETZ labels in 02/09/15. Historical text above is
+retained as provenance. WBM-GRID-15 physical ownership/write/restoration remains
+binding; WBM-TIME-01–24 and charging eligibility are unchanged.
+
+| ID | Normative requirement |
+| --- | --- |
+| WBM-HS-UI-SYNC-01 | OPTIMUM/MAXIMUM display the latest canonical target in every planner/control phase, including STOP, release OFF, absent vehicle and unavailable OCPP. |
+| WBM-HS-UI-SYNC-02 | Preserve WBM-PV-TARGET-01–06 sensor identity/precision/change-only publication; invalidate stale targets promptly. A reliable backend compatibility projection is permitted. |
+| WBM-HS-UI-SYNC-03 | No JavaScript planner; format one locale-aware decimal only at presentation. |
+| WBM-HS-UI-SYNC-04 | Publish meaningful target/action changes from early returns; 300 unchanged cycles create no redundant sensor or Select writes. |
+| WBM-HS-UI-NETZ-01 | NETZ right-hand value is the planned effective reserve even before Start, sharing BatteryReserve.desired arithmetic: max(original, step-floor(min(configured reserve, actual SoC))). |
+| WBM-HS-UI-NETZ-02 | Use actual valid reserve before ownership; use durable original during confirmed WBM ownership. Pending/recovering/invalid ownership evidence makes preview unavailable. External changes win. |
+| WBM-HS-UI-NETZ-03 | Share Number minimum/maximum/step and validation. Invalid/missing mapping, SoC, reserve or range yields unavailable, never invented zero. |
+| WBM-HS-UI-NETZ-04 | Tooltip/accessibility distinguishes actual battery SoC, planned NETZ reserve and observed/confirmed reserve; planned is not applied. |
+| WBM-HS-UI-NETZ-05 | Update change-only on config, SoC, original reserve and ownership transitions; multiple cards share one backend projection. |
+| WBM-HS-UI-NETZ-06 | Preview is pure: no writes, journal mutation, ownership, session start, OCPP or additional electrical prerequisite. Actual override remains gated by existing active confirmed charging prerequisites. |

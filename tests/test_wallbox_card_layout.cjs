@@ -17,7 +17,7 @@ test('home battery aligns with wallbox parameters and stacks by card width',()=>
         const c=document.createElement('wallbox-manager-card'); c.style.width=width+'px'; document.body.append(c); c.setConfig({entry_id:'E'});
         const states={};
         const put=(role,value,attrs={})=>states['E.'+role]={state:value,attributes:{wallbox_manager_entry:'E',wallbox_manager_scope:'connector',wallbox_manager_role:role,...attrs}};
-        put('connected','on'); put('charging_profile','NETZ',{options:['NETZ'],battery_soc_entity_id:'sensor.soc',battery_reserve_entity_id:'number.reserve'});
+        put('connected','on'); put('charging_profile','NETZ',{options:['NETZ'],planned_grid_reserve:40,battery_soc_entity_id:'sensor.soc',battery_reserve_entity_id:'number.reserve'});
         put('soll_power','4.8',{applied_phase_count:3,applied_current_a:6,requested_phase_count:1,requested_current_a:17});
         states['sensor.soc']={state:'69.125',attributes:{}};states['number.reserve']={state:'40',attributes:{}};
         c.hass={language,states,callService:()=>{throw Error('Unexpected service')}};
@@ -56,7 +56,7 @@ test('home battery aligns with wallbox parameters and stacks by card width',()=>
       assert.equal(r.captionAbsent,true);
       assert.equal(r.directPair,true);
       assert.equal(r.aria,r.tooltip);
-      assert.match(r.aria,r.language==='de'?/Ladezustand: .*Aktuelle Mindestreserve:/:/State of charge: .*Current minimum reserve:/);
+      assert.match(r.aria,r.language==='de'?/Ladezustand: .*Geplante NETZ-Mindestreserve:/:/State of charge: .*Planned NETZ minimum reserve:/);
       assert.ok(Math.abs(r.headingGap-8)<1,JSON.stringify(r));
       if (r.aligned) assert.equal(r.pairAligned,true,JSON.stringify(r));
     }

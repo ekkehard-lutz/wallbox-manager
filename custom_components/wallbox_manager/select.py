@@ -57,12 +57,16 @@ class SettingSelect(SettingEntity, SelectEntity, RestoreEntity):
                 battery_soc_entity_id=self.entry.options.get("soc_speicher_aktuell"),
                 battery_reserve_entity_id=self.entry.options.get("min_soc_speicher"),
                 pv_surplus_target=self.surplus_target(),
+                planned_grid_reserve=self.entry.runtime_data.battery.preview,
             )
         return attrs
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
         if self.role == "charging_profile":
+            self.async_on_remove(
+                self.observed.watch(("battery", self.scope, "preview"), self.changed)
+            )
             for role in ("soll_soc_speicher", "soc_hysterese"):
                 self.async_on_remove(self.settings.watch(role, self.changed))
 

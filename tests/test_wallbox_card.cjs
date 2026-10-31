@@ -36,7 +36,7 @@ function states(entry='E') {
     result[`${entry}.${role}`] = {state:value,attributes:{wallbox_manager_entry:entry,wallbox_manager_role:role,wallbox_manager_scope:'connector',station_id:`station-${entry}`,
       options:role==='charging_profile'?['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']:undefined,min:0,max:100}};
   }
-  Object.assign(result[`${entry}.charge_action`].attributes,{charge_action_ready:false,charge_action:"start",charge_release:false});
+  Object.assign(result[`${entry}.charge_action`].attributes,{charge_action_ready:false,charge_action:"start",charge_release:false,charge_action_revision:'r0',runtime_incarnation:entry});
   Object.assign(result[`${entry}.soll_power`].attributes,{technical_min_kw:1.4,technical_max_kw:18.6,grid_draft_revision:0,runtime_incarnation:entry});
   for (const role of ['grid_start_delay','grid_duration']) Object.assign(result[`${entry}.${role}`].attributes,{grid_timing_revision:0,runtime_incarnation:entry});
   return result;
@@ -182,11 +182,11 @@ test('explicit authority and permission actions stay scoped and observed',async(
   await get('charge-action').onclick();
   assert.equal(calls[0][0],'button'); assert.equal(calls[0][1],'press');
   assert.equal(calls[0][2].entity_id,'E.take_control');
-  assert.equal(calls[1][0],'button'); assert.equal(calls[1][1],'press');
+  assert.equal(calls[1][0],'wallbox_manager'); assert.equal(calls[1][1],'charge_action');
   assert.equal(data['E.charging_enabled'].state,'on');
   data['E.charging_enabled'].state='off'; c.hass=c._hass;
   await get('charge-action').onclick();
-  assert.equal(calls[2][1],'press');
+  assert.equal(calls[2][1],'charge_action');
   await c.call('switch','turn_on',{entity_id:'OTHER.charging_enabled'});
   await c.call('button','press',{entity_id:'E.charging_enabled'});
   assert.equal(calls.length,3);
@@ -392,7 +392,7 @@ test('one charging action follows backend start, apply, stop in both languages',
     assert.equal(get('charge-action').textContent,labels[2]);
     await get('charge-action').onclick();
     assert.equal(calls.length,3);
-    for (const call of calls) assert.equal(JSON.stringify(call),JSON.stringify(['button','press',{entity_id:'E.charge_action'}]));
+    for (const [index, call] of calls.entries()) assert.equal(JSON.stringify(call),JSON.stringify(['wallbox_manager','charge_action',{entity_id:'E.charge_action',action:['start','apply','stop'][index],profile:'NETZ',revision:'r0',incarnation:'E'}]));
   }
 });
 
@@ -691,7 +691,7 @@ test('moving focus from timing fields to Apply keeps the first explicit button c
   c.shadowRoot.activeElement=get('charge-action');await get('grid_duration-minutes').onblur();
   assert.equal(get('charge-action').disabled,false);
   await get('charge-action').onclick();
-  assert.equal(calls.at(-1)[0],'button');assert.equal(calls.at(-1)[1],'press');
+  assert.equal(calls.at(-1)[0],'wallbox_manager');assert.equal(calls.at(-1)[1],'charge_action');
   assert.equal(calls.filter(call=>call[2].action==='end').length,1);
 });
 test('off schedule shows no fictitious countdown but keeps meaningful next-start drafts',()=>{
@@ -783,45 +783,42 @@ function batteryStates(entry='E', soc='69', reserve='40') {
     battery_soc_entity_id:`sensor.${entry.toLowerCase()}_battery`,
     battery_reserve_entity_id:`number.${entry.toLowerCase()}_reserve`,
     pv_surplus_target:{soc:95,maximum_reserve:93},
+    planned_grid_reserve:Number(reserve),
   });
   data[`sensor.${entry.toLowerCase()}_battery`]={state:soc,attributes:{}};
   data[`number.${entry.toLowerCase()}_reserve`]={state:reserve,attributes:{}};
   return data;
 }
-test('battery shows actual and observed reserve, never requested or journal targets',()=>{
-  const data=batteryStates('E','69','20');
-  data['E.min_soc'].state='40';
-  Object.assign(data['E.charging_profile'].attributes,{
-    battery_status:'confirmation_pending',original_reserve:20,temporary:40,pending:40,
-  });
+test('battery shows canonical planned reserve and separately labels observed reserve',()=>{
+  const data=batteryStates('E','65','20');
+  data['E.charging_profile'].attributes.planned_grid_reserve=40;
   const {card:c,get,calls}=card(data);
-  assert.equal(get('battery-soc').textContent,'69.0 % → 20.0 %');
+  assert.equal(get('battery-soc').textContent,'65.0 % → 40.0 %');
+  assert.match(get('battery-soc')['aria-label'],/Planned NETZ minimum reserve: 40.0 %; Observed minimum reserve: 20.0 %/);
   for (const value of ['40','65','20','0']) {
     data['number.e_reserve'].state=value; c.hass=c._hass;
-    assert.equal(get('battery-soc').textContent,`69.0 % → ${value}.0 %`);
+    assert.equal(get('battery-soc').textContent,'65.0 % → 40.0 %');
   }
-  assert.match(get('battery-soc')['aria-label'],/Current minimum reserve/);
-  assert.equal(get('error').textContent,'—');
+  data['E.charging_profile'].attributes.planned_grid_reserve=null;c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'65.0 % → —');
   assert.equal(calls.length,0);
 });
-test('battery sides independently preserve zero and fractional locale values',()=>{
-  const data=batteryStates('E','69.125','40.5');
+test('battery independent validity and fractional locale preview',()=>{
+  const data=batteryStates('E','69.125','20');
+  data['E.charging_profile'].attributes.planned_grid_reserve=40.5;
   const {card:c,get,calls}=card(data,{},'de');
-  assert.equal(get('battery-label').textContent,'Hausspeicher');
   assert.equal(get('battery-soc').textContent,'69,1 % → 40,5 %');
-  assert.match(get('battery-soc')['aria-label'],/Aktuelle Mindestreserve/);
+  assert.match(get('battery-soc')['aria-label'],/Geplante NETZ-Mindestreserve/);
   for (const invalid of ['unknown','unavailable','',' ','NaN','Infinity','-1','101']) {
     data['sensor.e_battery'].state=invalid; c.hass=c._hass;
     assert.equal(get('battery-soc').textContent,'— → 40,5 %');
-    data['sensor.e_battery'].state='0'; data['number.e_reserve'].state=invalid; c.hass=c._hass;
-    assert.equal(get('battery-soc').textContent,'0,0 % → —');
-    data['number.e_reserve'].state='40.5';
   }
-  data['sensor.e_battery'].attributes.restored=true; c.hass=c._hass;
-  assert.equal(get('battery-soc').textContent,'— → 40,5 %');
-  delete data['sensor.e_battery']; delete data['number.e_reserve']; c.hass=c._hass;
-  assert.equal(get('battery-soc').textContent,'— → —');
-  assert.equal(get('error').textContent,'—'); assert.equal(calls.length,0);
+  data['sensor.e_battery'].state='0';
+  for (const invalid of [null,undefined,'40',NaN,Infinity,-1,101]) {
+    data['E.charging_profile'].attributes.planned_grid_reserve=invalid;c.hass=c._hass;
+    assert.equal(get('battery-soc').textContent,'0,0 % → —');
+  }
+  assert.equal(calls.length,0);
 });
 test('fixed SURPLUS target follows HA Number with independent missing SoC and target',()=>{
   const data=batteryStates('E','69','20'); data['E.charging_profile'].state='PV_SURPLUS';
@@ -923,10 +920,10 @@ for (const language of ['de','en']) for (const profile of ['NETZ','PV_SURPLUS','
     }
     data['sensor.e_battery'].state='unavailable';c.hass=c._hass;
     assert.equal(get('battery-soc').textContent,`— → ${target}`);
-    data['sensor.e_battery'].state='69.25';data['number.e_reserve'].state='unavailable';c.hass=c._hass;
+    data['sensor.e_battery'].state='69.25';data['number.e_reserve'].state='unavailable';data['E.charging_profile'].attributes.planned_grid_reserve=null;c.hass=c._hass;
     assert.equal(get('battery-soc').textContent,`69${decimal}3 % → —`);
     if(profile==='NETZ') {
-      data['number.e_reserve'].state='40.25';c.hass=c._hass;
+      data['number.e_reserve'].state='40.25';data['E.charging_profile'].attributes.planned_grid_reserve=40.25;c.hass=c._hass;
       assert.equal(get('battery-soc').textContent,`69${decimal}3 % → 40${decimal}3 %`);
     }
     assert.equal(calls.length,0);
@@ -956,6 +953,37 @@ for (const language of ['de','en']) {
     assert.match(c.shadowRoot.html,/<h3 id="battery-label"><\/h3><div class="reading" id="battery-soc"/);
     const value=get('battery-soc');
     assert.equal(value['aria-label'],value.title);
-    assert.match(value.title,de?/Ladezustand: 63,3 %; Aktuelle Mindestreserve: 40,0 %/:/State of charge: 63.3 %; Current minimum reserve: 40.0 %/);
+    assert.match(value.title,de?/Ladezustand: 63,3 %; Geplante NETZ-Mindestreserve: 40,0 %/:/State of charge: 63.3 %; Planned NETZ minimum reserve: 40.0 %/);
   });
 }
+
+
+test('click captures intended direction before asynchronous timing completion',async()=>{
+  const data=states();Object.assign(data['E.charge_action'].attributes,{charge_action_ready:true});
+  const {card:c,get,calls}=card(data);
+  let finish;c.timingEditing=true;c.endTiming=()=>new Promise(resolve=>{finish=resolve;});
+  const click=get('charge-action').onclick();
+  data['E.charge_action'].attributes.charge_action='stop';c.hass=c._hass;
+  finish();await click;
+  assert.equal(calls.length,0); // Never reinterpret the captured Start as Stop.
+});
+test('slow state updates and two cards retain explicit Start direction',async()=>{
+  const data=states();Object.assign(data['E.charge_action'].attributes,{charge_action_ready:true});
+  const a=card(data),b=card(data);
+  await a.get('charge-action').onclick();await b.get('charge-action').onclick();
+  await a.get('charge-action').onclick();
+  for(const call of [...a.calls,...b.calls]) {
+    assert.equal(call[0],'wallbox_manager');assert.equal(call[1],'charge_action');
+    assert.equal(call[2].action,'start');assert.equal(call[2].revision,'r0');
+  }
+});
+test('canonical compatibility target transition and invalidation during STOP',()=>{
+  const data=batteryStates();data['E.charging_profile'].state='PV_OPTIMUM';
+  data['E.charging_profile'].attributes.effective_target_soc=67.559;
+  const {card:c,get}=card(data);
+  assert.equal(get('battery-soc').textContent,'69.0 % → 67.6 %');
+  data['E.charging_profile'].attributes.effective_target_soc=73.619;c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69.0 % → 73.6 %');
+  data['E.charging_profile'].attributes.effective_target_soc=null;c.hass=c._hass;
+  assert.equal(get('battery-soc').textContent,'69.0 % → —');
+});
