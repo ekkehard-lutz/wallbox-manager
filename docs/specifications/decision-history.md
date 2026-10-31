@@ -487,3 +487,24 @@ No deployment, HACS action, HA restart, live setting/authority/release change,
 Stationary/Fronius operation or hardware test is authorized. See
 [release notes](../v0.4/release-notes-beta.20.md) and
 [validation](../v0.4/release-validation-beta.20.md).
+
+
+## 31 October 2026 — Beta.21 publication authorization [RELEASE SCOPE]
+
+Following independent review, the operator approves publication of feature
+`a024c8ebfa6ae76a9e5d3ac993bdb75baafe8414` and predecessor
+`e61a16d4c4c3fe671a2ccb2086c48c0b76979219` unchanged as beta.21. The accepted
+layout, semantic direction colors and kW with exactly two locale-aware decimals
+are not to be redesigned during release preparation. Existing action, release,
+PV target, preview, layout and power requirements remain unchanged.
+
+Authorized stages: release-branch feature merge and version/documentation commit,
+full validation, exact-SHA CI gates, normal non-fast-forward develop/main merges,
+annotated tag, and published GitHub prerelease using standard source archives.
+No reset/rebase/squash/force-push or historical release/tag replacement. Existing
+manager release still resets OFF on integration reload; separately controlled
+installation requires explicit user reauthorization if charging is desired.
+No HACS installation, deployment, live HA restart/reload, live configuration,
+Stationary/Fronius operation or physical charging test is authorized. See
+[release notes](../v0.4/release-notes-beta.21.md) and
+[release validation](../v0.4/release-validation-beta.21.md).

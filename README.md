@@ -2,26 +2,38 @@
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This **v0.4.0-beta.20 prerelease** adds the native **PV Target SoC / PV Ziel-SoC**
-Home Assistant sensor. It projects the existing canonical effective target in `%`,
-without recalculation or rounding, and supports normal Recorder/history graphs.
-State publication follows exact target/availability changes; unchanged regulation
-cycles produce no redundant sensor writes. Valid passive target planning remains
-active while manager charging release is OFF.
+This **v0.4.0-beta.21 prerelease** publishes the independently reviewed safe
+charging actions, state publication, battery reserve preview and status display.
+The card sends explicit Start/Stop/Apply intent through
+`wallbox_manager.charge_action`, with backend profile/runtime/revision fencing.
+Repeated stale Start cannot become Stop. Preparatory PV Start can authorize
+charging before a vehicle connects and acknowledges accepted durable release,
+without requiring an immediate electrical point or positive current. Release
+changes and canonical PV targets are published promptly even under SoC STOP.
 
-At diagnostic Level 2, existing unchanged eligible STOP/zero-current `pv_sample`
-records gain actual battery SoC, target SoC, proven surplus evidence and economic
-STOP state. Economic STOP can hold zero current while the SoC mode remains FAST
-or BALANCE. Positive-current FAST/BALANCE samples retain their eleven-key schema
-and five power values. Sparse `pv_config` events establish configured hysteresis
-at context start or change; no derived SoC thresholds or H are repeated in samples.
-There is no second cyclic diagnostic stream: the existing 5-second cadence still
-allows approximately **720 decision-related records/hour**. Release OFF, passive
-planning and NETZ create no cyclic PV samples. FAST/BALANCE regulation and manager
-charging-release behavior remain unchanged. See the
-[beta.20 release notes](docs/v0.4/release-notes-beta.20.md),
-[release validation](docs/v0.4/release-validation-beta.20.md) and
-[approved implementation report](docs/pv-target-sensor-pause-diagnostics.md).
+The card's **Wallbox Status** section contains rearranged upper status columns
+and lower **Home battery** / directional-power blocks. NETZ shows planned reserve
+before charging, with observed reserve separately labeled. PV shows storage
+charge/discharge power; NETZ shows grid import/export power. Charge/export uses
+semantic green, discharge/import semantic red, and invalid/ambiguous/zero pairs
+show neutral `—`. Power uses **kW with exactly two locale-aware decimals**;
+battery percentages retain one decimal. German/English accessibility and responsive
+layout are included. There is no new power sensor, polling or periodic Recorder
+churn, and no change to FAST/BALANCE, target mathematics or economic STOP.
+
+The existing `button.charge_action` identity remains. Generic `button.press`
+retains legacy state-dependent toggle semantics; automations requiring direction
+safety must use the explicit service with current context. See the
+[beta.21 release notes](docs/v0.4/release-notes-beta.21.md),
+[release validation](docs/v0.4/release-validation-beta.21.md),
+[safe-action/preview report](docs/charge-action-state-reserve-preview-review.md) and
+[PV Start/status-power follow-up](docs/charge-action-status-power-followup-review.md).
+
+The [beta.20 notes](docs/v0.4/release-notes-beta.20.md) retain the native
+**PV Target SoC / PV Ziel-SoC** sensor and compact pause-diagnostic history.
+The sensor's identity, full-precision target, passive planning and exact-change
+publication remain unchanged in beta.21. Existing compact PV diagnostics retain
+their scope and cadence without a second stream.
 
 The [beta.19 notes](docs/v0.4/release-notes-beta.19.md) retain the original compact
 cycle samples and Home Battery caption change; the
@@ -31,7 +43,7 @@ and immutable release descriptions remain historical.
 
 The [beta.17 release notes](docs/v0.4/release-notes-beta.17.md) describe the
 shared PV runtime, seven tuning parameters and original V3 migration. All seven
-parameters and defaults are unchanged in beta.20; no data/schema migration is
+parameters and defaults are unchanged in beta.21; no data/schema migration is
 added. The [implementation report](docs/pv-v3-implementation.md) retains V3 source
 evidence and regression validation. Physical FAST optimization remains open until
 the operator captures the new five-value hardware log; no live setting is changed.
@@ -41,7 +53,7 @@ status and simplified PV card history. The [beta.15 notes](docs/v0.4/release-not
 cover live NETZ schedules and the coordinated Stationary hardware-disable/CP
 correction; the [beta.14 notes](docs/v0.4/release-notes-beta.14.md) explain nominal
 NETZ power planning. The existing Stationary implementation identified in beta.15
-remains the interface baseline; **no Stationary update is part of beta.20**.
+remains the interface baseline; **no Stationary update is part of beta.21**.
 Stationary retains physical and electrical safety ownership. The old Stationary
 capability inventory cannot satisfy current execution requirements.
 The [beta.6 notes](docs/v0.4/release-notes-beta.6.md) retain Idle/session migration
@@ -130,8 +142,9 @@ and energy accounting are unchanged. See the [implementation and migration repor
 The read-only **Hausspeicher / Home battery** block compares actual mapped
 battery SoC with the current profile reference. All battery percentages use exactly
 one HA-language decimal (German `69,3 % → 40,0 %`, English `69.3 % → 40.0 %`).
-NETZ shows the observed writable reserve, including confirmed overrides and
-external changes. PV_SURPLUS shows its configured target only while valid against
+NETZ shows the planned effective reserve, including before charging; its tooltip
+separately identifies the observed writable reserve. Preview never writes Fronius
+or takes ownership. PV_SURPLUS shows its configured target only while valid against
 the actual reserve and hysteresis; invalid or unavailable values show `—`.
 PV_OPTIMUM and PV_MAXIMUM display their canonical effective backend targets once
 calculated, including while release is OFF, and `—` while unavailable. The five PV
@@ -171,11 +184,11 @@ separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
 For separately authorized installation and testing, select
-**v0.4.0-beta.20** in HACS. Keep manager release OFF, take a full pre-upgrade HA
-backup, verify installed manifest **0.4.0-beta.20** after the operator-managed
+**v0.4.0-beta.21** in HACS. Keep manager release OFF, take a full pre-upgrade HA
+backup, verify installed manifest **0.4.0-beta.21** after the operator-managed
 restart. Check that each browser loads the current frontend resource rather than
 an older cached card; any cache refresh is a separate operator action. Follow the
-[beta.20 upgrade and rollback notes](docs/v0.4/release-notes-beta.20.md#hacs-upgrade-and-rollback).
+[beta.21 upgrade and rollback notes](docs/v0.4/release-notes-beta.21.md#hacs-upgrade-and-rollback).
 The existing release reset turns manager charging release OFF after integration
 reload/restart; the operator must explicitly authorize charging again if required.
 A package-only downgrade to beta.16 cannot restore removed delay settings or

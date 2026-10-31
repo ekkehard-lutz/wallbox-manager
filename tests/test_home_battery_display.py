@@ -84,7 +84,7 @@ async def test_battery_display_adds_no_ha_state_publication_or_control(ha):
     assert not any(event.data["entity_id"] == profile.entity_id for event in published)
 
 
-async def test_changed_mapping_publishes_once_without_observation_churn(ha):
+async def test_changed_mapping_and_preview_publish_only_meaningful_changes(ha):
     entry = await ha.install()
     profile = next(e for e in entities(ha, entry) if e.role == "charging_profile")
     published = []
@@ -106,6 +106,14 @@ async def test_changed_mapping_publishes_once_without_observation_churn(ha):
         ha.states.async_set("sensor.new_soc", value)
         ha.states.async_set("number.new_reserve", value)
         await ha.async_block_till_done()
+    assert [
+        e.data["new_state"].attributes["planned_grid_reserve"]
+        for e in published
+        if e.data["entity_id"] == profile.entity_id
+    ] == [69, 70, None, 0]
+    published.clear()
+    for _ in range(300):
+        entry.runtime_data.battery.publish_preview()
     assert not any(e.data["entity_id"] == profile.entity_id for e in published)
     remove()
 

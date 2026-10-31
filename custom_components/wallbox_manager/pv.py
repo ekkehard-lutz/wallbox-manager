@@ -808,7 +808,6 @@ class PV:
             except OSError:
                 self.problem("journal_write_failed", powers=powers)
                 if d.point.amps > 0:
-                    g.publish()
                     return  # Failed storage inhibits positives, never required OFF.
             else:
                 self.problem(None, powers=powers)
@@ -823,9 +822,9 @@ class PV:
                 urgent=d.reason
                 in ("import_budget", "soc_stop", "balance_minimum_discharge"),
             )
-            g.publish()
         except (ValueError, TypeError, OverflowError, OSError) as exc:
             self.problem(str(exc), powers=powers)
+        finally:
             g.publish()
 
     def submit(self, point, current, *, urgent=False):

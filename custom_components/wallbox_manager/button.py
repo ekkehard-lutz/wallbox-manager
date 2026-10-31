@@ -1,7 +1,9 @@
 """Explicit station-scoped takeover, retaining the public registry identity."""
 
+import voluptuous as vol
 from homeassistant.components.button import ButtonEntity
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
 
@@ -9,6 +11,16 @@ from .entity import SettingEntity, WallboxEntity, unique_id
 
 
 async def async_setup_entry(hass, entry, add):
+    entity_platform.async_get_current_platform().async_register_entity_service(
+        "charge_action",
+        {
+            vol.Required("action"): vol.In(["start", "stop", "apply"]),
+            vol.Required("profile"): str,
+            vol.Required("revision"): str,
+            vol.Required("incarnation"): str,
+        },
+        "async_charge_action",
+    )
     state = entry.runtime_data.state
     # Retire only this integration's exact legacy button, not other devices/entities.
     registry = er.async_get(hass)
@@ -70,6 +82,14 @@ class TakeControl(WallboxEntity, ButtonEntity):
 
 class ChargeAction(SettingEntity, ButtonEntity):
     """Durable connector-scoped approval, independent of station eligibility."""
+
+    async def async_charge_action(self, action, profile, revision, incarnation):
+        try:
+            await self.entry.runtime_data.grid.explicit_action(
+                action, profile, revision, incarnation
+            )
+        except (ValueError, TypeError, OSError) as exc:
+            raise HomeAssistantError(f"Charge action: {exc}") from exc
 
     async def async_press(self):
         try:

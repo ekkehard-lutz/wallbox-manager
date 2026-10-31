@@ -110,3 +110,37 @@ recovery correction remain unchanged; measurement voltage does not affect readin
 ## Later approved NETZ timing amendment (24 October 2026)
 
 [WBM-TIME-01–24](operational-display-and-timing.md) supersede only **next-start-only time parameter** clauses in WBM-RELEASE-13, WBM-NETZ-ACTION-04–05 and earlier NETZ timing provisions: confirmed start delay and duration run on absolute business deadlines regardless of connected car; approved edits take effect in the *ongoing* schedule; unapproved timing edits have a 15-second post-edit Apply window while release ON. Expiry during editing changes the action to Start and preserves edits for a new run. All electrical authority/hardware protection and the single-button contract remain unchanged. Specification only.
+
+
+## Approved correction — safe explicit actions and preparatory release (31 October 2026)
+
+This operator-approved amendment takes precedence over conflicting historical
+clauses above. WBM-RELEASE-04's transaction-absence requirement is superseded
+only for manager PV authorization: an armed release may exist without a vehicle
+or transaction. Authority loss and transport recovery policies remain unchanged.
+WBM-RELEASE-05/09 and WBM-PV-RELEASE-01–05 are clarified, not weakened.
+WBM-NETZ-ACTION-01–13 remain subject to WBM-TIME-01–24.
+
+| ID | Normative requirement |
+| --- | --- |
+| WBM-ACTION-SAFE-01 | Keep one visual Start/Stop/Apply button; capture its intended direction at click time before asynchronous editor completion. |
+| WBM-ACTION-SAFE-02 | Card calls a connector entity service with explicit action, expected profile, runtime incarnation and action revision. Never call the ambiguous button toggle. |
+| WBM-ACTION-SAFE-03 | Backend serializes actions and validates authoritative direction/context before persistence and revalidates lifecycle fences across persistence. |
+| WBM-ACTION-SAFE-04 | Repeated/stale Start never stops; repeated/stale Stop never starts. Safe rejection is permitted. |
+| WBM-ACTION-SAFE-05 | Stale Apply never approves a superseded draft/schedule, starts or stops. |
+| WBM-ACTION-SAFE-06 | Reject obsolete profile, runtime, lifecycle and revision contexts; preserve drafts on rejection. |
+| WBM-ACTION-SAFE-07 | Publish accepted durable release promptly even at SoC STOP/0 A; do not wait for an OCPP point or publish optimistic Start success. |
+| WBM-ACTION-SAFE-08 | Preserve charge_action entity identity. Generic button.press is legacy state-dependent compatibility only, not direction-safe; explicit service is required for safe automation. Use equality deduplication, no periodic refresh. |
+| WBM-RELEASE-PREP-01 | PV_SURPLUS/OPTIMUM/MAXIMUM Start can arm manager release without a vehicle/transaction. |
+| WBM-RELEASE-PREP-02 | Arming grants no authority, hardware permission or physical charging claim. Local/offline/hardware-disabled restrictions remain. |
+| WBM-RELEASE-PREP-03 | Every electrical request still requires a valid transaction, Remote authority and ordinary hardware/capability/lockout and mandatory measurement policy. |
+| WBM-RELEASE-PREP-04 | Later connection uses the ordinary clocked PV cycle, with no event-triggered regulator or additional Start. |
+| WBM-RELEASE-PREP-05 | Stop before connection disarms; profile change/authority loss/reload and existing transport recovery fences remain. NETZ business scheduling is unchanged. |
+
+
+## Approved follow-up — PV Start acknowledgement (31 October 2026)
+
+| ID | Normative requirement |
+| --- | --- |
+| WBM-ACTION-SAFE-09 | Successful preparatory PV Start is acknowledged by accepted, durably persisted manager release. A prior rejected/communication_failure/unsupported electrical result must not fail that service invocation or require an immediate OCPP point/current transition. Existing electrical diagnostics remain truthful and separate. |
+| WBM-RELEASE-PREP-06 | PV Start returns after durable acceptance and lifecycle revalidation, without waiting for an older electrical task. Validation, persistence and supersession failures still fail. NETZ electrical execution, explicit Stop/Apply, authority restrictions and ordinary PV regulation remain unchanged. |

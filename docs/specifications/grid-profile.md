@@ -113,3 +113,12 @@ Stationary protection and the separately deferred PV V3 scope.
 | WBM-GRID-38 | Backend owns resolution, navigation and neighbour metadata. The card invokes a connector-entity-scoped, revision-checked relative-step service; no independent JavaScript electrical solver. Preserve hold, keyboard, one-decimal direct edits, locale parsing, multiple cards, stale-intent fencing and draft-only operation before Start/Apply. A stale revision must reject without changing or dispatching a point. |
 | WBM-GRID-39 | Keep recognized PhaseSwitchLockout / ReenableLockout, remaining seconds + 5 and 60-second fallback, release/authority/transaction/generation fences and desired/applied separation. For DOWN 3p/6 A → 1p/17 A and UP 1p/20 A → 3p/7 A, rejected phase transitions first use zero on the current physical mode. Never accept UP's old 4.6 kW point as fulfillment of 4.8 kW. Retry the approved technical identity after each applicable lockout; no generic-error retry loop. |
 | WBM-GRID-40 | Remove reserve and approximation editors only from Lovelace; keep HA entities, services, persistence, validation and battery policy. Requested power displays exactly one locale decimal; live actual power displays exactly two locale decimals in kW including zero. Other sensor precision, Recorder values, energy/duration display and PV economics remain unchanged. |
+
+
+## Read-only NETZ reserve preview — 31 October 2026
+
+[WBM-HS-UI-NETZ-01–06](lovelace-home-battery-display.md#approved-synchronization-and-netz-preview-amendment-31-october-2026)
+adds a pure planned-reserve projection before Start. WBM-GRID-15's physical
+write/ownership/readback/restoration contract remains unchanged; no reserve write
+is permitted merely to prepare or display this value. The observed reserve
+remains separately labeled in the card tooltip.
