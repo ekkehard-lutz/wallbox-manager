@@ -167,3 +167,25 @@ A full Level-2 decision log includes the five approved power fields and its deci
 - Historical v0.3.2 beta detailed/debug dumps remain excluded. The compact active-cycle record, with the later four-field pause extension, is the sole approved unchanged-decision exception.
 - Preserve the implemented semantic signature, point resolution and INFO severity.
   This exception does not approve retuning target significance or control behavior.
+
+## Approved PV operating-point execution trace — 7 November 2026
+
+- **PV-DIAG-11:** Retain `old_point` as the previous regulator decision point
+  when that legacy field is emitted. The sparse decision record explicitly
+  distinguishes `previous_decision_point` and `requested_point` from
+  confirmed current-generation readback and physical phase evidence.
+- **PV-DIAG-12:** At Level 2 trace actual PV profile submission, response and
+  confirmation or lack of confirmation. Keep the commanded and acknowledged
+  points distinct. Acknowledgement is never physical confirmation.
+- **PV-DIAG-13:** Trace a recognized phase rejection, justified continuation
+  and retry provenance with bounded context. An armed restriction with no
+  new command emits no repeated lockout events. A new phase attempt is
+  attributable to an eligible regular decision.
+- **PV-DIAG-14:** Keep the existing `pv_sample` contract. Use existing command
+  and observation callbacks with no extra reads, control ticks, Recorder
+  entities or secret identifiers. A bounded local command epoch and
+  observation-generation counters may correlate sparse execution records.
+
+PV-DIAG-11–14 supplement PV-DIAG-01–10 and narrow the PV-DIAG-05 restriction
+on generation context solely for the execution trace. The logging and
+physical-responsibility boundaries in WBM-ARCH-01–12 remain binding.

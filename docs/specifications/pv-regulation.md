@@ -370,6 +370,13 @@ Evidence: PDF pp. 72–83, 477–480, 569–571; `docs/phase-lockout-continuatio
 
 ### PV-PHASE-02 – Continue charging under phase-switch lockout [APPROVED]
 
+**7 November 2026 supersession:** [PV-LOCK-01–08](pv-operating-point-response.md#approved-pv-phase-lockout-continuation--7-november-2026)
+supersede automatic minimum substitution and the corresponding minimum-only
+replay expectation. Keep the valid previously confirmed offer after an atomic
+phase rejection and allow fresh same-phase regulation. The operator accepts
+battery-limited FAST exploration between 3p/11 A and 3p/12 A as normal.
+FAST/BALANCE policy, timing, SoC and economic rules are unchanged.
+
 A rejected 3p→1p switch due to an actual phase lockout **does not automatically cause STOP**. The confirmed executable phase mode remains active; current is reduced to its exact positive minimum if necessary. The energetically desired mode is retained; subsequent bounded probes/retries use **fresh** inputs. Existing settling logic must prevent immediate reversal after a confirmed phase change. Generic OCPP BUSY is not proof of a phase lockout.
 
 Evidence: PDF pp. 77–90, 477–480; `docs/phase-lockout-continuation-report.md`.

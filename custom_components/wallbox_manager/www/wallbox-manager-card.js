@@ -35,7 +35,9 @@ class WallboxManagerCard extends HTMLElement {
     this.config = config;
     this.edits = {};
     this.durationEdits = {};
+    this.renderedTiming = {};
     this.draftWrites = new Set();
+    this.busy ??= 0;
     if (!this.shadowRoot) this.attachShadow({mode: "open"});
     this.shadowRoot.innerHTML = `<style>
       :host {display:block;color:var(--primary-text-color)}
@@ -54,7 +56,14 @@ class WallboxManagerCard extends HTMLElement {
       button {cursor:pointer} button:hover:not(:disabled) {background:var(--secondary-background-color)}
       :is(input,select,button):focus-visible {outline:2px solid var(--primary-color);outline-offset:2px}
       :disabled {opacity:.5;cursor:default} #charge-action,#takeover {width:100%;padding:9px 12px;margin-top:6px;font-size:14px}
-      #charge-action {background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color);font-weight:500}
+      #charge-action {background:var(--action-bg);color:var(--action-fg,var(--action-contrast,#fff));border-color:var(--action-bg);font-weight:500}
+      #charge-action[data-action=start] {--action-theme:var(--success-color,#237537);--action-bg:var(--wbm-action-start-background,var(--action-default,#237537));--action-fg:var(--wbm-action-start-foreground)}
+      #charge-action[data-action=stop] {--action-theme:var(--error-color,#b3261e);--action-bg:var(--wbm-action-stop-background,var(--action-default,#b3261e));--action-fg:var(--wbm-action-stop-foreground)}
+      #charge-action[data-action=apply] {--action-theme:var(--info-color,#1766a2);--action-bg:var(--wbm-action-apply-background,var(--action-default,#1766a2));--action-fg:var(--wbm-action-apply-foreground)}
+      #charge-action:disabled {--action-bg:var(--wbm-action-disabled-background,#666);--action-fg:var(--wbm-action-disabled-foreground);opacity:1}
+      @supports (color: contrast-color(white)) {
+        #charge-action {--action-default:var(--action-theme);--action-contrast:contrast-color(var(--action-bg))}
+      }
       #charge-action:hover:not(:disabled) {filter:brightness(.95)}
       .live {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px}
       .caption {font-size:12px;color:var(--secondary-text-color);margin-bottom:3px} .reading {font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
@@ -68,7 +77,7 @@ class WallboxManagerCard extends HTMLElement {
       <button id="takeover"></button>
       <label class="row" id="profile-row"><span id="profile-label"></span><select id="profile"></select></label>
       <div class="row" id="power-row"><label id="power-label" for="power"></label><div class="numeric"><button id="power-down" class="step" type="button">−</button><input id="power" placeholder="—" type="text" inputmode="decimal" autocomplete="off"><button id="power-up" class="step" type="button">+</button><span class="unit">kW</span></div></div>
-      ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="--"><span class="colon">:</span><input type="number" id="${id}-minutes" min="0" max="59" step="1" placeholder="--"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
+      ${["grid_start_delay", "grid_duration"].map(id => `<div class="row" id="${id}-row"><span id="${id}-label"></span><div class="duration-editor" role="group" aria-labelledby="${id}-label"><input type="number" id="${id}-hours" min="0" step="1" placeholder="--"><span class="colon">:</span><input type="number" id="${id}-minutes" step="1" placeholder="--"><button type="button" class="clear" id="${id}-clear">×</button></div></div>`).join("")}
       <button id="charge-action"></button>
       <section class="section" aria-labelledby="wallbox-status-label"><h3 id="wallbox-status-label"></h3><div class="live"><div><div class="caption" id="connection-label"></div><div class="reading" id="connection"></div></div><div><div class="caption" id="charging-label"></div><div class="reading" id="charging"></div></div><div><div class="caption" id="energy-label"></div><div class="reading" id="energy"></div></div><div><div class="caption" id="live-power-label"></div><div class="reading" id="live-power"></div></div><div><div class="caption" id="duration-label"></div><div class="reading" id="duration"></div></div><div><div class="caption" id="parameters-label"></div><div class="reading" id="actual"></div></div></div>
       <div class="details"><section class="section" aria-labelledby="battery-label"><h3 id="battery-label"></h3><div class="caption" id="battery-caption"></div><div class="reading" id="battery-soc" role="img"></div></section><section class="section" aria-labelledby="flow-label"><h3 id="flow-label"></h3><div class="reading" id="flow-power" role="img"></div></section></div></section>
@@ -79,14 +88,19 @@ class WallboxManagerCard extends HTMLElement {
     get("profile").onchange = e => this.call("select", "select_option", {entity_id:this.discovery.roles.charging_profile, option:e.target.value});
     for (const id of ["grid_start_delay", "grid_duration"]) {
       for (const part of ["hours", "minutes"]) {
-        get(`${id}-${part}`).onfocus = () => this.beginTiming();
-        get(`${id}-${part}`).oninput = () => this.editDuration(id);
+        get(`${id}-${part}`).oninput = e => this.editDuration(id, e);
         get(`${id}-${part}`).onchange = () => this.editDuration(id);
         get(`${id}-${part}`).onblur = () => Promise.resolve().then(() => {
+          this.renderTiming();
           if (!this.timingFocused() && this.shadowRoot.activeElement !== get("charge-action")) this.endTiming();
         });
         get(`${id}-${part}`).onkeydown = e => {
           if (e.key === "Enter") { e.preventDefault(); this.editDuration(id); }
+          if (part === "minutes" && ["ArrowUp","ArrowDown"].includes(e.key) && !e.target.disabled) {
+            e.preventDefault();
+            e.target.value = String(Number(e.target.value || 0) + (e.key === "ArrowUp" ? 1 : -1));
+            this.editDuration(id, {target:e.target});
+          }
         };
       }
       get(`${id}-clear`).onclick = () => {
@@ -121,14 +135,19 @@ class WallboxManagerCard extends HTMLElement {
         };
       }
     }
+    get("charge-action").onblur = () => {
+      if (!this.timingFocused()) this.endTiming();
+    };
     get("charge-action").onclick = async () => {
       const entity = this.discovery.roles.charge_action;
       const snapshot = {...this._hass.states[entity]?.attributes};
       const action = snapshot.charge_action, profile = this._hass.states[this.discovery.roles.charging_profile]?.state;
       const incarnation = snapshot.runtime_incarnation, revision = snapshot.charge_action_revision;
       // Moving focus from a time editor onto Apply must keep this first click.
-      if (this.timingEditing) await this.endTiming();
-      if (this.timingQueue) await this.timingQueue.tail;
+      if (action !== "stop" || snapshot.actual_enabled === true) {
+        if (this.timingEditing) await this.endTiming();
+        if (this.timingQueue) await this.timingQueue.tail;
+      }
       const current = this._hass.states[entity]?.attributes || {};
       if (entity !== this.discovery.roles.charge_action || incarnation !== current.runtime_incarnation || profile !== this._hass.states[this.discovery.roles.charging_profile]?.state || action !== current.charge_action) return;
       return this.call("wallbox_manager", "charge_action", {entity_id:entity,action,profile,revision,incarnation});
@@ -280,14 +299,8 @@ class WallboxManagerCard extends HTMLElement {
   beginTiming() {
     if (this.timingEditing) return this.timingQueue?.tail || Promise.resolve();
     const attrs = this.timingAttributes();
-    for (const id of ["grid_start_delay", "grid_duration"]) {
-      const state = this._hass.states[this.discovery.roles[id]];
-      const parts = (durationAvailable(state) && state.state ? state.state : ":").split(":");
-      for (const [index,part] of ["hours","minutes"].entries()) this.shadowRoot.getElementById(`${id}-${part}`).value = parts[index];
-    }
     this.timingEditing = true;
     if (!this.timingQueue || this.timingQueue.cancelled || (this.draftWrites.size === 0 && this.timingQueue.revision !== attrs.grid_timing_revision)) this.timingQueue = {owner:`card-${Date.now()}-${Math.random()}`,revision:attrs.grid_timing_revision,incarnation:attrs.runtime_incarnation,tail:Promise.resolve(),cancelled:false};
-    this.renderTiming();
     return this.queueTiming("begin", "grid_start_delay");
   }
   endTiming() {
@@ -319,7 +332,7 @@ class WallboxManagerCard extends HTMLElement {
       }).finally(() => { this.scheduleTimingRenewal(); this.renderTiming(); });
     },20000);
   }
-  queueTiming(action, id, value="") {
+  queueTiming(action, id, value="", basis) {
     const queue = this.timingQueue, entity = this.discovery.roles[id];
     if (!queue) return Promise.resolve();
     const write = {entity};
@@ -328,13 +341,14 @@ class WallboxManagerCard extends HTMLElement {
       if (queue.cancelled) return;
       const state = this._hass.states[entity];
       if (entity !== this.discovery.roles[id] || state?.attributes.runtime_incarnation !== queue.incarnation || state?.attributes.grid_timing_revision !== queue.revision) throw new Error("Timing selection changed; try again");
-      if (action === "update" && state.state === value) return;
+      if (action === "update" && basis === undefined && state.state === value &&
+          !(id === "grid_duration" && state.attributes.grid_duration_projected_edit)) return;
       let pending;
       const acknowledged = new Promise((resolve,reject) => { pending = {entity,revision:queue.revision,incarnation:queue.incarnation,value,action,resolve,reject}; });
       const outcome = acknowledged.then(() => null, error => error);
       this.timingPending = pending;
       try {
-        await this._hass.callService("wallbox_manager","edit_timing",{entity_id:entity,action,owner:queue.owner,revision:queue.revision,incarnation:queue.incarnation,value});
+        await this._hass.callService("wallbox_manager","edit_timing",{entity_id:entity,action,owner:queue.owner,revision:queue.revision,incarnation:queue.incarnation,value,...(basis === undefined ? {} : {basis})});
         this.acknowledgeTiming();
         const error = await outcome;
         if (error) throw error;
@@ -363,10 +377,20 @@ class WallboxManagerCard extends HTMLElement {
       else pending.reject(new Error("Timing selection changed; try again"));
     }
   }
-  async editDuration(id) {
+  async editDuration(id, event) {
     const get = key => this.shadowRoot.getElementById(key);
     const hours = get(`${id}-hours`), minutes = get(`${id}-minutes`);
     if (hours.disabled || minutes.disabled) return;
+    if (event?.target === minutes && !event.inputType) {
+      if (minutes.value === "60") {
+        hours.value = String(Number(hours.value || 0) + 1);
+        minutes.value = "00";
+      } else if (minutes.value === "-1") {
+        const h = Number(hours.value || 0);
+        hours.value = String(Math.max(0, h - 1));
+        minutes.value = h ? "59" : "00";
+      }
+    }
     const valid = (input, max = Number.MAX_SAFE_INTEGER) => !input.validity?.badInput &&
       (input.value === "" || (/^[0-9]+$/.test(input.value) && Number.isSafeInteger(Number(input.value)) && Number(input.value) <= max));
     if (!valid(hours) || !valid(minutes,59)) {
@@ -374,10 +398,13 @@ class WallboxManagerCard extends HTMLElement {
       return;
     }
     const value = hours.value === "" && minutes.value === "" ? "" : `${String(Number(hours.value || 0)).padStart(2,"0")}:${String(Number(minutes.value || 0)).padStart(2,"0")}`;
+    const shown = this.renderedTiming[id];
+    if (shown?.value === value) return;
+    const basis = shown?.projected ? shown.value : undefined;
+    const edit = this.durationEdits[id] = {value,projected:shown?.projected && value !== ""};
     this.beginTiming();
-    const edit = this.durationEdits[id] = {entity:this.discovery.roles[id],value};
     this.clearWarning(id);
-    await this.queueTiming("update",id,value);
+    await this.queueTiming("update",id,value,basis);
     if (this.durationEdits[id] === edit) delete this.durationEdits[id];
     this.hass = this._hass;
   }
@@ -387,27 +414,26 @@ class WallboxManagerCard extends HTMLElement {
     const attrs = this.timingAttributes(), action = this._hass.states[this.discovery.roles.charge_action]?.attributes || {};
     const schedule = attrs.grid_schedule, now = Date.now()/1000;
     const live = action.charge_release && schedule;
-    const editing = this.timingEditing || attrs.grid_timing_edit || Object.keys(this.durationEdits).length > 0;
     const text = seconds => { const minutes = Math.floor(Math.max(0,seconds)/60); return `${String(Math.floor(minutes/60)).padStart(2,"0")}:${String(minutes%60).padStart(2,"0")}`; };
     for (const id of ["grid_start_delay", "grid_duration"]) {
       const state = this._hass.states[this.discovery.roles[id]];
-      let value = this.durationEdits[id]?.value ?? (durationAvailable(state) ? state.state : "");
-      if (live && !editing) {
+      const edit = this.durationEdits[id];
+      const pending = attrs.grid_pending_times?.includes(id);
+      let value = edit?.value ?? (durationAvailable(state) ? state.state : "");
+      let projected = edit?.projected || (id === "grid_duration" && attrs.grid_duration_projected_edit);
+      if (live && !edit && !pending) {
+        projected = true;
         if (id === "grid_start_delay") value = schedule.start_at > now && schedule.start_at > schedule.epoch_at ? text(schedule.start_at-now) : "";
         else value = schedule.end_at != null && schedule.end_at > now ? text(schedule.end_at-Math.max(now,schedule.start_at)) : "";
       }
-      if (!live && !editing) {
-        const approved = attrs[id === "grid_start_delay" ? "grid_approved_start_delay" : "grid_approved_duration"];
-        const seconds = value ? value.split(":").reduce((h,m) => Number(h)*3600+Number(m)*60) : null;
-        if (approved === seconds) value = "";
-      }
+      this.renderedTiming[id] = {value,projected};
       const parts = value === "" ? ["", ""] : value.split(":");
       for (const [index,part] of ["hours","minutes"].entries()) {
         const input = this.shadowRoot.getElementById(`${id}-${part}`);
-        if (!this.timingEditing) input.value = parts[index];
+        if (input.value !== parts[index] && !(input.validity?.badInput && this.shadowRoot.activeElement === input)) input.value = parts[index];
       }
     }
-    if (live && !editing) this.countdownTimer = setTimeout(() => this.renderTiming(),1000);
+    if (live) this.countdownTimer = setTimeout(() => this.renderTiming(),1000);
   }
   warningSnapshot(id) {
     const entity = this.discovery?.roles[numberRole(id)] || id;
@@ -430,20 +456,27 @@ class WallboxManagerCard extends HTMLElement {
     field.hidden = false;
     field.style.color = message ? "var(--error-color)" : "var(--secondary-text-color)";
   }
+  chargeActionReady(state) {
+    if (!state || state.state === "unavailable" || state.attributes.charge_action_ready !== true) return false;
+    if (state.attributes.charge_action === "stop" && state.attributes.actual_enabled !== true) return true;
+    return !this.busy && this.draftWrites.size === 0 && !this.edits.power && Object.keys(this.durationEdits).length === 0;
+  }
   async call(domain, service, data) {
     const action = domain === "wallbox_manager" && service === "charge_action" ? "charge_action" : domain === "button" && service === "press" ? (data.entity_id === this.discovery.roles.charge_action ? "charge_action" : "take_control") : null;
     if (domain === "button" && data.entity_id === this.discovery.roles.charge_action) return;
     if (action) {
       const state = this._hass.states[this.discovery.roles[action]];
-      if (this.busy || !state || state.state === "unavailable" || (action === "charge_action" ? (state.attributes.charge_action_ready !== true || this.draftWrites.size > 0 || this.edits.power || Object.keys(this.durationEdits).length > 0) : state.attributes.execution_ready !== true) || data.entity_id !== this.discovery.roles[action]) return;
+      const ready = action === "charge_action" ? this.chargeActionReady(state) :
+        !this.busy && state && state.state !== "unavailable" && state.attributes.execution_ready === true;
+      if (!ready || data.entity_id !== this.discovery.roles[action]) return;
     } else if (!["number", "select", "text"].includes(domain) || !Object.values(this.discovery.roles).includes(data.entity_id)) return;
     const warningId = data.entity_id;
     const binding = this.discovery.entry, runtime = this.runtime, profile = this._hass.states[this.discovery.roles.charging_profile]?.state;
     this.clearWarning(warningId);
-    this.busy = true; this.hass = this._hass;
+    this.busy++; this.hass = this._hass;
     try { await this._hass.callService(domain,service,data); }
     catch (err) { if (this.discovery.entry === binding && this.runtime === runtime && profile === this._hass.states[this.discovery.roles.charging_profile]?.state) this.warn(warningId,err.message || String(err)); }
-    finally { this.busy = false; this.hass = this._hass; }
+    finally { this.busy--; this.hass = this._hass; }
   }
   renderSourcePower(profile,mappings) {
     const de = this._hass.language?.startsWith("de"), grid = profile === "NETZ";
@@ -477,7 +510,13 @@ class WallboxManagerCard extends HTMLElement {
     if (!this.config) return;
     const get = id => this.shadowRoot.getElementById(id), de = hass.language?.startsWith("de");
     const previous = this.discovery?.entry;
+    const profileState = hass.states[this.discovery?.roles.charging_profile]?.state;
+    if (this.timingProfile && profileState !== this.timingProfile) {
+      this.cancelTiming();
+      this.durationEdits = {};
+    }
     const d = this.discovery = discoverWallboxManager(hass.states, this.config);
+    this.timingProfile = hass.states[d.roles.charging_profile]?.state;
     if (previous !== d.entry || (this.runtime && this.runtime !== this.timingAttributes().runtime_incarnation)) { this.stopHold(); this.cancelTiming(); this.edits = {}; this.durationEdits = {}; this.localWarnings.clear(); }
     this.runtime = this.timingAttributes().runtime_incarnation;
     for (const [id,warning] of this.localWarnings) if (warning.snapshot && warning.snapshot !== this.warningSnapshot(id)) this.localWarnings.delete(id);
@@ -552,13 +591,19 @@ class WallboxManagerCard extends HTMLElement {
       get(`${id}-row`).hidden = pv;
       get(`${id}-label`).textContent = label;
       const s = state(id);
-      for (const part of ["hours","minutes","clear"]) get(`${id}-${part}`).disabled = busy || !durationAvailable(s);
+      for (const [part, caption] of Object.entries(de ? {hours:"Stunden",minutes:"Minuten",clear:"Löschen"} : {hours:"Hours",minutes:"Minutes",clear:"Clear"})) {
+        const control = get(`${id}-${part}`);
+        control.disabled = busy || !durationAvailable(s);
+        control.setAttribute("aria-label", `${label} · ${caption}`);
+      }
     }
     this.renderTiming();
     const actionState = state("charge_action"), action = actionState?.attributes.charge_action;
     get("charge-action").textContent = ({start: de ? "Ladung starten" : "Start charging", stop: de ? "Ladung beenden" : "Stop charging", apply: de ? "Ladeparameter übernehmen" : "Apply charging parameters"})[action] || (de ? "Ladung starten" : "Start charging");
-    get("charge-action").disabled = busy || !actionState || actionState.state === "unavailable" || actionState.attributes.charge_action_ready !== true || this.draftWrites.size > 0 || !!this.edits.power || Object.keys(this.durationEdits).length > 0;
-    get("charge-action").title = actionState?.attributes.charge_action_blocked_reason || (action === "stop" && authority !== "remote" ? (de ? "Lokale Ladung kann durch WBM nicht beendet werden" : "WBM cannot stop locally controlled charging") : "");
+    get("charge-action").setAttribute("data-action", action || "");
+    get("charge-action").disabled = !this.chargeActionReady(actionState);
+    const blocked = actionState?.attributes.charge_action_blocked_reason;
+    get("charge-action").title = blocked === "hardware_disabled" ? (de ? "Wallbox ist deaktiviert oder der Status ist unbekannt" : "Wallbox is disabled or its permission is unknown") : blocked || (action === "stop" && authority !== "remote" ? (de ? "Lokale Ladung kann durch WBM nicht beendet werden" : "WBM cannot stop locally controlled charging") : "");
     get("parameters-label").textContent = de ? "Wallboxparameter" : "Wallbox parameters";
     get("messages-label").textContent = de ? "Meldungen" : "Messages";
     const point = state("soll_power")?.attributes;

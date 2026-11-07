@@ -104,7 +104,7 @@ async def test_target_decision_stop_restart_and_mode_context(ha, caplog, profile
             "target_unavailable",
         } <= {r.get("reason") for r in logged}
         for record in logged:
-            if record["event"] != "pv_config":
+            if record["event"] not in ("pv_config", "pv_execution"):
                 assert POWERS <= record.keys()
         first = next(r for r in logged if r["event"] == "pv_decision")
         assert {key: first[key] for key in POWERS} == dict(
@@ -238,7 +238,7 @@ async def test_logging_levels_have_identical_regulation_and_publications(
             traces.append((submitted, published))
         assert all(trace == traces[0] for trace in traces[1:])
         for r in records(caplog):
-            if r["event"] != "pv_config":
+            if r["event"] not in ("pv_config", "pv_execution"):
                 assert POWERS <= r.keys()
             assert len(json.dumps(r)) < 1500
             assert (

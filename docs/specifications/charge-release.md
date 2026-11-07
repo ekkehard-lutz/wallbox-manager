@@ -144,3 +144,24 @@ WBM-NETZ-ACTION-01–13 remain subject to WBM-TIME-01–24.
 | --- | --- |
 | WBM-ACTION-SAFE-09 | Successful preparatory PV Start is acknowledged by accepted, durably persisted manager release. A prior rejected/communication_failure/unsupported electrical result must not fail that service invocation or require an immediate OCPP point/current transition. Existing electrical diagnostics remain truthful and separate. |
 | WBM-RELEASE-PREP-06 | PV Start returns after durable acceptance and lifecycle revalidation, without waiting for an older electrical task. Validation, persistence and supersession failures still fail. NETZ electrical execution, explicit Stop/Apply, authority restrictions and ordinary PV regulation remain unchanged. |
+
+## Approved hardware readiness amendment — 7 November 2026
+
+- **WBM-ACTION-HW-01:** Start and Apply require a current-generation observed
+  `ChargingEnabled=true` in every profile. False and unknown block with
+  `hardware_disabled`. Existing profile checks still apply when enabled.
+- **WBM-ACTION-HW-02:** Explicit and legacy actions share the backend check.
+  Revalidate permission and lifecycle before durable acceptance. A permission
+  loss during storage supersedes the positive action and prevents publication
+  or dispatch of its candidate approval.
+- **WBM-ACTION-HW-03:** An active release is always revocable. With hardware
+  disabled or unknown, show Stop even with pending NETZ drafts. Stop retires
+  the schedule and positive intent without approving drafts or changing
+  hardware permission.
+- **WBM-ACTION-HW-04:** Draft editing remains available. WBM does not acquire
+  authority or hardware permission through an action. Electrical eligibility
+  and Stationary responsibility continue under WBM-ARCH-01–12.
+
+This amends WBM-RELEASE-09/11/13 and WBM-NETZ-ACTION-01–05/12/13, with the
+disabled-hardware Stop exception taking precedence over the Apply-then-Stop
+workflow. WBM-ACTION-SAFE-01–09 continue to govern direction and acceptance.

@@ -172,7 +172,11 @@ async def test_duration_expiry_beats_abandonment_or_rollback_grace(ha, duration)
         assert not settings.get("charge_release") and station.amps == 0
         assert settings.values["grid_timing_edit"] is None
         assert settings.get("grid_duration") == 1800
-        assert settings.values["grid_approved"] == approved
+        assert settings.values["grid_approved"] == {
+            **approved,
+            "grid_duration": None,
+            "revision": approved["revision"] + 1,
+        }
         assert grid.action_state()["charge_action"] == "start"
 
 

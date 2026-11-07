@@ -1,3 +1,24 @@
+**Beta.22 publication scope:** The reviewed NETZ and PV branches are
+integrated with both histories preserved. The
+[release notes](../v0.4/release-notes-beta.22.md) and
+[combined validation](../v0.4/release-validation-beta.22.md) cover the release
+and its independent publication gates. WBM-ARCH-01–12 retain precedence.
+Installation and physical acceptance are operator-controlled.
+
+**7 November 2026 — approved NETZ lifecycle correction:** The
+[hardware action gate](charge-release.md#approved-hardware-readiness-amendment--7-november-2026),
+[one-shot timing and editor](operational-display-and-timing.md#approved-one-shot-timing-and-editor-amendment--7-november-2026),
+[NETZ diagnostics](grid-profile.md#approved-netz-diagnostics-amendment--7-november-2026)
+and [action colors](lovelace-home-battery-display.md#approved-charge-action-colors--7-november-2026)
+amend beta.21. WBM-ARCH-01–12 retain precedence. The implementation and feature
+push are authorized for separate review.
+
+**7 November 2026 — approved PV phase-lockout correction:** The
+[PV continuation requirements](pv-operating-point-response.md#approved-pv-phase-lockout-continuation--7-november-2026)
+and [execution trace](pv-decision-diagnostics.md#approved-pv-operating-point-execution-trace--7-november-2026)
+amend beta.21 for a dedicated review branch. WBM-ARCH-01–12 retain precedence.
+The operator accepts battery-limited FAST current oscillation as normal.
+
 **31 October 2026 — beta.21 publication scope:** Independent review approved
 feature `a024c8ebfa6ae76a9e5d3ac993bdb75baafe8414`, including predecessor
 `e61a16d4c4c3fe671a2ccb2086c48c0b76979219`. The operator separately authorizes

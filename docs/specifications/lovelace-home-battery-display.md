@@ -104,3 +104,12 @@ explicitly approved. Canonical targets and WBM-HS-UI-NETZ-01–06 remain binding
 | WBM-HS-POWER-04 | Both zero, either missing/unknown/unavailable/restored/invalid, unsupported units, or both positive show neutral —, never an invented signed/net/zero power. Use stable Speicherleistung / Battery power or Netzleistung / Grid power heading and explain invalid/ambiguous inputs accessibly. |
 | WBM-HS-POWER-05 | Normalize finite nonnegative W/kW/MW observations to kW and display two locale-aware decimals. Tooltips identify both reported directions and ambiguity/unavailability; no source rounding or mutation. |
 | WBM-HS-POWER-06 | Expose only mapped source entity IDs on the existing profile Select if needed. Mapping changes publish once; source power changes render from HA states without WBM Recorder writes, polling, timers, a new sensor or control effects. |
+
+## Approved charge action colors — 7 November 2026
+
+- **WBM-UI-ACTION-COLOR-01:** Color the existing single button green for
+  Start, red for Stop and blue for Apply, using backend action identity
+  across NETZ and PV. Support theme overrides and readable foregrounds.
+- **WBM-UI-ACTION-COLOR-02:** Disabled actions use a grey treatment and native
+  disabled semantics. Preserve localized captions, keyboard access, layout
+  and source-power presentation.
