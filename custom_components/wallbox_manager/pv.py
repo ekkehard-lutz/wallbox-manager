@@ -122,23 +122,38 @@ class PV:
             self.state.publish(("pv", self.state.binding, "effective_target_soc"))
 
     async def start(self):
-        record = await self.store.async_load()
-        if record is None:
-            from .pv_migration import legacy_record
+        from .pv_migration import MISSING_JOURNAL, legacy_record, load_journal
 
-            economy = await Store(
-                self.hass, 1, f"wallbox_manager.{self.entry.entry_id}.pv_economy"
-            ).async_load()
-            days = await Store(
-                self.hass, 1, f"wallbox_manager.{self.entry.entry_id}.pv_day"
-            ).async_load()
+        record = await load_journal(self.hass, self.store)
+        from_legacy = record is MISSING_JOURNAL
+        if from_legacy:
+            prefix = f"wallbox_manager.{self.entry.entry_id}"
+            economy = await load_journal(
+                self.hass, Store(self.hass, 1, f"{prefix}.pv_economy")
+            )
+            days = await load_journal(
+                self.hass, Store(self.hass, 1, f"{prefix}.pv_day")
+            )
             record = legacy_record(
                 economy, days, self.entry.entry_id, self.state.binding
             )
-        if not isinstance(record, dict):
-            record = {"economics": {"invalid": True}}
+        elif (
+            not isinstance(record, dict)
+            or type(record.get("version")) is not int
+            or record["version"] != 1
+        ):
+            record = {}
         self.station_identity = record.get("station_identity")
-        self.budget = Budget.restore(record.get("economics"))
+        if self.station_identity is not None and (
+            not isinstance(self.station_identity, dict)
+            or any(
+                not isinstance(value, str) for value in self.station_identity.values()
+            )
+        ):
+            self.station_identity = None
+            self.budget = Budget.restore(None)
+        elif not from_legacy or "economics" in record:
+            self.budget = Budget.restore(record.get("economics"))
         self.planner = Planner.restore(record.get("day"))
         self.ended_transaction = record.get("ended_transaction")
         self.last_saved = record
@@ -693,7 +708,9 @@ class PV:
                     return
             scope = [*self.state.binding, "remote", tx]
             ended = bool(
-                self.budget.scope and self.budget.scope[-1] == self.ended_transaction
+                self.budget.scope
+                and self.budget.scope[:-1] == scope[:-1]
+                and self.budget.scope[-1] == self.ended_transaction
             )
             identity = self.state.identity
             if (

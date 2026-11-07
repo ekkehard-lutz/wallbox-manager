@@ -337,12 +337,13 @@ def test_budget_entire_power_threshold_strict_reset_and_no_backfill():
 
 
 def test_budget_scope_recovery_and_edit_does_not_erase_stop():
-    b = Budget(scope=["tx"], wh=51)
+    scope = ["Wallbox01", "1", "1", "remote"]
+    b = Budget(scope=[*scope, "tx"], wh=51)
     assert b.exhaust(50) and b.exhaust(100)
     restored = Budget.restore(b.saved())
     assert restored.wh == 51 and restored.stopped and restored.previous is None
-    assert not restored.bind(["different-tx"])
-    assert restored.bind(["new-tx"], ended=True)
+    assert not restored.bind([*scope, "different-tx"])
+    assert restored.bind([*scope, "new-tx"], ended=True)
     assert restored.wh == 0 and not restored.stopped
     assert Budget.restore({"corrupt": True}).stopped
 

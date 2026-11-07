@@ -1,19 +1,71 @@
-"""Read-only beta.18 journal import; no old response model or timers are restored."""
+"""Load PV journals and import beta.18 history without replaying old intervals."""
 
 import json
+import os
 from fractions import Fraction
+from pathlib import Path
+
+from homeassistant.exceptions import HomeAssistantError
+
+MISSING_JOURNAL = object()
+
+
+async def load_journal(hass, store):
+    """Distinguish Store's ambiguous None from absence of on-disk history."""
+    try:
+        data = await store.async_load()
+        if data is not None:
+            return data
+        if not await hass.async_add_executor_job(journal_exists, Path(store.path)):
+            return MISSING_JOURNAL
+    except (
+        HomeAssistantError,
+        OSError,
+        TypeError,
+        KeyError,
+        ValueError,
+        NotImplementedError,
+    ):
+        # Invalid wrapper, unsupported version or unreadable storage.
+        pass
+    return None
+
+
+def journal_exists(path):
+    try:
+        with os.scandir(path.parent) as entries:
+            return any(
+                entry.name == path.name
+                or entry.name.startswith(f"{path.name}.corrupt.")
+                for entry in entries
+            )
+    except FileNotFoundError:
+        return False
 
 
 def legacy_record(economy, days, entry_id, binding):
     record = {}
     if isinstance(days, dict) and days.get("version") == 2:
-        day = days.get("days", {}).get(json.dumps(list(binding)), {})
-        if day.get("state") in ("BEFORE_SURPLUS", "DYNAMIC", "FINISHED"):
+        entries = days.get("days")
+        day = (
+            entries.get(json.dumps(list(binding)))
+            if isinstance(entries, dict)
+            else None
+        )
+        if isinstance(day, dict) and day.get("state") in (
+            "BEFORE_SURPLUS",
+            "DYNAMIC",
+            "FINISHED",
+        ):
             record["day"] = dict(version=1, date=day.get("date"), phase=day["state"])
-    if economy is None:
+    if economy is MISSING_JOURNAL:
         return record
     try:
-        if not isinstance(economy, dict) or economy.get("version") != 1:
+        if (
+            not isinstance(economy, dict)
+            or type(economy.get("version")) is not int
+            or economy["version"] != 1
+        ):
             raise ValueError("legacy journal version")
         records = economy["records"]
         if not isinstance(records, list):
@@ -77,7 +129,8 @@ def legacy_record(economy, days, entry_id, binding):
             not isinstance(v, str) for v in record["station_identity"].values()
         ):
             raise ValueError("legacy hardware identity")
-    except ValueError, KeyError, TypeError, OverflowError:
+    except ValueError, KeyError, TypeError, OverflowError, AttributeError:
+        record.pop("station_identity", None)
         record["economics"] = dict(
             version=1,
             scope=["unreconciled"],

@@ -1,7 +1,7 @@
 """Prospective tick accounting and persistent economic STOP, independent of SoC."""
 
-import math
 from dataclasses import dataclass
+from sys import float_info
 
 
 @dataclass
@@ -27,18 +27,18 @@ class Budget:
 
     @classmethod
     def restore(cls, record):
-        if not record:
-            return cls()
         if (
             not isinstance(record, dict)
+            or not {"version", "scope", "wh", "stopped", "reset", "cause"}
+            <= record.keys()
+            or type(record.get("version")) is not int
             or record.get("version") != 1
-            or not (
-                isinstance(record.get("scope"), list) or record.get("scope") is None
-            )
             or type(record.get("wh")) not in (int, float)
-            or not math.isfinite(record["wh"])
-            or record["wh"] < 0
+            or not 0 <= record["wh"] <= float_info.max
             or type(record.get("stopped")) is not bool
+            or type(record.get("reset")) is not bool
+            or not (record["cause"] is None or isinstance(record["cause"], str))
+            or not cls._valid_scope(record)
         ):
             # Unknown history must never create a fresh positive allowance.
             return cls(scope=["unreconciled"], stopped=True, cause="recovery_unknown")
@@ -48,6 +48,25 @@ class Budget:
             stopped=record["stopped"],
             reset=False,
             cause=record.get("cause"),
+        )
+
+    @staticmethod
+    def _valid_scope(record):
+        scope = record["scope"]
+        if scope is None:
+            # A genuinely unbound saved budget has no accumulated history.
+            return (
+                record["wh"] == 0
+                and not (record["stopped"] or record["reset"])
+                and record["cause"] in (None, "operator_stop", "netz_scope_exit")
+            )
+        if scope == ["unreconciled"]:
+            return record["stopped"] and not record["reset"] and record["wh"] == 0
+        return (
+            isinstance(scope, list)
+            and len(scope) == 5
+            and scope[3] == "remote"
+            and all(isinstance(part, str) and part for part in scope)
         )
 
     def interrupt(self):
