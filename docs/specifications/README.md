@@ -1,3 +1,10 @@
+**Beta.22 publication scope:** The reviewed NETZ and PV branches are
+integrated with both histories preserved. The
+[release notes](../v0.4/release-notes-beta.22.md) and
+[combined validation](../v0.4/release-validation-beta.22.md) cover the release
+and its independent publication gates. WBM-ARCH-01–12 retain precedence.
+Installation and physical acceptance are operator-controlled.
+
 **7 November 2026 — approved NETZ lifecycle correction:** The
 [hardware action gate](charge-release.md#approved-hardware-readiness-amendment--7-november-2026),
 [one-shot timing and editor](operational-display-and-timing.md#approved-one-shot-timing-and-editor-amendment--7-november-2026),
