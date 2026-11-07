@@ -358,6 +358,40 @@ class PV:
         except Exception:
             pass
 
+    @staticmethod
+    def point_key(point):
+        return [point.phases, point.amps] if point is not None else None
+
+    def execution_event(
+        self, status, epoch, proposal, commanded, *, ack=None, reason=None, **fields
+    ):
+        try:
+            if diagnostic_level(self.entry.options) < 2:
+                return
+            g = self.grid
+            self.diagnostic(
+                "pv_execution",
+                powers={},
+                command_status=status,
+                command_reason=str(reason)[:20] if reason else None,
+                command_epoch=epoch,
+                generation=self.state.generation,
+                authority=self.state.value(g.listener.control.key("ControlAuthority")),
+                transaction_available=bool(g.transaction()),
+                requested_point=self.point_key(proposal),
+                commanded_point=self.point_key(commanded),
+                acknowledged_point=self.point_key(ack),
+                confirmed_point=self.point_key(
+                    None if g.point_uncertain else g.current_point()
+                ),
+                physical_phases=self.state.value(
+                    ("station", g.station_scope, "physical_phases")
+                ),
+                **fields,
+            )
+        except Exception:
+            pass
+
     def problem(self, reason, *, powers=None):
         if reason != self.input_problem:
             self.input_problem = reason
@@ -386,6 +420,16 @@ class PV:
                     old_point=list(old[2]) if old else None,
                     requested_point=list(point_key),
                 )
+            fields.update(
+                previous_decision_point=list(old[2]) if old else None,
+                requested_point=list(point_key),
+                confirmed_point=self.point_key(
+                    None if self.grid.point_uncertain else self.grid.current_point()
+                ),
+                physical_phases=self.state.value(
+                    ("station", self.grid.station_scope, "physical_phases")
+                ),
+            )
             if self.last_mode != decision.mode:
                 fields.update(previous_mode=self.last_mode)
                 self.last_mode = decision.mode
@@ -687,23 +731,25 @@ class PV:
                         == "BALANCE"
                     ):
                         raise
-            ranges = envelope(self.state, s)
-            points = [p for n in ranges.ranges for p in ranges.points(n)]
-            if not points:
-                raise ValueError("no_positive_modes")
+            try:
+                ranges = envelope(self.state, s)
+                points = [p for n in ranges.ranges for p in ranges.points(n)]
+                if not points:
+                    raise ValueError("no_positive_modes")
+            except ValueError, TypeError, OverflowError:
+                if g.pv_phase_waiting() and g.valid(epoch, adapter, tx):
+                    self.submit(ZERO, current, urgent=True)
+                raise
             minimum = min(float(p.watts) for p in points)
-            if (
-                g.retry_deadline is not None
-                and current
-                and current.phases in ranges.ranges
-            ):
+            restricted = g.pv_phase_waiting() or g.retry_deadline is not None
+            if restricted and current and current.phases in ranges.ranges:
                 minimum = float(ranges.points(current.phases)[0].watts)
             # Price M from held actual voltages where available; nominal power
             # remains the separate setpoint identity used for navigation.
             floor = min(points, key=lambda p: (p.watts, p.phases))
             phase_mode = (
                 current.phases
-                if g.retry_deadline is not None and current
+                if restricted and current and current.phases in ranges.ranges
                 else floor.phases
             )
             voltage = [
@@ -819,6 +865,7 @@ class PV:
             self.submit(
                 d.point,
                 current,
+                ranges=ranges if g.pv_phase_waiting() else None,
                 urgent=d.reason
                 in ("import_budget", "soc_stop", "balance_minimum_discharge"),
             )
@@ -827,8 +874,28 @@ class PV:
         finally:
             g.publish()
 
-    def submit(self, point, current, *, urgent=False):
+    def submit(self, point, current, *, ranges=None, urgent=False):
         g = self.grid
+        proposal = point
+        if point.amps > 0 and ranges is not None:
+            if current is None or current.phases not in ranges.ranges:
+                # Unknown or disabled phase cannot justify continuation.
+                point, urgent = ZERO, True
+            else:
+                same = ranges.points(current.phases)
+                if current.amps > 0 and current not in same:
+                    # A newly invalid limit takes precedence over settling.
+                    point = ranges.on_phase(
+                        min(point.watts, current.watts), current.phases, "down"
+                    )
+                    urgent = point.amps == 0
+                elif point.phases != current.phases:
+                    if point.watts >= current.watts:
+                        return
+                    # A fresh downward decision can use the legal floor.
+                    point = ranges.on_phase(
+                        max(point.watts, same[0].watts), current.phases, "down"
+                    )
         if urgent:
             self.pending_restart = None
             if g.requested and g.requested.amps > 0 and g.task and not g.task.done():
@@ -854,7 +921,7 @@ class PV:
             g.launch(confirm_only=True)
             return
         g.allow_issue = True
-        g.launch(pv_point=point)
+        g.launch(pv_point=point, pv_proposal=proposal)
 
     async def close(self):
         self.closed = True

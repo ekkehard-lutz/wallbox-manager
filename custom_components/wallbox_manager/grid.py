@@ -59,6 +59,7 @@ class Grid:
         self.confirmed_transaction = None
         self.point_uncertain = False
         self.retry_at = self.retry_deadline = None
+        self.pv_phase_deadline = self.pv_ack = None
         self.wall_time = time.time
         settings.wall_time = lambda: self.wall_time()
         self.call_later = lambda delay, callback: asyncio.get_running_loop().call_later(
@@ -217,6 +218,7 @@ class Grid:
         # is restored before the storage operation finishes.
         if enabled is not True:
             self.action_generation += 1
+            self.pv_phase_deadline = None
             self.invalidate()
             self.schedule()
         elif (
@@ -246,6 +248,7 @@ class Grid:
                 self.diagnostic("timing_retired", "profile_changed", request=request)
 
     def release_changed(self):
+        self.pv_phase_deadline = None
         self.action_generation += 1
         self.allow_issue = True
         self.invalidate()
@@ -593,6 +596,12 @@ class Grid:
         self.retry_deadline = self.wall_time() + delay
         self.timer = self.call_later(delay, self.intent_callback())
 
+    def pv_phase_waiting(self):
+        return (
+            self.pv_phase_deadline is not None
+            and self.wall_time() < self.pv_phase_deadline
+        )
+
     def attributes(self):
         point = None if self.point_uncertain else self.current_point()
         physical = self.state.value(("station", self.station_scope, "physical_phases"))
@@ -775,6 +784,7 @@ class Grid:
 
     def invalidate(self):
         self.epoch += 1
+        self.pv_ack = None
         self.outcome_epoch = None
         self.state.messages.clear("grid:outcome")
         self.state.messages.clear("grid:limitation")
@@ -784,6 +794,10 @@ class Grid:
         signature = self.fingerprint()
         if signature == self.signature:
             return
+        # Capability changes fence the current command but do not lift a
+        # Stationary lockout in the same release/transaction context.
+        if self.signature is None or signature[:-1] != self.signature[:-1]:
+            self.pv_phase_deadline = None
         adapter = self.listener.adapter
         if not self.closed and adapter and adapter.live(adapter.generation):
             adapter.spawn(self.settings.initialize_power())
@@ -854,7 +868,7 @@ class Grid:
 
         return elapsed
 
-    def launch(self, *, confirm_only=False, pv_point=None):
+    def launch(self, *, confirm_only=False, pv_point=None, pv_proposal=None):
         if (
             self.settings.get("charging_profile") != "NETZ"
             and self.settings.get("charge_release")
@@ -874,7 +888,13 @@ class Grid:
         epoch = self.task_epoch = self.epoch
         business_phase = self.phase()[0]
         self.task = adapter.spawn(
-            self.reconcile(epoch, adapter, confirm_only=confirm_only, pv_point=pv_point)
+            self.reconcile(
+                epoch,
+                adapter,
+                confirm_only=confirm_only,
+                pv_point=pv_point,
+                pv_proposal=pv_proposal,
+            )
         )
 
         def settled(task):
@@ -1041,7 +1061,9 @@ class Grid:
         self.publish()
         return point
 
-    async def dispatch_point(self, point, epoch, adapter, transaction):
+    async def dispatch_point(
+        self, point, epoch, adapter, transaction, *, proposal=None
+    ):
         """Send a bounded TxProfile with the same wire-generation guard."""
         period = {"start_period": 0, "limit": point.amps}
         if point.phases is not None:
@@ -1068,8 +1090,10 @@ class Grid:
         expected = {k: v for k, v in expected.items() if v is not None}
 
         uncertainty = {"previous": None, "rejected": False}
+        submitted = False
 
         def guard(action, wire):
+            nonlocal submitted
             if (
                 action != "SetChargingProfile"
                 or wire != expected
@@ -1078,6 +1102,14 @@ class Grid:
                     point.amps > 0
                     and (
                         not self.settings.get("charge_release")
+                        or (
+                            proposal is not None
+                            and self.pv_phase_waiting()
+                            and point.phases
+                            != self.state.value(
+                                ("station", self.station_scope, "physical_phases")
+                            )
+                        )
                         or self.phase()[0] != "active"
                         or self.state.value(
                             self.listener.control.key("ChargingEnabled")
@@ -1093,6 +1125,9 @@ class Grid:
                 self.diagnostic(
                     "positive_requested", requested_a=point.amps, epoch=epoch
                 )
+            submitted = True
+            if proposal is not None and self.pv:
+                self.pv.execution_event("submitted", epoch, proposal, point)
             uncertainty["previous"] = self.point_uncertain
             self.point_uncertain = uncertainty
             self.publish()
@@ -1100,6 +1135,20 @@ class Grid:
         token = DISPATCH.set(guard)
         try:
             response = await adapter.request(payload)
+        except TimeoutError, OSError, OCPPError, ConnectionClosed:
+            if (
+                proposal is not None
+                and self.pv
+                and self.valid(epoch, adapter, transaction)
+            ):
+                self.pv.execution_event(
+                    "communication_failure",
+                    epoch,
+                    proposal,
+                    point if submitted else None,
+                    reason="transport_failure",
+                )
+            raise
         finally:
             DISPATCH.reset(token)
         if (
@@ -1133,9 +1182,22 @@ class Grid:
             self.publish()
         return response
 
-    async def reconcile(self, epoch, adapter, *, confirm_only=False, pv_point=None):
+    async def reconcile(
+        self, epoch, adapter, *, confirm_only=False, pv_point=None, pv_proposal=None
+    ):
         transaction = self.transaction()
         netz_execution = False
+        pv = self.pv if self.settings.get("charging_profile") != "NETZ" else None
+        proposal = (pv_proposal or pv_point) if pv else None
+        ack = self.pv_ack
+        confirmation = (
+            pv
+            and confirm_only
+            and self.status == "accepted_unconfirmed"
+            and ack is not None
+            and ack[:3] == (epoch, adapter, transaction)
+            and ack[4] == self.requested
+        )
         try:
             if not self.valid(epoch, adapter, transaction):
                 return
@@ -1230,13 +1292,22 @@ class Grid:
                 self.retry_at = self.retry_deadline = None
                 self.allow_issue = False
                 self.status, self.reason = "confirmed", limitation
+                if confirmation:
+                    pv.execution_event("confirmed", epoch, ack[3], desired, ack=desired)
             elif confirm_only:
                 return
             else:
                 self.status, self.reason = "pending", None
                 self.publish()
+                physical_before = self.state.value(
+                    ("station", self.station_scope, "physical_phases")
+                )
                 response = await self.dispatch_point(
-                    desired, epoch, adapter, transaction
+                    desired,
+                    epoch,
+                    adapter,
+                    transaction,
+                    **({"proposal": proposal} if proposal is not None else {}),
                 )
                 if not self.valid(epoch, adapter, transaction):
                     return
@@ -1249,7 +1320,66 @@ class Grid:
                         "rejected",
                         (info or {}).get("reason_code", response.status),
                     )
-                    if delay is not None:
+                    if proposal is not None:
+                        pv.execution_event(
+                            "rejected", epoch, proposal, desired, reason=self.reason
+                        )
+                    if (
+                        pv_point is not None
+                        and response.status == "Rejected"
+                        and self.reason == "PhaseSwitchLockout"
+                        and desired.amps > 0
+                        and desired.phases != physical_before
+                    ):
+                        # The station rejects this profile before changing the
+                        # offer. Retain independently confirmed evidence and
+                        # let only the regular PV tick choose another point.
+                        reported = (
+                            isinstance((info or {}).get("additional_info"), str)
+                            and bool(
+                                re.fullmatch(
+                                    r"remainingSeconds=[0-9]{1,5}",
+                                    info["additional_info"],
+                                )
+                            )
+                            and delay <= 86405
+                        )
+                        delay = delay if reported else 60
+                        self.pv_phase_deadline = self.wall_time() + delay
+                        confirmed = (
+                            None if self.point_uncertain else self.current_point()
+                        )
+                        continuation = (
+                            confirmed
+                            if confirmed
+                            and confirmed == held
+                            and confirmed.amps > 0
+                            and ranges
+                            and confirmed.phases in ranges.ranges
+                            and confirmed in ranges.points(confirmed.phases)
+                            else None
+                        )
+                        self.status = "phase_lockout_pending"
+                        if proposal is not None:
+                            pv.execution_event(
+                                self.status,
+                                epoch,
+                                proposal,
+                                desired,
+                                reason=self.reason,
+                                continuation_point=pv.point_key(continuation),
+                                retry_after_s=delay,
+                                retry_at=self.pv_phase_deadline,
+                                retry_source="station_remaining"
+                                if reported
+                                else "fallback",
+                            )
+                        self.outcome_epoch = epoch
+                        self.publish()
+                        return
+                    if delay is not None and not (
+                        pv_point is not None and self.reason == "PhaseSwitchLockout"
+                    ):
                         if self.reason == "PhaseSwitchLockout" and held is not None:
                             temporary = (
                                 ranges.interim(
@@ -1260,15 +1390,6 @@ class Grid:
                                 if ranges and held.phases in ranges.ranges
                                 else Point(0, None, 0)
                             )
-                            if pv_point is not None and desired.amps > 0:
-                                # PV continuation during a real phase lockout:
-                                # retain the executable positive current-series
-                                # minimum, rather than importing NETZ DOWN=zero.
-                                temporary = (
-                                    ranges.points(held.phases)[0]
-                                    if ranges and held.phases in ranges.ranges
-                                    else Point(0, None, 0)
-                                )
                             if temporary.amps != held.amps or (
                                 temporary.phases is not None
                                 and temporary.phases != held.phases
@@ -1326,6 +1447,11 @@ class Grid:
                 if pv_point is not None and self.pv:
                     self.pv.accepted(desired, held)
                 self.status = "accepted_unconfirmed"
+                if proposal is not None:
+                    self.pv_ack = (epoch, adapter, transaction, proposal, desired)
+                    pv.execution_event(
+                        "accepted", epoch, proposal, desired, ack=desired
+                    )
                 await adapter.read(
                     adapter.generation,
                     {
@@ -1347,6 +1473,15 @@ class Grid:
                     self.status, self.reason = "confirmed", limitation
                 else:
                     self.reason = "readback_unknown_or_mismatch"
+                if proposal is not None:
+                    pv.execution_event(
+                        self.status,
+                        epoch,
+                        proposal,
+                        desired,
+                        ack=desired,
+                        reason=self.reason,
+                    )
             self.outcome_epoch = epoch
             self.publish()
         except (ValueError, TypeError, OverflowError) as exc:
@@ -1363,6 +1498,15 @@ class Grid:
                 if self.status == "accepted_unconfirmed"
                 else ("communication_failure", "transport_failure")
             )
+            if proposal is not None and self.status == "accepted_unconfirmed":
+                pv.execution_event(
+                    self.status,
+                    epoch,
+                    proposal,
+                    self.acknowledged,
+                    ack=self.acknowledged,
+                    reason=self.reason,
+                )
             self.outcome_epoch = epoch
             self.publish()
         except Refused:
