@@ -46,14 +46,51 @@ test('status columns, battery caption and directional power remain responsive an
           flowColor:getComputedStyle(get('flow-power')).color});
         c.remove();
       }
-      document.body.innerHTML='<pre id="results">'+JSON.stringify(results)+'</pre>';
+      const colors=[];
+      for (const profile of ['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']) {
+        for (const dark of [false,true]) for (const action of ['start','stop','apply']) for (const disabled of [false,true]) {
+          const c=document.createElement('wallbox-manager-card');
+          c.style.cssText=dark?'--primary-text-color:white;--card-background-color:#161616;--info-color:rgb(65,200,255);--wbm-action-start-background:rgb(20,230,90);':'--primary-text-color:black;--card-background-color:white;--info-color:rgb(10,70,160);';
+          document.body.append(c);
+          c.setConfig({entry_id:'E'});
+          const attributes={wallbox_manager_entry:'E',wallbox_manager_scope:'connector'};
+          c.hass={language:'de',states:{
+            'E.profile':{state:profile,attributes:{...attributes,wallbox_manager_role:'charging_profile',options:[profile]}},
+            'E.action':{state:'unknown',attributes:{...attributes,wallbox_manager_role:'charge_action',charge_action:action,charge_action_ready:!disabled}}
+          }};
+          const button=c.shadowRoot.getElementById('charge-action'), style=getComputedStyle(button);
+          button.focus();
+          colors.push({profile,dark,action,disabled,bg:style.backgroundColor,fg:style.color,
+            caption:button.textContent,focused:c.shadowRoot.activeElement===button,
+            opacity:style.opacity});
+          c.remove();
+        }
+      }
+      document.body.innerHTML='<pre id="results">'+JSON.stringify({results,colors})+'</pre>';
       </script></body></html>`;
     const path=join(dir,'test.html');writeFileSync(path,html);
     const chrome=process.env.CHROME_BIN||'google-chrome';
     const result=spawnSync(chrome,['--headless','--no-sandbox','--disable-gpu','--no-proxy-server','--disable-dev-shm-usage','--user-data-dir='+join(dir,'profile'),'--dump-dom','file://'+path],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
     assert.equal(result.status,0,result.stderr);
     const match=result.stdout.match(/<pre id="results">(.*?)<\/pre>/s);assert.ok(match,result.stdout);
-    const results=JSON.parse(match[1]);assert.equal(results.length,96);
+    const {results,colors}=JSON.parse(match[1]);assert.equal(results.length,96);
+    assert.equal(colors.length,48);
+    const luminance=css=>css.match(/[0-9]+/g).map(value=>Number(value)/255)
+      .map(value=>value<=0.04045?value/12.92:((value+0.055)/1.055)**2.4)
+      .reduce((sum,value,i)=>sum+value*[0.2126,0.7152,0.0722][i],0);
+    for (const row of colors) {
+      const expected=row.disabled?'rgb(102, 102, 102)':{
+        start:row.dark?'rgb(20, 230, 90)':'rgb(0, 120, 0)',
+        stop:'rgb(160, 0, 0)',
+        apply:row.dark?'rgb(65, 200, 255)':'rgb(10, 70, 160)'
+      }[row.action];
+      assert.equal(row.bg,expected,JSON.stringify(row));
+      assert.equal(row.caption,{start:'Ladung starten',stop:'Ladung beenden',apply:'Ladeparameter übernehmen'}[row.action]);
+      assert.equal(row.focused,!row.disabled);
+      assert.equal(row.opacity,'1');
+      const levels=[luminance(row.bg),luminance(row.fg)].sort((a,b)=>a-b);
+      assert.ok((levels[1]+0.05)/(levels[0]+0.05)>=4.5,JSON.stringify(row));
+    }
     for(const r of results) {
       const de=r.language==='de',grid=r.profile==='NETZ';
       for(const key of ['upperColumns','afterLive','messagesBelow','captionSmall','redundantCaptionAbsent','captionBeforePair']) assert.equal(r[key],true,`${key}: ${JSON.stringify(r)}`);

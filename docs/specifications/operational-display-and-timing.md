@@ -103,3 +103,39 @@ rearranges the status area and adds read-only mapped directional power. Existing
 session energy/live EV precision, active warning lifecycle and WBM-TIME-01–24
 business timing remain unchanged. Successful preparatory PV Start acknowledges
 durable release rather than an immediate electrical result (WBM-ACTION-SAFE-09).
+
+## Approved one-shot timing and editor amendment — 7 November 2026
+
+- **WBM-TIME-25:** Start assigns timing to one run. Any release retirement,
+  including expiry, Stop, profile change, authority loss and reload, clears
+  the consumed timing from the approved and matching draft fields. Independently
+  edited fields survive as drafts. An unset next Start is immediate and
+  unlimited. Explicit zero duration keeps the WBM-TIME-08 semantics.
+- **WBM-TIME-26:** Keep absolute business deadlines separate from drafts.
+  Retire release and consumed timing as one revision-fenced store update.
+  A failed or stale storage operation cannot rearm a retired schedule.
+- **WBM-TIME-27:** A card duration edit made from a live remaining countdown
+  adjusts the existing absolute end by the difference between the entered
+  and displayed whole minutes, preserving the sub-minute remainder. Further
+  edits adjust the pending endpoint. On an unlimited run, entering a duration
+  anchors an end to the edit or the planned start, whichever is later. Apply preserves the original
+  planned start for a duration-only edit, and time spent editing counts
+  against the run. Explicit zero ends at planned start. Clearing removes the
+  limit. Direct HA Text edits still
+  specify total duration measured from planned start.
+- **WBM-TIME-28:** A changed delay is relative to Apply acceptance. When
+  rearming delay, an edited duration supplies the new window length and an
+  unchanged duration retains the previous window length. If the old window
+  expires first, retain explicitly edited values as relative drafts for the
+  next Start under WBM-TIME-18.
+- **WBM-TIME-UI-01:** Focus and blur without a value change leave both fields,
+  backend revision, action and deadlines untouched. Begin the renewable
+  editor lease on the first meaningful edit.
+- **WBM-TIME-UI-02:** Edit from the rendered value, preserve the other
+  component except on carry or borrow, and continue projecting any unedited
+  field. Preserve backend ownership and the 15-second rollback.
+
+WBM-TIME-25 supersedes reusable approved timing in WBM-TIME-23. WBM-TIME-27/28
+clarify WBM-TIME-09/10 and WBM-TIME-UI-01/02 supersede focus-driven rendering
+and lease acquisition in WBM-TIME-14–16. WBM-TIME-18 and WBM-ARCH-01–12 retain
+precedence for old-window expiry and electrical responsibility respectively.

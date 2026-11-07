@@ -69,7 +69,8 @@ async def test_draft_entity_steps_and_times_never_execute_until_set(ha):
         assert settings.values["grid_request"]["start_at"] == 1300
         assert station.amps == 0
         await asyncio.gather(button.async_press(), button.async_press())
-        assert settings.approval_attributes()["grid_approved_revision"] == revision + 1
+        assert settings.approval_attributes()["grid_approved_revision"] == revision + 2
+        assert settings.get("grid_start_delay") is settings.get("grid_duration") is None
         await eventually(lambda: station.amps == 0)
         assert len(station.profiles) == count + 1  # Already confirms zero.
         assert settings.get("charge_release") is False
@@ -94,7 +95,8 @@ async def test_equivalent_numeric_power_is_durable_without_set_or_ocpp(ha):
         assert settings.approved("soll_power") == 11.1
         assert settings.approval_attributes()["grid_set_required"]
         await settings._approve_release()
-        assert settings.approved("grid_duration") == 0
+        assert settings.approved("grid_duration") is None
+        assert not settings.get("charge_release")
         assert settings.approved("soll_power") == 11.2
         assert len(station.profiles) == count
 
@@ -159,10 +161,17 @@ async def test_set_is_durable_without_execution_eligibility(ha, mode):
         await settings.set("grid_duration", "00:00")
         button = by_role(ha, entry, "charge_action")
         assert button.available
-        await button.async_press()
-        assert settings.approved("soll_power") == 3
-        assert settings.get("charge_release") is False  # Explicit zero duration.
-        assert not settings.approval_attributes()["grid_set_required"]
+        if mode in ("offline", "permission_off"):
+            with pytest.raises(HomeAssistantError, match="hardware_disabled"):
+                await button.async_press()
+            assert settings.approved("soll_power") == 11
+            assert settings.get("grid_duration") == 0
+            assert settings.approval_attributes()["grid_set_required"]
+        else:
+            await button.async_press()
+            assert settings.approved("soll_power") == 3
+            assert not settings.approval_attributes()["grid_set_required"]
+        assert settings.get("charge_release") is False
         if station:
             assert not station.profiles
             assert not any(
@@ -337,15 +346,20 @@ async def test_apply_rearms_delay_and_duration_uses_unchanged_planned_start(ha):
         assert settings.values["grid_request"]["start_at"] == 1300
         assert settings.values["grid_request"]["end_at"] == 1360
         await clock.advance(60)
-        await eventually(lambda: settings.get("charge_release") is False)
-        await grid.action()
         await eventually(
-            lambda: grid.status == "confirmed" and grid.confirmed.amps == 0
+            lambda: (
+                not settings.get("charge_release")
+                and grid.status == "confirmed"
+                and grid.confirmed.amps == 0
+            )
         )
-        assert settings.values["grid_request"]["start_at"] == clock.now + 300
+        await grid.action()
+        assert settings.values["grid_request"]["start_at"] == clock.now
+        assert settings.values["grid_request"]["end_at"] is None
         await grid.stop_release()
         await settings.set("soll_power", 5)
-        await settings._approve_release()
+        await settings.set("grid_start_delay", "00:05")
+        await settings.set("grid_duration", "00:01")
         await grid.action()
         assert settings.values["grid_request"]["start_at"] == clock.now + 300
         await clock.advance(300)
@@ -424,7 +438,8 @@ async def test_ha_number_text_and_button_services_share_approval_boundary(ha):
         )
         assert (
             settings.approved("soll_power") == 3
-            and settings.approved("grid_duration") == 0
+            and settings.approved("grid_duration") is None
+            and not settings.get("charge_release")
         )
         assert not settings.approval_attributes()["grid_set_required"]
 

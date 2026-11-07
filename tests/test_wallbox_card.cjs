@@ -75,6 +75,7 @@ function card(data=states(), config={}, language='en', clock={}) {
         const a=data[`${entry}.${role}`].attributes;
         a.grid_timing_revision++;
         a.grid_timing_edit=r.action==='end' ? null : {owner:r.owner,active:true};
+        if (r.action==='update') a.grid_pending_times=[...new Set([...(a.grid_pending_times||[]),state.attributes.wallbox_manager_role])];
       }
       card.hass=card._hass;
     }
@@ -619,7 +620,7 @@ test('canonical countdown uses absolute deadlines, floors minutes, and generates
   assert.equal(calls.length,0);
   c.disconnectedCallback();assert.equal(clock.pending,0);
 });
-test('both timing fields show drafts during one editing area and await revision acknowledgements',async()=>{
+test('focus is inert and only the changed time field becomes a draft',async()=>{
   const data=states(),clock=uiClock();
   data['E.grid_start_delay'].state='00:02';data['E.grid_duration'].state='00:03';
   Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop'});
@@ -627,9 +628,14 @@ test('both timing fields show drafts during one editing area and await revision 
   const {card:c,get,calls}=card(data,{},'en',clock);
   assert.equal(get('grid_start_delay-minutes').value,'00');
   c.shadowRoot.activeElement=get('grid_duration-minutes');
-  await get('grid_duration-minutes').onfocus();
-  assert.equal(get('grid_start_delay-minutes').value,'02');
+  await get('grid_duration-minutes').onfocus?.();
+  assert.equal(get('grid_start_delay-minutes').value,'00');
   assert.equal(get('grid_duration-minutes').value,'03');
+  c.shadowRoot.activeElement=null;
+  await get('grid_duration-minutes').onblur();
+  assert.equal(calls.length,0);
+  assert.equal(get('charge-action').textContent,'Stop charging');
+  c.shadowRoot.activeElement=get('grid_duration-minutes');
   get('grid_duration-minutes').value='10';await get('grid_duration-minutes').oninput();
   assert.equal(data['E.grid_duration'].state,'00:10');
   c.shadowRoot.activeElement=get('grid_start_delay-minutes');
@@ -643,7 +649,7 @@ test('backend edit window is shared, duration expiry retains drafts, and a later
   const data=states(),clock=uiClock();
   const a=data['E.grid_duration'].attributes;
   Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'apply'});
-  Object.assign(a,{grid_schedule:{epoch_at:1000,start_at:1000,end_at:1060},grid_timing_edit:{owner:'other-card',active:false,expires_at:1015}});
+  Object.assign(a,{grid_schedule:{epoch_at:1000,start_at:1000,end_at:1060},grid_timing_edit:{owner:'other-card',active:false,expires_at:1015},grid_pending_times:['grid_duration']});
   data['E.grid_duration'].state='00:20';
   const first=card(data,{},'en',clock),second=card(data,{},'en',clock);
   for(const instance of [first,second]) assert.equal(instance.get('grid_duration-minutes').value,'20');
@@ -695,7 +701,7 @@ test('moving focus from timing fields to Apply keeps the first explicit button c
   assert.equal(calls.filter(call=>call[2].action==='end').length,1);
 });
 test('off schedule shows no fictitious countdown but keeps meaningful next-start drafts',()=>{
-  const data=states();Object.assign(data['E.grid_duration'].attributes,{grid_approved_duration:9000,grid_approved_start_delay:null});
+  const data=states();data['E.grid_duration'].state='';
   const {card:c,get}=card(data);
   assert.equal(get('grid_duration-minutes').value,'');
   data['E.grid_duration'].state='00:12';c.hass=c._hass;
@@ -1045,4 +1051,65 @@ test('power display switches profile and mapping without retaining another direc
   data['A.charging_profile'].attributes.storage_charge_power_entity_id='sensor.absent';a.card.hass=a.card._hass;
   assert.equal(a.get('flow-power').textContent,'—');assert.equal(b.get('flow-power').textContent,'3.00 kW');
   assert.equal(a.calls.length+b.calls.length,0);
+});
+
+test('refresh projects remaining time and the first native step sends that visible baseline',async()=>{
+  const data=states(),clock=uiClock();
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop',charge_action_ready:true});
+  Object.assign(data['E.grid_duration'].attributes,{grid_schedule:{epoch_at:800,start_at:900,end_at:6113},grid_pending_times:[]});
+  data['E.grid_start_delay'].state='00:05';
+  const {card:c,get,calls}=card(data,{},'de',clock);
+  const minute=get('grid_duration-minutes');
+  c.shadowRoot.activeElement=minute;
+  assert.equal(get('grid_duration-hours').value,'01');
+  assert.equal(minute.value,'25');
+  assert.equal(get('grid_start_delay-minutes').value,'');
+  clock.advance(14000);
+  assert.equal(minute.value,'24');
+  assert.equal(calls.length,0);
+  minute.value='25';
+  await minute.oninput({target:minute});
+  assert.deepEqual(calls.map(call=>call[2].action),['begin','update']);
+  assert.equal(calls[1][2].value,'01:25');
+  assert.equal(calls[1][2].basis,'01:24');
+  assert.equal(data['E.grid_start_delay'].state,'00:05');
+  assert.equal(get('grid_start_delay-minutes').value,'');
+  assert.equal(get('charge-action').textContent,'Ladung beenden');
+  c.disconnectedCallback();await c.timingQueue.tail;
+});
+
+test('minute spinner carries and borrows while typed overflow is invalid',async()=>{
+  const data=states();
+  data['E.grid_duration'].state='00:59';
+  const {card:c,get,calls}=card(data);
+  const minute=get('grid_duration-minutes'), hour=get('grid_duration-hours');
+  minute.value='60';
+  await minute.oninput({target:minute,inputType:'insertText'});
+  assert.equal(calls.length,0);
+  assert.match(get('error').textContent,/0 to 59/);
+  await minute.oninput({target:minute});
+  assert.equal(calls.at(-1)[2].value,'01:00');
+  assert.equal(hour.value,'01');
+  minute.value='-1';
+  await minute.oninput({target:minute});
+  assert.equal(calls.at(-1)[2].value,'00:59');
+  assert.equal(hour.value,'00');
+  get('grid_duration-clear').onclick();
+  await c.timingQueue.tail;
+  assert.equal(data['E.grid_duration'].state,'');
+  await c.endTiming();
+});
+
+test('hardware-disabled Stop uses the safe direction while an editor service is pending',async()=>{
+  const data=states();
+  Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop',charge_action_ready:true,actual_enabled:false});
+  const {card:c,get,calls}=card(data,{},'de');
+  c.draftWrites.add({entity:'E.grid_duration'});
+  c.timingQueue={tail:new Promise(()=>{})};
+  c.hass=c._hass;
+  assert.equal(get('charge-action').disabled,false);
+  assert.equal(get('charge-action')['data-action'],'stop');
+  assert.equal(get('charge-action').textContent,'Ladung beenden');
+  await get('charge-action').onclick();
+  assert.equal(calls.at(-1)[2].action,'stop');
 });

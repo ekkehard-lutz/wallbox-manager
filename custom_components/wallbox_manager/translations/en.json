@@ -375,6 +375,9 @@
         },
         "value": {
           "name": "New draft time"
+        },
+        "basis": {
+          "name": "Displayed timing baseline"
         }
       }
     },

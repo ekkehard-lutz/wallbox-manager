@@ -68,6 +68,10 @@ edit_timing:
       name: New draft time
       selector:
         text:
+    basis:
+      name: Displayed timing baseline
+      selector:
+        text:
 
 charge_action:
   name: Explicit charging action
