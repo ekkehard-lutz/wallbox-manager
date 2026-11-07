@@ -5,6 +5,8 @@
 [V04-01–12](specifications/passive-v0.4.md). Older phase/permission freshness,
 sample-expiry and manager-side hardware safety/readback gates below are
 explicitly superseded by the 18 October 2026 responsibility decision.
+For the current OCPP deployment model, see the
+[approved OCPP LAN trust boundary](specifications/architecture-responsibility.md#approved-ocpp-lan-trust-boundary).
 
 
 Status: design with initial pure-core implementation, 2026-09-23. Immutable
@@ -293,8 +295,8 @@ its own library messages and schemas. The pinned `ocpp==2.1.0` library provides 
 real v21 module; discovery and verified-device charging operations are supported, not full
 feature parity or conformance. No server starts at import time. Configuration
 contains only bind IP and port; runtime objects live in `entry.runtime_data`.
-The current listener is plain WebSocket for trusted local networks; TLS and station
-authentication are not implemented. It does not bind to a particular vendor.
+The listener described here used plain WebSocket for trusted local networks.
+It was vendor-neutral and had no TLS or station authentication.
 
 `runtime.Runtime` exposes immutable `core.events.StationSnapshot` updates and
 subscriptions; HA diagnostic entities consume snapshots without parsing OCPP objects. Snapshots retain

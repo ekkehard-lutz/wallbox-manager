@@ -136,6 +136,10 @@ validation does not establish live vehicle response or relay endurance.
 
 ## Proposed deployment and rollback — requires separate authorization
 
+The [approved OCPP LAN trust boundary](specifications/architecture-responsibility.md#approved-ocpp-lan-trust-boundary)
+applies to current installations. Perform its operator-controlled network
+reachability check during commissioning.
+
 1. Independent review of both pushed branches; authorize merge/release separately.
 2. Before any authorized installation, back up HA integration/profile/entity-registry
    storage and Stationary code/configuration/persisted state. Record installed revisions.

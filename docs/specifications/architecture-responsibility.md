@@ -76,3 +76,29 @@ canonical planning target: one scoped HA sensor, no volatile telemetry attribute
 no unchanged-cycle writes, no extra target calculation, acquisition or timer.
 OCPP generation broadcasts do not republish an unchanged HA-only target. This
 observability extension does not alter the architecture responsibility boundary.
+
+## Approved OCPP LAN trust boundary
+
+**Operator decision, 7 November 2026.** Wallbox Manager runs on an
+operator-controlled, trusted private LAN used by trusted devices and family
+members. Remote administrative and charging-control access is permitted only
+through an authenticated VPN that provides access to that LAN. Direct public
+Internet exposure of the OCPP listener is outside the supported deployment model.
+
+Within this boundary, the OCPP listener may use unencrypted WebSockets
+(`ws://`) without client certificates or application-level authentication.
+Binding to `0.0.0.0:9000` is permitted. The station ID is used only for routing
+and provides no peer authentication. The operator accepts that a compromised
+device with access to the trusted LAN could observe or disclose communication,
+impersonate a station, replace or disrupt an existing connection, or submit
+manipulated protocol observations or responses.
+
+The operator must verify during commissioning that the configured listener
+is reachable only from the intended trusted LAN or through the authenticated
+VPN and is not directly published to the public Internet. This decision
+defines the supported deployment model. The network check is operator-controlled.
+
+This decision supplements WBM-ARCH-01–12. The approved deployment requires
+no additional WBM TLS, certificate management, authentication layer, IP allowlist,
+network watchdog or hardware safety mechanism. Stationary retains exclusive
+physical and electrical safety responsibility.

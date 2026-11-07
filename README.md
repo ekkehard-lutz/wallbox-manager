@@ -83,6 +83,23 @@ nonconflicting ports. Configure the station's existing OCPP client URL as
 `ws://HA-address:port/station-id` in a separately authorized installation step.
 There is no active-wallbox selector or wallbox subentry workflow.
 
+### OCPP network and commissioning
+
+Run Wallbox Manager on an operator-controlled, trusted private LAN used by
+trusted devices and family members. Use an authenticated VPN into that LAN
+for remote administration or charging control. The OCPP listener can use
+unencrypted `ws://` without client certificates or application-level
+authentication, including the default bind `0.0.0.0:9000`. The station ID
+routes the connection and provides no peer authentication.
+
+During commissioning, verify that the configured OCPP listener is reachable
+only from the intended trusted LAN or through the authenticated VPN and is
+not directly published to the public Internet. A compromised LAN device can
+observe communication, impersonate a station, disrupt or replace its
+connection, or send manipulated observations and responses. The operator
+accepts these residual risks under the approved deployment model. Stationary
+owns physical and electrical safety. See the [approved OCPP LAN trust boundary](docs/specifications/architecture-responsibility.md#approved-ocpp-lan-trust-boundary).
+
 The integration receives measurements and reported status, performs supported
 read-only discovery/readbacks, and retains cumulative imported energy/statistics
 identities. Ordinary measurements remain valid until explicit invalidation or a
