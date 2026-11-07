@@ -71,6 +71,12 @@ def records(caplog):
 
 async def setup(entry, station):
     g, pv = await release(entry, station, profile="PV_OPTIMUM")
+    # The replay owns tick delivery. Lifecycle publications must not arm a
+    # second tick on the same fake clock while the test advances it.
+    pv.arm = lambda: None
+    if pv.timer:
+        pv.timer.cancel()
+        pv.timer = None
     g.wall_time, g.call_later = lambda: station.clock.now, station.clock.later
     pv.monotonic = g.wall_time
     pv.values.update(

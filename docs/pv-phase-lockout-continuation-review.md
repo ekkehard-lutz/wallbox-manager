@@ -152,7 +152,7 @@ No Stationary or Fronius changes form part of this branch.
 
 | Check | Candidate | Published beta.21 baseline |
 | --- | --- | --- |
-| Complete Python suite | **918 passed** with five dependency warnings in 209.42 s | 895 passed |
+| Complete Python suite | **918 passed** with five dependency warnings in 207.03 s | 895 passed |
 | Statement coverage | **93.62%** (3,963/4,233 covered, 270 missing) | 93.51% |
 | Frontend suite | **92 passed** | 92 passed |
 | Headless Chrome | **1 passed**, 96 layout combinations | 1 passed, 96 combinations |
@@ -160,8 +160,11 @@ No Stationary or Fronius changes form part of this branch.
 | Specification and review links | 87 local links and anchors across six Markdown files | — |
 | Exact source comparison | 43 integration files match the beta.21 Git blobs outside `grid.py` and `pv.py`, including `pv_core.py`, `grid_point.py`, `pv_economics.py`, `pv_plan.py`, `pv_soc.py`, `ocpp.py`, `control.py` and `grid_battery.py` | Reference |
 
-These are local checks. The GitHub Actions push workflow validates the
-review commit independently.
+The replay fixture owns tick delivery to avoid counting both a timer-fired
+tick and a manual tick at the same simulated instant. The prior-outcome
+PV Start fixture drains Stop's legitimate zero readback before seeding the
+historical status. Both fixes are limited to tests. The GitHub Actions push
+workflow validates the review commit independently.
 
 ## Later physical acceptance
 
