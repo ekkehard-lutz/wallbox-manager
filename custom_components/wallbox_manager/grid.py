@@ -17,12 +17,13 @@ from .control import DISPATCH, Refused
 from .grid_point import NOMINAL_VOLTAGE, Point, envelope, number, rounded_kw
 
 _LOGGER = logging.getLogger(__name__)
+ATOMIC_PROFILE_REJECTIONS = ("PhaseSwitchLockout", "ReenableLockout")
 
 
 def retry_delay(info):
-    if not isinstance(info, dict) or info.get("reason_code") not in (
-        "PhaseSwitchLockout",
-        "ReenableLockout",
+    if (
+        not isinstance(info, dict)
+        or info.get("reason_code") not in ATOMIC_PROFILE_REJECTIONS
     ):
         return None
     raw = info.get("additional_info", "")
@@ -918,7 +919,7 @@ class Grid:
             adapter.spawn(self.settings.approve_equivalent_grid())
 
     def current_point(self):
-        """A failed read does not erase a held, correctly scoped observation."""
+        """Return the held observation. Confirmation also requires no uncertainty."""
         point = self.confirmed
         if (
             point
@@ -1151,17 +1152,17 @@ class Grid:
             raise
         finally:
             DISPATCH.reset(token)
+        info = getattr(response, "status_info", None)
+        reason = (
+            (info.get("reason_code") or info.get("reasonCode"))
+            if isinstance(info, dict)
+            else None
+        )
         if (
             point.amps > 0
             and self.settings.get("charging_profile") == "NETZ"
             and self.valid(epoch, adapter, transaction)
         ):
-            info = getattr(response, "status_info", None)
-            reason = (
-                (info.get("reason_code") or info.get("reasonCode"))
-                if isinstance(info, dict)
-                else None
-            )
             self.diagnostic(
                 "positive_accepted"
                 if response.status == "Accepted"
@@ -1171,15 +1172,20 @@ class Grid:
                 requested_a=point.amps,
                 epoch=epoch,
             )
-        if response.status == "Accepted":
-            uncertainty["previous"] = False
-        elif response.status == "Rejected":
-            # Atomic rejection did not apply. Unwind only rejected proposals;
-            # retain prior accepted uncertainty and newer dispatch/readback state.
+        if (
+            submitted
+            and response.status == "Rejected"
+            and reason in ATOMIC_PROFILE_REJECTIONS
+        ):
+            # Only these Stationary reasons guarantee rejection before actuation.
+            # Keep prior unresolved commands and any newer dispatch or readback.
             uncertainty["rejected"] = True
             while self.point_uncertain and self.point_uncertain["rejected"]:
                 self.point_uncertain = self.point_uncertain["previous"]
             self.publish()
+        else:
+            # An unresolved submission already covers any older uncertainty.
+            uncertainty["previous"] = False
         return response
 
     async def reconcile(
@@ -1380,7 +1386,11 @@ class Grid:
                     if delay is not None and not (
                         pv_point is not None and self.reason == "PhaseSwitchLockout"
                     ):
-                        if self.reason == "PhaseSwitchLockout" and held is not None:
+                        if (
+                            self.reason == "PhaseSwitchLockout"
+                            and held is not None
+                            and not self.point_uncertain
+                        ):
                             temporary = (
                                 ranges.interim(
                                     watts,
