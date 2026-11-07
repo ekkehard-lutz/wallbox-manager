@@ -18,6 +18,7 @@ async def async_setup_entry(hass, entry, add):
             vol.Required("revision"): vol.All(int, vol.Range(min=0)),
             vol.Required("incarnation"): str,
             vol.Optional("value", default=""): str,
+            vol.Optional("basis"): str,
         },
         "async_edit_timing",
     )
@@ -36,10 +37,14 @@ class Duration(SettingEntity, TextEntity):
     async def async_set_value(self, value):
         await self.settings.set(self.role, value)
 
-    async def async_edit_timing(self, action, owner, revision, incarnation, value):
+    async def async_edit_timing(
+        self, action, owner, revision, incarnation, value, basis=None
+    ):
         if incarnation != self.observed.runtime_id:
             raise HomeAssistantError("Superseded timing runtime")
         try:
-            await self.settings.edit_timing(self.role, action, owner, revision, value)
+            await self.settings.edit_timing(
+                self.role, action, owner, revision, value, basis
+            )
         except (ValueError, TypeError, OSError) as exc:
             raise HomeAssistantError(str(exc)) from exc

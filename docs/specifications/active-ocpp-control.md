@@ -58,3 +58,12 @@ blocked actions, failure/pending display and independently observed permission; 
 Automated acceptance does not establish physical switching success, station
 firmware deployment, full bootstrap push coverage or live HA CPU acceptance.
 Follow the separate [source assessment and hardware procedure](../active-ocpp-control-assessment.md).
+
+## Approved PV phase-lockout interpretation — 7 November 2026
+
+[PV-LOCK-01–08](pv-operating-point-response.md#approved-pv-phase-lockout-continuation--7-november-2026)
+apply only to the explicit atomic Stationary `Rejected / PhaseSwitchLockout`
+response. Prior positive confirmation remains usable only in its valid
+scope and with consistent physical phase evidence. Other responses follow
+the ordinary outcome and uncertainty paths. Stationary owns all physical
+CP, relay and phase operations under WBM-ARCH-01–12.

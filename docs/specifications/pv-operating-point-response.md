@@ -70,3 +70,36 @@ Let `G = P_grid_import - P_grid_export` (+ import; − export). When `-pv_grid_d
 | PV-DIAG-01–10 | Log changed requested phase/current/SoC modes and relevant decision reason, including configured EV-uptake/startup-hold **transitions** when decision-driving; never log each identical tick. |
 
 **Scope:** This document establishes the shared FAST/BALANCE operating-point and response design. The BALANCE SoC/recharge law and non-D economic restart are now specified in PV-BAL-06/07 and PV-ECO-08. This document authorizes **no** code/release/deployment change; numerical replay and technical mapping verification remain.
+
+## Approved PV phase-lockout continuation — 7 November 2026
+
+- **PV-LOCK-01:** After an explicit, atomic `Rejected / PhaseSwitchLockout`
+  for a positive phase change, retain a valid confirmed positive offer on
+  the actual phase. Do not send a redundant profile for that offer.
+- **PV-LOCK-02:** The rejection alone does not justify substituting the
+  phase-series minimum. A later, independently justified downward decision
+  may use the existing solver to choose a lower legal current in that phase.
+- **PV-LOCK-03:** Restrict cross-phase execution only. Continue ordinary
+  FAST/BALANCE/SURPLUS ticks, same-phase steps and zero-current proposals.
+  Keep the shared phase-first technical model and existing economic policy.
+- **PV-LOCK-04:** Stop, release/authority/permission/transaction changes,
+  mandatory SoC and economic STOP, invalid limits and inconsistent evidence
+  take precedence. A positive continuation claim requires a confirmed point
+  consistent with the physical phase and current capability limits.
+- **PV-LOCK-05:** Honor valid remaining lockout time with the existing
+  five-second retry margin. Use the existing 60-second fallback without a
+  reliable duration. Retry a phase change only on a fresh eligible regular
+  tick at or after the deadline. A same-phase operation cannot clear it.
+- **PV-LOCK-06:** Apply symmetrically to all supported phase directions.
+- **PV-LOCK-07:** Generic rejection, timeout, uncertain application and an
+  unconfirmed acknowledgement supply no phase-lockout continuation evidence.
+  Use existing readback and lifecycle guards.
+- **PV-LOCK-08:** Keep the restriction scoped to the active authority,
+  connector, transaction, profile and observation generation. A deadline
+  never stores or dispatches the rejected proposal.
+
+These requirements amend only the execution fallback referred to by PV-STEP-05
+and supersede the automatic minimum substitution in historical PV-PHASE-02
+implementation. PV-STEP-01–06, PV-RESP-01–08 and WBM-ARCH-01–12 retain their
+planning, timing and electrical responsibility boundaries. NETZ fallback is
+outside this amendment.

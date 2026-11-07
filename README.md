@@ -2,7 +2,22 @@
 
 Home Assistant integration domain: `wallbox_manager`.
 
-This **v0.4.0-beta.21 prerelease** publishes the independently reviewed safe
+**v0.4.0-beta.22** combines the reviewed NETZ timing and readiness changes
+with PV phase-lockout continuation. Start and Apply require observed hardware
+permission, and an active manager release remains revocable while hardware is
+disabled. NETZ timing is one-shot. Time edits start from the visible countdown,
+and Start, Stop and Apply use green, red and blue. NETZ lifecycle diagnostics
+record schedule and execution transitions.
+
+After a recognized atomic PV phase-switch rejection, Wallbox Manager retains
+a valid independently confirmed offer without sending a fallback profile.
+Same-phase current changes and mandatory stops remain available during the
+wait. A later eligible PV tick makes a fresh phase decision. Level 2 logs
+separate the regulator proposal, submitted command, acknowledgement, confirmed
+offer and physical phase. See the [beta.22 release notes](docs/v0.4/release-notes-beta.22.md)
+and [combined validation](docs/v0.4/release-validation-beta.22.md).
+
+The **v0.4.0-beta.21 prerelease** introduced the independently reviewed safe
 charging actions, state publication, battery reserve preview and status display.
 The card sends explicit Start/Stop/Apply intent through
 `wallbox_manager.charge_action`, with backend profile/runtime/revision fencing.
@@ -184,11 +199,11 @@ separately authorized, longer alternating real measurements. No unit-test or
 call-count result establishes that target. The station does not yet guarantee a
 complete immediate initial telemetry snapshot; missing fields remain explicit.
 For separately authorized installation and testing, select
-**v0.4.0-beta.21** in HACS. Keep manager release OFF, take a full pre-upgrade HA
-backup, verify installed manifest **0.4.0-beta.21** after the operator-managed
+**v0.4.0-beta.22** in HACS. Keep manager release OFF, take a full pre-upgrade HA
+backup, verify installed manifest **0.4.0-beta.22** after the operator-managed
 restart. Check that each browser loads the current frontend resource rather than
 an older cached card; any cache refresh is a separate operator action. Follow the
-[beta.21 upgrade and rollback notes](docs/v0.4/release-notes-beta.21.md#hacs-upgrade-and-rollback).
+[beta.22 upgrade and rollback notes](docs/v0.4/release-notes-beta.22.md#hacs-upgrade-and-rollback).
 The existing release reset turns manager charging release OFF after integration
 reload/restart; the operator must explicitly authorize charging again if required.
 A package-only downgrade to beta.16 cannot restore removed delay settings or

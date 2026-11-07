@@ -22,6 +22,9 @@ async def test_pv_start_service_accepts_durable_release_despite_old_outcome(
     async with peer(entry, station_type=GridStation) as station:
         grid, _ = await release(entry, station, profile=profile)
         await grid.stop_release()
+        # Drain Stop's zero readback before seeding the historical result.
+        if grid.task:
+            await grid.task
         assert grid.eligible()
         grid.status, grid.reason = status, "previous electrical result"
         grid.publish()
