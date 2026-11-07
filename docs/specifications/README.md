@@ -1,3 +1,9 @@
+**7 November 2026 — approved PV phase-lockout correction:** The
+[PV continuation requirements](pv-operating-point-response.md#approved-pv-phase-lockout-continuation--7-november-2026)
+and [execution trace](pv-decision-diagnostics.md#approved-pv-operating-point-execution-trace--7-november-2026)
+amend beta.21 for a dedicated review branch. WBM-ARCH-01–12 retain precedence.
+The operator accepts battery-limited FAST current oscillation as normal.
+
 **31 October 2026 — beta.21 publication scope:** Independent review approved
 feature `a024c8ebfa6ae76a9e5d3ac993bdb75baafe8414`, including predecessor
 `e61a16d4c4c3fe671a2ccb2086c48c0b76979219`. The operator separately authorizes

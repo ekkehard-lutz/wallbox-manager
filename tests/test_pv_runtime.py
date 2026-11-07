@@ -387,7 +387,8 @@ async def test_phase_lockout_retains_confirmed_3p_minimum_and_tick_owns_retry(ha
             reason_code="PhaseSwitchLockout", additional_info="remainingSeconds=31"
         )
         await tick(pv)
-        assert g.retry_deadline == clock.now + 36
+        assert g.pv_phase_deadline == clock.now + 36
+        assert g.retry_deadline is None
         assert g.requested.phases == 1
         assert station.phases == 3 and station.amps == 6
         assert pv.core.mode == "BALANCE"
