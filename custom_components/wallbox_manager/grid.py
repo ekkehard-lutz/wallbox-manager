@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 
@@ -11,8 +12,11 @@ from ocpp.exceptions import OCPPError
 from ocpp.v21 import call
 from websockets.exceptions import ConnectionClosed
 
+from .config_flow import diagnostic_level
 from .control import DISPATCH, Refused
 from .grid_point import NOMINAL_VOLTAGE, Point, envelope, number, rounded_kw
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def retry_delay(info):
@@ -40,6 +44,12 @@ class Grid:
         self.action_task = None
         self.action_lock = asyncio.Lock()
         self.action_generation = 0
+        self.logged = {}
+        self.logged_profile = settings.get("charging_profile")
+        self.last_permission = self.hardware_enabled()
+        self.permission_generation = None
+        self.logged_window = None
+        self.logged_deferral = None
         self.allow_issue = False
         self.known_transaction = None
         self.last_authority = None
@@ -104,6 +114,9 @@ class Grid:
 
         self.removers.append(settings.watch("charge_release", self.release_changed))
         self.removers.append(
+            settings.watch("grid_profile_retired", self.profile_retired)
+        )
+        self.removers.append(
             settings.watch("grid_timing_edit", self.edit_window_changed)
         )
         self.removers.append(settings.watch("grid_timing_lease", self.schedule))
@@ -121,13 +134,116 @@ class Grid:
             )
         )
 
+    def hardware_enabled(self):
+        return self.state.value(self.listener.control.key("ChargingEnabled"))
+
+    def diagnostic(self, event, reason=None, *, level=2, request=None, **fields):
+        if diagnostic_level(self.listener.options()) < level:
+            return
+        schedule = request or self.settings.get("grid_request") or {}
+        station, evse, connector = self.state.binding
+        record = dict(
+            event=event,
+            reason=reason,
+            station=station,
+            evse=evse,
+            connector=connector,
+            runtime=self.state.runtime_id,
+            generation=self.state.generation,
+            profile=self.settings.get("charging_profile"),
+            release=self.settings.get("charge_release"),
+            hardware=self.hardware_enabled(),
+            authority=self.state.value(self.listener.control.key("ControlAuthority")),
+            transaction=bool(self.transaction()),
+            start_at=schedule.get("start_at"),
+            end_at=schedule.get("end_at"),
+            revision=schedule.get("revision"),
+            **fields,
+        )
+        if self.logged.get(event) != record:
+            self.logged[event] = record
+            _LOGGER.warning(
+                "WBMGR subsystem=netz %s", json.dumps(record, sort_keys=True)
+            )
+
+    def observe_window(self):
+        request = self.settings.get("grid_request")
+        if not request or not self.settings.get("charge_release"):
+            self.logged_window = self.logged_deferral = None
+            return
+        if self.phase()[0] != "active":
+            return
+        window = (request["epoch_at"], request["start_at"])
+        if self.logged_window != window:
+            self.logged_window = window
+            if request["start_at"] > request["epoch_at"]:
+                self.diagnostic("delay_elapsed")
+            self.diagnostic("window_active")
+        reason = (
+            "hardware_disabled"
+            if self.hardware_enabled() is not True
+            else "communication_unavailable"
+            if not self.state.current(self.state.registered_generation)
+            else "authority_unavailable"
+            if not self.manager_ready()
+            else "transaction_unavailable"
+            if not self.transaction()
+            else None
+        )
+        if reason != self.logged_deferral:
+            self.logged_deferral = reason
+            if reason:
+                self.diagnostic(
+                    "execution_blocked"
+                    if reason == "hardware_disabled"
+                    else "execution_deferred",
+                    reason,
+                    level=1 if reason == "hardware_disabled" else 2,
+                )
+            else:
+                self.diagnostic("execution_ready")
+
     def permission_changed(self):
-        # Hardware permission has no profile/start/stop side effects.
-        if self.state.value(self.listener.control.key("ChargingEnabled")) is not True:
+        enabled = self.hardware_enabled()
+        if enabled is self.last_permission:
+            return
+        self.last_permission = enabled
+        known_generation = self.permission_generation == self.state.generation
+        if enabled is not None:
+            self.permission_generation = self.state.generation
+        if self.settings.get("charge_release"):
+            self.diagnostic("permission_changed")
+        # Permission changes supersede in-flight approvals even if permission
+        # is restored before the storage operation finishes.
+        if enabled is not True:
+            self.action_generation += 1
             self.invalidate()
             self.schedule()
+        elif (
+            known_generation
+            and self.settings.get("charge_release")
+            and self.settings.get("charging_profile") == "NETZ"
+        ):
+            # A deliberate re-enable supersedes any in-flight disabled/zero
+            # decision. The first observation after reconnect uses normal
+            # recovery instead of granting permission to replay a point.
+            self.invalidate()
+            self.schedule()
+            self.allow_issue = True
+            self.launch()
         self.signature = self.fingerprint()
         self.publish()
+
+    def profile_retired(self):
+        previous = self._published or {}
+        request = previous.get("grid_schedule")
+        if request:
+            self.diagnostic("profile_release_retired", request=request)
+            if (
+                previous.get("grid_approved_revision")
+                != self.settings.approval_attributes()["grid_approved_revision"]
+            ):
+                self.diagnostic("timing_retired", "profile_changed", request=request)
 
     def release_changed(self):
         self.action_generation += 1
@@ -144,22 +260,20 @@ class Grid:
         released = self.settings.get("charge_release") is True
         pending = self.settings.approval_attributes()["grid_set_required"]
         grid = self.settings.get("charging_profile") == "NETZ"
+        enabled = self.hardware_enabled() is True
         action = (
             "apply"
-            if released and grid and pending
+            if released and grid and pending and enabled
             else "stop"
             if released
             else "start"
         )
         reason = None
         if action != "stop":
-            if not grid and not self.manager_ready():
-                reason = "control_unavailable"
-            elif not grid and (
-                self.state.value(self.listener.control.key("ChargingEnabled"))
-                is not True
-            ):
+            if not enabled:
                 reason = "hardware_disabled"
+            elif not grid and not self.manager_ready():
+                reason = "control_unavailable"
             elif grid:
                 try:
                     self.settings.validate(
@@ -229,9 +343,13 @@ class Grid:
                 self.closed
                 or incarnation != self.state.runtime_id
                 or profile != self.settings.get("charging_profile")
-                or revision != self.action_revision()
                 or action not in ("start", "stop", "apply")
-                or (action != "stop" and action != self.action_state()["charge_action"])
+            ):
+                raise ValueError("Superseded charge action")
+            if action != "stop":
+                self.require_hardware(action)
+            if revision != self.action_revision() or (
+                action != "stop" and action != self.action_state()["charge_action"]
             ):
                 raise ValueError("Superseded charge action")
 
@@ -259,16 +377,25 @@ class Grid:
         async with self.action_lock:
             await self._action()
 
+    def require_hardware(self, action):
+        if self.hardware_enabled() is not True:
+            self.diagnostic(
+                "action_rejected", "hardware_disabled", level=1, action=action
+            )
+            raise ValueError("hardware_disabled")
+
     async def _action(self, intended=None, validate=lambda: None):
         if self.settings.get("charge_release") and self.phase()[0] == "expired":
             if intended is not None:
                 # The business scheduler owns expiry; stale Apply is never Stop.
                 raise ValueError("Superseded charge action")
-            await self.stop_release()
+            await self.stop_release(reason="duration_expired")
             return
         state = self.action_state()
         if intended is not None:
             state = {**state, "charge_action": intended}
+        if state["charge_action"] != "stop":
+            self.require_hardware(state["charge_action"])
         if not state["charge_action_ready"]:
             raise ValueError(state["charge_action_blocked_reason"])
         if state["charge_action"] == "stop":
@@ -280,67 +407,99 @@ class Grid:
             # Persistence may be delayed; the old business deadline still wins.
             self.schedule()
             epochs = []
+            action_generation = self.action_generation
+            starting = state["charge_action"] == "start"
 
             def current():
                 # Capture the epoch after acquiring the settings lock. A preceding
                 # stop may still be completing its durable write when Start arrives.
                 if not epochs:
                     validate()
-                    if state["charge_action"] == "apply" and (
-                        not self.settings.get("charge_release")
-                        or self.settings.values.get("grid_request") != previous_request
-                        or self.phase()[0] == "expired"
-                    ):
-                        return False
                     epochs.append(self.epoch)
                 return (
                     epochs[0] == self.epoch
+                    and action_generation == self.action_generation
                     and not self.closed
+                    and self.hardware_enabled() is True
                     and self.settings.get("charging_profile") == "NETZ"
+                    and (
+                        not self.settings.get("charge_release")
+                        if starting
+                        else (
+                            self.settings.get("charge_release")
+                            and self.settings.get("grid_request") == previous_request
+                            and self.phase()[0] != "expired"
+                        )
+                    )
                 )
+
+            def accepted(request, released):
+                self.diagnostic(
+                    "start_accepted" if starting else "apply_accepted", request=request
+                )
+                if request != previous_request:
+                    self.diagnostic(
+                        "schedule_armed" if starting else "schedule_adjusted",
+                        request=request,
+                    )
+                if not released:
+                    self.diagnostic("duration_expired", request=request)
+                    self.diagnostic(
+                        "timing_retired", "duration_expired", request=request
+                    )
 
             try:
                 equivalent, timing_only = await self.settings._approve_release(
-                    start=state["charge_action"] == "start",
+                    start=starting,
                     notify=False,
                     now=self.wall_time,
                     current=current,
+                    accepted=accepted,
                 )
             except ValueError, TypeError, OSError:
+                self.diagnostic(
+                    "action_rejected",
+                    "hardware_disabled"
+                    if self.hardware_enabled() is not True
+                    else "approval_failed",
+                    level=1,
+                    action=state["charge_action"],
+                )
                 if not self.settings.get("charge_release"):
                     self.release_changed()
                 elif self.phase()[0] == "expired":
-                    await self.stop_release()
+                    await self.stop_release(reason="duration_expired")
                 else:
                     self.schedule()
                     if retry_deadline is not None and self.eligible():
                         self.retry(max(0, retry_deadline - self.wall_time()))
                 raise
-            if state["charge_action"] == "start":
+            if starting:
                 self.edited("charge_release")
             else:
                 self.retry_deadline = retry_deadline
                 self.committed(equivalent, timing_only=timing_only)
         else:
             # PV Start grants release; the next regular tick decides its point.
+            action_generation = self.action_generation
             async with self.settings.lock:
                 validate()
+                self.require_hardware("start")
+                if action_generation != self.action_generation:
+                    raise ValueError("Superseded charge action")
+                if not self.manager_ready():
+                    raise ValueError("control_unavailable")
                 epoch = self.epoch
                 profile = self.settings.get("charging_profile")
                 await self.settings._save(
-                    {**self.settings.values, "charge_release": True}
+                    {**self.settings.values, "charge_release": True},
+                    current=lambda: (
+                        epoch == self.epoch
+                        and profile == self.settings.get("charging_profile")
+                        and self.manager_ready()
+                        and self.hardware_enabled() is True
+                    ),
                 )
-                if (
-                    self.closed
-                    or epoch != self.epoch
-                    or profile != self.settings.get("charging_profile")
-                ):
-                    self.settings.values["charge_release"] = False
-                    await self.settings._save(
-                        {**self.settings.values, "charge_release": False}
-                    )
-                    self.release_changed()
-                    raise ValueError("Superseded charge action")
                 self.settings.notify("charge_release")
             # Preparatory authorization succeeded; electrical outcomes are separate.
             return
@@ -349,26 +508,27 @@ class Grid:
         if self.status in ("rejected", "communication_failure", "unsupported"):
             raise ValueError(self.reason or self.status)
 
-    async def stop_release(self):
-        if self.settings.get("charge_release") is False and not self.settings.get(
+    def retire_release(self, reason):
+        request = self.settings.get("grid_request")
+        if request:
+            self.diagnostic(reason, request=request)
+        reset = self.settings.retire_release()
+        if reset:
+            self.diagnostic("timing_retired", reason, request=request)
+
+    async def stop_release(self, *, reason="stop"):
+        if not self.settings.get("charge_release") and not self.settings.get(
             "grid_request"
         ):
             return
-        self.settings.values["charge_release"] = False
-        self.settings.values["grid_request"] = None
-        self.settings.values["grid_timing_edit"] = None
+        self.retire_release(reason)
         self.release_changed()
-        await self.settings.save_runtime(
-            {
-                "charge_release": False,
-                "grid_request": None,
-                "grid_timing_edit": None,
-                "grid_timing_revision": self.settings.values["grid_timing_revision"],
-            }
-        )
-        if self.pv:
-            await self.pv.operator_stop()
-        self.publish()
+        try:
+            await self.settings.persist_retirement()
+        finally:
+            if self.pv:
+                await self.pv.operator_stop()
+            self.publish()
 
     def equivalent(self, values):
         """Compare approved desired points, never the temporary physical offer."""
@@ -480,6 +640,7 @@ class Grid:
             return
         self._publishing = True
         try:
+            self.observe_window()
             self.sync_messages()
             attributes = self.attributes()
             if attributes == self._published:
@@ -619,18 +780,6 @@ class Grid:
         self.state.messages.clear("grid:limitation")
         self.cancel_timers()
 
-    async def persist_release_loss(self):
-        async with self.settings.lock:
-            if not self.settings.get("charge_release"):
-                await self.settings._save(
-                    {
-                        **self.settings.values,
-                        "charge_release": False,
-                        "grid_request": None,
-                        "grid_timing_edit": None,
-                    }
-                )
-
     def changed(self):
         signature = self.fingerprint()
         if signature == self.signature:
@@ -646,11 +795,9 @@ class Grid:
         if authority in ("remote", "local"):
             self.last_authority = authority
         if self.settings.get("charge_release") and authority_lost:
-            self.settings.values["charge_release"] = False
-            self.settings.values["grid_request"] = None
-            self.settings.values["grid_timing_edit"] = None
+            self.retire_release("authority_lost")
             if not self.closed:
-                self.settings.hass.async_create_task(self.persist_release_loss())
+                self.settings.hass.async_create_task(self.settings.persist_retirement())
             signature = self.fingerprint()
         transaction = self.transaction()
         if transaction and transaction != self.known_transaction:
@@ -681,6 +828,10 @@ class Grid:
         self.requested = None
         self.schedule()
         if role == "charging_profile":
+            profile = self.settings.get(role)
+            if self.logged_profile != profile:
+                self.diagnostic("profile_changed", previous=self.logged_profile)
+                self.logged_profile = profile
             self.signature = None
             self.changed()
         else:
@@ -816,7 +967,7 @@ class Grid:
                 self.schedule()
                 return
             if self.phase()[0] == "expired":
-                await self.stop_release()
+                await self.stop_release(reason="duration_expired")
             else:
                 if edit_deadline is not None and edit_deadline <= self.wall_time():
                     # Keep the business end armed while rollback awaits storage.
@@ -938,6 +1089,10 @@ class Grid:
                 raise Refused("Superseded NETZ intent")
             # Preserve the held planning point, but do not present it as actual
             # while this proposal may supersede it, including after intent changes.
+            if point.amps > 0 and self.settings.get("charging_profile") == "NETZ":
+                self.diagnostic(
+                    "positive_requested", requested_a=point.amps, epoch=epoch
+                )
             uncertainty["previous"] = self.point_uncertain
             self.point_uncertain = uncertainty
             self.publish()
@@ -947,6 +1102,26 @@ class Grid:
             response = await adapter.request(payload)
         finally:
             DISPATCH.reset(token)
+        if (
+            point.amps > 0
+            and self.settings.get("charging_profile") == "NETZ"
+            and self.valid(epoch, adapter, transaction)
+        ):
+            info = getattr(response, "status_info", None)
+            reason = (
+                (info.get("reason_code") or info.get("reasonCode"))
+                if isinstance(info, dict)
+                else None
+            )
+            self.diagnostic(
+                "positive_accepted"
+                if response.status == "Accepted"
+                else "positive_rejected",
+                str(reason)[:80] if reason else None,
+                level=2 if response.status == "Accepted" else 1,
+                requested_a=point.amps,
+                epoch=epoch,
+            )
         if response.status == "Accepted":
             uncertainty["previous"] = False
         elif response.status == "Rejected":
@@ -960,20 +1135,23 @@ class Grid:
 
     async def reconcile(self, epoch, adapter, *, confirm_only=False, pv_point=None):
         transaction = self.transaction()
+        netz_execution = False
         try:
             if not self.valid(epoch, adapter, transaction):
                 return
             phase, _ = self.phase()
             if phase == "expired" and self.settings.get("charge_release"):
-                await self.stop_release()
+                await self.stop_release(reason="duration_expired")
                 return
-            watts = (
-                number(rounded_kw(self.settings.approved("soll_power"))) * 1000
-                if phase == "active"
+            netz_execution = (
+                phase == "active"
                 and self.settings.get("charge_release")
                 and self.settings.get("charging_profile") == "NETZ"
-                and self.state.value(self.listener.control.key("ChargingEnabled"))
-                is True
+                and self.hardware_enabled() is True
+            )
+            watts = (
+                number(rounded_kw(self.settings.approved("soll_power"))) * 1000
+                if netz_execution
                 else 0
             )
             try:
@@ -1001,6 +1179,8 @@ class Grid:
                     else "unconfirmed",
                     "readback_unknown",
                 )
+                if netz_execution:
+                    self.diagnostic("readback_deferred", "readback_unknown")
                 self.publish()
                 return
             ongoing = held.phases if held and held.amps > 0 else None
@@ -1027,6 +1207,8 @@ class Grid:
                 desired = self.requested
                 watts = desired.watts
             self.requested = desired
+            if netz_execution and desired.amps <= 0:
+                self.diagnostic("point_deferred", "no_positive_current")
             limitation = (
                 "power_above_mode_maximum"
                 if desired.phases is not None
@@ -1185,9 +1367,34 @@ class Grid:
             self.publish()
         except Refused:
             pass
+        finally:
+            if (
+                self.outcome_epoch == epoch
+                and self.valid(epoch, adapter, transaction)
+                and netz_execution
+                and (
+                    self.status in ("unsupported", "communication_failure")
+                    or self.requested
+                    and self.requested.amps > 0
+                    and self.status
+                    in ("confirmed", "accepted_unconfirmed", "unconfirmed")
+                )
+            ):
+                self.diagnostic(
+                    "positive_outcome",
+                    (self.reason or "none")[:80],
+                    level=1
+                    if self.status in ("unsupported", "communication_failure")
+                    else 2,
+                    status=self.status,
+                    requested_a=self.requested.amps if self.requested else None,
+                    confirmed_a=self.confirmed.amps
+                    if self.confirmed and self.status == "confirmed"
+                    else None,
+                )
 
     async def close(self):
-        self.closed = True
+        self.closed = self.settings.closed = True
         self.invalidate()
         if self.action_task and not self.action_task.done():
             self.action_task.cancel()
@@ -1196,5 +1403,8 @@ class Grid:
             task.cancel()
         if self.deadline_tasks:
             await asyncio.gather(*self.deadline_tasks, return_exceptions=True)
-        for remove in self.removers:
-            remove()
+        # Explicit service writes also use this lock. Let their lifecycle
+        # revalidation and any corrective write finish before runtime replacement.
+        async with self.settings.lock:
+            for remove in self.removers:
+                remove()

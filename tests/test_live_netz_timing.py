@@ -34,6 +34,18 @@ async def test_start_without_vehicle_enforces_planned_deadlines(
         await settings.initialize_power()
         await configure(settings)
         assert grid.transaction() is None
+        if hardware == "false":
+            assert (
+                grid.action_state()["charge_action_blocked_reason"]
+                == "hardware_disabled"
+            )
+            with pytest.raises(ValueError, match="hardware_disabled"):
+                await grid.action()
+            assert not settings.get("charge_release") and not settings.get(
+                "grid_request"
+            )
+            assert not station.profiles and not station.writes
+            return
         assert grid.action_state()["charge_action_ready"]
         await grid.action()
         request = deepcopy(settings.values["grid_request"])
@@ -234,7 +246,11 @@ async def test_expiry_during_focus_or_grace_retains_unapproved_times_for_new_sta
         assert settings.get("charge_release") is False and station.amps == 0
         assert settings.values["grid_timing_edit"] is None
         assert settings.get("grid_duration") == 600
-        assert settings.values["grid_approved"] == approved
+        assert settings.values["grid_approved"] == {
+            **approved,
+            "grid_duration": None,
+            "revision": approved["revision"] + 1,
+        }
         assert grid.action_state()["charge_action"] == "start"
         await clock.advance(10)
         await settings.expire_timing_edit(old["revision"], old["schedule_revision"])
@@ -459,7 +475,11 @@ async def test_duration_expiry_fences_apply_while_durable_write_is_delayed(
         await ha.async_block_till_done()
         if grid.task:
             await grid.task
-        assert settings.values["grid_approved"] == approved
+        assert settings.values["grid_approved"] == {
+            **approved,
+            "grid_duration": None,
+            "revision": approved["revision"] + 1,
+        }
         assert settings.get("grid_duration") == 1200
         assert settings.get("charge_release") is False and station.amps == 0
 
@@ -640,7 +660,11 @@ async def test_duration_expiry_wins_over_inflight_timing_rollback_write(
             await grid.task
         assert settings.get("charge_release") is False and station.amps == 0
         assert settings.get("grid_duration") == 1200
-        assert settings.values["grid_approved"] == approved
+        assert settings.values["grid_approved"] == {
+            **approved,
+            "grid_duration": None,
+            "revision": approved["revision"] + 1,
+        }
         assert settings.values["grid_timing_edit"] is None
         stored = (await settings.store.async_load())[settings.key]
         assert stored["grid_duration"] == 1200 and stored["charge_release"] is False

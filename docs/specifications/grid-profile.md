@@ -122,3 +122,19 @@ adds a pure planned-reserve projection before Start. WBM-GRID-15's physical
 write/ownership/readback/restoration contract remains unchanged; no reserve write
 is permitted merely to prepare or display this value. The observed reserve
 remains separately labeled in the card tooltip.
+
+## Approved NETZ diagnostics amendment — 7 November 2026
+
+- **WBM-LOG-NETZ-01:** At Level 2 emit structured profile transitions and NETZ
+  accepted Start/Apply, schedule arm, delay elapsed, active window, Stop,
+  duration expiry, permission changes and timing retirement.
+- **WBM-LOG-NETZ-02:** Trace positive requests and accepted, rejected,
+  unconfirmed and confirmed outcomes. Log changes in dispatch deferral
+  reasons, including permission, authority, communication and transaction.
+- **WBM-LOG-NETZ-03:** At Level 1 surface important blocks and failures,
+  including rejected hardware-disabled actions. Use bounded WBMGR records
+  with connector, runtime, generation, release, eligibility and applicable
+  deadlines and current. Deduplicate unchanged observations.
+- **WBM-LOG-NETZ-04:** Diagnostics add no poll, countdown ticks, Recorder
+  entity or controller decisions. WBM-GRID-15 and WBM-ARCH-01–12 continue
+  to govern electrical execution.

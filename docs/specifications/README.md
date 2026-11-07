@@ -1,3 +1,11 @@
+**7 November 2026 — approved NETZ lifecycle correction:** The
+[hardware action gate](charge-release.md#approved-hardware-readiness-amendment--7-november-2026),
+[one-shot timing and editor](operational-display-and-timing.md#approved-one-shot-timing-and-editor-amendment--7-november-2026),
+[NETZ diagnostics](grid-profile.md#approved-netz-diagnostics-amendment--7-november-2026)
+and [action colors](lovelace-home-battery-display.md#approved-charge-action-colors--7-november-2026)
+amend beta.21. WBM-ARCH-01–12 retain precedence. The implementation and feature
+push are authorized for separate review.
+
 **31 October 2026 — beta.21 publication scope:** Independent review approved
 feature `a024c8ebfa6ae76a9e5d3ac993bdb75baafe8414`, including predecessor
 `e61a16d4c4c3fe671a2ccb2086c48c0b76979219`. The operator separately authorizes

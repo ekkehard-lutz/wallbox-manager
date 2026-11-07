@@ -375,6 +375,9 @@
         },
         "value": {
           "name": "Neuer Zeitentwurf"
+        },
+        "basis": {
+          "name": "Angezeigte Zeit als Ausgangswert"
         }
       }
     },
