@@ -1,3 +1,10 @@
+**9 November 2026 — approved PV economic transaction rollover.** A new valid
+current-generation transaction on the same binding starts a fresh private
+optimization budget even if the prior valid economic transaction has no
+matching `Ended` observation. Same-transaction reconnect and conservative
+damaged-journal recovery remain governed by PV-ECO-07.
+[PV-ECO-07 rollover decision](pv-regulation.md#approved-pv-transaction-rollover--9-november-2026)
+
 **Beta.22 publication scope:** The reviewed NETZ and PV branches are
 integrated with both histories preserved. The
 [release notes](../v0.4/release-notes-beta.22.md) and

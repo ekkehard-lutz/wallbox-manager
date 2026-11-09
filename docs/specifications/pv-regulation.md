@@ -476,9 +476,9 @@ Accounting becomes eligible only when **all** required evidence is available:
 
 The **first counted interval must be fully supported by actual qualifying measurement evidence**. Do not count a preceding interval whose start lacked the required evidence. If transaction identity arrives after physical charging or measurements, begin only valid prospective accounting once the conditions hold; later knowledge of identity must not retrospectively attribute earlier charging. No general pre-identity buffering/replay mechanism is approved. Unknown gaps and downtime produce no integration or reset credit; do not fabricate intervals, transactions or accounting scopes.
 
-Preserve the unified **nominal 50 Wh** economic command threshold: approximate accumulation uses the complete **valid unsmoothed** grid-import power only while `P_import > M/2`; a held valid value may count across any number of regulation ticks, **without a 10-second maximum gap between source reports**. Reset still requires **strictly more than 15 seconds** of valid `P_import <= M/2`. Revised [PV-ECO-05](#pv-eco-05--last-value-held-validity-and-causality-approved-revised-16-october-2026) and retained PV-ECO-07/08/09 govern availability, provenance, persistence, and restart. No persisted budget/STOP history is reset or transferred by observational activation; no new energy allowance, timer or change to the economic restart model is approved.
+Preserve the unified **nominal 50 Wh** economic command threshold: approximate accumulation uses the complete **valid unsmoothed** grid-import power only while `P_import > M/2`; a held valid value may count across any number of regulation ticks, **without a 10-second maximum gap between source reports**. Reset still requires **strictly more than 15 seconds** of valid `P_import <= M/2`. Revised [PV-ECO-05](#pv-eco-05--last-value-held-validity-and-causality-approved-revised-16-october-2026) and retained PV-ECO-07/08/09 govern availability, provenance, persistence, and restart. Observational activation does not reset or transfer persisted budget or STOP history. A new transaction can establish a new budget only under the approved [transaction rollover rule](#approved-pv-transaction-rollover--9-november-2026).
 
-Keep these four facts distinct: **observed physical charging**, **an active economic accounting interval**, **an authorized manager positive command**, and **an approved restart following economic STOP**. Observational activity activation is **not an authorized positive restart**. It must not call a restart-confirmation mechanism that clears valid STOP provenance merely because charging was observed. A genuinely ended transaction followed by a proven new transaction follows the existing lifecycle rules for a new scope; a changed transaction ID alone during uncertain continuous activity must not reset exhaustion or reuse another transaction's energy. HA restart/reload requires reconciliation of persisted history and new valid evidence, without downtime integration or a fabricated fresh allowance.
+Keep these four facts distinct: **observed physical charging**, **an active economic accounting interval**, **an authorized manager positive command**, and **an approved restart following economic STOP**. Observational activity activation is **not an authorized positive restart**. It must not call a restart-confirmation mechanism that clears valid STOP provenance merely because charging was observed. The approved [transaction rollover rule](#approved-pv-transaction-rollover--9-november-2026) supersedes the previous matching-`Ended` requirement only for rollover of a valid economic scope to a new valid current transaction. Uncertain transaction or journal evidence still supplies no fresh allowance. HA restart/reload requires reconciliation of persisted history and new valid evidence, without downtime integration or a fabricated fresh allowance.
 
 **Q2 — Temporary unattributed charging [APPROVED, 15 October 2026].** A temporarily unattributed physical charging interval is accepted while transaction or causal accounting evidence is unavailable; confirmed general charging permission may remain ON, and no automatic permission-OFF fallback is authorized solely for that missing evidence. No mandatory pre-plug 0 A TxProfile is required. Diagnose the missing transaction, attribution or measurement prerequisites explicitly, and distinguish observed physical activity from economic monitoring that is not yet eligible. **Do not claim that the 50 Wh economic monitoring is active during an unattributed interval.** Begin valid prospective accounting when Q1 is satisfied and proceed with selected-profile regulation promptly when its actual execution prerequisites hold. Existing economic STOP/restart restrictions remain mandatory; do not issue automatic positive manager commands when the existing economic recovery contract inhibits them.
 
@@ -677,6 +677,29 @@ During valid, actively eligible PV charging, the regulator uses current **unsmoo
 Grid-import energy, activity/pending/in-flight/paused state, STOP cause and restart reference are **session- and authority-bound**. Persist them in Home Assistant Store where the same entry, wallbox identity, authority, connector, external OCPP transaction and fixed policy-context data can be proven. Neither reload nor profile change/reselection of a PV profile may blindly reset a consumed budget. During downtime, **do not** integrate energy or advance the reset interval. Uncertain recovery permits no automatic positive point. Explicit OFF, NETZ scope exit and proven genuine transaction end close the scope under implemented rules. Late storage operations or delayed ACKs must not undo a newer OFF.
 
 Under PV-OCPP-04, general permission without a real transaction creates no accounting scope and clears no history. The approved Q1/Q2 decisions in [section 6.4.4](#644-transaction-bound-control-and-economic-accounting) require prospective real-transaction-scoped observational accounting, reconciled persisted history and explicit diagnosis of accepted unattributed flow; no retrospective pre-identity replay or reset is authorized. Observational activation cannot authorize restart or clear STOP provenance. Recovery inhibition of automatic positive points does not mean general permission must await transaction preparation.
+
+#### Approved PV transaction rollover — 9 November 2026
+
+The import-energy budget serves private PV charging optimization. Billing and
+financial settlement are outside its scope. A valid new OCPP transaction ID,
+accepted for the bound station and connector in the current observation
+generation, owns a fresh economic budget. For a valid prior economic scope on
+that same binding, the first otherwise eligible accounting cycle binds the new
+transaction with `wh = 0`, `stopped = False`, `reset = False`, `cause = None`
+and unset sampling endpoints before sampling the new interval. The prior
+transaction's matching `Ended` event is optional for this rollover. The
+operator accepts an occasional additional allowance after a Stationary restart
+or interrupted transaction.
+
+The same transaction retains its import budget and STOP on reconnect. Duplicate,
+stale, superseded-generation and wrong-scope reports cannot roll over the
+budget. Existing station identity validation applies. A corrupt, unreadable,
+quarantined or explicitly unreconciled journal supplies no valid prior
+economic scope. The existing recovery inhibition remains in effect.
+
+Rollover neither issues a proposal nor schedules an extra PV cycle. Manager
+release, authority, permission, SoC STOP, durable journal recovery and the
+current-transaction economic reset and restart rules remain in force.
 
 ### PV-ECO-08 – Economic restart after configured import-Wh STOP [25 OCTOBER OPERATOR DIRECTION]
 

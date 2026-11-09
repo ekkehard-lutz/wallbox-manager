@@ -708,6 +708,7 @@ class PV:
                         self.submit(d.point, current, urgent=True)
                     return
             scope = [*self.state.binding, "remote", tx]
+            # An observed end also permits retiring the old station identity.
             ended = bool(
                 self.budget.scope
                 and self.budget.scope[:-1] == scope[:-1]
@@ -721,7 +722,7 @@ class PV:
             ):
                 self.problem("economic_station_identity_mismatch", powers=powers)
                 return
-            if not self.budget.bind(scope, ended=ended):
+            if not self.budget.bind(scope):
                 self.problem("economic_scope_unreconciled", powers=powers)
                 return
             self.station_identity = dict(identity)

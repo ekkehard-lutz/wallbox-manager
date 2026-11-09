@@ -392,7 +392,7 @@ async def test_queued_restart_checkpoint_cannot_overwrite_newer_authority(ha, ne
             newer_write = asyncio.create_task(pv.grid.stop_release())
             await asyncio.sleep(0)
         else:
-            pv.budget.bind([*pv.state.binding, "remote", "new-transaction"], ended=True)
+            pv.budget.bind([*pv.state.binding, "remote", "new-transaction"])
             pv.budget.wh = 3
             pv.context = (*pv.context[:-1], "new-transaction")
             newer_write = asyncio.create_task(pv.persist())
@@ -435,9 +435,7 @@ async def test_failed_old_restart_checkpoint_does_not_rollback_newer_state(
 
                 pv.budget = Budget(cause="operator_stop")
             else:
-                pv.budget.bind(
-                    [*pv.state.binding, "remote", "new-transaction"], ended=True
-                )
+                pv.budget.bind([*pv.state.binding, "remote", "new-transaction"])
                 pv.budget.wh = 3
             expected = pv.budget.saved()
             finish.set()

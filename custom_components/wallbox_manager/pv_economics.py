@@ -74,17 +74,24 @@ class Budget:
         # A completed reset is retained during normal operation; restored resets
         # are not trusted without new uninterrupted evidence after downtime.
 
-    def bind(self, scope, *, ended=False):
-        if self.scope is None or ended:
-            self.scope, self.wh, self.stopped, self.reset, self.cause = (
-                scope,
-                0,
-                False,
-                False,
-                None,
-            )
-            self.interrupt()
-        return self.scope == scope
+    def bind(self, scope):
+        if self.scope == scope:
+            return True
+        # Only a different transaction on the same binding can replace
+        # existing history. The unreconciled marker has no binding.
+        if self.scope is not None and (
+            len(scope) != 5 or self.scope[:-1] != scope[:-1]
+        ):
+            return False
+        self.scope, self.wh, self.stopped, self.reset, self.cause = (
+            scope,
+            0,
+            False,
+            False,
+            None,
+        )
+        self.interrupt()
+        return True
 
     def sample(self, now, imported, minimum, *, active, valid=True):
         if not valid:
