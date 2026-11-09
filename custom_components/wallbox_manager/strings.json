@@ -50,7 +50,6 @@
         "name": "Discovery evidence",
         "state": {
           "unknown": "Unknown",
-          "advertised": "Advertised",
           "verified": "Verified",
           "unsupported": "Unsupported",
           "degraded": "Degraded"
@@ -179,9 +178,6 @@
       }
     },
     "number": {
-      "desired_charging_power": {
-        "name": "{scope} Desired charging power"
-      },
       "allowed_current_1p": {
         "name": "{scope} Allowed current 1p"
       },
@@ -211,9 +207,6 @@
       },
       "optimum_upper_soc": {
         "name": "{scope} PV Optimum upper target SoC"
-      },
-      "optimum_max_discharge_w": {
-        "name": "Maximum PV storage discharge (deprecated, unused)"
       },
       "estimated_daily_house_consumption_kwh": {
         "name": "{scope} PV Optimum daily household consumption without EV"
@@ -256,13 +249,6 @@
           "PV_SURPLUS": "PV Surplus",
           "PV_OPTIMUM": "PV Optimum",
           "PV_MAXIMUM": "PV Maximum"
-        }
-      },
-      "pv_approximation": {
-        "name": "PV power approximation",
-        "state": {
-          "up": "Not below target",
-          "down": "Not above target"
         }
       }
     },
@@ -324,7 +310,6 @@
             "data": {
               "regulation_interval": "Regulation interval",
               "soc_hysterese": "SoC hysteresis and target safety margin",
-              "power_smoothing_window": "Power smoothing window (seconds)",
               "pv_increase_interval_cycles": "Upward regulation interval",
               "pv_startup_hold_cycles": "Startup settling time",
               "pv_grid_deadband_w": "Grid point deadband",

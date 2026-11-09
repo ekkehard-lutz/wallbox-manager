@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import pytest
-from conftest import eventually
+from conftest import entities, eventually
 from ocpp.exceptions import InternalError, OCPPError
 from ocpp.routing import after, on
 from ocpp.v21 import ChargePoint, call, call_result
@@ -179,6 +179,13 @@ async def test_real_boot_readback_push_reconnect_and_no_control(ha):
         await boot(station)
         await eventually(lambda: listener.initialization["status"] == "missing")
         assert state.identity["serial_number"] == "serial-1"
+        discovery = next(e for e in entities(ha, entry) if e.role == "discovery")
+        assert discovery.native_value == "verified"
+        assert set(listener.initialization) == {"status", "missing"}
+        assert (
+            discovery.extra_state_attributes["initialization"]
+            == listener.initialization
+        )
         assert (
             state.value(("station", ("Wallbox01", None, None), "control_authority"))
             == "local"

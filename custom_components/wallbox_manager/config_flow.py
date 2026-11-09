@@ -11,7 +11,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .migration import target
-from .settings import NUMBERS, OBSOLETE_PV, REGULATION, regulation_value
+from .settings import NUMBERS, OBSOLETE_PV, REGULATION, number_value
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -70,26 +70,13 @@ SOURCES = (
 )
 
 
-REGULATION_FIELDS = {key: NUMBERS[key][1:] for key in REGULATION} | {
-    "power_smoothing_window": (5, 0, 300, 1, "s"),
-}
+REGULATION_FIELDS = {key: NUMBERS[key][1:] for key in REGULATION}
 
 
 def diagnostic_level(options):
-    """Explicit 0–3 wins; preserve beta.18's legacy boolean fallback."""
+    """Read the configured diagnostic level, defaulting to off."""
     try:
-        return max(
-            0,
-            min(
-                3,
-                int(
-                    options.get(
-                        "diagnostic_level",
-                        3 if options.get("pv_diagnostic_logging") else 0,
-                    )
-                ),
-            ),
-        )
+        return max(0, min(3, int(options.get("diagnostic_level", 0))))
     except ValueError, TypeError:
         return 0
 
@@ -180,10 +167,10 @@ class Options(config_entries.OptionsFlow):
                             options.pop(key, None)
                 for key in REGULATION_FIELDS:
                     if key in data:
-                        if key in NUMBERS:
-                            regulation_value(key, data[key])
-                            if runtime:
-                                runtime.settings.validate(key, data[key])
+                        if runtime:
+                            runtime.settings.validate(key, data[key])
+                        else:
+                            number_value(key, data[key])
                         options[key] = regulation[
                             next(
                                 marker for marker in regulation if marker.schema == key

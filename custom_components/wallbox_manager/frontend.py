@@ -24,7 +24,7 @@ async def async_setup_assets(hass):
             if event.data.get("component") in ("http", "frontend", "lovelace"):
                 hass.async_create_task(async_setup_assets(hass))
 
-        state["unsubscribe"] = hass.bus.async_listen(EVENT_COMPONENT_LOADED, loaded)
+        hass.bus.async_listen(EVENT_COMPONENT_LOADED, loaded)
     state = hass.data[KEY]
     async with state["lock"]:
         if not getattr(hass, "http", None):

@@ -282,7 +282,7 @@ An **active exploration step** is allowed only while SoC/profile/manager release
 
 The former `optimum_max_discharge_w` / `D` is **not used as a positive EV-power ceiling, FAST ramp authorization, BALANCE cap or economic STOP exception**. WBM does not guarantee a maximum instantaneous physical battery discharge; installed battery/inverter controls and Stationary retain their respective physical limits. FAST instead follows valid SoC thresholds and the measured grid-point correction plus the common measured-import 50 Wh economic policy. Brief grid/SoC deviations are optimization effects to correct in subsequent ticks, **not** a new WBM hardware-safety violation.
 
-**Compatibility/migration:** Preserve the existing HA Number entity identity, service contract and persisted value initially for compatibility, mark it deprecated and unused by the **new** PV control policy; remove/retire it only in a separately reviewed migration decision. This supersedes the 24 October UI-only removal as to future **functional use**, not as to the currently shipped beta.16 behavior. Never interpret the old saved value as a new zero-current safety constraint.
+**Approved cleanup:** Retire the deprecated HA Number and its settings write path. An existing saved value is inert.
 
 ### PV-FAST-03 – Asymmetric response and grid correction [REVISED AGREED DIRECTION]
 
@@ -340,7 +340,7 @@ Below `T-H/2` the battery recovers through the **one-lower-EV-step** rule in PV-
 
 **Decision:** BALANCE uses the **current valid storage charge and discharge values without any new temporal averaging, median, smoothing window, low-pass filter or additional number of sample cycles**. At each existing PV regulation tick compute the signed battery value and target anew from the currently retained HA states. The ordinary power-point quantization, shared SoC hysteresis, upward tick interval, EV uptake gate and ordinary downward setting already provide the intended damping. Revisit smoothing **only after hardware/replay evidence shows a real regulation problem** and a new explicit operator decision; do not preemptively hide fast storage changes.
 
-Previously approved configurable cycle-based smoothing `N` (legacy `power_smoothing_window` migration) is historical or may remain available for **other independently specified paths** where actually used. Do not silently apply it to the new BALANCE storage regulation or reinterpret legacy seconds as cycles. The shared configured **regulation interval in seconds** remains unchanged. Unsmoothed measured grid-import power remains mandatory for economic Wh accounting; SoC, command state, authority and urgent STOP are never smoothed.
+The unused `power_smoothing_window` option is retired. Existing saved seconds are ignored. The shared configured **regulation interval in seconds** remains unchanged. Unsmoothed measured grid-import power remains mandatory for economic Wh accounting; SoC, command state, authority and urgent STOP are never smoothed.
 
 ### PV-BAL-07 – Fronius charge/discharge mapping and mutually-positive transition [APPROVED 25 OCTOBER]
 

@@ -98,7 +98,7 @@ class Reading(WallboxEntity, SensorEntity):
         if role in STATES or role in ("control_authority", "discovery"):
             self._attr_device_class = "enum"
             self._attr_options = (
-                ["unknown", "advertised", "verified", "unsupported", "degraded"]
+                ["unknown", "verified", "unsupported", "degraded"]
                 if role == "discovery"
                 else STATES.get(role, ["unknown", "local", "remote"])
             )
@@ -158,7 +158,7 @@ class Reading(WallboxEntity, SensorEntity):
         ):
             return True
         if self.role == "physical_phases":
-            return self.observed.last_observed_value(self.key) is not None
+            return self.observed.value(self.key) is not None
         return super().available
 
     @property
@@ -177,7 +177,7 @@ class Reading(WallboxEntity, SensorEntity):
                 case "protocol_version":
                     return "2.1" if state.connected else None
         if self.role == "physical_phases":
-            return state.last_observed_value(self.key)
+            return state.value(self.key)
         return state.value(self.key)
 
     @property
@@ -217,7 +217,6 @@ class Reading(WallboxEntity, SensorEntity):
                 external_transaction_id=session["external_transaction_id"],
                 session_active=view(self.observed, datetime.now(UTC))["active"],
                 start_known=session["started_at"] is not None,
-                valid_until=None,
             )
             if self.role == "power":
                 attrs["power_availability_reason"] = (
@@ -248,9 +247,7 @@ class Reading(WallboxEntity, SensorEntity):
                     else None,
                 )
             if self.role == "duration":
-                attrs.update(
-                    started_at=session["started_at"], duration_valid_until=None
-                )
+                attrs["started_at"] = session["started_at"]
         if self.role == "physical_phases":
             attrs["state_represents"] = "last_known_observation"
         if self.role == "discovery":

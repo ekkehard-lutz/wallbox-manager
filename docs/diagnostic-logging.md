@@ -12,12 +12,11 @@ Open **Settings → Devices & services → Wallbox Manager → Configure** and c
 | 2 — Events with relevant data / Ereignisse mit relevanten Daten | The same events with explanatory measurements and context. |
 | 3 — Full diagnostic trace / Vollständige Diagnosespur | Complete cyclic PV records and detailed recovery stages, plus lifecycle events. |
 
-The persisted integer `diagnostic_level` replaces the legacy boolean
-`pv_diagnostic_logging`. Legacy false/absent migrates to 0, true migrates to 3;
-an explicit new level wins. Options-only level changes take effect live without
-control reload, OCPP reconnect or commands. The default is 0; no card control is
-needed. The level applies to PV, recovery, physical state, ownership and battery
-reserve diagnostics.
+The persisted integer `diagnostic_level` controls logging. An old
+`pv_diagnostic_logging` value is ignored. Options-only level changes take effect
+live without control reload, OCPP reconnect or commands. The default is 0. The
+level applies to PV, recovery, physical state, ownership and battery reserve
+diagnostics.
 
 Deduplication is centralized per entry, connector and event family. Identity uses
 mode/phase/reason, discrete phase/current operating points, permission and control

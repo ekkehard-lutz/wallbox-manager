@@ -80,9 +80,6 @@ class WallboxEntity(Entity):
                 connection_generation=observation.generation[0],
                 boot_generation=observation.generation[1],
             )
-            # Acquisition times stay internal; identical reads do not change
-            # Recorder-significant attributes. Compatibility deadlines are inert.
-            attrs["valid_until"] = None
         return attrs
 
     def changed(self):

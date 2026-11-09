@@ -7,7 +7,7 @@ from homeassistant.components import number
 from custom_components.wallbox_manager import async_setup_entry, async_unload_entry
 
 
-async def test_mapping_projection_and_five_number_services_survive_reload(ha):
+async def test_mapping_projection_and_four_number_services_survive_reload(ha):
     entry = config()
     ha.config_entries._entries[entry.entry_id] = entry
     ha.config_entries.async_update_entry(
@@ -37,7 +37,6 @@ async def test_mapping_projection_and_five_number_services_survive_reload(ha):
     values = {
         "optimum_lower_soc": 25,
         "optimum_upper_soc": 85,
-        "optimum_max_discharge_w": 3456,
         "estimated_daily_house_consumption_kwh": 12.5,
         "soll_soc_speicher": 40,
     }
