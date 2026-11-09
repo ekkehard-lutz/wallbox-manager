@@ -7,7 +7,6 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
-from .settings import OBSOLETE_PV
 
 
 def target(value):
@@ -113,7 +112,7 @@ def migrate(hass, entry, profiles):
         "evse_id": binding[1],
         "connector_id": binding[2],
     }
-    options = {k: v for k, v in entry.options.items() if k not in OBSOLETE_PV}
+    options = dict(entry.options)
     if entry.subentries:
         options.setdefault(
             "passive_v04_legacy_subentries",
@@ -144,22 +143,16 @@ def migrate(hass, entry, profiles):
     # HA processes device moves immediately and removes entities still attached
     # to the old subentry. Move entities FIRST, then their existing device.
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
-        retired = False
-        for family, roles in (
-            ("control", {"phase_switch_deviation_pct", *OBSOLETE_PV}),
-            (
-                "capability",
-                {"maximum_current_1", "maximum_current_2", "maximum_current_3"},
-            ),
-        ):
-            prefix = f"{entry.entry_id}:{family}:"
-            if entity.unique_id.startswith(prefix):
-                parts = json.loads(entity.unique_id[len(prefix) :])
-                retired = parts[3] in roles
-                break
-        if retired:
-            registry.async_remove(entity.entity_id)
-            continue
+        prefix = f"{entry.entry_id}:capability:"
+        if entity.unique_id.startswith(prefix):
+            parts = json.loads(entity.unique_id[len(prefix) :])
+            if parts[3] in {
+                "maximum_current_1",
+                "maximum_current_2",
+                "maximum_current_3",
+            }:
+                registry.async_remove(entity.entity_id)
+                continue
         if entity.config_subentry_id is not None:
             registry.async_update_entity(entity.entity_id, config_subentry_id=None)
     for device in dr.async_entries_for_config_entry(devices, entry.entry_id):

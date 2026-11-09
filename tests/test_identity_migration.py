@@ -2,6 +2,7 @@
 
 import json
 from types import MappingProxyType
+from unittest.mock import AsyncMock
 
 import pytest
 from conftest import config, entities
@@ -11,6 +12,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
+from custom_components.wallbox_manager import async_unload_entry
 from custom_components.wallbox_manager.config_flow import WallboxManagerConfigFlow
 from custom_components.wallbox_manager.entity import unique_id
 from custom_components.wallbox_manager.migration import migrate
@@ -382,8 +384,6 @@ async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
 
 
 async def test_failed_setting_save_does_not_commit_options_or_memory(ha, monkeypatch):
-    from unittest.mock import AsyncMock
-
     entry = await ha.install()
     settings = entry.runtime_data.settings
     before = dict(entry.options), dict(settings.values), dict(settings.profiles)
@@ -404,7 +404,6 @@ async def test_grid_migration_retires_only_superseded_entities(ha):
     scope = ("Wallbox01", "1", "1")
     retired = []
     for domain, family, role in (
-        ("number", "control", "phase_switch_deviation_pct"),
         ("sensor", "capability", "maximum_current_1"),
         ("sensor", "capability", "maximum_current_3"),
     ):
@@ -416,12 +415,51 @@ async def test_grid_migration_retires_only_superseded_entities(ha):
                 config_entry=entry,
             ).entity_id
         )
-    preserved = registry.async_get_or_create(
-        "number",
-        "wallbox_manager",
-        unique_id(entry.entry_id, "control", scope, "min_soc"),
-        config_entry=entry,
-    ).entity_id
+    preserved = [
+        registry.async_get_or_create(
+            "number",
+            "wallbox_manager",
+            unique_id(entry.entry_id, "control", scope, role),
+            config_entry=entry,
+        ).entity_id
+        for role in (
+            "min_soc",
+            "phase_switch_deviation_pct",
+            "pv_start_delay",
+            "pv_stop_delay",
+        )
+    ]
     await ha.install(entry)
     assert all(registry.async_get(entity_id) is None for entity_id in retired)
-    assert registry.async_get(preserved) is not None
+    assert all(registry.async_get(entity_id) is not None for entity_id in preserved)
+    assert not {"phase_switch_deviation_pct", "pv_start_delay", "pv_stop_delay"} & {
+        entity.role for entity in entities(ha, entry)
+    }
+
+
+async def test_retired_profile_fields_are_inert_without_cleanup_writes(ha, monkeypatch):
+    entry = await ha.install()
+    settings = entry.runtime_data.settings
+    await settings.set("min_soc", 33)
+    store, key = settings.store, settings.key
+    await async_unload_entry(ha, entry)
+
+    data = await store.async_load()
+    retired = {
+        "pv_start_delay": 75,
+        "pv_stop_delay": 90,
+        "phase_switch_deviation_pct": 5,
+    }
+    data[key].update(retired)
+    await store.async_save(data)
+    write = AsyncMock()
+    monkeypatch.setattr(Store, "async_save", write)
+    await ha.install(entry)
+
+    assert await store.async_load() == data
+    write.assert_not_awaited()
+    settings = entry.runtime_data.settings
+    assert all(settings.get(key) is None for key in retired)
+    assert settings.get("min_soc") == 33
+    assert settings.get("pv_startup_hold_cycles") == 10
+    assert settings.get("grid_start_delay") is None

@@ -14,7 +14,7 @@ from test_protocol import peer
 
 from custom_components.wallbox_manager import async_setup_entry, async_unload_entry
 from custom_components.wallbox_manager.pv import reading
-from custom_components.wallbox_manager.settings import NUMBERS, OBSOLETE_PV
+from custom_components.wallbox_manager.settings import NUMBERS
 
 
 def sources(ha, *, battery=True):
@@ -331,9 +331,11 @@ async def test_obsolete_keys_entities_and_option_fields_are_removed_only(ha):
         entry, options=dict(pv_start_delay=77, pv_stop_delay=99)
     )
     await ha.install(entry)
-    assert all(key not in entry.options for key in OBSOLETE_PV)
-    assert all(e.role not in OBSOLETE_PV for e in entities(ha, entry))
-    assert not set(OBSOLETE_PV) & NUMBERS.keys()
+    obsolete_pv = {"pv_start_delay", "pv_stop_delay"}
+    assert entry.options == {"pv_start_delay": 77, "pv_stop_delay": 99}
+    assert all(entry.runtime_data.settings.get(key) is None for key in obsolete_pv)
+    assert all(e.role not in obsolete_pv for e in entities(ha, entry))
+    assert not obsolete_pv & NUMBERS.keys()
 
     def load_locale(name):
         with open("custom_components/wallbox_manager/" + name) as handle:
@@ -354,7 +356,7 @@ async def test_obsolete_keys_entities_and_option_fields_are_removed_only(ha):
     assert shape(en) == shape(de)
     for locale in (source, en, de):
         text = json.dumps(locale)
-        assert all(key not in text for key in OBSOLETE_PV)
+        assert all(key not in text for key in obsolete_pv)
         assert "storage_charge_power" in text
         assert (
             not {"desired_charging_power", "optimum_max_discharge_w"}

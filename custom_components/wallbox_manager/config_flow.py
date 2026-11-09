@@ -11,7 +11,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .migration import target
-from .settings import NUMBERS, OBSOLETE_PV, REGULATION, number_value
+from .settings import NUMBERS, REGULATION, number_value
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -83,9 +83,7 @@ def diagnostic_level(options):
 
 class Options(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
-        options = {
-            k: v for k, v in self.config_entry.options.items() if k not in OBSOLETE_PV
-        }
+        options = dict(self.config_entry.options)
         runtime = getattr(self.config_entry, "runtime_data", None)
         # Central options retain precedence over the existing profile settings.
         if runtime:

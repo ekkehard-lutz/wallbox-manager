@@ -68,12 +68,13 @@ TIMES = ("grid_start_delay", "grid_duration")
 GRID_FIELDS = ("power_kw", "power_phases", *TIMES)
 PV_TUNING = tuple(k for k in NUMBERS if k.startswith("pv_"))
 REGULATION = ("soc_hysterese", "regulation_interval", *PV_TUNING)
-OBSOLETE_PV = ("pv_start_delay", "pv_stop_delay")
-RETIRED_PROFILE_FIELDS = (
-    *OBSOLETE_PV,
-    "target_w",
-    "approximation",
-    "optimum_max_discharge_w",
+GRID_STATE_FIELDS = (
+    "grid_power_initialized",
+    "grid_approved",
+    "grid_draft_revision",
+    "grid_timing_revision",
+    "grid_delay_edited",
+    "grid_duration_target",
 )
 
 
@@ -114,8 +115,11 @@ class Settings:
         self.values["direction"] = "nearest"
         self.values.update(dict.fromkeys(TIMES))
         self.values["power_phases"] = None
+        # Unknown profile fields stay on disk but do not become runtime settings.
         self.values.update(
-            {k: v for k, v in saved.items() if k not in RETIRED_PROFILE_FIELDS}
+            (key, value)
+            for key, value in saved.items()
+            if key in self.values or key in GRID_STATE_FIELDS
         )
         # Restore caps before any connection/control task can use default maxima.
         # Entities are added only after capability discovery, which is too late
@@ -177,14 +181,7 @@ class Settings:
         self.approval_error = None
 
     async def initialize_grid(self):
-        """Migrate active beta.10 settings once, before entities/transport start."""
-        cleaned = {
-            key: {k: v for k, v in values.items() if k not in OBSOLETE_PV}
-            for key, values in self.profiles.items()
-        }
-        if cleaned != self.profiles:
-            await self.persist(cleaned)
-            self.profiles = cleaned
+        """Initialize durable approval and persist any release retirement."""
         saved = self.profiles.get(self.key, {})
         if "grid_approved" in saved and any(
             saved.get(key) != self.values[key]

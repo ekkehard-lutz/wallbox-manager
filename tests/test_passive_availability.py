@@ -207,7 +207,8 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
     )
     assert result["data"]["leistung_pv"] == "sensor.pv"
     assert result["data"]["foreign"] == {"keep": True}
-    assert "pv_stop_delay" not in result["data"]
+    assert result["data"]["pv_stop_delay"] == 123
+    assert settings.get("pv_stop_delay") is None
     assert result["data"]["pv_decrease_delay_cycles"] == 3
     assert result["data"]["power_smoothing_window"] == 55
     assert settings.get("power_smoothing_window") is None
