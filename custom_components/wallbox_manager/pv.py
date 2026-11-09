@@ -294,7 +294,7 @@ class PV:
             if self.ended_transaction != session["external_transaction_id"]:
                 self.ended_transaction = session["external_transaction_id"]
                 self.checkpoint()
-        if not self.grid.eligible():
+        if not self.grid.eligible() or self.grid.hardware_enabled() is not True:
             self.budget.interrupt()
         if not self.scheduled():
             if self.timer:
