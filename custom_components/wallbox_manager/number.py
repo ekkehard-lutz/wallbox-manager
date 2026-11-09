@@ -175,39 +175,16 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
                     self.async_on_remove(
                         self.observed.watch(("capability", scope, role), self.changed)
                     )
-        if self.role in (
-            "desired_charging_power",
-            "allowed_current_1p",
-            "allowed_current_2p",
-            "allowed_current_3p",
-        ):
+        if self.role.startswith("allowed_current_"):
             previous = await self.async_get_last_state()
             if (
                 previous
                 and previous.state not in ("unknown", "unavailable")
-                and NUMBERS[self.role][0]
-                not in self.settings.profiles.get(self.settings.key, {})
+                and self.role not in self.settings.profiles.get(self.settings.key, {})
             ):
-                try:
-                    if self.role.startswith("allowed_current_"):
-                        self.settings.values[NUMBERS[self.role][0]] = (
-                            previous.attributes.get("exact_current_limit_a")
-                            or previous.state
-                        )
-                        return
-                    value = self.settings.validate(
-                        self.role,
-                        previous.attributes.get("exact_current_limit_a")
-                        or previous.state,
-                    )
-                    self.settings.values[NUMBERS[self.role][0]] = (
-                        str(Fraction(previous.attributes["exact_current_limit_a"]))
-                        if self.role.startswith("allowed_current_")
-                        and previous.attributes.get("exact_current_limit_a")
-                        else value
-                    )
-                except ValueError, TypeError:
-                    pass
+                self.settings.values[self.role] = (
+                    previous.attributes.get("exact_current_limit_a") or previous.state
+                )
 
     async def async_set_native_value(self, value):
         await self.settings.set(self.role, value)

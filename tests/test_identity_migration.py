@@ -194,6 +194,9 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
             "power_kw": 7.2,
             "min_soc": 33,
             "legacy_soc_targets": {"x": 3},
+            "target_w": 51000,
+            "approximation": "up",
+            "optimum_max_discharge_w": 1,
             "foreign": "preserve",
         }
     }
@@ -203,18 +206,31 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
     settings = entry.runtime_data.settings
     assert settings.get("charging_profile") == "PV_OPTIMUM"
     assert settings.get("soll_power") == 7.2
+    assert settings.get("power_approximation") == "nearest"
+    assert (
+        not {"target_w", "approximation", "optimum_max_discharge_w"}
+        & settings.values.keys()
+    )
+    assert not {
+        "desired_charging_power",
+        "pv_approximation",
+        "optimum_max_discharge_w",
+    } & {e.role for e in entities(ha, entry)}
     migrated = await store.async_load()
     assert {k: migrated[key][k] for k in saved[key]} == saved[key]
     assert migrated[key]["grid_approved"]["power_kw"] == 7.2
+    discovery = next(e for e in entities(ha, entry) if e.role == "discovery")
+    assert discovery.options == ["unknown", "verified", "unsupported", "degraded"]
     await settings.set("soll_power", 6.8)
     await settings.set("charging_profile", "NETZ")
     await settings.set("grid_duration", "12:34")
-    await settings.set("pv_approximation", "up")
+    await settings.set("power_approximation", "up")
     restored = Settings(
         ha, entry, entry.runtime_data.state.binding, store, await store.async_load()
     )
     assert restored.get("grid_duration") == 45240
     assert restored.get("soll_power") == 6.8
+    assert restored.get("power_approximation") == "up"
     assert (await store.async_load())[key]["foreign"] == "preserve"
     assert (await store.async_load())[key]["legacy_soc_targets"] == {"x": 3}
     for role, value in (
@@ -223,6 +239,9 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
         ("grid_duration", "1:78"),
         ("charging_profile", "BAD"),
         ("soll_soc_speicher", 42.5),
+        ("desired_charging_power", 100),
+        ("pv_approximation", "down"),
+        ("optimum_max_discharge_w", 100),
     ):
         with pytest.raises(ValueError):
             await settings.set(role, value)
@@ -311,7 +330,6 @@ async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
             "6.3333333333",
             {"exact_current_limit_a": "19/3"},
         ),
-        ("number", "desired_charging_power", "7200", {}),
         ("select", "power_approximation", "up", {}),
     ):
         registered = er.async_get(ha).async_get_or_create(
@@ -340,7 +358,6 @@ async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
         state.observe(generation, ("capability", scope, role), value, "inventory")
     await ha.async_block_till_done()
     assert settings.get("allowed_current_1p") == "19/3"
-    assert settings.get("desired_charging_power") == 7200
     assert settings.get("power_approximation") == "up"
     current = next(e for e in entities(ha, entry) if e.role == "allowed_current_1p")
     assert current.entity_id == "number.historical_allowed_current_1p"

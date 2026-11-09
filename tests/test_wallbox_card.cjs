@@ -30,9 +30,9 @@ function load(clock={}) {
 }
 function states(entry='E') {
   const result = {};
-  for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',pv_approximation:'down',
+  for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',
     charge_action:'unknown',charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
-    grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',optimum_max_discharge_w:'3000',estimated_daily_house_consumption_kwh:'12'})) {
+    grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',estimated_daily_house_consumption_kwh:'12'})) {
     result[`${entry}.${role}`] = {state:value,attributes:{wallbox_manager_entry:entry,wallbox_manager_role:role,wallbox_manager_scope:'connector',station_id:`station-${entry}`,
       options:role==='charging_profile'?['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']:undefined,min:0,max:100}};
   }
@@ -874,7 +874,7 @@ test('five editors and their controls are absent for every profile',()=>{
   const data=batteryStates(); const {card:c}=card(data);
   for (const profile of ['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']) {
     data['E.charging_profile'].state=profile; c.hass=c._hass;
-    for (const role of ['optimum_lower_soc','optimum_upper_soc','optimum_max_discharge_w','estimated_daily_house_consumption_kwh','soll_soc_speicher']) {
+    for (const role of ['optimum_lower_soc','optimum_upper_soc','estimated_daily_house_consumption_kwh','soll_soc_speicher']) {
       assert.doesNotMatch(c.shadowRoot.html,new RegExp(`id="${role}(?:-|\\")`));
     }
   }

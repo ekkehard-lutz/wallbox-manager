@@ -98,7 +98,7 @@ class Reading(WallboxEntity, SensorEntity):
         if role in STATES or role in ("control_authority", "discovery"):
             self._attr_device_class = "enum"
             self._attr_options = (
-                ["unknown", "advertised", "verified", "unsupported", "degraded"]
+                ["unknown", "verified", "unsupported", "degraded"]
                 if role == "discovery"
                 else STATES.get(role, ["unknown", "local", "remote"])
             )

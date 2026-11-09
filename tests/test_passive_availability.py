@@ -176,6 +176,7 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
             "foreign": {"keep": True},
             "pv_stop_delay": 123,  # PV-TUNE-10: removed, never converted to cycles.
             "pv_decrease_delay_cycles": 3,
+            "power_smoothing_window": 55,
         },
     )
     await ha.async_block_till_done()
@@ -187,19 +188,24 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
     sections = {key.schema: value for key, value in schema.items()}
     general = sections["general"].schema.schema
     fields = {key.schema: value for key, value in general.items()}
+    regulation = {key.schema for key in sections["regulation"].schema.schema}
+    assert "power_smoothing_window" not in regulation
+    assert "pv_diagnostic_logging" not in fields
     assert fields["leistung_pv"].config["domain"] == ["sensor"]
     assert fields["min_soc_speicher"].config["domain"] == ["number", "input_number"]
     assert fields["soc_speicher_aktuell"].selector_type == "entity"
     result = await flow.async_step_init(
         {
             "general": {"diagnostic_level": "3"},
-            "regulation": {"pv_startup_hold_cycles": 20},
+            "regulation": {"pv_startup_hold_cycles": 20, "power_smoothing_window": 99},
         }
     )
     assert result["data"]["leistung_pv"] == "sensor.pv"
     assert result["data"]["foreign"] == {"keep": True}
     assert "pv_stop_delay" not in result["data"]
     assert result["data"]["pv_decrease_delay_cycles"] == 3
+    assert result["data"]["power_smoothing_window"] == 55
+    assert settings.get("power_smoothing_window") is None
     ha.config_entries.async_update_entry(entry, options=result["data"])
     await ha.async_block_till_done()
     assert settings.get("pv_startup_hold_cycles") == 20
@@ -215,7 +221,10 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
 async def test_diagnostic_levels_bounded_and_fail_safe(ha, caplog, monkeypatch, level):
     entry = await ha.install()
     listener = entry.runtime_data.server
-    ha.config_entries.async_update_entry(entry, options={"diagnostic_level": level})
+    options = {"pv_diagnostic_logging": True}
+    if level:
+        options["diagnostic_level"] = level
+    ha.config_entries.async_update_entry(entry, options=options)
     caplog.clear()
     listener.diagnostic(0, "error", reason="test")
     for _ in range(10):
