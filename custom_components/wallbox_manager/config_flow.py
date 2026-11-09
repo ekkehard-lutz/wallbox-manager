@@ -141,39 +141,32 @@ class Options(config_entries.OptionsFlow):
             )
         errors = {}
         if user_input is not None:
-            data = {**user_input.get("general", {}), **user_input.get("regulation", {})}
-            # Support callers of the previous flat form as well.
-            data.update(
-                {
-                    k: v
-                    for k, v in user_input.items()
-                    if k not in ("general", "regulation")
-                }
-            )
+            general_input = user_input.get("general", {})
+            regulation_input = user_input.get("regulation", {})
             try:
-                if "diagnostic_level" in data:
-                    level = int(data["diagnostic_level"])
+                if "diagnostic_level" in general_input:
+                    level = int(general_input["diagnostic_level"])
                     if str(level) not in ("0", "1", "2", "3"):
                         raise ValueError("Invalid level")
                     options["diagnostic_level"] = level
                 # Absent fields are preserved; an explicit empty selection clears.
                 for key in SOURCES:
-                    if key in data:
-                        if data[key]:
-                            options[key] = data[key]
+                    if key in general_input:
+                        if general_input[key]:
+                            options[key] = general_input[key]
                         else:
                             options.pop(key, None)
                 for key in REGULATION_FIELDS:
-                    if key in data:
+                    if key in regulation_input:
                         if runtime:
-                            runtime.settings.validate(key, data[key])
+                            runtime.settings.validate(key, regulation_input[key])
                         else:
-                            number_value(key, data[key])
+                            number_value(key, regulation_input[key])
                         options[key] = regulation[
                             next(
                                 marker for marker in regulation if marker.schema == key
                             )
-                        ](data[key])
+                        ](regulation_input[key])
                 return self.async_create_entry(title="", data=options)
             except ValueError, TypeError, OverflowError, vol.Invalid:
                 errors["base"] = "invalid_settings"
