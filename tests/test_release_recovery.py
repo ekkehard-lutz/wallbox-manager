@@ -140,10 +140,10 @@ async def test_recovery_zero_is_fenced_before_wire_dispatch(ha, monkeypatch, fen
         entered, release = asyncio.Event(), asyncio.Event()
         original = grid.dispatch_point
 
-        async def delayed(point, epoch, adapter, transaction):
+        async def delayed(point, epoch, adapter, transaction, **kwargs):
             entered.set()
             await release.wait()
-            return await original(point, epoch, adapter, transaction)
+            return await original(point, epoch, adapter, transaction, **kwargs)
 
         monkeypatch.setattr(grid, "dispatch_point", delayed)
         await session(station)

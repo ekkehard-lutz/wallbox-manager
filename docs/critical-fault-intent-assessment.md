@@ -28,16 +28,17 @@ physical proof, per-dispatch safety checks and freshness requirements while
 retaining intent fencing.
 
 [PV-ARCH-07](specifications/pv-regulation.md#pv-arch-07--immediate-safety-and-asynchronous-ocpp-execution-approved)
-calls for prompt invalidation independent of the PV tick when a critical
-fault is reported. Its precedence paragraph explicitly retains prompt
-authority, connection and intent fencing. On that narrow reading, an explicit
-fault that represents Stationary's `EV_FAILURE` should invalidate the pending
+called for prompt invalidation independent of the PV tick when a critical
+fault is reported. The prior precedence paragraph retained prompt authority,
+connection and intent fencing. On that reading, an explicit fault that
+represents Stationary's `EV_FAILURE` should invalidate the pending
 positive WBM decision and its result context. An existing observation can
 remain historical evidence. A fault report does not prove 0 A, end a session,
 revoke authority or change hardware permission. The historical safety wording
 in PV-QA-02 row 16 remains superseded. Neither the older wording nor the
-November LAN decision expands WBM's physical responsibilities. This
-assessment leaves the requirement text intact.
+November LAN decision expands WBM's physical responsibilities. The November
+operator decision below supersedes the earlier proposal for a held-fault
+restriction.
 
 ## What Stationary reports
 
@@ -67,7 +68,7 @@ It retained the cable on `EV_FAILURE`, produced `Faulted`, and yielded
 Repeating the failed state yielded no event. Remote and permission remained
 on in that snapshot. The probe performed no Stationary I/O.
 
-## What WBM does
+## What WBM did on the assessed baseline
 
 - [OCPP StatusNotification](../custom_components/wallbox_manager/ocpp.py#L354)
   supplies a scoped, timestamped observation. The
@@ -188,25 +189,22 @@ documents, including the approved network decision and its commissioning
 references. Git diff whitespace checks passed. A byte comparison against
 develop verified that every existing non-documentation file is identical.
 
-## Recommendation and operator decision
+## Approved operator decision
 
-**CHANGE REQUIRED.** Subject to separate approval, use the existing Grid
-command epoch to supersede the pending positive proposal, any positive retry
-of that proposal and its ACK/readback completion on the transition into a
-valid, current-generation, correctly scoped `Faulted` observation. Keep
-existing independent observations, explicit Stop, required 0 A policy,
-hardware permission, Remote authority, economics, release state and NETZ
-business deadlines. Avoid using the generic change path in a way that
-immediately resubmits the old proposal or cancels an active NETZ expiry.
-Add simulated ordering coverage at the pre-wire and post-response boundaries.
-The fault edge itself sends no command and adds no polling or safety timer.
+On 9 November 2026 the operator approved the narrower F5 interpretation of
+[PV-ARCH-07](specifications/pv-regulation.md#pv-arch-07--immediate-safety-and-asynchronous-ocpp-execution-approved).
+A new, correctly scoped and current-generation `Faulted` observation
+invalidates pending positive intent, its retries and its delayed results.
+The earlier proposal to prohibit all positive commands while `Faulted` is
+held is superseded. Ordinary later NETZ and PV decisions can still propose a
+positive point under their existing authority, permission, transaction,
+release and business rules. A subsequent `Available` or `Occupied` observation
+updates connector status without restoring superseded intent.
 
-Before implementation, the operator should confirm that this Stationary
-`Faulted` mapping is the WBM policy trigger under PV-ARCH-07. Separately
-decide whether a later independent positive decision should wait while
-`Faulted` is held, and how it becomes eligible after an explicit clear.
-This assessment establishes the gap for already pending intent and provides
-no evidence for automatically revoking release, synthesizing a physical
-pause, imposing a recovery delay or reacting to `Unavailable` as a critical
-fault. Stationary retains exclusive physical and electrical safety
-responsibility.
+The fault transition emits no command and establishes no physical current.
+WBM distinguishes requested intent, protocol acceptance, and applied-point
+confirmation from a valid scoped readback. Stationary remains exclusively
+responsible for physical and electrical safety.
+
+See the [F5 implementation review](critical-fault-intent-review.md) for the
+runtime changes and permanent replay evidence.

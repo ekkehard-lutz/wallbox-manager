@@ -557,6 +557,8 @@ async def test_one_clock_only_and_inactive_has_no_periodic_regulation(ha):
         assert len([h for h in clock.calls if not h.cancelled]) == 1
         assert station.amps == 6
         await g.stop_release()
+        await g.task
+        assert station.amps == 0
         count = len(station.profiles)
         await clock.advance(500)
         await pv.task

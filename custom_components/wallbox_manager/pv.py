@@ -645,15 +645,16 @@ class PV:
             g.publish()
             return
         if not g.valid(epoch, adapter, tx):
-            self.problem(planning_error or "control_unavailable", powers=powers)
-            g.publish()
+            if not g.fault_superseded(epoch):
+                self.problem(planning_error or "control_unavailable", powers=powers)
+                g.publish()
             return
         if self.state.value(g.listener.control.key("ChargingEnabled")) is not True:
             self.problem(planning_error or "hardware_disabled", powers=powers)
             g.publish()
             return
         current = None if g.point_uncertain else g.current_point()
-        busy = bool(g.task and not g.task.done())
+        busy = g.execution_pending()
         pending = busy or bool(g.point_uncertain)
         battery = (
             bool(self.mapping.get("soc_speicher_aktuell"))
@@ -685,7 +686,7 @@ class PV:
                         await self.persist()
                     except OSError:
                         self.problem("journal_write_failed", powers=powers)
-                    if g.valid(epoch, adapter, tx):
+                    if g.valid(epoch, adapter, tx, zero=True):
                         from .pv_core import Decision
 
                         d = Decision(
@@ -874,7 +875,10 @@ class PV:
                     return  # Failed storage inhibits positives, never required OFF.
             else:
                 self.problem(None, powers=powers)
-            if not g.valid(epoch, adapter, tx) or not self.regulation_active():
+            if (
+                not g.valid(epoch, adapter, tx, zero=d.point.amps == 0)
+                or not self.regulation_active()
+            ):
                 return
             self.decision_event(
                 d, powers=powers, pause=pause, hysteresis=config["soc_hysterese"]
@@ -917,7 +921,7 @@ class PV:
             self.pending_restart = None
             if g.requested and g.requested.amps > 0 and g.task and not g.task.done():
                 g.invalidate()  # supersede an in-flight positive proposal
-        if g.task and not g.task.done() and g.task_epoch == g.epoch:
+        if g.execution_pending():
             return
         if (
             current

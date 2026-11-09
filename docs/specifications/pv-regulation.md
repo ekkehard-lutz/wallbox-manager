@@ -126,9 +126,28 @@ When WBM only observes, when authority is absent, or when no automatic PV contro
 
 ### PV-ARCH-07 – Immediate safety and asynchronous OCPP execution [APPROVED]
 
-**18 October precedence:** WBM-ARCH-01/09/11 supersedes manager hardware safety checks and mandatory physical proof below. Prompt authority/connection/intent fencing and truthful command outcomes remain; no mandatory fresh readback before requests.
+**Approved F5 clarification, 9 November 2026.** When the canonical store
+accepts a new transition to `Faulted` from `StatusNotification` for the selected
+connector in the current observation generation, WBM promptly invalidates
+earlier pending positive NETZ and PV intent, independently of the regulation
+tick. This covers queued proposals, associated retries, and delayed command
+acknowledgments and applied-point readbacks. Duplicate, stale, out-of-scope
+and previous-generation reports do not trigger the transition. `Unavailable`,
+unknown status and request-specific failures are separate observations or
+outcomes. Authority loss, permission loss, transaction replacement and
+transport lifecycle retain their existing fences.
 
-Loss of control authority, OCPP disconnect and critical hardware/safety faults must invalidate control readiness promptly, **independent of the PV regulation tick**. The station remains responsible for physical CP and local protections. A normal unplugging/status event can be incorporated into the next PV decision, but queued/new commands still have to pass the existing live pre-dispatch authority, permission, connection, transaction, intent and safety checks. OCPP CALL/CALLRESULT/ERROR handling, command serialization, delayed acknowledgements, readback and confirmation of the **actual physical operating point** are asynchronous and separate from the regulator; protocol acceptance never substitutes for physical proof.
+The fault transition itself sends no command and establishes no physical
+operating point. Operator Stop, policy zero, economic state, hardware
+permission, authority, manager release, transaction and NETZ business
+deadlines retain their independent rules. An ordinary later NETZ or PV
+decision may propose a positive point while `Faulted` is held, subject to
+the existing policy and execution conditions. A subsequent connector
+status update cannot restore superseded intent. Stationary exclusively
+owns physical and electrical safety and decides whether to execute each
+proposal. OCPP `Accepted` records protocol acceptance. Only a valid
+appropriately scoped readback confirms an applied point. A missing or
+unsuccessful read leaves application unconfirmed.
 
 WebSocket Ping/Pong already supplies transport liveness; choosing to ping only after inactivity is an optional optimization, **not** a new correctness precondition. Transport liveness is distinct from the assumed last-value-held ordinary metering contract and never proves a new physical phase/current change or an applied command. Boot, disconnect and reconnect invalidate or resynchronize affected execution evidence. Preserve PV-OCPP-01–04, verified phase switching, CP lockouts, response/measurement causality, existing SoC/FAST/BALANCE safeguards and 50 Wh accounting/recovery restrictions; no new automatic authority takeover or unsafe restart.
 
@@ -719,7 +738,7 @@ Evidence: PDF pp. 99–119, 235–252, 529–535; `docs/pv-surplus-profile.md`, 
 13. PV-OCPP-04 acceptance matrix: permission without transaction/preparation; retained legal current; normal live vehicle-absent standby; CP-blocked/probe/disconnection evidence; all restart/reconnect cases; explicit OFF, transaction-scoped persistence and unresolved interface limitations. Keep command request, ACK, confirmed state, physical observation and dashboard presentation separate in verification.
 14. PV-ARCH-05/06/08: replay repeated/equal and rapidly changing OCPP and HA measurements with WBM observing only or without authority; no background PV regulation, redundant OCPP targets or expensive all-entity reactions. Compare HA Core CPU WBM enabled/disabled and record profiler evidence, not an invented numeric threshold.
 15. PV-ARCH-06: while PV control is active, apply multiple input updates and an unplugging event within one interval; verify exactly one per-tick PV decision, latest consistent snapshot, **no added BALANCE smoothing**, deduplicated commands and preserved FAST/BALANCE asymmetry, SoC/economic decisions and phase-switch lockout.
-16. PV-ARCH-07: inject authority revocation, OCPP disconnect, critical fault and late ACKs between ticks; verify prompt executor invalidation, per-dispatch live safety fences and independent physical feedback. Verify reconnect/readback without downtime accounting or accidental restart.
+16. PV-ARCH-07: inject authority revocation, OCPP disconnect, a scoped critical fault and late ACKs between ticks. Verify pending-intent invalidation, independent applied-point readback, and continued eligibility for later ordinary proposals under held fault. Verify reconnect/readback without downtime accounting or accidental restart.
 17. PV-BAL-03/07: validate **no smoothing in the new BALANCE storage-flow loop** regardless of legacy N; charge/discharge `(positive,0)`, `(0,positive)`, `(0,0)` and `(positive,positive)→effective 0 W`, missing input validity, and no additional Modbus/HA requests. Any remaining historical seconds-based smoothing must not be reinterpreted as cycles or silently applied to BALANCE.
 18. PV-ECO-09/05: estimate Wh from latest valid raw grid import at each eligible tick; request OFF at first detected configured Wh-budget crossing (default 50 Wh), permit unavoidable physical delay and retain >15 s reset, history and restart checks. Repeated equal values are not duplicate charge events; extended unchanged valid input must count, actual unavailability or downtime must not count.
 19. PV-ARCH-03/PV-ECO-05: make Fronius inverter, Smart Meter and BYD input values `unknown`/`unavailable` independently; affected PV profile becomes ineligible, independent NETZ remains functional under its own OCPP/authority prerequisites, and configured battery-free PV_SURPLUS remains possible with valid grid/EV inputs. No invented zero value or automatic NETZ switch.

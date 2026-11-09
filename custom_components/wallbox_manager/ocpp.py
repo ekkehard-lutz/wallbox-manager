@@ -269,6 +269,13 @@ class Adapter(ChargePoint):
                 value=self.state.value(key),
             )
             if key[2] == "connector_state":
+                if (
+                    source == "ocpp2.1:StatusNotification"
+                    and key[1] == self.state.binding
+                    and self.state.value(key) == "faulted"
+                    and self.listener.grid is not None
+                ):
+                    self.listener.grid.connector_faulted()
                 self.state.publish(("station", (key[1][0], None, None), "discovery"))
         if accepted and key[2] in (
             "control_authority",
