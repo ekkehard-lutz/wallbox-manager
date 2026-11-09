@@ -11,7 +11,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
 from .migration import target
-from .settings import NUMBERS, OBSOLETE_PV, REGULATION, regulation_value
+from .settings import NUMBERS, OBSOLETE_PV, REGULATION, number_value
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -167,9 +167,10 @@ class Options(config_entries.OptionsFlow):
                             options.pop(key, None)
                 for key in REGULATION_FIELDS:
                     if key in data:
-                        regulation_value(key, data[key])
                         if runtime:
                             runtime.settings.validate(key, data[key])
+                        else:
+                            number_value(key, data[key])
                         options[key] = regulation[
                             next(
                                 marker for marker in regulation if marker.schema == key

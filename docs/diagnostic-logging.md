@@ -13,10 +13,10 @@ Open **Settings → Devices & services → Wallbox Manager → Configure** and c
 | 3 — Full diagnostic trace / Vollständige Diagnosespur | Complete cyclic PV records and detailed recovery stages, plus lifecycle events. |
 
 The persisted integer `diagnostic_level` controls logging. An old
-`pv_diagnostic_logging` value is ignored. Options-only level changes take effect live without control
-reload, OCPP reconnect or commands. The default is 0; no card control is
-needed. The level applies to PV, recovery, physical state, ownership and battery
-reserve diagnostics.
+`pv_diagnostic_logging` value is ignored. Options-only level changes take effect
+live without control reload, OCPP reconnect or commands. The default is 0. The
+level applies to PV, recovery, physical state, ownership and battery reserve
+diagnostics.
 
 Deduplication is centralized per entry, connector and event family. Identity uses
 mode/phase/reason, discrete phase/current operating points, permission and control
@@ -137,14 +137,15 @@ at runtime. The repository does not contain the user's live HA configuration.
 | Battery SoC (%) | `soc_speicher_aktuell` | Shared policy for all three PV profiles; optional for PV_SURPLUS |
 | Minimum reserve (%) | `min_soc_speicher` | Existing battery policy reader; mapping is shown, but this separate reader is not a regulator power sample |
 | Battery discharge (W) | `storage_discharge_power` | FAST in all applicable profiles; also validated by PV_OPTIMUM in BALANCE |
+| Maximum discharge (W) | Profile setting `optimum_max_discharge_w` | Configured limit, not measured discharge or a dynamic BMS limit |
 | Battery charge / signed power | No existing mapping | Explicit null; cannot infer charge from nonnegative discharge |
 | Dynamic battery discharge limit | No existing provider | Explicit null |
 | Grid import / export (W) | `grid_import_power`, `grid_export_power` | FAST in all applicable profiles; also validated by PV_OPTIMUM in BALANCE |
 | Signed grid power (W) | Derived from both consumed inputs | Import minus export; null if either input is unavailable or unused |
-| PV power (W) | `leistung_pv` | Current valid PV input for applicable profiles |
-| Total consumption (W) | `leistung_verbraucher` | Current valid total consumption, including the selected EV |
+| PV power (W) | `leistung_pv` | Existing raw and smoothed inputs for all PV power paths |
+| Total consumption (W) | `leistung_verbraucher` | Includes selected EV; existing raw and smoothed inputs |
 | Selected EV power (W) | Scoped `session_power` sensor | Existing entry/station/EVSE/connector/runtime identity selection |
-| Non-EV load / surplus (W) | Existing calculation | `site_load_w = max(0, total consumption - measured EV)`; surplus uses current valid inputs` |
+| Non-EV load / surplus (W) | Existing calculation | `site_load_w = smoothed consumption - measured EV`; `surplus_w = smoothed PV - site_load_w` |
 | Capacity / remaining forecast | `storage_capacity`, `remaining_pv_energy` | Existing Optimum planner and validation; normalized Wh |
 
 In particular, FAST under PV_MAXIMUM now exposes its actual battery and grid
@@ -172,6 +173,8 @@ An unsuccessful later evaluation does not inherit earlier calculation values.
 
 | Field | Meaning |
 | --- | --- |
+| `calculations.raw_pv_power_w`, `smoothed_pv_power_w` | Actual raw and averaged PV input |
+| `calculations.raw_consumption_power_w`, `smoothed_consumption_power_w` | Actual raw and averaged total consumption |
 | `calculations.measured_power_w` | Selected EV measurement; not a setpoint |
 | `calculations.site_load_w`, `surplus_w` | Existing calculated non-EV load and surplus, including negative/inconsistent results |
 | `request_w` | Returned regulator/policy request before discrete selection and minimum hold |

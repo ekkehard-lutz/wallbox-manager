@@ -334,15 +334,36 @@ async def test_obsolete_keys_entities_and_option_fields_are_removed_only(ha):
     assert all(key not in entry.options for key in OBSOLETE_PV)
     assert all(e.role not in OBSOLETE_PV for e in entities(ha, entry))
     assert not set(OBSOLETE_PV) & NUMBERS.keys()
-    for name in ("strings.json", "translations/en.json", "translations/de.json"):
 
-        def load_text(name=name):
-            with open("custom_components/wallbox_manager/" + name) as handle:
-                return json.dumps(json.load(handle))
+    def load_locale(name):
+        with open("custom_components/wallbox_manager/" + name) as handle:
+            return json.load(handle)
 
-        text = await ha.async_add_executor_job(load_text)
+    def shape(value):
+        return (
+            {key: shape(child) for key, child in value.items()}
+            if isinstance(value, dict)
+            else type(value)
+        )
+
+    source, en, de = [
+        await ha.async_add_executor_job(load_locale, name)
+        for name in ("strings.json", "translations/en.json", "translations/de.json")
+    ]
+    assert source == en
+    assert shape(en) == shape(de)
+    for locale in (source, en, de):
+        text = json.dumps(locale)
         assert all(key not in text for key in OBSOLETE_PV)
         assert "storage_charge_power" in text
+        assert (
+            not {"desired_charging_power", "optimum_max_discharge_w"}
+            & locale["entity"]["number"].keys()
+        )
+        assert "pv_approximation" not in locale["entity"]["select"]
+        assert "advertised" not in locale["entity"]["sensor"]["discovery"]["state"]
+        regulation = locale["options"]["step"]["init"]["sections"]["regulation"]["data"]
+        assert "power_smoothing_window" not in regulation
 
 
 @pytest.mark.parametrize(

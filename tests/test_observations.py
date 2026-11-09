@@ -226,7 +226,7 @@ async def test_all_observations_hold_without_expiry_callbacks(ha, monkeypatch, e
     # even after prolonged silence; a second distinct report removes it.
     later = Later.now(UTC)
     state.observe(generation, phase, None, "NotifyEvent", later)
-    assert state.value(phase) == state.last_observed_value(phase) == 3
+    assert state.value(phase) == 3
     state.observe(
         generation, phase, None, "NotifyEvent", later + timedelta(microseconds=1)
     )

@@ -5,12 +5,14 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
-from conftest import entities
+from conftest import config, entities
+from homeassistant.components import number
 from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_report_event
 
-from custom_components.wallbox_manager import session, store
-from custom_components.wallbox_manager.config_flow import Options
+from custom_components.wallbox_manager import async_unload_entry, session, store
+from custom_components.wallbox_manager.config_flow import Options, diagnostic_level
 
 
 async def test_retained_observation_reconnect_and_exact_energy(ha):
@@ -220,14 +222,86 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
     assert "leistung_pv" not in cleared["data"]
 
 
+@pytest.mark.parametrize("loaded", [False, True])
+async def test_all_regulation_options_and_optional_numbers_remain_editable(ha, loaded):
+    entry = config()
+    ha.config_entries._entries[entry.entry_id] = entry
+    if loaded:
+        await ha.install(entry)
+    flow = Options()
+    flow.hass = ha
+    flow.handler = entry.entry_id
+    values = {
+        "regulation_interval": 7,
+        "soc_hysterese": 3,
+        "pv_increase_interval_cycles": 4,
+        "pv_startup_hold_cycles": 12,
+        "pv_decrease_delay_cycles": 2,
+        "pv_grid_deadband_w": 125,
+        "pv_grid_import_budget_wh": 41.5,
+        "pv_ev_uptake_threshold_pct": 55,
+        "pv_fast_restart_household_load_limit_w": 600,
+    }
+    form = await flow.async_step_init()
+    sections = {key.schema: value for key, value in form["data_schema"].schema.items()}
+    assert {key.schema for key in sections["regulation"].schema.schema} == values.keys()
+    result = await flow.async_step_init({"regulation": values})
+    assert result["data"] == values
+    for key, value in (
+        ("regulation_interval", True),
+        ("regulation_interval", 301),
+        ("pv_increase_interval_cycles", 1.5),
+        ("pv_grid_import_budget_wh", 0),
+    ):
+        invalid = await flow.async_step_init({"regulation": {key: value}})
+        assert invalid["errors"] == {"base": "invalid_settings"}
+    context = await flow.async_step_init({"regulation": {"soc_hysterese": 6}})
+    if loaded:
+        assert context["errors"] == {"base": "invalid_settings"}
+    else:
+        assert context["data"]["soc_hysterese"] == 6
+
+    ha.config_entries.async_update_entry(entry, options=result["data"])
+    if loaded:
+        await ha.async_block_till_done()
+    else:
+        await ha.install(entry)
+    assert {key: entry.runtime_data.settings.get(key) for key in values} == values
+
+    registry = er.async_get(ha)
+    for key in values:
+        item = next(
+            item
+            for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+            if item.unique_id.endswith(f',"{key}"]')
+        )
+        assert item.disabled_by == er.RegistryEntryDisabler.INTEGRATION
+        registry.async_update_entity(item.entity_id, disabled_by=None)
+    await async_unload_entry(ha, entry)
+    await ha.install(entry)
+    assert await number.async_setup(ha, {})
+    updates = {key: value + 1 for key, value in values.items()}
+    for key, value in updates.items():
+        entity = next(e for e in entities(ha, entry) if e.role == key)
+        await ha.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": entity.entity_id, "value": value},
+            blocking=True,
+        )
+        assert entity.native_value == value
+    assert entry.options == updates
+
+
 @pytest.mark.parametrize("level", [0, 1, 2, 3])
 async def test_diagnostic_levels_bounded_and_fail_safe(ha, caplog, monkeypatch, level):
     entry = await ha.install()
     listener = entry.runtime_data.server
     options = {"pv_diagnostic_logging": True}
-    if level:
-        options["diagnostic_level"] = level
-    ha.config_entries.async_update_entry(entry, options=options)
+    assert diagnostic_level(options) == 0
+    ha.config_entries.async_update_entry(
+        entry, options={**options, "diagnostic_level": level}
+    )
     caplog.clear()
     listener.diagnostic(0, "error", reason="test")
     for _ in range(10):
@@ -356,13 +430,13 @@ async def test_phase_single_invalid_preserves_canonical_value(
         original, reported_at=start + timedelta(microseconds=1), invalid_count=1
     )
     assert phase.available and phase.native_value == 3
-    assert state.last_observed_value(key) == 3
+    assert state.value(key) == 3
     assert state.value(key) == 3
     assert ha.states.get(phase.entity_id) is published
     assert not hasattr(phase, "_expiry")
     report("RST" if recovery == 3 else "Rxx", 2)
     assert state.value(key) == recovery
-    assert state.last_observed_value(key) == recovery
+    assert state.value(key) == recovery
     assert state.observations[key].invalid_count == 0
     assert state.observations[key].observed_at == start + timedelta(microseconds=2)
     await ha.async_block_till_done()
@@ -416,7 +490,7 @@ async def test_phase_two_distinct_invalid_reports_only_publish_availability(ha, 
     assert phase.available and state.value(key) == 3
     report("unrecognized", 2)
     assert not phase.available and phase.native_value is None
-    assert state.last_observed_value(key) is None
+    assert state.value(key) is None
     assert state.observations[key].value == 3
     assert state.observations[key].observed_at == start
     for i in range(3, 2003):
@@ -459,9 +533,9 @@ def test_phase_report_watermark_duplicates_conflicts_and_ordering():
     assert not observe(None, 1)
     assert not observe(1, 1)
     assert state.observations[key] is first_invalid
-    assert state.last_observed_value(key) == state.value(key) == 3
+    assert state.value(key) == 3
     assert observe(None, 3)
-    assert state.last_observed_value(key) is None
+    assert state.value(key) is None
     assert not observe(3, 2)
     assert not observe(None, 3)
     assert observe(1, 4)
@@ -469,7 +543,7 @@ def test_phase_report_watermark_duplicates_conflicts_and_ordering():
     assert observe(
         3, 4
     )  # Conflicting values at one timestamp count as one invalid report.
-    assert state.last_observed_value(key) == state.value(key) == 1
+    assert state.value(key) == 1
     assert state.observations[key].invalid_count == 1
     assert not observe(3, 4)
     assert not observe(1, 4)
@@ -488,7 +562,7 @@ async def test_phase_initial_invalid_and_generation_fencing(ha, boot):
     phase = next(e for e in entities(ha, entry) if e.key == key)
     assert not phase.available and phase.native_value is None
     assert state.observe(gen, key, None, "invalid")
-    assert state.value(key) is None and state.last_observed_value(key) is None
+    assert state.value(key) is None
     assert state.observe(gen, key, 3, "phase")
     valid = state.observations[key]
     assert state.observe(gen, key, None, "invalid")
@@ -527,7 +601,7 @@ async def test_phase_invalid_sequences_are_entry_local(ha):
     original = b.observations[kb]
     a.observe(ga, ka, None, "invalid")
     a.observe(ga, ka, None, "invalid")
-    assert a.last_observed_value(ka) is None and a.value(ka) is None
+    assert a.value(ka) is None
     assert b.observations[kb] is original
-    assert b.last_observed_value(kb) == b.value(kb) == 1
+    assert b.value(kb) == 1
     assert not b.observe(gb, ka, None, "foreign")

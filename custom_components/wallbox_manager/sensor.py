@@ -158,7 +158,7 @@ class Reading(WallboxEntity, SensorEntity):
         ):
             return True
         if self.role == "physical_phases":
-            return self.observed.last_observed_value(self.key) is not None
+            return self.observed.value(self.key) is not None
         return super().available
 
     @property
@@ -177,7 +177,7 @@ class Reading(WallboxEntity, SensorEntity):
                 case "protocol_version":
                     return "2.1" if state.connected else None
         if self.role == "physical_phases":
-            return state.last_observed_value(self.key)
+            return state.value(self.key)
         return state.value(self.key)
 
     @property

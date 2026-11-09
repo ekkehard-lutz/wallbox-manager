@@ -77,8 +77,8 @@ RETIRED_PROFILE_FIELDS = (
 )
 
 
-def regulation_value(role, value):
-    """Same finite bounds in HA options and direct Number service calls."""
+def number_value(role, value):
+    """Validate finite Number values and whole cycles for both HA edit paths."""
     if isinstance(value, bool):
         raise ValueError("Number required")
     value = float(Fraction(value))
@@ -453,14 +453,7 @@ class Settings:
 
     def validate(self, role, value):
         if role in NUMBERS:
-            _, _, minimum, maximum, _, _ = NUMBERS[role]
-            if isinstance(value, bool):
-                raise ValueError("Number required")
-            value = float(Fraction(value))
-            if not math.isfinite(value) or not minimum <= value <= maximum:
-                raise ValueError("Number outside supported range")
-            if role in REGULATION:
-                value = regulation_value(role, value)
+            value = number_value(role, value)
             if role == "soll_power":
                 from .grid_point import envelope, rounded_kw
 

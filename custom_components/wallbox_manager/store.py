@@ -136,7 +136,7 @@ class State:
         previous = self.observations.get(key)
         same_generation = previous and previous.generation == generation
         phase = key[0] == "station" and key[2] == "physical_phases"
-        before = self.last_observed_value(key) if phase else None
+        before = self.value(key) if phase else None
         latest = (previous.reported_at or previous.observed_at) if previous else None
         same_report_generation = (
             previous
@@ -200,7 +200,7 @@ class State:
                 observation.unit,
                 observation.status,
             )
-            or (phase and before != self.last_observed_value(key))
+            or (phase and before != self.value(key))
             or (
                 key[2] == "charging_state"
                 and idle_before != self.authentic_idle_current(key[1])
@@ -279,7 +279,3 @@ class State:
         ):
             return None
         return observation.value
-
-    def last_observed_value(self, key):
-        """Compatibility alias for the single canonical observed-value view."""
-        return self.value(key)
