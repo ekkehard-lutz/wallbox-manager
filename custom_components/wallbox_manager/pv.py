@@ -957,4 +957,6 @@ class PV:
         if self.checkpoints:
             await asyncio.gather(*self.checkpoints, return_exceptions=True)
         self.budget.interrupt()
-        await self.persist()
+        # Setup can be cancelled before recovery has loaded existing history.
+        if self.last_saved is not None:
+            await self.persist()

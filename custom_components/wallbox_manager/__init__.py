@@ -1,6 +1,7 @@
 """Wallbox Manager lifecycle, one independent OCPP entry per station."""
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from importlib import import_module
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
@@ -25,6 +26,44 @@ class EntryRuntime:
     grid: object
     battery: object
     pv: object
+    _shutdown: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
+
+    async def close(self):
+        if self._shutdown is None:
+            self._shutdown = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(self._shutdown)
+        except asyncio.CancelledError as cancelled:
+            # The lifecycle caller may go away while a durable write is in
+            # progress. Keep the old runtime owned until cleanup settles.
+            try:
+                await asyncio.shield(self._shutdown)
+            except Exception as error:
+                raise cancelled from error
+            raise
+
+    async def _close(self):
+        errors = []
+        # Fence dispatch and release the socket before the final journal save.
+        for close in (
+            self.grid.close,
+            self.battery.close,
+            self.server.stop,
+            self.pv.close,
+        ):
+            try:
+                await close()
+            except (Exception, asyncio.CancelledError) as error:
+                errors.append(error)
+        if self.state.session:
+            try:
+                await self.session_store.async_save(document(self.state))
+            except (Exception, asyncio.CancelledError) as error:
+                errors.append(error)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("Wallbox Manager shutdown failed", errors)
 
 
 async def async_setup(hass, config):
@@ -72,28 +111,29 @@ async def async_setup_entry(hass, entry):
         grid.known_transaction = state.session.get("external_transaction_id")
     battery = GridBattery(hass, entry, grid)
     pv = grid.pv = PV(hass, entry, grid)
-    entry.runtime_data = EntryRuntime(
+    runtime = entry.runtime_data = EntryRuntime(
         state, settings, server, session_store, grid, battery, pv
     )
-    await pv.start()
-    await battery.start()
+    forwarding = False
     try:
-        await server.start()
-    except OSError as exc:
-        await pv.close()
-        await grid.close()
-        await battery.close()
-        await server.stop()
-        raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
-    try:
+        await pv.start()
+        await battery.start()
+        try:
+            await server.start()
+        except OSError as exc:
+            raise ConfigEntryNotReady("Cannot bind OCPP listener") from exc
+        forwarding = True
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         await async_setup_assets(hass)
-    except BaseException:
-        await pv.close()
-        await grid.close()
-        await battery.close()
-        await server.stop()
-        await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    except BaseException as setup_error:
+        try:
+            try:
+                await runtime.close()
+            finally:
+                if forwarding:
+                    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        except (Exception, asyncio.CancelledError) as cleanup_error:
+            raise setup_error from cleanup_error
         raise
 
     async def options_updated(hass, updated_entry):
@@ -111,12 +151,7 @@ async def async_setup_entry(hass, entry):
     entry.async_on_unload(entry.add_update_listener(options_updated))
 
     async def stop(event):
-        await pv.close()
-        await grid.close()
-        await battery.close()
-        await server.stop()
-        if state.session:
-            await session_store.async_save(session.document(state))
+        await runtime.close()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop))
     return True
@@ -125,14 +160,7 @@ async def async_setup_entry(hass, entry):
 async def async_unload_entry(hass, entry):
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    await entry.runtime_data.pv.close()
-    await entry.runtime_data.grid.close()
-    await entry.runtime_data.battery.close()
-    await entry.runtime_data.server.stop()
-    if entry.runtime_data.state.session:
-        await entry.runtime_data.session_store.async_save(
-            document(entry.runtime_data.state)
-        )
+    await entry.runtime_data.close()
     return True
 
 
