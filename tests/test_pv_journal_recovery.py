@@ -10,7 +10,6 @@ from homeassistant.helpers.storage import Store
 from ocpp.v21 import call
 from test_grid_profile import GridStation
 from test_protocol import peer
-from test_pv_core import legacy_economics
 from test_pv_runtime import power, release, sources, tick
 
 from custom_components.wallbox_manager import async_setup_entry, async_unload_entry
@@ -137,12 +136,9 @@ def test_valid_unbound_budget_can_bind_first_scope(cause):
         None,
     ],
 )
-async def test_current_store_invalid_payload_never_uses_legacy_fallback(ha, payload):
+async def test_current_store_invalid_payload_is_inhibited(ha, payload):
     entry = entry_with_sources(ha)
     await journal_store(ha, entry).async_save(payload)
-    await journal_store(ha, entry, "pv_economy").async_save(
-        {"version": 1, "records": []}
-    )
     await ha.install(entry)
     assert_unreconciled(entry.runtime_data.pv.budget)
 
@@ -228,57 +224,85 @@ async def test_loaded_budget_reconciles_transaction_on_matching_station_and_bind
         assert (station.amps > 0) is (problem is None)
 
 
-@pytest.mark.parametrize("legacy_empty", [False, True])
-async def test_first_installation_and_empty_legacy_can_charge(ha, legacy_empty):
+def legacy_economics():
+    return dict(
+        version=1,
+        records=[
+            dict(
+                identity=dict(
+                    entry_id="entry",
+                    station="Wallbox01",
+                    evse="1",
+                    connector="1",
+                    transaction="tx",
+                    station_identity=dict(
+                        vendor="Test", model="Passive", serial="serial-1", firmware=None
+                    ),
+                ),
+                policy=dict(
+                    version=2, scope="pv_charging", reset_seconds=15, reset_strict=True
+                ),
+                state=dict(
+                    version=2,
+                    energy_ws=dict(numerator=183600, denominator=1),
+                    paused=True,
+                    restart_required=True,
+                    off_pending=False,
+                    off_in_flight=False,
+                ),
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize("legacy_present", [False, True])
+async def test_missing_current_journal_never_reads_historical_stores(
+    ha, monkeypatch, legacy_present
+):
     entry = entry_with_sources(ha)
-    if legacy_empty:
-        await journal_store(ha, entry, "pv_economy").async_save(
-            {"version": 1, "records": []}
-        )
+    old = legacy_economics()
+    identity = old["records"][0]["identity"]
+    identity.update(entry_id=entry.entry_id, transaction=SCOPE[-1])
+    retired = (
+        (journal_store(ha, entry, "pv_economy"), old),
+        (
+            journal_store(ha, entry, "pv_day"),
+            {
+                "version": 2,
+                "days": {
+                    json.dumps(BINDING): {"date": "2026-10-25", "state": "FINISHED"}
+                },
+            },
+        ),
+    )
+    if legacy_present:
+        for store, data in retired:
+            await store.async_save(data)
+    reads = []
+    load = Store.async_load
+
+    async def record_load(store):
+        reads.append(store.key)
+        return await load(store)
+
+    monkeypatch.setattr(Store, "async_load", record_load)
     await ha.install(entry)
-    assert entry.runtime_data.pv.budget.saved() == Budget().saved()
+    pv = entry.runtime_data.pv
+    assert pv.store.key in reads
+    assert not {store.key for store, _ in retired}.intersection(reads)
+    assert pv.budget.saved() == Budget().saved()
+    assert pv.planner.saved() == {"version": 1, "date": None, "phase": "BEFORE_SURPLUS"}
+    assert pv.station_identity is None and pv.ended_transaction is None
+    assert not pv.settings.get("charge_release") and pv.grid.task is None
+
     async with peer(entry, station_type=GridStation) as station:
         _, pv = await release(entry, station)
         await tick(pv)
         assert station.amps > 0
         assert pv.budget.scope == SCOPE and pv.input_problem is None
-
-
-@pytest.mark.parametrize(
-    "kind", ["valid", "null", "invalid", "invalid_version", "day_only"]
-)
-async def test_startup_imports_legacy_history_without_restoring_release(ha, kind):
-    entry = entry_with_sources(ha)
-    old = legacy_economics()
-    old["records"][0]["identity"]["entry_id"] = entry.entry_id
-    old["records"][0]["identity"]["transaction"] = SCOPE[-1]
-    if kind != "day_only":
-        economy = {
-            "valid": old,
-            "null": None,
-            "invalid": False,
-            "invalid_version": {"version": True, "records": []},
-        }[kind]
-        await journal_store(ha, entry, "pv_economy").async_save(economy)
-    await journal_store(ha, entry, "pv_day").async_save(
-        {
-            "version": 2,
-            "days": {json.dumps(BINDING): {"date": "2026-10-25", "state": "FINISHED"}},
-        }
-    )
-    await ha.install(entry)
-    pv = entry.runtime_data.pv
-    assert not pv.settings.get("charge_release")
-    assert pv.planner.date == "2026-10-25" and pv.planner.phase == "FINISHED"
-    if kind == "valid":
-        assert pv.budget.scope == SCOPE and pv.budget.wh == 51 and pv.budget.stopped
-        assert pv.budget.cause == "import_budget"
-        assert pv.station_identity["serial_number"] == "serial-1"
-    elif kind == "day_only":
-        assert pv.budget.saved() == Budget().saved()
-    else:
-        assert_unreconciled(pv.budget)
-        assert pv.budget.cause == "legacy_recovery_unknown"
+    await async_unload_entry(ha, entry)
+    for store, data in retired:
+        assert await load(store) == (data if legacy_present else None)
 
 
 async def test_damaged_current_journal_blocks_eligible_pv_until_explicit_stop(ha):
@@ -308,13 +332,26 @@ async def test_exhausted_current_journal_survives_restart_then_ends_with_transac
 ):
     entry = entry_with_sources(ha)
     saved = stored_budget(wh=51, stopped=True, reset=True, cause="import_budget")
-    await journal_store(ha, entry).async_save({"version": 1, "economics": saved})
+    day = {"version": 1, "date": "2026-10-25", "phase": "FINISHED"}
+    identity = {"serial_number": "serial-1"}
+    await journal_store(ha, entry).async_save(
+        {
+            "version": 1,
+            "economics": saved,
+            "day": day,
+            "station_identity": identity,
+            "ended_transaction": "prior-ended",
+        }
+    )
     await ha.install(entry)
     await async_unload_entry(ha, entry)
     await async_setup_entry(ha, entry)
     pv = entry.runtime_data.pv
     assert not pv.settings.get("charge_release")
     assert pv.budget.saved() == saved | {"reset": False}
+    assert pv.budget.previous is None and pv.budget.low_since is None
+    assert pv.planner.saved() == day
+    assert pv.station_identity == identity and pv.ended_transaction == "prior-ended"
     async with peer(entry, station_type=GridStation) as station:
         _, pv = await release(entry, station)
         await tick(pv)

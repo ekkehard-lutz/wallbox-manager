@@ -13,7 +13,7 @@ from test_live_netz_timing import running
 from test_protocol import peer
 from websockets.exceptions import ConnectionClosed
 
-from custom_components.wallbox_manager import async_unload_entry, pv_migration
+from custom_components.wallbox_manager import async_unload_entry, pv_journal
 
 WRITE_FAILURE = "injected PV journal save failure"
 
@@ -195,7 +195,7 @@ async def test_cancelled_setup_does_not_overwrite_unloaded_pv_journal(ha, monkey
         reading.set()
         await asyncio.Future()
 
-    monkeypatch.setattr(pv_migration, "load_journal", blocked_load)
+    monkeypatch.setattr(pv_journal, "load_journal", blocked_load)
     setup = asyncio.create_task(ha.install(entry))
     try:
         await reached(reading)

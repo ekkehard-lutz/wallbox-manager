@@ -122,22 +122,11 @@ class PV:
             self.state.publish(("pv", self.state.binding, "effective_target_soc"))
 
     async def start(self):
-        from .pv_migration import MISSING_JOURNAL, legacy_record, load_journal
+        from .pv_journal import MISSING_JOURNAL, load_journal
 
         record = await load_journal(self.hass, self.store)
-        from_legacy = record is MISSING_JOURNAL
-        if from_legacy:
-            prefix = f"wallbox_manager.{self.entry.entry_id}"
-            economy = await load_journal(
-                self.hass, Store(self.hass, 1, f"{prefix}.pv_economy")
-            )
-            days = await load_journal(
-                self.hass, Store(self.hass, 1, f"{prefix}.pv_day")
-            )
-            record = legacy_record(
-                economy, days, self.entry.entry_id, self.state.binding
-            )
-        elif (
+        missing = record is MISSING_JOURNAL
+        if (
             not isinstance(record, dict)
             or type(record.get("version")) is not int
             or record["version"] != 1
@@ -152,7 +141,7 @@ class PV:
         ):
             self.station_identity = None
             self.budget = Budget.restore(None)
-        elif not from_legacy or "economics" in record:
+        elif not missing:
             self.budget = Budget.restore(record.get("economics"))
         self.planner = Planner.restore(record.get("day"))
         self.ended_transaction = record.get("ended_transaction")
