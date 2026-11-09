@@ -342,9 +342,14 @@ def test_budget_scope_recovery_and_edit_does_not_erase_stop():
     assert b.exhaust(50) and b.exhaust(100)
     restored = Budget.restore(b.saved())
     assert restored.wh == 51 and restored.stopped and restored.previous is None
-    assert not restored.bind([*scope, "different-tx"])
-    assert restored.bind([*scope, "new-tx"], ended=True)
-    assert restored.wh == 0 and not restored.stopped
+    assert restored.bind([*scope, "tx"]) and restored.wh == 51 and restored.stopped
+    assert not restored.bind(["other", *scope[1:], "different-tx"])
+    restored.sample(0, 0, 1380, active=False)
+    restored.sample(16, 0, 1380, active=False)
+    assert restored.reset and restored.previous is not None and restored.low_since == 0
+    assert restored.bind([*scope, "new-tx"])
+    assert restored.saved() == Budget(scope=[*scope, "new-tx"]).saved()
+    assert restored.previous is None and restored.low_since is None
     assert Budget.restore({"corrupt": True}).stopped
 
 

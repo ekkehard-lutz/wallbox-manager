@@ -194,18 +194,22 @@ async def test_unreadable_store_is_not_first_installation(ha, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "serial,tx,problem",
+    "serial,prior_scope,problem",
     [
-        ("serial-1", "net-test", None),
-        ("other", "net-test", "economic_station_identity_mismatch"),
-        ("serial-1", "other", "economic_scope_unreconciled"),
+        ("serial-1", SCOPE, None),
+        ("serial-1", [*SCOPE[:-1], "previous"], None),
+        ("other", SCOPE, "economic_station_identity_mismatch"),
+        ("other", [*SCOPE[:-1], "previous"], "economic_station_identity_mismatch"),
+        ("serial-1", ["OtherStation", *SCOPE[1:]], "economic_scope_unreconciled"),
+        ("serial-1", [SCOPE[0], "2", *SCOPE[2:]], "economic_scope_unreconciled"),
+        ("serial-1", [*SCOPE[:2], "2", *SCOPE[3:]], "economic_scope_unreconciled"),
     ],
 )
-async def test_loaded_budget_requires_matching_station_and_transaction(
-    ha, serial, tx, problem
+async def test_loaded_budget_reconciles_transaction_on_matching_station_and_binding(
+    ha, serial, prior_scope, problem
 ):
     entry = entry_with_sources(ha)
-    saved = stored_budget(wh=7) | {"scope": [*SCOPE[:-1], tx]}
+    saved = stored_budget(wh=7) | {"scope": prior_scope}
     await journal_store(ha, entry).async_save(
         {
             "version": 1,
@@ -218,7 +222,8 @@ async def test_loaded_budget_requires_matching_station_and_transaction(
         _, pv = await release(entry, station)
         count = len(station.profiles)
         await tick(pv)
-        assert pv.input_problem == problem and pv.budget.saved() == saved
+        expected = saved if problem or prior_scope == SCOPE else stored_budget()
+        assert pv.input_problem == problem and pv.budget.saved() == expected
         assert len(station.profiles) == count + (problem is None)
         assert (station.amps > 0) is (problem is None)
 
