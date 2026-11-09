@@ -104,9 +104,13 @@ The station alone owns physical/electrical safety; WBM owns optimization, policy
 and presentation. This decision takes precedence over conflicting older clauses;
 V3 remains DRAFT overall.
 
+**Approved 7 November 2026:** The [OCPP LAN trust boundary](architecture-responsibility.md#approved-ocpp-lan-trust-boundary)
+defines the supported private-LAN and authenticated-VPN deployment and the
+operator's commissioning check. It supplements WBM-ARCH-01–12.
+
 | Document | Purpose | Status |
 | --- | --- | --- |
-| [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, with explicit supersession register | **APPROVED independently** |
+| [Architectural responsibility and observations](architecture-responsibility.md) | Overarching WBM-ARCH-01–12, explicit supersession register and OCPP LAN trust boundary | **APPROVED independently** |
 | [Active OCPP control foundation](active-ocpp-control.md) | Explicit takeover and independent charging permission; successor milestone | **User-authorized implementation scope; hardware acceptance separate** |
 | [Lovelace home battery and simplified PV controls](lovelace-home-battery-display.md) | Profile-dependent home battery status, removal of five card-only editors, compatibility and tests | **Base published by beta.17; caption refinement approved after beta.18** |
 | [NETZ / Grid fixed-point profile](grid-profile.md) | Implemented event-driven NETZ control, phase range/limits, recognized lockout retry, battery reserve | **APPROVED; published before beta.17; unchanged in beta.18** |
@@ -118,6 +122,7 @@ V3 remains DRAFT overall.
 | [Level-2 PV decision diagnostics](pv-decision-diagnostics.md) | Full transitions plus compact five-power context for unchanged eligible active cycles | **Beta.18 five-value expansion published; later compact-cycle exception approved** |
 | [PV regulation – Requirements baseline V3](pv-regulation.md) | Current consolidated target specification draft with stable requirement IDs, acceptance criteria, sources and open issues | **DRAFT overall; approved runtime published in beta.17** |
 | [Decision history, October 2026](decision-history.md) | NON-NORMATIVE history: approved decisions, superseded interim solutions and explicitly rejected approaches | Reference / history |
+| [Critical-fault intent assessment](../critical-fault-intent-assessment.md) | Evidence about fault reporting and pending WBM policy intent | Analysis for operator review |
 
 ## Mandatory working procedure for Codex and subsequent iterations
 
