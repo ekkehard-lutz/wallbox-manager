@@ -82,6 +82,8 @@ async def test_netz_electrical_rejection_still_fails_service(ha):
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await grid.stop_release()
+        await grid.task
+        assert station.amps == 0
         station.profile_result = "Rejected"
         with pytest.raises(HomeAssistantError):
             await invoke(ha, entry, context(grid))

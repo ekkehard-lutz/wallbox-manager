@@ -675,10 +675,10 @@ async def test_failed_interim_confirmation_preserves_recognized_retry(ha, monkey
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         original = entry.runtime_data.grid.read_point
 
-        async def read(*args):
+        async def read(*args, **kwargs):
             if station.fail_interim_read and station.locked and station.amps == 0:
                 raise TimeoutError
-            return await original(*args)
+            return await original(*args, **kwargs)
 
         monkeypatch.setattr(entry.runtime_data.grid, "read_point", read)
         station.fail_interim_read = True
@@ -854,11 +854,11 @@ async def test_superseded_interim_cannot_dispatch_after_new_intent(ha, monkeypat
         original = grid.dispatch_point
         waiting, release = asyncio.Event(), asyncio.Event()
 
-        async def dispatch(point, *args):
+        async def dispatch(point, *args, **kwargs):
             if point.amps == 0:
                 waiting.set()
                 await release.wait()
-            return await original(point, *args)
+            return await original(point, *args, **kwargs)
 
         monkeypatch.setattr(grid, "dispatch_point", dispatch)
         station.locked = True
