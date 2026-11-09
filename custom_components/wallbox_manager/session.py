@@ -4,6 +4,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.storage import Store
 
 BOUNDARY_AGE = timedelta(seconds=15)
@@ -279,65 +280,19 @@ def linked_energy(state, stream, value, at):
 async def load(hass, entry_id, state):
     store = Store(hass, 1, f"wallbox_manager.{entry_id}.passive_session")
     saved = await store.async_load()
-    if saved and saved.get("schema", 1) < 2:
-        old = saved.get("session")
-        if old:
-            old["current_meter"] = old.get("end_meter")
-            if old["ended_at"] is None:
-                old["end_meter"] = None
-    if saved:
+    if saved is not None:
+        if (
+            not isinstance(saved, dict)
+            or type(saved.get("schema")) is not int
+            or saved["schema"] != 2
+        ):
+            raise ConfigEntryError(
+                "Unsupported passive session journal schema (expected 2)"
+            )
         state.session = saved["session"]
         if state.session:
             state.session["generation"] = None
         state.closed_transactions = set(saved.get("closed_transactions", []))
-    else:
-        # Read-only projection of the last legacy session; leave its full ledger intact.
-        legacy = (
-            await Store(hass, 1, f"wallbox_manager.{entry_id}.sessions").async_load()
-            or {}
-        )
-        rows = {r["session_id"]: r for r in legacy.get("records", [])}
-        state.closed_transactions = {
-            r["external_transaction_id"]
-            for r in rows.values()
-            if r["ended_at"] is not None
-        }
-        matches = [
-            rows[k]
-            for k in legacy.get("latest", [])
-            if k in rows and state.accepts(rows[k]["scope"])
-        ]
-        if len(matches) > 1:
-            # Prefer the bound connector to a parent session, without altering history.
-            matches = [r for r in matches if tuple(r["scope"]) == state.binding]
-        if len(matches) == 1:
-            old = matches[0]
-
-            def energy(key):
-                value = old.get(key)
-                if value is None:
-                    return None
-                from fractions import Fraction
-
-                return float(Fraction(value) / 1000)
-
-            state.session = {
-                "session_id": old["session_id"],
-                "external_transaction_id": old["external_transaction_id"],
-                "scope": old["scope"],
-                "started_at": old["started_at"]
-                if old.get("start_known", True)
-                else None,
-                "updated_at": old["updated_at"],
-                "ended_at": old["ended_at"],
-                "start_meter": energy("energy_start_wh"),
-                "end_meter": energy("energy_end_wh") if old["ended_at"] else None,
-                "current_meter": energy("energy_end_wh"),
-                "energy": energy("energy_charged_wh"),
-                "sequence": old.get("sequence") or -1,
-                "generation": None,
-                "energy_invalid": old.get("energy_invalid", False),
-            }
     state.save_session = lambda: store.async_delay_save(lambda: document(state), 1)
     return store
 
