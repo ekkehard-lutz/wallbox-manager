@@ -545,3 +545,64 @@ def test_active_idle_contradiction_and_replays_cannot_restore_old_idle():
     )
     assert state.idle_barrier == barrier
     assert state.charging_value(state.binding) is None
+
+
+@pytest.mark.parametrize("old_generation", [False, True])
+async def test_schema_two_active_session_reconfirms_before_attribution(
+    ha, old_generation
+):
+    from copy import deepcopy
+
+    from conftest import config, entities
+
+    entry = config()
+    source, adapter = setup()
+    start = datetime.now(UTC) - timedelta(seconds=20)
+    transaction(adapter, "Started", start, 0, 100000)
+    transaction(adapter, "Updated", start + timedelta(seconds=5), 1, 100125)
+    old = dict(source.session)
+    if not old_generation:
+        old.pop("generation")
+    persisted = Store(ha, 1, f"wallbox_manager.{entry.entry_id}.passive_session")
+    await persisted.async_save(
+        {
+            "schema": 2,
+            "session": old,
+            "closed_transactions": ["retired"],
+        }
+    )
+
+    await ha.install(entry)
+    runtime = entry.runtime_data
+    state = runtime.state
+    generation = state.reset(connected=True)
+    assert list(generation) == source.session["generation"]
+    assert state.session == old | {"generation": None}
+    assert state.closed_transactions == {"retired"}
+    assert runtime.grid.transaction() is None
+    assert session.view(state, datetime.now(UTC))["active"] is None
+    at = datetime.now(UTC)
+    session.meter(state, "energy", 100.25, at)
+    assert state.session["energy"] == pytest.approx(0.125)
+    assert not session.event(
+        state, generation, state.binding, "retired", "Updated", at, 2
+    )
+    assert session.event(state, generation, state.binding, "a", "Updated", at, 2)
+    session.meter(state, "energy", 100.25, at)
+    assert state.session["energy"] == pytest.approx(0.25)
+    assert state.session["energy_channel"] == source.session["energy_channel"]
+    assert runtime.grid.transaction() == "a"
+    active = next(
+        e for e in entities(ha, entry) if e.family == "session" and e.role == "active"
+    )
+    assert active.available and active.is_on is True
+
+    live = deepcopy(state.session)
+    document = session.document(state)
+    assert state.session == live and state.session["generation"] == list(generation)
+    del live["generation"]
+    assert document == {
+        "schema": 2,
+        "session": live,
+        "closed_transactions": ["retired"],
+    }

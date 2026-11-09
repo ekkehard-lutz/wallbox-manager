@@ -298,8 +298,11 @@ async def load(hass, entry_id, state):
 
 
 def document(state):
+    snapshot = state.session.copy() if state.session is not None else None
+    if snapshot is not None:
+        snapshot.pop("generation", None)
     return {
         "schema": 2,
-        "session": state.session,
+        "session": snapshot,
         "closed_transactions": sorted(state.closed_transactions),
     }
