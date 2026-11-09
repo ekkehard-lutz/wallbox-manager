@@ -1,4 +1,4 @@
-"""Public identity/statistics continuity and reversible registry association changes."""
+"""Current identity, scoped settings and retained session import contracts."""
 
 import json
 from datetime import UTC, datetime
@@ -18,7 +18,6 @@ from homeassistant.helpers.storage import Store
 from custom_components.wallbox_manager import async_unload_entry
 from custom_components.wallbox_manager.config_flow import WallboxManagerConfigFlow
 from custom_components.wallbox_manager.entity import unique_id
-from custom_components.wallbox_manager.migration import migrate
 from custom_components.wallbox_manager.settings import Settings
 
 
@@ -52,22 +51,12 @@ def test_exact_public_identity_formats():
     assert not WallboxManagerConfigFlow.async_get_supported_subentry_types(None)
 
 
-async def test_subentry_migration_preserves_registry_and_rollback(ha):
+async def test_current_sensor_registry_and_recorder_metadata_are_preserved(ha):
     entry = config()
     ha.config_entries._entries[entry.entry_id] = entry
-    subentry = ConfigSubentry(
-        subentry_type="wallbox",
-        title="Wallbox01 / 1 / 1",
-        unique_id='["Wallbox01","1","1"]',
-        data=MappingProxyType(
-            {"station": "Wallbox01", "evse": "1", "connector": "1", "references": {}}
-        ),
-    )
-    ha.config_entries.async_add_subentry(entry, subentry)
     devices, registry = dr.async_get(ha), er.async_get(ha)
     device = devices.async_get_or_create(
         config_entry_id=entry.entry_id,
-        config_subentry_id=subentry.subentry_id,
         identifiers={("wallbox_manager", entry.entry_id + ":Wallbox01")},
         name="Wallbox01",
     )
@@ -80,56 +69,21 @@ async def test_subentry_migration_preserves_registry_and_rollback(ha):
         "wallbox_manager",
         energy_id,
         config_entry=entry,
-        config_subentry_id=subentry.subentry_id,
         device_id=device.id,
-        suggested_object_id="my_historical_energy",
+        suggested_object_id="my_energy",
     )
     disabled = registry.async_get_or_create(
         "sensor",
         "wallbox_manager",
         unique_id(entry.entry_id, "observation", ("Wallbox01", "1", None), "power"),
         config_entry=entry,
-        config_subentry_id=subentry.subentry_id,
         device_id=device.id,
         disabled_by=er.RegistryEntryDisabler.USER,
     )
-    ha.config_entries.async_update_entry(entry, data={"host": "127.0.0.1", "port": 0})
-    original_id = entry.entry_id
-    assert migrate(ha, entry, {}) == ("Wallbox01", "1", "1")
-    await ha.async_block_till_done()
-    assert not entry.subentries
-    assert entry.entry_id == original_id and entry.version == 3
-    assert devices.async_get(device.id).name_by_user == "Garage"
-    assert devices.async_get(device.id).config_subentry_id is None
-    kept = registry.async_get(entity.entity_id)
-    assert kept.unique_id == energy_id and kept.device_id == device.id
-    assert kept.config_subentry_id is None
-    assert (
-        registry.async_get(disabled.entity_id).disabled_by
-        == er.RegistryEntryDisabler.USER
-    )
-    assert registry.async_get(disabled.entity_id).config_subentry_id is None
-    assert (
-        entry.options["passive_v04_legacy_subentries"][0]["id"] == subentry.subentry_id
-    )
-    # beta.18's documented ensure_subentry format can be reconstructed without
-    # deleting/recreating entities or changing statistics identity.
-    ref = entry.options["station_references"]["Wallbox01"]["1:1"]
-    assert (
-        ref["reference_station_id"],
-        ref["reference_evse_id"],
-        ref["reference_connector_id"],
-    ) == ("Wallbox01", 1, 1)
-    restored = ConfigSubentry(
-        data=subentry.data,
-        subentry_type="wallbox",
-        title=subentry.title,
-        unique_id=subentry.unique_id,
-    )
-    ha.config_entries.async_add_subentry(entry, restored)
-    assert registry.async_get(entity.entity_id).device_id == device.id
-    # Remove it through migration again, then register the actual new HA sensor.
     await ha.install(entry)
+    assert devices.async_get(device.id).name_by_user == "Garage"
+    assert registry.async_get(entity.entity_id).device_id == device.id
+    assert registry.async_get(disabled.entity_id).device_id == device.id
     state = entry.runtime_data.state
     generation = state.reset(connected=True)
     state.observe(
@@ -164,29 +118,48 @@ async def test_foreign_parent_scope_registry_fails_before_writes(ha):
         disabled_by=er.RegistryEntryDisabler.USER,
     )
     before = dict(entry.data), dict(entry.options), dict(entry.subentries)
-    with pytest.raises(ConfigEntryError, match="migration decision"):
-        migrate(ha, entry, {})
+    with pytest.raises(ConfigEntryError, match="Registered entity"):
+        await ha.install(entry)
     assert (dict(entry.data), dict(entry.options), dict(entry.subentries)) == before
     assert registry.async_get(foreign.entity_id) is foreign
 
 
-async def test_ambiguous_migration_fails_before_any_write(ha):
+@pytest.mark.parametrize("count", [1, 2])
+async def test_legacy_subentries_fail_without_reparenting(ha, count):
     entry = config()
     ha.config_entries._entries[entry.entry_id] = entry
-    for connector in ("1", "2"):
+    devices, registry = dr.async_get(ha), er.async_get(ha)
+    for connector in range(1, count + 1):
         sub = ConfigSubentry(
             subentry_type="wallbox",
-            title=connector,
-            unique_id=connector,
+            title=str(connector),
+            unique_id=str(connector),
             data=MappingProxyType(
-                {"station": "Wallbox01", "evse": "1", "connector": connector}
+                {"station": "Wallbox01", "evse": "1", "connector": str(connector)}
             ),
         )
         ha.config_entries.async_add_subentry(entry, sub)
+    device = devices.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        config_subentry_id=sub.subentry_id,
+        identifiers={("wallbox_manager", entry.entry_id + ":Wallbox01")},
+    )
+    entity = registry.async_get_or_create(
+        "sensor",
+        "wallbox_manager",
+        unique_id(
+            entry.entry_id, "observation", ("Wallbox01", "1", str(count)), "energy"
+        ),
+        config_entry=entry,
+        config_subentry_id=sub.subentry_id,
+        device_id=device.id,
+    )
     before = dict(entry.data), dict(entry.options), dict(entry.subentries)
-    with pytest.raises(ConfigEntryError, match="migration decision"):
-        migrate(ha, entry, {})
+    with pytest.raises(ConfigEntryError, match="cannot have subentries"):
+        await ha.install(entry)
     assert (dict(entry.data), dict(entry.options), dict(entry.subentries)) == before
+    assert registry.async_get(entity.entity_id) is entity
+    assert devices.async_get(device.id).config_subentry_id == sub.subentry_id
 
 
 async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
@@ -378,7 +351,7 @@ async def test_failed_setting_save_does_not_commit_options_or_memory(ha, monkeyp
     assert (dict(entry.options), settings.values, settings.profiles) == before
 
 
-async def test_grid_migration_retires_only_superseded_entities(ha):
+async def test_retired_registry_entries_stay_inert(ha):
     entry = config()
     ha.config_entries._entries[entry.entry_id] = entry
     registry = er.async_get(ha)
@@ -411,11 +384,16 @@ async def test_grid_migration_retires_only_superseded_entities(ha):
         )
     ]
     await ha.install(entry)
-    assert all(registry.async_get(entity_id) is None for entity_id in retired)
-    assert all(registry.async_get(entity_id) is not None for entity_id in preserved)
-    assert not {"phase_switch_deviation_pct", "pv_start_delay", "pv_stop_delay"} & {
-        entity.role for entity in entities(ha, entry)
-    }
+    assert all(
+        registry.async_get(entity_id) is not None for entity_id in retired + preserved
+    )
+    assert not {
+        "phase_switch_deviation_pct",
+        "pv_start_delay",
+        "pv_stop_delay",
+        "maximum_current_1",
+        "maximum_current_3",
+    } & {entity.role for entity in entities(ha, entry)}
 
 
 async def test_retired_profile_fields_are_inert_without_cleanup_writes(ha, monkeypatch):

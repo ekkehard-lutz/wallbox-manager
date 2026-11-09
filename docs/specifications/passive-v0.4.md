@@ -9,11 +9,11 @@ reviews/performance reports are evidence, not architectural requirements.
 
 | ID | Approved requirement | Milestone |
 | --- | --- | --- |
-| V04-01 | One config entry manages exactly one station, EVSE, connector, listener, observation store and settings set. Persist explicit binding; reject unexpected identities and ambiguous legacy migration. | Current |
+| V04-01 | One config entry manages exactly one station, EVSE, connector, listener, observation store and settings set. Persist explicit binding; require a complete explicit binding and reject conflicting current profile or registry identities before mutation. | Current |
 | V04-02 | Multiple wallboxes use independent entries/endpoints, lifecycles, observations and settings. No global selector, central ownership manager or shared mutable charging state. | Current |
 | V04-03 | Implement passive OCPP observations only. No takeover, physical charging/phase commands, regulator, economic bookkeeping or charging timers. Backend control requests must fail explicitly. | Current |
-| V04-04 | Preserve public entity unique IDs, existing entity IDs through registry associations, physical device identifiers, metadata, history and cumulative-energy statistics. Classify intentional exceptions explicitly. | Current |
-| V04-05 | Native HA structure: one physical wallbox directly under each config entry, no wallbox subentry/add-wallbox flow. Detach associations safely before removal; preserve rollback data. | Current |
+| V04-04 | Preserve current entity unique IDs, HA entity IDs, physical device identifiers, user metadata and associations on reload. Historical registry reconstruction and Recorder/statistics continuity are outside the supported upgrade scope. | Current |
+| V04-05 | Native HA structure: one physical wallbox directly under each config entry, no wallbox subentry/add-wallbox flow. Reject historical subentry layouts without mutation or reparenting. Keep existing historical records inert. | Current |
 | V04-06 | Retain recognizable German/English card and editing, scoped to one entry; remove multi-wallbox behavior. Take-control and permission buttons visible but disabled; actual permission independently visible. | Current |
 | V04-07 | Profile settings remain editable and persistent, with validation and zero physical action. Active charging functionality explicitly unavailable. | Current |
 | V04-08 | Canonical observation store → affected entity only. Ordinary measurements last-value-held within generation, no expiry scanning; accurate acquisition metadata stays internal; identical reads do not publish public timestamps (WBM-ARCH-05/12). | Current |

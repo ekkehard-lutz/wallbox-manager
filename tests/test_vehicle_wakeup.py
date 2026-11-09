@@ -1,4 +1,4 @@
-"""Removed remote wake-up settings are ignored; retire only integration-owned IDs."""
+"""Removed remote wake-up controls and their registry records stay inert."""
 
 import pytest
 from conftest import entities
@@ -33,7 +33,7 @@ async def test_legacy_wire_variable_ignored_and_not_writable(ha):
         assert not station.writes
 
 
-async def test_obsolete_switch_and_set_registry_migration_is_exact(ha):
+async def test_obsolete_switch_and_set_registry_entries_stay_inert(ha):
     entry = await ha.install()
     registry = er.async_get(ha)
     keys = [
@@ -57,14 +57,14 @@ async def test_obsolete_switch_and_set_registry_migration_is_exact(ha):
         )
     await async_unload_entry(ha, entry)
     await ha.install(entry)
-    assert all(registry.async_get(e.entity_id) is None for e in old)
+    assert all(registry.async_get(e.entity_id) is e for e in old)
     assert all(registry.async_get(e.entity_id) is not None for e in foreign)
     roles = {e.role for e in entities(ha, entry)}
-    assert "charging_enabled" in roles and "charge_action" in roles
+    assert {"charging_enabled", "charge_action", "take_control"} <= roles
     assert not roles & {"auto_wakeup_enabled", "grid_set", "wake_up_vehicle"}
 
 
-async def test_legacy_registry_button_is_retired_without_foreign_removal(ha):
+async def test_legacy_wake_up_buttons_remain_registered_but_inactive(ha):
     entry = await ha.install()
     registry = er.async_get(ha)
     legacy = registry.async_get_or_create(
@@ -81,6 +81,6 @@ async def test_legacy_registry_button_is_retired_without_foreign_removal(ha):
     )
     await async_unload_entry(ha, entry)
     await ha.install(entry)
-    assert registry.async_get(legacy.entity_id) is None
+    assert registry.async_get(legacy.entity_id) is legacy
     assert registry.async_get(foreign.entity_id) is not None
     assert not any(e.role == "wake_up_vehicle" for e in entities(ha, entry))

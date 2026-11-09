@@ -9,13 +9,13 @@ from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 from homeassistant.helpers.storage import Store
 
-from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
-from .migration import target
+from .binding import target
+from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN, ENTRY_VERSION
 from .settings import NUMBERS, REGULATION, number_value
 
 
 class WallboxManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 3
+    VERSION = ENTRY_VERSION
 
     @staticmethod
     @callback
