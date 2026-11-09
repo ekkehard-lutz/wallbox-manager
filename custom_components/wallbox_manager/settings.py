@@ -121,30 +121,6 @@ class Settings:
             for key, value in saved.items()
             if key in self.values or key in GRID_STATE_FIELDS
         )
-        # Restore caps before any connection/control task can use default maxima.
-        # Entities are added only after capability discovery, which is too late
-        # to make their RestoreEntity callback the sole migration boundary.
-        from homeassistant.helpers import entity_registry as er
-        from homeassistant.helpers import restore_state
-
-        from .const import DOMAIN
-        from .entity import unique_id
-
-        registry = er.async_get(hass)
-        restored = restore_state.async_get(hass).last_states
-        for mode in (1, 2, 3):
-            role = f"allowed_current_{mode}p"
-            if role in saved:
-                continue
-            entity_id = registry.async_get_entity_id(
-                "number", DOMAIN, unique_id(entry.entry_id, "control", binding, role)
-            )
-            previous = restored.get(entity_id)
-            if previous and previous.state.state not in ("unknown", "unavailable"):
-                self.values[role] = (
-                    previous.state.attributes.get("exact_current_limit_a")
-                    or previous.state.state
-                )
         # Central options are authoritative for the active regulation fields.
         for key in REGULATION:
             if key in entry.options:

@@ -8,7 +8,6 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import SettingEntity
 from .grid_point import capabilities, envelope, rounded_kw
@@ -50,7 +49,7 @@ async def async_setup_entry(hass, entry, add):
     )
 
 
-class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
+class SettingNumber(SettingEntity, NumberEntity):
     _attr_mode = NumberMode.BOX
 
     def __init__(self, entry, role):
@@ -169,16 +168,6 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
                     self.async_on_remove(
                         self.observed.watch(("capability", scope, role), self.changed)
                     )
-        if self.role.startswith("allowed_current_"):
-            previous = await self.async_get_last_state()
-            if (
-                previous
-                and previous.state not in ("unknown", "unavailable")
-                and self.role not in self.settings.profiles.get(self.settings.key, {})
-            ):
-                self.settings.values[self.role] = (
-                    previous.attributes.get("exact_current_limit_a") or previous.state
-                )
 
     async def async_set_native_value(self, value):
         await self.settings.set(self.role, value)

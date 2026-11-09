@@ -1,15 +1,18 @@
 """Public identity/statistics continuity and reversible registry association changes."""
 
 import json
+from datetime import UTC, datetime
 from types import MappingProxyType
 from unittest.mock import AsyncMock
 
 import pytest
 from conftest import config, entities
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.core import State as HAState
 from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import restore_state
 from homeassistant.helpers.storage import Store
 
 from custom_components.wallbox_manager import async_unload_entry
@@ -316,34 +319,13 @@ async def test_profile_edits_are_serialized_without_lost_updates(ha):
     ) == (8.1, 44, 15600)
 
 
-async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
-    from datetime import UTC, datetime
-
-    from homeassistant.core import State
-    from homeassistant.helpers import restore_state
-
+async def test_stored_fractional_cap_keeps_exact_value_and_current_normalization(ha):
     entry = config()
-    ha.config_entries._entries[entry.entry_id] = entry
-    restored = restore_state.async_get(ha)
-    for domain, role, value, attrs in (
-        (
-            "number",
-            "allowed_current_1p",
-            "6.3333333333",
-            {"exact_current_limit_a": "19/3"},
-        ),
-        ("select", "power_approximation", "up", {}),
-    ):
-        registered = er.async_get(ha).async_get_or_create(
-            domain,
-            "wallbox_manager",
-            unique_id(entry.entry_id, "control", ("Wallbox01", "1", "1"), role),
-            config_entry=entry,
-            suggested_object_id="historical_" + role,
-        )
-        restored.last_states[registered.entity_id] = restore_state.StoredState(
-            State(registered.entity_id, value, attrs), None, datetime.now(UTC)
-        )
+    scope = ("Wallbox01", "1", "1")
+    store = Store(ha, 1, f"wallbox_manager.{entry.entry_id}.profiles")
+    await store.async_save(
+        {json.dumps(scope): {"allowed_current_1p": "19/3", "direction": "up"}}
+    )
     await ha.install(entry)
     settings = entry.runtime_data.settings
     assert settings.get("allowed_current_1p") == "19/3"
@@ -362,7 +344,6 @@ async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
     assert settings.get("allowed_current_1p") == "19/3"
     assert settings.get("power_approximation") == "up"
     current = next(e for e in entities(ha, entry) if e.role == "allowed_current_1p")
-    assert current.entity_id == "number.historical_allowed_current_1p"
     assert current.extra_state_attributes["exact_current_limit_a"] == "19/3"
     assert current.native_value == 6
     assert "legacy_limit_migration" not in current.extra_state_attributes
@@ -463,3 +444,66 @@ async def test_retired_profile_fields_are_inert_without_cleanup_writes(ha, monke
     assert settings.get("min_soc") == 33
     assert settings.get("pv_startup_hold_cycles") == 10
     assert settings.get("grid_start_delay") is None
+
+
+@pytest.mark.parametrize("stored", [False, True])
+async def test_scoped_caps_and_direction_override_restored_entity_states(ha, stored):
+    entry = config()
+    scope = ("Wallbox01", "1", "1")
+    ha.config_entries._entries[entry.entry_id] = entry
+    raw = {
+        "allowed_current_1p": 16,
+        "allowed_current_2p": 12,
+        "allowed_current_3p": 0,
+        "direction": "down",
+    }
+    store = Store(ha, 1, f"wallbox_manager.{entry.entry_id}.profiles")
+    if stored:
+        await store.async_save({json.dumps(scope): raw})
+    restored = restore_state.async_get(ha)
+    for domain, role, value in (
+        ("number", "allowed_current_1p", "7"),
+        ("number", "allowed_current_2p", "8"),
+        ("number", "allowed_current_3p", "9"),
+        ("select", "power_approximation", "up"),
+    ):
+        item = er.async_get(ha).async_get_or_create(
+            domain,
+            "wallbox_manager",
+            unique_id(entry.entry_id, "control", scope, role),
+            config_entry=entry,
+        )
+        restored.last_states[item.entity_id] = restore_state.StoredState(
+            HAState(item.entity_id, value), None, datetime.now(UTC)
+        )
+
+    for _ in range(2):
+        await ha.install(entry)
+        state, settings = entry.runtime_data.state, entry.runtime_data.settings
+        generation = state.reset(connected=True)
+        parent = ("Wallbox01", "1", None)
+        for location, role, value in (
+            (parent, "minimum_current", 6),
+            (parent, "current_step", 1),
+            (parent, "supported_phases", "1,2,3"),
+            (scope, "maximum_current", 27),
+            (scope, "maximum_asymmetry_current", 10),
+        ):
+            state.observe(
+                generation, ("capability", location, role), value, "inventory"
+            )
+        await ha.async_block_till_done()
+        registered = {e.role: e for e in entities(ha, entry)}
+        for mode, effective in enumerate((10, 10, 0 if stored else 27), start=1):
+            role = f"allowed_current_{mode}p"
+            assert (
+                settings.get(role) == raw[role]
+                if stored
+                else settings.get(role) is None
+            )
+            assert registered[role].native_value == effective
+        assert registered["power_approximation"].current_option == (
+            "down" if stored else "nearest"
+        )
+        await async_unload_entry(ha, entry)
+        del entry.runtime_data
