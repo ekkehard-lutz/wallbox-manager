@@ -48,7 +48,6 @@ class Permission(WallboxEntity, SwitchEntity):
         return {
             **super().extra_state_attributes,
             "state_represents": self.state_represents,
-            "enabled_valid_until": None,
             **self.entry.runtime_data.server.control.attributes(self.command),
         }
 

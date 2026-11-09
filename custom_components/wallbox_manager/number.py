@@ -132,12 +132,6 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
     def extra_state_attributes(self):
         attrs = super().extra_state_attributes
         if self.role.startswith("allowed_current_"):
-            try:
-                attrs["legacy_limit_migration"] = envelope(
-                    self.observed, self.settings
-                ).migration.get(int(self.role[-2]))
-            except ValueError, TypeError:
-                attrs["legacy_limit_migration"] = None
             attrs["exact_current_limit_a"] = (
                 str(self.settings.get(self.role))
                 if self.native_value is not None

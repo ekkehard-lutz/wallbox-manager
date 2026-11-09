@@ -54,7 +54,6 @@ class Envelope:
         ):
             raise ValueError("Unsupported current diagnostics")
         self.ranges = {}
-        self.migration = {}
         for n in sorted(set(modes)):
             if type(n) is not int or n not in (1, 2, 3):
                 raise ValueError("Unsupported phase count")
@@ -64,8 +63,6 @@ class Envelope:
             normalized = max(0, min(math.floor(cap), math.floor(ceiling)))
             if normalized < self.minimum:
                 normalized = 0
-            if cap != normalized:
-                self.migration[n] = {"stored": str(cap), "effective": normalized}
             if normalized == 0:
                 continue
             cap = self.minimum + ((normalized - self.minimum) // self.step) * self.step

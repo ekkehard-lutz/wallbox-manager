@@ -93,7 +93,6 @@ class Listener:
         return {
             "status": status,
             "missing": sorted(missing),
-            "push_only": True,
         }
 
     async def start(self):

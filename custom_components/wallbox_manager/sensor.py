@@ -217,7 +217,6 @@ class Reading(WallboxEntity, SensorEntity):
                 external_transaction_id=session["external_transaction_id"],
                 session_active=view(self.observed, datetime.now(UTC))["active"],
                 start_known=session["started_at"] is not None,
-                valid_until=None,
             )
             if self.role == "power":
                 attrs["power_availability_reason"] = (
@@ -248,9 +247,7 @@ class Reading(WallboxEntity, SensorEntity):
                     else None,
                 )
             if self.role == "duration":
-                attrs.update(
-                    started_at=session["started_at"], duration_valid_until=None
-                )
+                attrs["started_at"] = session["started_at"]
         if self.role == "physical_phases":
             attrs["state_represents"] = "last_known_observation"
         if self.role == "discovery":

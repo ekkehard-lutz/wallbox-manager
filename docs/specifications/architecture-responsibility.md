@@ -37,7 +37,7 @@ all unrelated economic/profile/authority rules remain in effect.
 
 | Prior provision | Binding replacement |
 | --- | --- |
-| V04-08 accurate public acquisition metadata; beta.3 permission-specific timestamps/TTL | WBM-ARCH-05/06/12: accurate internal metadata, no public per-read acquisition timestamps, inert compatibility deadlines (`None`). |
+| V04-08 accurate public acquisition metadata; beta.3 permission-specific timestamps/TTL | WBM-ARCH-05/06/12: accurate internal metadata, no public per-read acquisition timestamps or compatibility deadline attributes. NETZ business schedule deadlines remain. |
 | V04-10 future manager physical evidence, phase/current safety gates | WBM-ARCH-01/09/11: station safety; WBM optimization and policy using held observations. |
 | PV-ARCH-04–09 references to live safety checks, fresh physical evidence and proof of executable points | WBM-ARCH-01/03/09/10: ordinary held observations, no per-request safety revalidation. Retain authority, intent, connection, transaction fencing, cadence and no reconnect command queue. |
 | PV-PLAN-04 900 s forecast freshness class, stricter live TTLs and expiry diagnostics; PV-QA-02 row 2 stale-forecast expectation | WBM-ARCH-05/06: no forecast or ordinary-input age expiration. Retain 300 s planning and local-day/forecast-domain semantics. |

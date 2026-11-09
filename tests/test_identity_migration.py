@@ -363,10 +363,22 @@ async def test_manual_preferences_restore_historical_ids_and_exact_current(ha):
     assert current.entity_id == "number.historical_allowed_current_1p"
     assert current.extra_state_attributes["exact_current_limit_a"] == "19/3"
     assert current.native_value == 6
-    assert current.extra_state_attributes["legacy_limit_migration"] == {
-        "stored": "19/3",
-        "effective": 6,
-    }
+    assert "legacy_limit_migration" not in current.extra_state_attributes
+    await settings.set("allowed_current_1p", 16)
+    await settings.set("allowed_current_3p", 0)
+    state.observe(
+        generation,
+        ("capability", state.binding, "maximum_asymmetry_current"),
+        10,
+        "inventory",
+    )
+    assert current.native_max_value == current.native_value == 10
+    assert current.extra_state_attributes["exact_current_limit_a"] == "16"
+    assert "legacy_limit_migration" not in current.extra_state_attributes
+    assert settings.get("allowed_current_1p") == 16
+    disabled = next(e for e in entities(ha, entry) if e.role == "allowed_current_3p")
+    assert disabled.native_value == 0
+    assert (await settings.store.async_load())[settings.key]["allowed_current_3p"] == 0
 
 
 async def test_failed_setting_save_does_not_commit_options_or_memory(ha, monkeypatch):

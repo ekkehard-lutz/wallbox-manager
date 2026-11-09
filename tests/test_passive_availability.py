@@ -80,7 +80,7 @@ async def test_phase_last_observation_has_no_expiry(ha, monkeypatch):
     monkeypatch.setattr(store, "datetime", Later)
     assert state.value(key) == 3
     assert phase.native_value == 3 and phase.available
-    assert phase.extra_state_attributes["valid_until"] is None
+    assert "valid_until" not in phase.extra_state_attributes
     assert write.call_count == 0
     state.reset(connected=False)
     assert not phase.available
@@ -97,6 +97,9 @@ async def test_duration_minutes_final_duration_and_cleanup(ha, monkeypatch):
     session.event(state, gen, state.binding, "actual", "Started", start, 0)
     await ha.async_block_till_done()
     duration = next(e for e in entities(ha, entry) if e.role == "duration")
+    attrs = duration.extra_state_attributes
+    assert not {"valid_until", "duration_valid_until"} & attrs.keys()
+    assert attrs["started_at"] == start.isoformat()
     changes, reports = [], []
 
     @callback

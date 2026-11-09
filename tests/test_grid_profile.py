@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 
 import pytest
-from conftest import eventually
+from conftest import entities, eventually
 from ocpp.routing import on
 from ocpp.v21 import call, call_result
 from test_active_control import Controllable, ready
@@ -54,11 +54,10 @@ def test_generic_three_modes_disabled_modes_and_stable_overlap():
     assert ranges(caps={1: 0, 3: 0}).resolve(0).amps == 0
 
 
-def test_quantization_legacy_migration_and_unequal_voltage():
+def test_quantization_normalizes_stored_caps_and_uses_nominal_voltage():
     e = ranges(caps={1: "19/3", 3: 100})
     assert e.ranges[1][3] == 6
     assert e.ranges[3][3] == 27
-    assert e.migration[1] == {"stored": "19/3", "effective": 6}
     assert ranges(caps={1: 5}).ranges.keys() == {3}
     for direction, expected in [("down", 8), ("nearest", 9), ("up", 9)]:
         assert ranges(modes=(1,)).resolve(2000, direction).amps == expected
@@ -210,6 +209,17 @@ async def test_complete_profile_confirmation_no_telemetry_repeat_and_set(ha):
         assert profile["stack_level"] == 0
         assert grid.confirmed.amps == 16 and grid.confirmed.phases == 3
         assert grid.attributes()["applied_offered_power_w"] == 11040
+        attrs = next(
+            e for e in entities(ha, entry) if e.role == "soll_power"
+        ).extra_state_attributes
+        assert (
+            not {"profile_status", "control_status", "profile_control_ready"}
+            & attrs.keys()
+        )
+        assert attrs["command_status"] == "confirmed"
+        assert attrs["command_reason"] is None
+        assert attrs["execution_ready"] is True
+        assert attrs["execution_blocked_reason"] is None
         for i in range(4):
             await station.call(
                 call.MeterValues(

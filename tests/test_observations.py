@@ -100,7 +100,7 @@ async def test_narrow_writes_provenance_and_no_measurement_timeout(ha, monkeypat
     monkeypatch.setattr(store, "datetime", Later)
     assert state.value(power) == 1500
     assert reading.available
-    assert reading.extra_state_attributes["valid_until"] is None
+    assert "valid_until" not in reading.extra_state_attributes
     monkeypatch.undo()
     assert not state.observe(
         gen, ("observation", ("Other", "1", None), "power"), 1, "bad"
@@ -941,7 +941,7 @@ async def test_identical_permission_readbacks_do_not_publish_or_change_attribute
     assert permission.extra_state_attributes == attrs
     assert ha.states.get(permission.entity_id) is published
     assert not writes.called and not changes and not reports
-    assert attrs["valid_until"] is attrs["enabled_valid_until"] is None
+    assert not {"valid_until", "enabled_valid_until"} & attrs.keys()
     assert not {"observed_at", "received_at", "enabled_observed_at"} & attrs.keys()
     # Readback changes and explicit unknown events remain immediately visible.
     for value, expected in [("false", False), ("true", True)]:
