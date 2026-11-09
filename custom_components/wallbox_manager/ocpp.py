@@ -160,10 +160,12 @@ class Listener:
         self.stopping = True
         if self.server:
             self.server.close()
-            if self.adapter:
-                await self.adapter.close()
-            await self.server.wait_closed()
-            self.server = None
+            try:
+                if self.adapter:
+                    await self.adapter.close()
+            finally:
+                await self.server.wait_closed()
+                self.server = None
 
 
 class Adapter(ChargePoint):
@@ -235,10 +237,13 @@ class Adapter(ChargePoint):
             return
         self.listener.control.invalidate()
         self.closed = True
-        await self._connection.close()
-        for task in tuple(self.tasks):
-            task.cancel()
-        await asyncio.gather(*tuple(self.tasks), return_exceptions=True)
+        try:
+            await self._connection.close()
+        finally:
+            tasks = tuple(self.tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def live(self, generation):
         return (

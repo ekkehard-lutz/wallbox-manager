@@ -54,6 +54,7 @@ class Grid:
         self.logged_deferral = None
         self.allow_issue = False
         self.known_transaction = None
+        self.started_window = None
         self.last_authority = None
         self.signature = None
         self.status, self.reason = "waiting", None
@@ -219,6 +220,8 @@ class Grid:
         # Permission changes supersede in-flight approvals even if permission
         # is restored before the storage operation finishes.
         if enabled is not True:
+            if not self.state.current(self.permission_generation):
+                self.allow_issue = False
             self.action_generation += 1
             self.pv_phase_deadline = None
             self.invalidate()
@@ -252,7 +255,7 @@ class Grid:
     def release_changed(self):
         self.pv_phase_deadline = None
         self.action_generation += 1
-        self.allow_issue = True
+        self.allow_issue = self.eligible()
         self.invalidate()
         self.signature = None
         self.changed()
@@ -836,7 +839,6 @@ class Grid:
             adapter.spawn(self.settings.initialize_power())
         if self.signature and self.signature[0] != self.state.generation:
             self.allow_issue = False
-            self.known_transaction = None
         authority = self.state.value(self.listener.control.key("ControlAuthority"))
         authority_lost = self.last_authority == "remote" and authority == "local"
         if authority in ("remote", "local"):
@@ -995,6 +997,12 @@ class Grid:
         if now < request["start_at"]:
             return "waiting", request["start_at"]
         return "active", request.get("end_at")
+
+    def delayed_window(self):
+        request = self.settings.get("grid_request")
+        if request and request["start_at"] > request["epoch_at"]:
+            return request["epoch_at"], request["start_at"]
+        return None
 
     def schedule(self):
         """Business deadlines also expire without a connected vehicle/transaction."""
@@ -1172,6 +1180,7 @@ class Grid:
             # Preserve the held planning point, but do not present it as actual
             # while this proposal may supersede it, including after intent changes.
             if point.amps > 0 and self.settings.get("charging_profile") == "NETZ":
+                self.started_window = self.delayed_window()
                 self.diagnostic(
                     "positive_requested", requested_a=point.amps, epoch=epoch
                 )
@@ -1295,10 +1304,11 @@ class Grid:
             if not current():
                 return
             held = observed or self.current_point()
-            # Release OFF still reconciles a confirmed retained positive offer
-            # to zero. allow_issue never authorizes replay of a positive target.
-            # Missing supported readback on reconnect cannot authorize blind replay.
-            if held is None and not self.allow_issue:
+            # A delayed business start can mature during an outage. Its first
+            # decision is independent of recovery of a previously issued point.
+            window = self.delayed_window() if netz_execution else None
+            first_start = window is not None and window != self.started_window
+            if held is None and not self.allow_issue and not first_start:
                 self.status, self.reason = (
                     "accepted_unconfirmed"
                     if self.settings.get("charging_profile") != "NETZ"
@@ -1355,6 +1365,8 @@ class Grid:
                 )
 
             if matches(observed) or (matches(held) and not self.point_uncertain):
+                if window is not None and desired.amps > 0:
+                    self.started_window = window
                 self.cancel_retry()
                 self.allow_issue = False
                 self.status, self.reason = "confirmed", limitation
