@@ -1,13 +1,13 @@
 """Connection and observed session activity."""
 
-import json
 from datetime import UTC, datetime
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 
-from .entity import WallboxEntity
+from .const import DOMAIN
+from .entity import WallboxEntity, scoped_identity
 from .session import view
 
 
@@ -26,16 +26,15 @@ async def async_setup_entry(hass, entry, add):
     entry.async_on_unload(lambda: setattr(state, "add_active", lambda scope: None))
     if state.session:
         add_active(state.session["scope"])
-    prefix = f"{entry.entry_id}:session:"
     for registered in er.async_entries_for_config_entry(
         er.async_get(hass), entry.entry_id
     ):
-        if registered.domain == "binary_sensor" and registered.unique_id.startswith(
-            prefix
-        ):
-            parts = json.loads(registered.unique_id[len(prefix) :])
-            if parts[3] == "active":
-                add_active(parts[:3])
+        if registered.platform != DOMAIN or registered.domain != "binary_sensor":
+            continue
+        if key := scoped_identity(entry.entry_id, registered.unique_id):
+            family, scope, role = key
+            if family == "session" and role == "active":
+                add_active(scope)
 
 
 class Connected(WallboxEntity, BinarySensorEntity):

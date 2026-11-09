@@ -8,7 +8,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.event import async_track_time_interval
 
-from .entity import WallboxEntity
+from .const import CAPABILITIES, DOMAIN
+from .entity import WallboxEntity, scoped_identity
 from .session import KEYS, view
 
 STATES = {
@@ -43,8 +44,6 @@ DIAGNOSTICS = (
 
 
 async def async_setup_entry(hass, entry, add):
-    import json
-
     state = entry.runtime_data.state
     seen = set()
 
@@ -69,14 +68,17 @@ async def async_setup_entry(hass, entry, add):
     for registered in er.async_entries_for_config_entry(
         er.async_get(hass), entry.entry_id
     ):
-        for family in ("observation", "capability", "session"):
-            prefix = f"{entry.entry_id}:{family}:"
+        if registered.platform != DOMAIN or registered.domain != "sensor":
+            continue
+        if key := scoped_identity(entry.entry_id, registered.unique_id):
+            family, _, role = key
             if (
-                registered.unique_id.startswith(prefix)
-                and registered.domain == "sensor"
+                family == "observation"
+                or family == "capability"
+                and role in CAPABILITIES.values()
+                or family == "session"
             ):
-                parts = json.loads(registered.unique_id[len(prefix) :])
-                add_key((family, tuple(parts[:3]), parts[3]))
+                add_key(key)
     # Fixed single-connector session identity exists even before the first transaction.
     scopes = set()
     if state.session:

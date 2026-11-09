@@ -15,21 +15,12 @@ from websockets.exceptions import ConnectionClosed
 
 from . import session
 from .config_flow import diagnostic_level
+from .const import CAPABILITIES
 from .control import DISPATCH, ROLES, Control, Refused
 from .control import endpoint as control_endpoint
 from .meter import CHARGING, CONNECTOR, reported_time, samples
 
 _LOGGER = logging.getLogger(__name__)
-CAPABILITIES = {
-    "SupportedPhaseModes": "supported_phases",
-    "MinimumCurrent": "minimum_current",
-    "CurrentStep": "current_step",
-    "PhaseSwitchingSupported": "phase_switching",
-    "MaximumCurrent": "maximum_current",
-    "MaximumAsymmetryCurrent": "maximum_asymmetry_current",
-    "ZeroCurrentSupported": "zero_current",
-    "ChargingEnableDisableSupported": "enable_disable",
-}
 READ_ONLY = {"GetBaseReport", "GetVariables", "GetCompositeSchedule"}
 
 

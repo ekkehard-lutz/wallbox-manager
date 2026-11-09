@@ -9,9 +9,9 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.storage import Store
 
-from .const import DEFAULT_HOST, DEFAULT_PORT, PLATFORMS
+from .binding import validate_binding
+from .const import DEFAULT_HOST, DEFAULT_PORT, ENTRY_VERSION, PLATFORMS
 from .entity import device_info
-from .migration import migrate
 from .session import document
 from .settings import REGULATION, Settings
 from .store import State
@@ -80,8 +80,10 @@ async def async_setup_entry(hass, entry):
     profiles_store = Store(
         hass, 1, f"wallbox_manager.{entry.entry_id}.profiles", atomic_writes=True
     )
-    profiles = await profiles_store.async_load() or {}
-    binding = migrate(hass, entry, profiles)
+    profiles = await profiles_store.async_load()
+    if profiles is None:
+        profiles = {}
+    binding = validate_binding(hass, entry, profiles)
     state = State(binding)
     settings = Settings(hass, entry, binding, profiles_store, profiles)
     await settings.initialize_grid()
@@ -165,10 +167,5 @@ async def async_unload_entry(hass, entry):
 
 
 async def async_migrate_entry(hass, entry):
-    if entry.version in (1, 2):
-        hass.config_entries.async_update_entry(
-            entry,
-            version=3,
-            data={"host": DEFAULT_HOST, "port": DEFAULT_PORT, **entry.data},
-        )
-    return entry.version == 3
+    """Accept current major-version entries through Home Assistant's lifecycle."""
+    return entry.version == ENTRY_VERSION

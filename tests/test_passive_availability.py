@@ -207,7 +207,8 @@ async def test_options_selectors_precedence_validation_and_no_effects(ha):
     )
     assert result["data"]["leistung_pv"] == "sensor.pv"
     assert result["data"]["foreign"] == {"keep": True}
-    assert "pv_stop_delay" not in result["data"]
+    assert result["data"]["pv_stop_delay"] == 123
+    assert settings.get("pv_stop_delay") is None
     assert result["data"]["pv_decrease_delay_cycles"] == 3
     assert result["data"]["power_smoothing_window"] == 55
     assert settings.get("power_smoothing_window") is None
@@ -605,3 +606,35 @@ async def test_phase_invalid_sequences_are_entry_local(ha):
     assert b.observations[kb] is original
     assert b.value(kb) == 1
     assert not b.observe(gb, ka, None, "foreign")
+
+
+async def test_options_form_only_uses_nested_sections(ha):
+    entry = await ha.install()
+    flow = Options()
+    flow.hass = ha
+    flow.handler = entry.entry_id
+    flat = await flow.async_step_init(
+        {"diagnostic_level": "3", "regulation_interval": 17}
+    )
+    assert flat["data"] == {}
+    nested = await flow.async_step_init(
+        {
+            "general": {
+                "diagnostic_level": "2",
+                "leistung_pv": "sensor.pv",
+                "regulation_interval": 30,
+            },
+            "regulation": {
+                "regulation_interval": 11,
+                "diagnostic_level": "1",
+                "pv_start_delay": 50,
+            },
+            "leistung_pv": "sensor.ignored",
+            "regulation_interval": 17,
+        }
+    )
+    assert nested["data"] == {
+        "diagnostic_level": 2,
+        "leistung_pv": "sensor.pv",
+        "regulation_interval": 11,
+    }

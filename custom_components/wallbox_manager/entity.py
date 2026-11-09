@@ -16,6 +16,27 @@ def unique_id(entry_id, family, scope, role, projection=None):
     return f"{entry_id}:{family}:" + json.dumps(parts, separators=(",", ":"))
 
 
+def scoped_identity(entry_id, identifier):
+    """Decode a current scoped registry ID without changing its serialized form."""
+    prefix = f"{entry_id}:"
+    if not identifier.startswith(prefix):
+        return None
+    family, _, payload = identifier[len(prefix) :].partition(":")
+    if family not in ("control", "observation", "session", "capability", "pv") or not (
+        payload.startswith("[") and payload.endswith("]")
+    ):
+        return None
+    parts = json.loads(payload)
+    if (
+        not isinstance(parts, list)
+        or len(parts) != (5 if family == "observation" else 4)
+        or not isinstance(parts[3], str)
+        or not parts[3]
+    ):
+        raise ValueError("Invalid scoped entity identity")
+    return family, tuple(parts[:3]), parts[3]
+
+
 def device_info(entry, state):
     return DeviceInfo(
         identifiers={(DOMAIN, f"{entry.entry_id}:{state.binding[0]}")},
