@@ -30,14 +30,14 @@ changes of the dynamic target, a correct SoC STOP and battery recovery that did
 not reach the moving restart threshold within the recorded period. Continuous
 actual-SoC/target visibility is required for future validation. The Fronius
 inverter restart was an external hardware event, not a WBM regulation fault.
-These are operator-provided findings, not a new hardware test by this task.
+These are historical operator-provided findings. Current physical acceptance remains open.
 
 [Pause diagnostics](pv-decision-diagnostics.md#approved-pause-context-extension--27-october-2026)
 provide the complementary captured-tick log context. Preserve strict STOP
 `SoC < T-H`, STOP→BALANCE `SoC > T+H/2` with proven surplus and STOP→FAST
 `SoC >= T+H`, plus independent economic STOP/restart. FAST/BALANCE mathematics,
 planning, settings/defaults, technical restrictions, OCPP and journal formats
-remain unchanged. No release, merge, deployment or hardware action is authorized.
+remain in their respective supporting specifications.
 
 
 ## Publication clarification — 31 October 2026

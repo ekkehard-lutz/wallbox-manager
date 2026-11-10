@@ -1,9 +1,9 @@
 # Legacy manual vehicle wake-up compatibility
 
-[Approved AUTO-WAKE-01–10](automatic-vehicle-wakeup.md) supersede WBM-WAKE-01–08
-and WBM-WAKE-FUTURE-01. There is no outstanding automatic-wake-up approval.
-Stationary owns automatic detection/delay/CP; WBM exposes only its confirmed enable
-switch. The manual HA button and WBM DataTransfer dispatch are removed.
+**HISTORICAL for WBM.** AUTO-WAKE-01–10 superseded the WBM-WAKE-01–08 and
+WBM-WAKE-FUTURE-01 UI/dispatch scope. WBM-RELEASE-14 later retired the WBM
+automatic setting. [Stationary owns local configuration and execution](automatic-vehicle-wakeup.md).
+WBM has no manual wake-up button or dispatch path.
 
 The station retains this legacy manual 0 A wire contract for compatibility.
 Confirmed CP restoration never asserts that a vehicle awakened or began charging.

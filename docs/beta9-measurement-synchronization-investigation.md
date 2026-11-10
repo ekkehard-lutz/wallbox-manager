@@ -71,12 +71,12 @@ Principal inspected files and responsibilities:
 | Station `docs/meter-architecture.md`, `docs/ocpp.md`, Fronius register YAML maps | Supporting descriptions; implementation takes precedence over outdated prose |
 
 Useful source anchors:
-[Fronius coordinator](/home/elutz/Projekte/fronius-pv-manager/custom_components/fronius_pv_manager/coordinator.py:243),
-[semantic site power](/home/elutz/Projekte/fronius-pv-manager/custom_components/fronius_pv_manager/sensor.py:540),
-[SDM630 timestamp assignment](/home/elutz/Projekte/wallbox-stationary/backends/sdm630.py:91),
-[OCPP sample construction](/home/elutz/Projekte/wallbox-stationary/ocpp_runtime/metering.py:59),
-[manager normalization](/home/elutz/Projekte/wallbox-manager/custom_components/wallbox_manager/protocols/ocpp/common/metering.py:134),
-[session source attributes](/home/elutz/Projekte/wallbox-manager/custom_components/wallbox_manager/session_entity.py:117).
+Fronius coordinator (`/home/elutz/Projekte/fronius-pv-manager/custom_components/fronius_pv_manager/coordinator.py:243`),
+semantic site power (`/home/elutz/Projekte/fronius-pv-manager/custom_components/fronius_pv_manager/sensor.py:540`),
+SDM630 timestamp assignment (`/home/elutz/Projekte/wallbox-stationary/backends/sdm630.py:91`),
+OCPP sample construction (`/home/elutz/Projekte/wallbox-stationary/ocpp_runtime/metering.py:59`),
+manager normalization (`/home/elutz/Projekte/wallbox-manager/custom_components/wallbox_manager/protocols/ocpp/common/metering.py:134`),
+session source attributes (`/home/elutz/Projekte/wallbox-manager/custom_components/wallbox_manager/session_entity.py:117`).
 
 ## 3. Actual measurement architecture
 
