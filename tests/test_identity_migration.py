@@ -1,4 +1,4 @@
-"""Current identity, scoped settings and retained session import contracts."""
+"""Current identity, scoped settings and retired storage isolation."""
 
 import json
 from datetime import UTC, datetime
@@ -236,7 +236,7 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
     assert entry.runtime_data.server.adapter is None
 
 
-async def test_legacy_session_display_load_is_read_only(ha):
+async def test_missing_passive_session_leaves_historical_ledger_inert(ha, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
     entry = config()
@@ -262,16 +262,23 @@ async def test_legacy_session_display_load_is_read_only(ha):
     }
     store = Store(ha, 1, f"wallbox_manager.{entry.entry_id}.sessions")
     await store.async_save(original)
+    reads = []
+    load = Store.async_load
+
+    async def record_load(store):
+        reads.append(store.key)
+        return await load(store)
+
+    monkeypatch.setattr(Store, "async_load", record_load)
     await ha.install(entry)
-    assert entry.runtime_data.state.session["session_id"] == record["session_id"]
-    reading = next(
-        e for e in entities(ha, entry) if e.family == "session" and e.role == "energy"
-    )
-    assert reading.native_value == 2.5
-    assert reading.unique_id == unique_id(
-        entry.entry_id, "session", ("Wallbox01", "1", "1"), "energy"
-    )
-    assert await store.async_load() == original
+    runtime = entry.runtime_data
+    assert runtime.session_store.key in reads
+    assert store.key not in reads
+    assert runtime.state.session is None and not runtime.state.closed_transactions
+    assert not any(e.family == "session" for e in entities(ha, entry))
+    await async_unload_entry(ha, entry)
+    assert await load(runtime.session_store) is None
+    assert await load(store) == original
 
 
 async def test_profile_edits_are_serialized_without_lost_updates(ha):
