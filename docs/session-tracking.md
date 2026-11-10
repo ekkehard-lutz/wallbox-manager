@@ -1,5 +1,7 @@
 # Session tracking and persistence
 
+**HISTORICAL v0.3 implementation.** The [current contract](specifications/v0.4-current-requirements.md#ocpp-and-session-lifecycle) describes v0.4.
+
 A charging session follows the reported transaction lifecycle, independently of
 socket lifetime, boot generations, connector occupancy and power. A connected
 vehicle drawing 0 W can remain in the same active session indefinitely.

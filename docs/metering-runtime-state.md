@@ -1,10 +1,10 @@
 # Metering and reported runtime state
 
-**Historical implementation description:** Current passive v0.4 follows
-[WBM-ARCH-01–12](specifications/architecture-responsibility.md) and
-[V04-01–12](specifications/passive-v0.4.md). Older phase/permission freshness,
-sample-expiry and manager-side hardware safety/readback gates below are
-explicitly superseded by the 18 October 2026 responsibility decision.
+**HISTORICAL implementation description.** For current active NETZ and PV,
+see the [v0.4 requirements baseline](specifications/v0.4-current-requirements.md)
+and [WBM-ARCH-01–12](specifications/architecture-responsibility.md).
+The earlier phase/permission freshness, expiry and manager physical proof
+clauses below were superseded by the 18 October responsibility decision.
 
 
 ## Boundary and scope

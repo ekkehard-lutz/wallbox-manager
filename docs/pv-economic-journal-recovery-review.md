@@ -27,7 +27,7 @@ Unreadable files, malformed envelopes and unsupported major versions can
 raise instead. The normal Store load/write contract remains in use.
 [Home Assistant Store source](https://github.com/home-assistant/core/blob/2026.8.0/homeassistant/helpers/storage.py#L304-L467)
 
-[`load_journal()`](../custom_components/wallbox_manager/pv_migration.py#L13)
+[`load_journal()`](https://github.com/ekkehard-lutz/wallbox-manager/blob/4d2992e66ad42605f768dc4c7d6fa49f256fbcf2/custom_components/wallbox_manager/pv_migration.py#L13)
 checks the storage directory only when Store returns `None`. It uses the
 public `Store.path` and runs the directory check in HA's executor. A matching
 file name or its HA quarantine name is evidence of existing history. Load

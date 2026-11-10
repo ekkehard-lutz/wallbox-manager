@@ -1,16 +1,22 @@
 # WBM charging release, NETZ action button, and hardware-enable separation
 
-**Status: APPROVED REQUIREMENTS — coordinated feature implementation (24 October 2026).** Implementation and simulated verification are recorded in [the implementation report](../coordinated-control-redesign.md). Independent review, merge, release and hardware acceptance remain separate. This document is normative for the upcoming WBM UI/control redesign and supersedes the specifically conflicting historical requirements in `active-ocpp-control.md`, `grid-profile.md`, `automatic-vehicle-wakeup.md` and the PV V3 draft. It does not approve the PV algorithms themselves.
+**APPROVED** from the 24 October 2026 coordinated control decision, with the
+31 October safe-action/preparation and 7 November hardware-readiness
+decisions below. The current implementation is summarized in the
+[baseline](v0.4-current-requirements.md). PV algorithm approval remains
+independent.
 
 ## Terminology and ownership
 
 Three states must **never** be conflated:
 
 1. **Hardware Wallbox enable/disable:** `WallboxController.ChargingEnabled.Actual`, physically implemented by Stationary's EVSE permission bit. It enables/disables the **whole wallbox**; it is not the WBM profile gate. Retain the HA integration/device-page switch and the observed Actual state. Remove its control from the Lovelace wallbox card.
-2. **WBM Ladefreigabe (manager charge release):** a **per-connector, manager-owned boolean user intent**. This is not `ChargingEnabled`, not an OCPP variable and not vehicle charging evidence. False means WBM may not issue a positive current/phase operating point; when WBM has authority and a valid executable transaction, it commands **0 A** as a regular charging pause. True permits eligible profile current/phase requests, including a calculated **0 A for future PV profiles**. It must never turn hardware enable ON/OFF as a side effect.
+2. **WBM Ladefreigabe (manager charge release):** a **per-connector, manager-owned boolean user intent**. This is not `ChargingEnabled`, not an OCPP variable and not vehicle charging evidence. False means WBM may not issue a positive current/phase operating point; when WBM has authority and a valid executable transaction, it commands **0 A** as a regular charging pause. True permits eligible profile current/phase requests, including an automatic **0 A PV pause**. It must never turn hardware enable ON/OFF as a side effect.
 3. **ControlAuthority:** who may specify the station's offered **current and phase**. Only explicit takeover obtains Remote/OCPP current/phase authority; Local remains responsible otherwise. Hardware `ChargingEnabled` shall be writable from WBM regardless of Local/Remote authority (while station is reachable), without claiming current/phase authority. Actual station feedback determines success.
 
-Changing the last distinction requires a coordinated Stationary update: Stationary already has an authority-independent local `set_enabled()` path; its OCPP `set_ocpp_enabled()` currently enforces Remote authority. WBM currently rejects the command under Local as well. This is feasible with small, scoped changes on both sides; implemented on the coordinated feature branches.
+The station's supported writable permission endpoint and Actual feedback are
+part of this interface. Profile selection and transaction eligibility remain
+independent of the three states above.
 
 ## Normative WBM release contract (WBM-RELEASE-01–14)
 
@@ -25,11 +31,11 @@ Changing the last distinction requires a coordinated Stationary update: Stationa
 | WBM-RELEASE-07 | A hardware-enabled action while Local authority is active may cause the Wallbox's own local current target to take effect. Display that this is a **hardware permission**, not a WBM-authorized profile start, and never infer Remote authority from it. |
 | WBM-RELEASE-08 | Use existing station `SetChargingProfile` for zero and positive manager points, not a new permission OCPP extension. Continue distinguishing desired, ACKed, confirmed offered and measured power. Release false is a hard WBM dispatch gate against later positive profile retries, cached schedules or stale callbacks. |
 | WBM-RELEASE-09 | Backend owns all button state, pending-draft equivalence, persistence, authorization and operation results. Lovelace reads canonical state and invokes services; it is not a separate safety or state engine. Disable unavailable actions with intelligible reasons. Prevent duplicates, late callbacks and stale revisions across card instances, profile changes, disconnect, restart and authority changes. |
-| WBM-RELEASE-10 | Prefer one per-connector action interface/button in Lovelace; preserve useful HA entity identity and diagnostic history, but remove the obsolete standalone NETZ SET action from the active UI/control contract when replacing it. Plan safe entity-registry and stored-profile migration before deletion. |
+| WBM-RELEASE-10 | Prefer one per-connector action interface/button in Lovelace; preserve useful HA entity identity and diagnostic history, but remove the obsolete standalone NETZ SET action from the active UI/control contract when replacing it. Preserve current entity identities under V04-04/05. |
 | WBM-RELEASE-11 | Operational charging remains subject to separately observed hardware `ChargingEnabled=true`; internal release true cannot override disabled wallbox hardware. Keep `charging_allowed` vs `charging_active` vs `charge_release` distinct. |
 | WBM-RELEASE-12 | Reconcile previous pending NETZ drafts and approved/active settings without silently approving them on upgrade, connection recovery, reload or profile switch. For a newly selected profile, default release OFF even if that profile has a saved positive setpoint. |
 | WBM-RELEASE-13 | Preserve existing one-shot NETZ start-delay/duration semantics and battery reserve ownership. A user stop supersedes pending delayed starts/retries. A new explicit start creates the next eligible schedule; applying parameters during an ongoing charge must not incorrectly restart duration/start-delay. |
-| WBM-RELEASE-14 | Automatic vehicle wake-up is **no longer part of WBM**. Remove the `auto_wakeup_enabled` HA switch, associated OCPP variable handling, startup subscriptions, translations, unique-entity exposure and related control paths in the future implementation. Stationary owns the optional local INI setting and the physical automatic wake-up algorithm. Preserve independent legacy manual DataTransfer only where separately specified; this change does not authorize arbitrary OCPP wake-up messages. |
+| WBM-RELEASE-14 | Automatic vehicle wake-up is **no longer part of WBM**. The former `auto_wakeup_enabled` surface and associated WBM OCPP control are superseded. Stationary owns the optional local INI setting and the physical automatic wake-up algorithm. Legacy manual DataTransfer belongs to the station compatibility interface; this change does not authorize arbitrary OCPP wake-up messages. |
 
 ### Recovery clarification for WBM-RELEASE-03/04/08
 
@@ -63,10 +69,10 @@ recovery correction remain unchanged; measurement voltage does not affect readin
 | WBM-NETZ-ACTION-02 | Start action validates and atomically approves the selected NETZ draft power, start-delay and duration using the existing durable approval contract, then sets internal release true and requests the applicable positive point **when authorized and eligible**. If persistence/validation fails, keep release false, do not send positive current and display the error. No separate SET press. |
 | WBM-NETZ-ACTION-03 | While release=true and **no meaningful unapproved NETZ parameters** exist, show **Ladung beenden** (Stop charging). Press sets release false, cancels outstanding positive/retry intents, requests 0 A when permitted and shows actual vs requested until confirmed. (The earlier phrase `Ladung stoppen` denotes the same action; use consistent visible text `Ladung beenden`.) |
 | WBM-NETZ-ACTION-04 | While release=true and a meaningful power or timing draft differs from the currently approved request, show **Ladeparameter übernehmen** (Apply charging parameters) **instead of** Stop charging. Press atomically approves the draft and updates the currently authorized desired point subject to lockouts. It **does not** set release false. After approval, button returns to **Ladung beenden**. |
-| WBM-NETZ-ACTION-05 | While **Ladeparameter übernehmen** is shown, stopping by this same button requires **two intentional presses**: first apply the pending parameters, then press the restored **Ladung beenden**. Alternatively revert drafts to equivalence so **Ladung beenden** reappears. Do not add another stop button to bypass this intended workflow. |
+| WBM-NETZ-ACTION-05 | While **Ladeparameter übernehmen** is shown with hardware permission confirmed, stopping by this same button requires **two intentional presses**: first apply the pending parameters, then press the restored **Ladung beenden**. Alternatively revert drafts to equivalence so **Ladung beenden** reappears. Do not add another stop button to bypass this intended workflow. |
 | WBM-NETZ-ACTION-06 | The pending-change predicate must be **backend authoritative**, using existing approved-versus-draft target equivalence (`WBM-GRID-24/25`), including timing fields. Numerically different power that resolves to the same legal phase/current and no timing changes does not unnecessarily become pending SET. Direct HA Number/Text edits and multiple cards obey the same action state. |
 | WBM-NETZ-ACTION-07 | Only active enabled/supported phase modes with `allowed_current_Np >= MinimumCurrent > 0` contribute to the power selector's lower/upper bounds. A configured cap `0 A` removes that phase mode entirely; do not use it to calculate 0 W endpoints or invalid maxima. |
-| WBM-NETZ-ACTION-08 | Calculate **technical minimum selectable power** as the lowest positive `P_min(n)` across eligible modes, and **technical maximum selectable power** as the highest `P_max(n)` across them, using the existing consistent voltage basis, station minimum, station maximum/asymmetry maximum, current-step and per-mode WBM caps. Do not hardcode a 1p/3p pair, 6 A, 230 V, or thresholds; 2p applies only when actually supported. |
+| WBM-NETZ-ACTION-08 | Calculate **technical minimum selectable power** as the lowest positive `P_min(n)` across eligible modes, and **technical maximum selectable power** as the highest `P_max(n)` across them, using WBM-GRID-31–34 nominal 230 V, station minimum, station maximum/asymmetry maximum, current step and per-mode WBM caps. Do not assume a 1p/3p pair, a 6 A minimum or a fixed power threshold; 2p applies only when actually supported. |
 | WBM-NETZ-ACTION-09 | The NETZ power editor shall no longer allow values below this dynamic **positive** minimum or above the dynamic maximum. Clamp or reject invalid stored or draft values predictably and report effective bounds; no silent positive current issuance. If there is **no eligible positive phase**, disable positive power choice and **Ladung starten**, and explain why. Explicit stop/0 A is controlled by release OFF rather than by a 0 W slider value. |
 | WBM-NETZ-ACTION-10 | Continue the existing DOWN/NEAREST/UP **legal-current quantization** and overlap/phase-retention rules; never force a positive current solely because the selector displays a positive power. A currently selected value may still quantize to 0 A under applicable rules, leaving **Ladung starten** disabled. Show requested vs executable power transparently. |
 | WBM-NETZ-ACTION-11 | On approval while running, re-evaluate latest draft and physical station caps/phase identity with the current generation. Preserve valid 1p/3p transition and phase/re-enable lockout retry behavior. An OCPP rejection or lockout must not report new parameters as applied. |
@@ -82,9 +88,9 @@ recovery correction remain unchanged; measurement voltage does not affect readin
 | ON | equivalent / no pending change | n/a | **Ladung beenden** | release OFF + zero request |
 | ON | meaningful pending change | n/a | **Ladeparameter übernehmen** | approve and apply; release stays ON |
 
-## Future PV profile behavior (WBM-PV-RELEASE-01–07)
+## PV profile behavior (WBM-PV-RELEASE-01–07)
 
-**Specification only. None of the PV profiles is implemented in the current active-control scope.** PV V3 remains a separate DRAFT and is not silently approved by this button design.
+All three PV profiles implement the shared release interface. PV V3 remains DRAFT overall.
 
 | ID | Requirement |
 | --- | --- |
@@ -94,22 +100,20 @@ recovery correction remain unchanged; measurement voltage does not affect readin
 | WBM-PV-RELEASE-04 | Pressing **Ladung beenden** sets release=false, sends 0 A where authorized, and blocks later positive automatic EV operating-point updates until the operator explicitly starts again. Observational target-SoC and PV_OPTIMUM day planning continue on the existing scheduler and authorize no positive or zero-current command. |
 | WBM-PV-RELEASE-05 | Every actual profile switch sets release=false, even PV↔PV, PV→NETZ and NETZ→PV. Merely changing PV tuning inputs or a computed target does not reset release. |
 | WBM-PV-RELEASE-06 | Preserve the separately approved PV SoC/economic-stop, lockout, battery-policy and OCPP transaction behavior unless directly overridden here. Economic 0 A, operator release OFF, and physical charging stopped remain distinct causes. |
-| WBM-PV-RELEASE-07 | Do not implement PV regulators in the present requirements-only task. Future PV implementation must integrate the shared manager release gate at one canonical dispatch point rather than duplicating gates across profiles. |
+| WBM-PV-RELEASE-07 | Integrate PV with the shared manager release gate at the canonical dispatch boundary. The original task-only exclusion of PV implementation is historical. |
 
-## Migration, acceptance and exclusions
+## Acceptance and compatibility
 
-- The existing `button.grid_set` and backend approval contract must be retired/repurposed coherently with safe HA entity migration; do not leave an independent SET action that can bypass the new button.
-- Remove Lovelace invocation of `switch.charging_enabled` while retaining its HA device/integration page presence, actual station state and readback. Consider consistent translations so a hardware switch cannot be confused with WBM Ladefreigabe.
-- Existing grid scheduling provisions whose expiration says `ChargingEnabled=false` must be adapted: **operator/profile scheduling end sets manager release false and requests 0 A**, not hardware disable, unless the user separately chooses hardware disable.
-- Explicitly remove `AutoWakeUpEnabled` from WBM control inventory, state publication and entity surfaces once the coordinated Stationary wire removal occurs; tolerate protocol migration deterministically rather than exposing a dead switch.
-- Verify Local/Remote hardware enable in both configurations, station hardware bit Actual and notifications; verify Manager OFF while Remote uses 0 A, not bit 14; profile switching while positive, pending changes during running, 2-click stop behavior, no eligible modes, positive-min/max range, DOWN-to-zero, HA persistence, multiple cards, restart/reconnect and late ACK fencing.
-- No new OCPP component/variable for manager release, no WBM-owned physical CP logic, no automatic authority takeover.
-- The feature branches implement this contract; this does not claim deployment or integration into `develop`.
-
+Verify independent Local/Remote hardware enable and Actual readback, release
+OFF reconciliation, physical scope, pending approvals, unavailable positive
+points, multiple cards, persistence, restart/reconnect and late outcomes.
+The retired standalone SET and wake-up controls are outside the current
+registry and control contract. WBM-ARCH-01–12 govern execution and Stationary
+owns physical CP.
 
 ## Later approved NETZ timing amendment (24 October 2026)
 
-[WBM-TIME-01–24](operational-display-and-timing.md) supersede only **next-start-only time parameter** clauses in WBM-RELEASE-13, WBM-NETZ-ACTION-04–05 and earlier NETZ timing provisions: confirmed start delay and duration run on absolute business deadlines regardless of connected car; approved edits take effect in the *ongoing* schedule; unapproved timing edits have a 15-second post-edit Apply window while release ON. Expiry during editing changes the action to Start and preserves edits for a new run. All electrical authority/hardware protection and the single-button contract remain unchanged. Specification only.
+[WBM-TIME-01–24](operational-display-and-timing.md) supersede only **next-start-only time parameter** clauses in WBM-RELEASE-13, WBM-NETZ-ACTION-04–05 and earlier NETZ timing provisions: confirmed start delay and duration run on absolute business deadlines regardless of connected car; approved edits take effect in the *ongoing* schedule; unapproved timing edits have a 15-second post-edit Apply window while release ON. Expiry during editing changes the action to Start and preserves edits for a new run. All electrical authority/hardware protection and the single-button contract remain binding subject to the hardware-readiness exception below.
 
 
 ## Approved correction — safe explicit actions and preparatory release (31 October 2026)
