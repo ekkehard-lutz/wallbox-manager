@@ -1,6 +1,6 @@
 # Shared PV operating-point navigation and EV settling
 
-**Decision record:** 25 October 2026, operator's FAST discussion with explicit applicability to **both FAST and BALANCE**. **Status:** agreed FAST/BALANCE response and adjustable regulation parameters. Follow-up decision: the economic import-budget STOP overrides the 0 A startup hold; grid correction deadband defaults to ±100 W. Overall PV V3 remains DRAFT; documentation only.
+**Decision record:** 25 October 2026, operator's FAST discussion with explicit applicability to **both FAST and BALANCE**. **Status:** agreed FAST/BALANCE response and adjustable regulation parameters. Follow-up decision: the economic import-budget STOP overrides the 0 A startup hold; grid correction deadband defaults to ±100 W. The shared path is implemented. Overall PV V3 remains DRAFT. Physical response acceptance is open.
 
 IDs: PV-STEP-01–06, PV-RESP-01–08, PV-TUNE-01–12.
 
@@ -30,7 +30,7 @@ IDs: PV-STEP-01–06, PV-RESP-01–08, PV-TUNE-01–12.
 
 ## Adjustable shared PV regulation parameters (25 October 2026)
 
-These are **integration configuration parameters**, not Lovelace-card controls. They apply to both FAST and BALANCE unless explicitly FAST-only. Use the existing integration's normal Home Assistant configuration surface and validated settings, in **regulation cycles** rather than seconds for the three timing values. Exact technical identifiers are proposed for implementation; German UI names and defaults are the operator's requirement.
+These are **integration configuration parameters**, not Lovelace-card controls. They apply to both FAST and BALANCE unless explicitly FAST-only. Use the existing integration's normal Home Assistant configuration surface and validated settings, in **regulation cycles** rather than seconds for the three timing values. The current configuration surface is OptionsFlow Regulation plus the optional disabled-by-default HA Numbers. See the [nine regulation fields](v0.4-current-requirements.md#home-assistant-entities-and-configuration) for implemented ranges and defaults.
 
 | ID | HA integration parameter (proposed key) | German UI name | Default | Units and behavior |
 | --- | --- | --- | --- | --- |
@@ -48,9 +48,24 @@ These are **integration configuration parameters**, not Lovelace-card controls. 
 
 **PV-TUNE-08 — Boundaries and persistence:** The integration must validate finite, nonnegative whole-cycle parameters, the nonnegative FAST household restart threshold in W and the strictly positive import-energy budget. Values must persist, remain independent from `regulation_interval` (which stays in **seconds**) and be visible/editable through normal HA integration configuration. Provide explicit appropriate upper bounds in the implementation design rather than accepting unbounded values or guessing that zero means disabled for the Wh budget. Changing a setting must **not** trigger a second regulator or a fresh PV control cycle; the next ordinary tick uses effective settings. Use the same shared settings for all battery PV profiles.
 
-**PV-TUNE-09 — Economic budget edits in active scope:** Historical accumulated Wh and economic STOP provenance survive integration reload and configuration changes; a threshold edit is **not** an accounting reset, transaction change or permission to restart. **Proposed implementation behavior pending final review:** lowering the budget below already accumulated eligible Wh triggers economic STOP on the next permitted ordinary cycle; increasing it does not cancel an already-issued STOP or clear restart inhibition. Persist the setting and keep accounting in actual Wh rather than a percentage of budget. Test active edits, restart, lower/raise and late ACKs.
+**PV-TUNE-09 — Economic budget edits in active scope [APPROVED, 11 November
+2026]:** Persist the threshold in Wh and retain accumulated Wh when the operator
+raises or lowers it. A lower limit can trigger economic STOP on the next
+eligible ordinary tick. A higher limit leaves pending STOP intent and latched
+STOP intact. A budget edit grants no charge release and schedules no extra
+regulation cycle. Existing reset qualification and restart evidence remain
+mandatory. Reload and valid same-ID recovery retain the existing economic
+scope and history. A valid new transaction gets a fresh budget under the
+approved rollover rule.
 
-**PV-TUNE-10 — Remove two obsolete parameters entirely:** The beta.16 preferences **`pv_start_delay` (default 0 seconds)** and **`pv_stop_delay` (default 90 seconds)** are unused by the active v0.4 PV runtime and are **not** retained as migration compatibility entities for the next PV milestone. Remove their HA Number entities, entity descriptions/translations, options/configuration editors, settings registration, stored keys and unused watchers. Do not repurpose their entity IDs for the new cycle-based parameters or silently interpret historical **seconds** as **cycles**. Existing historical `v0.3.2-beta.18` start-delay logic and the 90-second economic stop are superseded. Account for Home Assistant entity-registry/orphan cleanup without removing unrelated entities or user history.
+**PV-TUNE-10 — Retired settings [APPROVED, 11 November 2026]:**
+Harmless retired keys may remain in stored configuration. In particular,
+`pv_start_delay` and `pv_stop_delay` have no current control, configuration or
+entity surface. Current scoped settings retain their own identities and
+precedence. Retired values are inert and excluded from runtime decisions.
+Preserve the existing scoped Store format without automatic deletion or
+migration. This approval supersedes earlier physical deletion clauses for
+retired keys. Historical registry rows can remain unavailable.
 
 ### FAST ±100 W grid deadband [APPROVED configurable default]
 

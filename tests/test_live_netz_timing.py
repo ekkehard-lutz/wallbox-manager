@@ -599,13 +599,13 @@ async def test_planned_start_is_not_lost_behind_inflight_zero_decision(ha, monke
         entered, release = asyncio.Event(), asyncio.Event()
         first = True
 
-        async def blocked(*args):
+        async def blocked(*args, **kwargs):
             nonlocal first
             if first:
                 first = False
                 entered.set()
                 await release.wait()
-            return await read(*args)
+            return await read(*args, **kwargs)
 
         monkeypatch.setattr(grid, "read_point", blocked)
         await session(station)

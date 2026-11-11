@@ -122,23 +122,27 @@ class PV:
             self.state.publish(("pv", self.state.binding, "effective_target_soc"))
 
     async def start(self):
-        record = await self.store.async_load()
-        if record is None:
-            from .pv_migration import legacy_record
+        from .pv_journal import MISSING_JOURNAL, load_journal
 
-            economy = await Store(
-                self.hass, 1, f"wallbox_manager.{self.entry.entry_id}.pv_economy"
-            ).async_load()
-            days = await Store(
-                self.hass, 1, f"wallbox_manager.{self.entry.entry_id}.pv_day"
-            ).async_load()
-            record = legacy_record(
-                economy, days, self.entry.entry_id, self.state.binding
-            )
-        if not isinstance(record, dict):
-            record = {"economics": {"invalid": True}}
+        record = await load_journal(self.hass, self.store)
+        missing = record is MISSING_JOURNAL
+        if (
+            not isinstance(record, dict)
+            or type(record.get("version")) is not int
+            or record["version"] != 1
+        ):
+            record = {}
         self.station_identity = record.get("station_identity")
-        self.budget = Budget.restore(record.get("economics"))
+        if self.station_identity is not None and (
+            not isinstance(self.station_identity, dict)
+            or any(
+                not isinstance(value, str) for value in self.station_identity.values()
+            )
+        ):
+            self.station_identity = None
+            self.budget = Budget.restore(None)
+        elif not missing:
+            self.budget = Budget.restore(record.get("economics"))
         self.planner = Planner.restore(record.get("day"))
         self.ended_transaction = record.get("ended_transaction")
         self.last_saved = record
@@ -279,7 +283,7 @@ class PV:
             if self.ended_transaction != session["external_transaction_id"]:
                 self.ended_transaction = session["external_transaction_id"]
                 self.checkpoint()
-        if not self.grid.eligible():
+        if not self.grid.eligible() or self.grid.hardware_enabled() is not True:
             self.budget.interrupt()
         if not self.scheduled():
             if self.timer:
@@ -630,15 +634,16 @@ class PV:
             g.publish()
             return
         if not g.valid(epoch, adapter, tx):
-            self.problem(planning_error or "control_unavailable", powers=powers)
-            g.publish()
+            if not g.fault_superseded(epoch):
+                self.problem(planning_error or "control_unavailable", powers=powers)
+                g.publish()
             return
         if self.state.value(g.listener.control.key("ChargingEnabled")) is not True:
             self.problem(planning_error or "hardware_disabled", powers=powers)
             g.publish()
             return
         current = None if g.point_uncertain else g.current_point()
-        busy = bool(g.task and not g.task.done())
+        busy = g.execution_pending()
         pending = busy or bool(g.point_uncertain)
         battery = (
             bool(self.mapping.get("soc_speicher_aktuell"))
@@ -670,7 +675,7 @@ class PV:
                         await self.persist()
                     except OSError:
                         self.problem("journal_write_failed", powers=powers)
-                    if g.valid(epoch, adapter, tx):
+                    if g.valid(epoch, adapter, tx, zero=True):
                         from .pv_core import Decision
 
                         d = Decision(
@@ -692,8 +697,11 @@ class PV:
                         self.submit(d.point, current, urgent=True)
                     return
             scope = [*self.state.binding, "remote", tx]
+            # An observed end also permits retiring the old station identity.
             ended = bool(
-                self.budget.scope and self.budget.scope[-1] == self.ended_transaction
+                self.budget.scope
+                and self.budget.scope[:-1] == scope[:-1]
+                and self.budget.scope[-1] == self.ended_transaction
             )
             identity = self.state.identity
             if (
@@ -703,7 +711,7 @@ class PV:
             ):
                 self.problem("economic_station_identity_mismatch", powers=powers)
                 return
-            if not self.budget.bind(scope, ended=ended):
+            if not self.budget.bind(scope):
                 self.problem("economic_scope_unreconciled", powers=powers)
                 return
             self.station_identity = dict(identity)
@@ -857,7 +865,10 @@ class PV:
                     return  # Failed storage inhibits positives, never required OFF.
             else:
                 self.problem(None, powers=powers)
-            if not g.valid(epoch, adapter, tx) or not self.regulation_active():
+            if (
+                not g.valid(epoch, adapter, tx, zero=d.point.amps == 0)
+                or not self.regulation_active()
+            ):
                 return
             self.decision_event(
                 d, powers=powers, pause=pause, hysteresis=config["soc_hysterese"]
@@ -900,7 +911,7 @@ class PV:
             self.pending_restart = None
             if g.requested and g.requested.amps > 0 and g.task and not g.task.done():
                 g.invalidate()  # supersede an in-flight positive proposal
-        if g.task and not g.task.done() and g.task_epoch == g.epoch:
+        if g.execution_pending():
             return
         if (
             current
@@ -936,4 +947,6 @@ class PV:
         if self.checkpoints:
             await asyncio.gather(*self.checkpoints, return_exceptions=True)
         self.budget.interrupt()
-        await self.persist()
+        # Setup can be cancelled before recovery has loaded existing history.
+        if self.last_saved is not None:
+            await self.persist()

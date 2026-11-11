@@ -1,7 +1,7 @@
 """Prospective tick accounting and persistent economic STOP, independent of SoC."""
 
-import math
 from dataclasses import dataclass
+from sys import float_info
 
 
 @dataclass
@@ -27,18 +27,18 @@ class Budget:
 
     @classmethod
     def restore(cls, record):
-        if not record:
-            return cls()
         if (
             not isinstance(record, dict)
+            or not {"version", "scope", "wh", "stopped", "reset", "cause"}
+            <= record.keys()
+            or type(record.get("version")) is not int
             or record.get("version") != 1
-            or not (
-                isinstance(record.get("scope"), list) or record.get("scope") is None
-            )
             or type(record.get("wh")) not in (int, float)
-            or not math.isfinite(record["wh"])
-            or record["wh"] < 0
+            or not 0 <= record["wh"] <= float_info.max
             or type(record.get("stopped")) is not bool
+            or type(record.get("reset")) is not bool
+            or not (record["cause"] is None or isinstance(record["cause"], str))
+            or not cls._valid_scope(record)
         ):
             # Unknown history must never create a fresh positive allowance.
             return cls(scope=["unreconciled"], stopped=True, cause="recovery_unknown")
@@ -50,22 +50,48 @@ class Budget:
             cause=record.get("cause"),
         )
 
+    @staticmethod
+    def _valid_scope(record):
+        scope = record["scope"]
+        if scope is None:
+            # A genuinely unbound saved budget has no accumulated history.
+            return (
+                record["wh"] == 0
+                and not (record["stopped"] or record["reset"])
+                and record["cause"] in (None, "operator_stop", "netz_scope_exit")
+            )
+        if scope == ["unreconciled"]:
+            return record["stopped"] and not record["reset"] and record["wh"] == 0
+        return (
+            isinstance(scope, list)
+            and len(scope) == 5
+            and scope[3] == "remote"
+            and all(isinstance(part, str) and part for part in scope)
+        )
+
     def interrupt(self):
         self.previous = self.low_since = None
         # A completed reset is retained during normal operation; restored resets
         # are not trusted without new uninterrupted evidence after downtime.
 
-    def bind(self, scope, *, ended=False):
-        if self.scope is None or ended:
-            self.scope, self.wh, self.stopped, self.reset, self.cause = (
-                scope,
-                0,
-                False,
-                False,
-                None,
-            )
-            self.interrupt()
-        return self.scope == scope
+    def bind(self, scope):
+        if self.scope == scope:
+            return True
+        # Only a different transaction on the same binding can replace
+        # existing history. The unreconciled marker has no binding.
+        if self.scope is not None and (
+            len(scope) != 5 or self.scope[:-1] != scope[:-1]
+        ):
+            return False
+        self.scope, self.wh, self.stopped, self.reset, self.cause = (
+            scope,
+            0,
+            False,
+            False,
+            None,
+        )
+        self.interrupt()
+        return True
 
     def sample(self, now, imported, minimum, *, active, valid=True):
         if not valid:

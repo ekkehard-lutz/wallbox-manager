@@ -50,7 +50,6 @@
         "name": "Discovery-Nachweis",
         "state": {
           "unknown": "Unbekannt",
-          "advertised": "Angekündigt",
           "verified": "Verifiziert",
           "unsupported": "Nicht unterstützt",
           "degraded": "Beeinträchtigt"
@@ -179,9 +178,6 @@
       }
     },
     "number": {
-      "desired_charging_power": {
-        "name": "{scope} Gewünschte Leistung"
-      },
       "allowed_current_1p": {
         "name": "{scope} Zulässiger Strom 1p"
       },
@@ -211,9 +207,6 @@
       },
       "optimum_upper_soc": {
         "name": "{scope} PV Optimum oberer Ziel-SoC"
-      },
-      "optimum_max_discharge_w": {
-        "name": "Maximale PV-Speicherentladeleistung (veraltet, ungenutzt)"
       },
       "estimated_daily_house_consumption_kwh": {
         "name": "{scope} PV Optimum täglicher Hausverbrauch ohne EV"
@@ -256,13 +249,6 @@
           "PV_SURPLUS": "PV-Überschuss",
           "PV_OPTIMUM": "PV Optimum",
           "PV_MAXIMUM": "PV Maximum"
-        }
-      },
-      "pv_approximation": {
-        "name": "PV-Leistungsannäherung",
-        "state": {
-          "up": "Nicht unter Soll",
-          "down": "Nicht über Soll"
         }
       }
     },
@@ -324,7 +310,6 @@
             "data": {
               "regulation_interval": "Regelintervall",
               "soc_hysterese": "SoC-Hysterese und Ziel-Sicherheitsabstand",
-              "power_smoothing_window": "Glättungsfenster (Sekunden)",
               "pv_increase_interval_cycles": "Hochregelintervall",
               "pv_startup_hold_cycles": "Einschwingzeit nach Ladestart",
               "pv_grid_deadband_w": "Netzpunkt-Totzone",

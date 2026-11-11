@@ -11,7 +11,6 @@ from homeassistant.core import CoreState
 
 # Public roles -> legacy storage field, default, minimum, maximum, step, unit.
 NUMBERS = {
-    "desired_charging_power": ("target_w", 0, 0, 100000, 100, "W"),
     **{
         f"allowed_current_{n}p": (f"allowed_current_{n}p", None, 0, 100000, 1, "A")
         for n in (1, 2, 3)
@@ -22,7 +21,6 @@ NUMBERS = {
     "soc_hysterese": ("soc_hysterese", 2, 0, 50, 1, "%"),
     "optimum_lower_soc": ("optimum_lower_soc", 20, 0, 100, 1, "%"),
     "optimum_upper_soc": ("optimum_upper_soc", 80, 0, 100, 1, "%"),
-    "optimum_max_discharge_w": ("optimum_max_discharge_w", 0, 0, 100000, 100, "W"),
     "estimated_daily_house_consumption_kwh": (
         "estimated_daily_house_consumption_kwh",
         0,
@@ -63,7 +61,6 @@ NUMBERS = {
 }
 SELECTS = {
     "charging_profile": ("profile", ["NETZ", "PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"]),
-    "pv_approximation": ("approximation", ["up", "down"]),
     "power_approximation": ("direction", ["up", "down", "nearest"]),
 }
 EDITOR_LEASE_SECONDS = 60
@@ -71,11 +68,18 @@ TIMES = ("grid_start_delay", "grid_duration")
 GRID_FIELDS = ("power_kw", "power_phases", *TIMES)
 PV_TUNING = tuple(k for k in NUMBERS if k.startswith("pv_"))
 REGULATION = ("soc_hysterese", "regulation_interval", *PV_TUNING)
-OBSOLETE_PV = ("pv_start_delay", "pv_stop_delay")
+GRID_STATE_FIELDS = (
+    "grid_power_initialized",
+    "grid_approved",
+    "grid_draft_revision",
+    "grid_timing_revision",
+    "grid_delay_edited",
+    "grid_duration_target",
+)
 
 
-def regulation_value(role, value):
-    """Same finite bounds in HA options and direct Number service calls."""
+def number_value(role, value):
+    """Validate finite Number values and whole cycles for both HA edit paths."""
     if isinstance(value, bool):
         raise ValueError("Number required")
     value = float(Fraction(value))
@@ -108,36 +112,16 @@ class Settings:
         saved = profiles.get(self.key, {})
         self.values = {spec[0]: spec[1] for spec in NUMBERS.values()}
         self.values.update({spec[0]: spec[1][0] for spec in SELECTS.values()})
-        self.values.update(approximation="down", direction="nearest")
+        self.values["direction"] = "nearest"
         self.values.update(dict.fromkeys(TIMES))
         self.values["power_phases"] = None
-        self.values.update({k: v for k, v in saved.items() if k not in OBSOLETE_PV})
-        # Restore caps before any connection/control task can use default maxima.
-        # Entities are added only after capability discovery, which is too late
-        # to make their RestoreEntity callback the sole migration boundary.
-        from homeassistant.helpers import entity_registry as er
-        from homeassistant.helpers import restore_state
-
-        from .const import DOMAIN
-        from .entity import unique_id
-
-        registry = er.async_get(hass)
-        restored = restore_state.async_get(hass).last_states
-        for mode in (1, 2, 3):
-            role = f"allowed_current_{mode}p"
-            if role in saved:
-                continue
-            entity_id = registry.async_get_entity_id(
-                "number", DOMAIN, unique_id(entry.entry_id, "control", binding, role)
-            )
-            previous = restored.get(entity_id)
-            if previous and previous.state.state not in ("unknown", "unavailable"):
-                self.values[role] = (
-                    previous.state.attributes.get("exact_current_limit_a")
-                    or previous.state.state
-                )
-        # Old central options are authoritative for these fields. Preserve seconds-
-        # based smoothing unchanged; future regulator must migrate its units.
+        # Unknown profile fields stay on disk but do not become runtime settings.
+        self.values.update(
+            (key, value)
+            for key, value in saved.items()
+            if key in self.values or key in GRID_STATE_FIELDS
+        )
+        # Central options are authoritative for the active regulation fields.
         for key in REGULATION:
             if key in entry.options:
                 self.values[key] = entry.options[key]
@@ -173,14 +157,7 @@ class Settings:
         self.approval_error = None
 
     async def initialize_grid(self):
-        """Migrate active beta.10 settings once, before entities/transport start."""
-        cleaned = {
-            key: {k: v for k, v in values.items() if k not in OBSOLETE_PV}
-            for key, values in self.profiles.items()
-        }
-        if cleaned != self.profiles:
-            await self.persist(cleaned)
-            self.profiles = cleaned
+        """Initialize durable approval and persist any release retirement."""
         saved = self.profiles.get(self.key, {})
         if "grid_approved" in saved and any(
             saved.get(key) != self.values[key]
@@ -449,14 +426,7 @@ class Settings:
 
     def validate(self, role, value):
         if role in NUMBERS:
-            _, _, minimum, maximum, _, _ = NUMBERS[role]
-            if isinstance(value, bool):
-                raise ValueError("Number required")
-            value = float(Fraction(value))
-            if not math.isfinite(value) or not minimum <= value <= maximum:
-                raise ValueError("Number outside supported range")
-            if role in REGULATION:
-                value = regulation_value(role, value)
+            value = number_value(role, value)
             if role == "soll_power":
                 from .grid_point import envelope, rounded_kw
 

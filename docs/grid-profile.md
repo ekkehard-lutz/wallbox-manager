@@ -1,5 +1,7 @@
 # Grid (`NETZ`) profile and installation ownership
 
+**HISTORICAL v0.3 implementation.** The [current contract](specifications/v0.4-current-requirements.md#netz-profile) describes v0.4.
+
 This is the implemented beta.4 refinement of the v0.3.x Grid contract. It
 supersedes the older conceptual Grid, takeover and battery-read-only proposals
 in `architecture.md`. PV_SURPLUS, PV_DAILY_OPTIMUM, PV_MAXIMUM and the Energy

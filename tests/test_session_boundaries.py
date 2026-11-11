@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
+from homeassistant.exceptions import ConfigEntryError
+from homeassistant.helpers.storage import Store
 
 from custom_components.wallbox_manager import session
 from custom_components.wallbox_manager.ocpp import Adapter, Listener
@@ -14,6 +16,7 @@ from custom_components.wallbox_manager.store import State
 def setup():
     state = State(("Wallbox01", "1", "1"))
     generation = state.reset(connected=True)
+    state.registered_generation = generation
     state.epoch -= timedelta(seconds=60)
     listener = Listener(state, "127.0.0.1", 0)
     adapter = Adapter(Mock(), listener, generation)
@@ -234,7 +237,7 @@ def test_arbitrary_energy_channels_are_not_linked(proof):
     supported(state)
     start = datetime.now(UTC) - timedelta(seconds=20)
     if proof == "no_identity":
-        state.registered_generation = None
+        state.identity.clear()
     elif proof == "other_model":
         state.identity["model"] = "another"
     adapter.meters(1, energy(start, 200000 if proof == "different_value" else 100000))
@@ -278,10 +281,12 @@ async def test_completed_session_survives_reload_and_new_state_from_disk(ha):
 
     entry = await ha.install()
     state = entry.runtime_data.state
-    state.reset(connected=True)
+    state.registered_generation = state.reset(connected=True)
     state.epoch -= timedelta(seconds=60)
     adapter = Adapter(Mock(), entry.runtime_data.server, state.generation)
     start = datetime.now(UTC) - timedelta(seconds=20)
+    transaction(adapter, "Started", start - timedelta(seconds=8), 0, tx="retired")
+    transaction(adapter, "Ended", start - timedelta(seconds=6), 1, tx="retired")
     transaction(adapter, "Started", start, 0, 100000, start - timedelta(seconds=5))
     transaction(
         adapter,
@@ -296,53 +301,50 @@ async def test_completed_session_survives_reload_and_new_state_from_disk(ha):
     await ha.install(entry)
     restored = entry.runtime_data.state
     assert session.view(restored, datetime.now(UTC)) == expected
-    # A fresh State loads the actual store, as after an HA process restart.
+    assert restored.closed_transactions == {"a", "retired"}
+    # Fresh HA instances and States read disk, with a write between restarts.
     from homeassistant.core import HomeAssistant
 
-    restarted_ha = HomeAssistant(ha.config.config_dir)
-    fresh = State(state.binding)
-    await session.load(restarted_ha, entry.entry_id, fresh)
-    await restarted_ha.async_stop()
-    assert session.view(fresh, datetime.now(UTC)) == expected
-    assert fresh.session["start_meter_at"] == state.session["start_meter_at"]
-    assert fresh.session["end_meter_at"] == state.session["end_meter_at"]
+    for _ in range(2):
+        restarted_ha = HomeAssistant(ha.config.config_dir)
+        fresh = State(state.binding)
+        persisted = await session.load(restarted_ha, entry.entry_id, fresh)
+        assert session.view(fresh, datetime.now(UTC)) == expected
+        assert fresh.session == state.session | {"generation": None}
+        assert fresh.closed_transactions == {"a", "retired"}
+        generation = fresh.reset(connected=True)
+        for tx in ("a", "retired"):
+            assert not session.event(
+                fresh, generation, fresh.binding, tx, "Updated", datetime.now(UTC), 5
+            )
+        await persisted.async_save(session.document(fresh))
+        await restarted_ha.async_stop()
     reading = next(e for e in entities(ha, entry) if e.role == "end_meter")
     assert reading.available and reading.native_value == 100.123
     assert reading.extra_state_attributes["boundary_approximation"] is True
+    active = next(
+        e for e in entities(ha, entry) if e.family == "session" and e.role == "active"
+    )
+    assert active.available and active.is_on is False
 
 
-@pytest.mark.parametrize("completed", [False, True])
-async def test_schema_one_migration_keeps_id_and_history_without_inventing_data(
-    ha, completed
-):
-    from homeassistant.helpers.storage import Store
-
+@pytest.mark.parametrize("schema", [{}, {"schema": 1}, {"schema": 3}])
+async def test_unsupported_session_schema_is_rejected_without_rewriting_it(ha, schema):
     state, adapter = setup()
     start = datetime.now(UTC) - timedelta(seconds=20)
     transaction(adapter, "Started", start, 0, 100000)
     transaction(adapter, "Updated", start + timedelta(seconds=5), 1, 100100)
-    if completed:
-        transaction(adapter, "Ended", start + timedelta(seconds=10), 2, 100200)
     old = dict(state.session)
     old.pop("current_meter")
-    if not completed:
-        old["end_meter"] = 100.1  # beta.5's provisional endpoint
-    old["start_meter"] = None  # Historical absence must survive migration.
-    old["energy"] = None
-    doc = {"session": old, "closed_transactions": ["historical"]}
-    await Store(ha, 1, "wallbox_manager.migration.passive_session").async_save(doc)
-    legacy = Store(ha, 1, "wallbox_manager.migration.sessions")
-    await legacy.async_save({"records": [{"session_id": "untouched"}]})
+    old["end_meter"] = 100.1  # Historical provisional endpoint.
+    doc = schema | {"session": old, "closed_transactions": ["historical"]}
+    persisted = Store(ha, 1, "wallbox_manager.unsupported.passive_session")
+    await persisted.async_save(doc)
     fresh = State(state.binding)
-    await session.load(ha, "migration", fresh)
-    assert fresh.session["session_id"] == old["session_id"]
-    assert fresh.session["start_meter"] is None
-    assert fresh.session["energy"] is None
-    assert fresh.session["current_meter"] == old["end_meter"]
-    assert fresh.session["end_meter"] == (old["end_meter"] if completed else None)
-    assert "historical" in fresh.closed_transactions
-    assert await legacy.async_load() == {"records": [{"session_id": "untouched"}]}
-    assert session.document(fresh)["schema"] == 2
+    with pytest.raises(ConfigEntryError, match="Unsupported passive session"):
+        await session.load(ha, "unsupported", fresh)
+    assert fresh.session is None and not fresh.closed_transactions
+    assert await persisted.async_load() == doc
 
 
 def test_projection_publishes_connector_and_session_changes():
@@ -544,3 +546,64 @@ def test_active_idle_contradiction_and_replays_cannot_restore_old_idle():
     )
     assert state.idle_barrier == barrier
     assert state.charging_value(state.binding) is None
+
+
+@pytest.mark.parametrize("old_generation", [False, True])
+async def test_schema_two_active_session_reconfirms_before_attribution(
+    ha, old_generation
+):
+    from copy import deepcopy
+
+    from conftest import config, entities
+
+    entry = config()
+    source, adapter = setup()
+    start = datetime.now(UTC) - timedelta(seconds=20)
+    transaction(adapter, "Started", start, 0, 100000)
+    transaction(adapter, "Updated", start + timedelta(seconds=5), 1, 100125)
+    old = dict(source.session)
+    if not old_generation:
+        old.pop("generation")
+    persisted = Store(ha, 1, f"wallbox_manager.{entry.entry_id}.passive_session")
+    await persisted.async_save(
+        {
+            "schema": 2,
+            "session": old,
+            "closed_transactions": ["retired"],
+        }
+    )
+
+    await ha.install(entry)
+    runtime = entry.runtime_data
+    state = runtime.state
+    generation = state.reset(connected=True)
+    assert list(generation) == source.session["generation"]
+    assert state.session == old | {"generation": None}
+    assert state.closed_transactions == {"retired"}
+    assert runtime.grid.transaction() is None
+    assert session.view(state, datetime.now(UTC))["active"] is None
+    at = datetime.now(UTC)
+    session.meter(state, "energy", 100.25, at)
+    assert state.session["energy"] == pytest.approx(0.125)
+    assert not session.event(
+        state, generation, state.binding, "retired", "Updated", at, 2
+    )
+    assert session.event(state, generation, state.binding, "a", "Updated", at, 2)
+    session.meter(state, "energy", 100.25, at)
+    assert state.session["energy"] == pytest.approx(0.25)
+    assert state.session["energy_channel"] == source.session["energy_channel"]
+    assert runtime.grid.transaction() == "a"
+    active = next(
+        e for e in entities(ha, entry) if e.family == "session" and e.role == "active"
+    )
+    assert active.available and active.is_on is True
+
+    live = deepcopy(state.session)
+    document = session.document(state)
+    assert state.session == live and state.session["generation"] == list(generation)
+    del live["generation"]
+    assert document == {
+        "schema": 2,
+        "session": live,
+        "closed_transactions": ["retired"],
+    }

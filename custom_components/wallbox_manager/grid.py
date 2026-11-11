@@ -17,12 +17,13 @@ from .control import DISPATCH, Refused
 from .grid_point import NOMINAL_VOLTAGE, Point, envelope, number, rounded_kw
 
 _LOGGER = logging.getLogger(__name__)
+ATOMIC_PROFILE_REJECTIONS = ("PhaseSwitchLockout", "ReenableLockout")
 
 
 def retry_delay(info):
-    if not isinstance(info, dict) or info.get("reason_code") not in (
-        "PhaseSwitchLockout",
-        "ReenableLockout",
+    if (
+        not isinstance(info, dict)
+        or info.get("reason_code") not in ATOMIC_PROFILE_REJECTIONS
     ):
         return None
     raw = info.get("additional_info", "")
@@ -35,12 +36,13 @@ class Grid:
     def __init__(self, listener, settings):
         self.listener, self.state, self.settings = listener, listener.state, settings
         self.pv = None
-        self.epoch = 0
+        self.epoch = self.lifecycle_epoch = 0
         self.closed = False
         self.task = self.timer = self.schedule_timer = None
         self.deadline_tasks = set()
         self.attempted_edit_revision = None
         self.task_epoch = None
+        self.task_zero = False
         self.action_task = None
         self.action_lock = asyncio.Lock()
         self.action_generation = 0
@@ -52,6 +54,7 @@ class Grid:
         self.logged_deferral = None
         self.allow_issue = False
         self.known_transaction = None
+        self.started_window = None
         self.last_authority = None
         self.signature = None
         self.status, self.reason = "waiting", None
@@ -217,6 +220,8 @@ class Grid:
         # Permission changes supersede in-flight approvals even if permission
         # is restored before the storage operation finishes.
         if enabled is not True:
+            if not self.state.current(self.permission_generation):
+                self.allow_issue = False
             self.action_generation += 1
             self.pv_phase_deadline = None
             self.invalidate()
@@ -250,7 +255,7 @@ class Grid:
     def release_changed(self):
         self.pv_phase_deadline = None
         self.action_generation += 1
-        self.allow_issue = True
+        self.allow_issue = self.eligible()
         self.invalidate()
         self.signature = None
         self.changed()
@@ -407,6 +412,7 @@ class Grid:
             retry_deadline = self.retry_deadline
             previous_request = self.settings.values.get("grid_request")
             self.invalidate()
+            approval_epoch = self.epoch
             # Persistence may be delayed; the old business deadline still wins.
             self.schedule()
             epochs = []
@@ -468,19 +474,26 @@ class Grid:
                     level=1,
                     action=state["charge_action"],
                 )
+                if self.fault_superseded(approval_epoch):
+                    raise
                 if not self.settings.get("charge_release"):
                     self.release_changed()
                 elif self.phase()[0] == "expired":
                     await self.stop_release(reason="duration_expired")
                 else:
                     self.schedule()
-                    if retry_deadline is not None and self.eligible():
+                    if (
+                        retry_deadline is not None
+                        and approval_epoch == self.epoch
+                        and self.eligible()
+                    ):
                         self.retry(max(0, retry_deadline - self.wall_time()))
                 raise
             if starting:
                 self.edited("charge_release")
             else:
-                self.retry_deadline = retry_deadline
+                if approval_epoch == self.epoch:
+                    self.retry_deadline = retry_deadline
                 self.committed(equivalent, timing_only=timing_only)
         else:
             # PV Start grants release; the next regular tick decides its point.
@@ -610,9 +623,6 @@ class Grid:
             **self.action_state(),
             "execution_ready": self.eligible(),
             "execution_blocked_reason": self.reason,
-            "profile_status": self.status,
-            "control_status": self.status,
-            "profile_control_ready": self.eligible(),
             "command_status": self.status,
             "command_reason": self.reason,
             "active_message": self.state.messages.latest,
@@ -774,21 +784,44 @@ class Grid:
             ),
         )
 
-    def cancel_timers(self):
-        for name in ("timer", "schedule_timer"):
-            handle = getattr(self, name)
-            if handle:
-                handle.cancel()
-                setattr(self, name, None)
+    def cancel_retry(self):
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
         self.retry_at = self.retry_deadline = None
 
-    def invalidate(self):
+    def cancel_timers(self):
+        self.cancel_retry()
+        if self.schedule_timer:
+            self.schedule_timer.cancel()
+            self.schedule_timer = None
+
+    def invalidate(self, *, fault=False):
         self.epoch += 1
+        if fault:
+            self.cancel_retry()
+        else:
+            self.lifecycle_epoch = self.epoch
+            self.cancel_timers()
         self.pv_ack = None
         self.outcome_epoch = None
         self.state.messages.clear("grid:outcome")
         self.state.messages.clear("grid:limitation")
-        self.cancel_timers()
+
+    def connector_faulted(self):
+        """Supersede the positive intent without waking either profile."""
+        if self.closed:
+            return
+        if self.requested and self.requested.amps > 0 and self.status != "confirmed":
+            self.requested = self.acknowledged = None
+            self.status, self.reason = "unconfirmed", "fault_superseded"
+        self.pv_phase_deadline = None
+        if self.pv:
+            if self.pv.proposed and self.pv.proposed.amps > 0:
+                self.pv.proposed = None
+            self.pv.pending_restart = None
+        self.invalidate(fault=True)
+        self.publish()
 
     def changed(self):
         signature = self.fingerprint()
@@ -803,7 +836,6 @@ class Grid:
             adapter.spawn(self.settings.initialize_power())
         if self.signature and self.signature[0] != self.state.generation:
             self.allow_issue = False
-            self.known_transaction = None
         authority = self.state.value(self.listener.control.key("ControlAuthority"))
         authority_lost = self.last_authority == "remote" and authority == "local"
         if authority in ("remote", "local"):
@@ -878,14 +910,12 @@ class Grid:
             return  # Observations never execute an additional PV regulation pass.
         if self.closed or not self.eligible():
             return
-        if self.task and not self.task.done() and self.task_epoch == self.epoch:
+        if self.execution_pending():
             return
-        if self.timer:
-            self.timer.cancel()
-            self.timer = None
-        self.retry_at = self.retry_deadline = None
+        self.cancel_retry()
         adapter = self.listener.adapter
         epoch = self.task_epoch = self.epoch
+        self.task_zero = False
         business_phase = self.phase()[0]
         self.task = adapter.spawn(
             self.reconcile(
@@ -898,17 +928,18 @@ class Grid:
         )
 
         def settled(task):
-            if not task.cancelled() and task.exception() is None:
-                # A planned start can fall while a read/zero write is in flight.
-                # The deadline cannot coalesce into that older waiting decision.
-                if (
-                    self.task is task
-                    and self.valid(epoch, adapter, self.transaction())
-                    and self.phase()[0] != business_phase
-                ):
-                    self.launch()
-                else:
-                    self.reevaluate_pending()
+            if task.cancelled() or task.exception() is not None:
+                return
+            # A planned start can fall while a read/zero write is in flight.
+            # The deadline cannot coalesce into that older waiting decision.
+            if (
+                self.task is task
+                and self.valid(epoch, adapter, self.transaction(), zero=self.task_zero)
+                and self.phase()[0] != business_phase
+            ):
+                self.launch()
+            elif not self.fault_superseded(epoch):
+                self.reevaluate_pending()
 
         self.task.add_done_callback(settled)
 
@@ -918,7 +949,7 @@ class Grid:
             adapter.spawn(self.settings.approve_equivalent_grid())
 
     def current_point(self):
-        """A failed read does not erase a held, correctly scoped observation."""
+        """Return the held observation. Confirmation also requires no uncertainty."""
         point = self.confirmed
         if (
             point
@@ -931,9 +962,23 @@ class Grid:
             return point
         return None
 
-    def valid(self, epoch, adapter, transaction):
+    def fault_superseded(self, epoch):
+        return self.lifecycle_epoch <= epoch < self.epoch
+
+    def current_intent(self, epoch, *, zero=False):
+        # A fault supersedes positive intent. Lifecycle changes supersede both.
+        return epoch == self.epoch or (zero and epoch >= self.lifecycle_epoch)
+
+    def execution_pending(self):
+        return bool(
+            self.task
+            and not self.task.done()
+            and self.current_intent(self.task_epoch, zero=self.task_zero)
+        )
+
+    def valid(self, epoch, adapter, transaction, *, zero=False):
         return (
-            epoch == self.epoch
+            self.current_intent(epoch, zero=zero)
             and self.eligible()
             and self.listener.adapter is adapter
             and transaction == self.transaction()
@@ -949,6 +994,12 @@ class Grid:
         if now < request["start_at"]:
             return "waiting", request["start_at"]
         return "active", request.get("end_at")
+
+    def delayed_window(self):
+        request = self.settings.get("grid_request")
+        if request and request["start_at"] > request["epoch_at"]:
+            return request["epoch_at"], request["start_at"]
+        return None
 
     def schedule(self):
         """Business deadlines also expire without a connected vehicle/transaction."""
@@ -1020,13 +1071,16 @@ class Grid:
             max(0, deadline - self.wall_time()), fire
         )
 
-    async def read_point(self, adapter, epoch, transaction):
+    async def read_point(self, adapter, epoch, transaction, *, zero=False):
         response = await adapter.request(
             call.GetCompositeSchedule(
                 evse_id=int(self.state.binding[1]), duration=60, charging_rate_unit="A"
             )
         )
-        if not self.valid(epoch, adapter, transaction) or response.status != "Accepted":
+        if (
+            not self.valid(epoch, adapter, transaction, zero=zero)
+            or response.status != "Accepted"
+        ):
             return None
         schedule = getattr(response, "schedule", None)
         if not isinstance(schedule, dict):
@@ -1062,7 +1116,7 @@ class Grid:
         return point
 
     async def dispatch_point(
-        self, point, epoch, adapter, transaction, *, proposal=None
+        self, point, epoch, adapter, transaction, *, proposal=None, zero=False
     ):
         """Send a bounded TxProfile with the same wire-generation guard."""
         period = {"start_period": 0, "limit": point.amps}
@@ -1091,13 +1145,14 @@ class Grid:
 
         uncertainty = {"previous": None, "rejected": False}
         submitted = False
+        zero = zero and point.amps == 0
 
         def guard(action, wire):
             nonlocal submitted
             if (
                 action != "SetChargingProfile"
                 or wire != expected
-                or not self.valid(epoch, adapter, transaction)
+                or not self.valid(epoch, adapter, transaction, zero=zero)
                 or (
                     point.amps > 0
                     and (
@@ -1122,6 +1177,7 @@ class Grid:
             # Preserve the held planning point, but do not present it as actual
             # while this proposal may supersede it, including after intent changes.
             if point.amps > 0 and self.settings.get("charging_profile") == "NETZ":
+                self.started_window = self.delayed_window()
                 self.diagnostic(
                     "positive_requested", requested_a=point.amps, epoch=epoch
                 )
@@ -1139,7 +1195,7 @@ class Grid:
             if (
                 proposal is not None
                 and self.pv
-                and self.valid(epoch, adapter, transaction)
+                and self.valid(epoch, adapter, transaction, zero=zero)
             ):
                 self.pv.execution_event(
                     "communication_failure",
@@ -1151,17 +1207,17 @@ class Grid:
             raise
         finally:
             DISPATCH.reset(token)
+        info = getattr(response, "status_info", None)
+        reason = (
+            (info.get("reason_code") or info.get("reasonCode"))
+            if isinstance(info, dict)
+            else None
+        )
         if (
             point.amps > 0
             and self.settings.get("charging_profile") == "NETZ"
             and self.valid(epoch, adapter, transaction)
         ):
-            info = getattr(response, "status_info", None)
-            reason = (
-                (info.get("reason_code") or info.get("reasonCode"))
-                if isinstance(info, dict)
-                else None
-            )
             self.diagnostic(
                 "positive_accepted"
                 if response.status == "Accepted"
@@ -1171,15 +1227,20 @@ class Grid:
                 requested_a=point.amps,
                 epoch=epoch,
             )
-        if response.status == "Accepted":
-            uncertainty["previous"] = False
-        elif response.status == "Rejected":
-            # Atomic rejection did not apply. Unwind only rejected proposals;
-            # retain prior accepted uncertainty and newer dispatch/readback state.
+        if (
+            submitted
+            and response.status == "Rejected"
+            and reason in ATOMIC_PROFILE_REJECTIONS
+        ):
+            # Only these Stationary reasons guarantee rejection before actuation.
+            # Keep prior unresolved commands and any newer dispatch or readback.
             uncertainty["rejected"] = True
             while self.point_uncertain and self.point_uncertain["rejected"]:
                 self.point_uncertain = self.point_uncertain["previous"]
             self.publish()
+        else:
+            # An unresolved submission already covers any older uncertainty.
+            uncertainty["previous"] = False
         return response
 
     async def reconcile(
@@ -1198,13 +1259,13 @@ class Grid:
             and ack[:3] == (epoch, adapter, transaction)
             and ack[4] == self.requested
         )
+        zero = False
+
+        def current():
+            return self.valid(epoch, adapter, transaction, zero=zero)
+
         try:
-            if not self.valid(epoch, adapter, transaction):
-                return
             phase, _ = self.phase()
-            if phase == "expired" and self.settings.get("charge_release"):
-                await self.stop_release(reason="duration_expired")
-                return
             netz_execution = (
                 phase == "active"
                 and self.settings.get("charge_release")
@@ -1216,6 +1277,17 @@ class Grid:
                 if netz_execution
                 else 0
             )
+            zero = not confirm_only and (
+                pv_point.amps == 0 if pv_point is not None else watts == 0
+            )
+            owns_task = self.task is asyncio.current_task()
+            if not current() or (not owns_task and epoch != self.epoch):
+                return
+            if owns_task:
+                self.task_zero = zero
+            if phase == "expired" and self.settings.get("charge_release"):
+                await self.stop_release(reason="duration_expired")
+                return
             try:
                 ranges = envelope(self.state, self.settings)
             except ValueError, TypeError, OverflowError:
@@ -1225,14 +1297,15 @@ class Grid:
                 # positive-current capability diagnostics or a phase selection.
                 ranges = None
             # Initial/reconnect read reconciles Stationary's independent recovery.
-            observed = await self.read_point(adapter, epoch, transaction)
-            if not self.valid(epoch, adapter, transaction):
+            observed = await self.read_point(adapter, epoch, transaction, zero=zero)
+            if not current():
                 return
             held = observed or self.current_point()
-            # Release OFF still reconciles a confirmed retained positive offer
-            # to zero. allow_issue never authorizes replay of a positive target.
-            # Missing supported readback on reconnect cannot authorize blind replay.
-            if held is None and not self.allow_issue:
+            # A delayed business start can mature during an outage. Its first
+            # decision is independent of recovery of a previously issued point.
+            window = self.delayed_window() if netz_execution else None
+            first_start = window is not None and window != self.started_window
+            if held is None and not self.allow_issue and not first_start:
                 self.status, self.reason = (
                     "accepted_unconfirmed"
                     if self.settings.get("charging_profile") != "NETZ"
@@ -1268,6 +1341,9 @@ class Grid:
                     return
                 desired = self.requested
                 watts = desired.watts
+            zero = not confirm_only and desired.amps == 0
+            if owns_task:
+                self.task_zero = zero
             self.requested = desired
             if netz_execution and desired.amps <= 0:
                 self.diagnostic("point_deferred", "no_positive_current")
@@ -1286,10 +1362,9 @@ class Grid:
                 )
 
             if matches(observed) or (matches(held) and not self.point_uncertain):
-                if self.timer:
-                    self.timer.cancel()
-                    self.timer = None
-                self.retry_at = self.retry_deadline = None
+                if window is not None and desired.amps > 0:
+                    self.started_window = window
+                self.cancel_retry()
                 self.allow_issue = False
                 self.status, self.reason = "confirmed", limitation
                 if confirmation:
@@ -1308,8 +1383,9 @@ class Grid:
                     adapter,
                     transaction,
                     **({"proposal": proposal} if proposal is not None else {}),
+                    zero=zero,
                 )
-                if not self.valid(epoch, adapter, transaction):
+                if not current():
                     return
                 self.allow_issue = False
                 if response.status != "Accepted":
@@ -1380,7 +1456,11 @@ class Grid:
                     if delay is not None and not (
                         pv_point is not None and self.reason == "PhaseSwitchLockout"
                     ):
-                        if self.reason == "PhaseSwitchLockout" and held is not None:
+                        if (
+                            self.reason == "PhaseSwitchLockout"
+                            and held is not None
+                            and not self.point_uncertain
+                        ):
                             temporary = (
                                 ranges.interim(
                                     watts,
@@ -1397,7 +1477,7 @@ class Grid:
                                 fallback = await self.dispatch_point(
                                     temporary, epoch, adapter, transaction
                                 )
-                                if not self.valid(epoch, adapter, transaction):
+                                if not current():
                                     return
                                 if fallback.status == "Accepted":
                                     self.acknowledged = temporary
@@ -1429,7 +1509,7 @@ class Grid:
                                         "reason_code", fallback.status
                                     )
                                     delay = retry_delay(fallback_info)
-                        if not self.valid(epoch, adapter, transaction):
+                        if not current():
                             return
                         if delay is not None:
                             self.status = (
@@ -1440,7 +1520,7 @@ class Grid:
                             )
                             self.allow_issue = True
                             self.retry(delay)
-                    self.outcome_epoch = epoch
+                    self.outcome_epoch = self.epoch
                     self.publish()
                     return
                 self.acknowledged = desired
@@ -1464,10 +1544,12 @@ class Grid:
                         },
                         "variable": {"name": "PhaseRotation"},
                     },
-                    current=lambda: self.valid(epoch, adapter, transaction),
+                    current=current,
                 )
-                applied = await self.read_point(adapter, epoch, transaction)
-                if not self.valid(epoch, adapter, transaction):
+                if not current():
+                    return
+                applied = await self.read_point(adapter, epoch, transaction, zero=zero)
+                if not current():
                     return
                 if matches(applied):
                     self.status, self.reason = "confirmed", limitation
@@ -1482,16 +1564,16 @@ class Grid:
                         ack=desired,
                         reason=self.reason,
                     )
-            self.outcome_epoch = epoch
+            self.outcome_epoch = self.epoch
             self.publish()
         except (ValueError, TypeError, OverflowError) as exc:
-            if not self.valid(epoch, adapter, transaction):
+            if not current():
                 return
             self.status, self.reason = "unsupported", str(exc)
-            self.outcome_epoch = epoch
+            self.outcome_epoch = self.epoch
             self.publish()
         except TimeoutError, OSError, OCPPError, ConnectionClosed:
-            if not self.valid(epoch, adapter, transaction):
+            if not current():
                 return
             self.status, self.reason = (
                 ("accepted_unconfirmed", "readback_failure")
@@ -1507,14 +1589,14 @@ class Grid:
                     ack=self.acknowledged,
                     reason=self.reason,
                 )
-            self.outcome_epoch = epoch
+            self.outcome_epoch = self.epoch
             self.publish()
         except Refused:
             pass
         finally:
             if (
-                self.outcome_epoch == epoch
-                and self.valid(epoch, adapter, transaction)
+                self.outcome_epoch == self.epoch
+                and current()
                 and netz_execution
                 and (
                     self.status in ("unsupported", "communication_failure")

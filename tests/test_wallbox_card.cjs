@@ -30,9 +30,9 @@ function load(clock={}) {
 }
 function states(entry='E') {
   const result = {};
-  for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',pv_approximation:'down',
+  for (const [role,value] of Object.entries({connected:'on',control_authority:'local',charging_profile:'NETZ',soll_power:'7.2',min_soc:'20',soll_soc_speicher:'95',
     charge_action:'unknown',charging_enabled:'on',connector_state:'available',charging_state:'idle',power:'1500',session_energy:'1.2',session_duration:'60',
-    grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',optimum_max_discharge_w:'3000',estimated_daily_house_consumption_kwh:'12'})) {
+    grid_start_delay:'',grid_duration:'02:30',optimum_lower_soc:'20',optimum_upper_soc:'80',estimated_daily_house_consumption_kwh:'12'})) {
     result[`${entry}.${role}`] = {state:value,attributes:{wallbox_manager_entry:entry,wallbox_manager_role:role,wallbox_manager_scope:'connector',station_id:`station-${entry}`,
       options:role==='charging_profile'?['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']:undefined,min:0,max:100}};
   }
@@ -328,7 +328,7 @@ test('automatic wake-up switch has no card markup or authorized card action',asy
 test('reserve and approximation controls are absent while measured power remains separate',()=>{
   const data=states();
   data['E.power_approximation']={state:'nearest',attributes:{wallbox_manager_entry:'E',wallbox_manager_role:'power_approximation'}};
-  Object.assign(data['E.soll_power'].attributes,{profile_status:'rejected',command_reason:'PhaseSwitchLockout',applied_phase_count:3,applied_current_a:6});
+  Object.assign(data['E.soll_power'].attributes,{command_status:'rejected',command_reason:'PhaseSwitchLockout',applied_phase_count:3,applied_current_a:6});
   const {card:c,get}=card(data);
   assert.doesNotMatch(c.shadowRoot.html,/id="reserve|id="approximation|Entladereserve|Leistungsannäherung/);
   assert.equal(c.discovery.roles.min_soc,'E.min_soc');
@@ -874,7 +874,7 @@ test('five editors and their controls are absent for every profile',()=>{
   const data=batteryStates(); const {card:c}=card(data);
   for (const profile of ['NETZ','PV_SURPLUS','PV_OPTIMUM','PV_MAXIMUM']) {
     data['E.charging_profile'].state=profile; c.hass=c._hass;
-    for (const role of ['optimum_lower_soc','optimum_upper_soc','optimum_max_discharge_w','estimated_daily_house_consumption_kwh','soll_soc_speicher']) {
+    for (const role of ['optimum_lower_soc','optimum_upper_soc','estimated_daily_house_consumption_kwh','soll_soc_speicher']) {
       assert.doesNotMatch(c.shadowRoot.html,new RegExp(`id="${role}(?:-|\\")`));
     }
   }

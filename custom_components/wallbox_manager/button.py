@@ -4,10 +4,9 @@ import voluptuous as vol
 from homeassistant.components.button import ButtonEntity
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
 
-from .entity import SettingEntity, WallboxEntity, unique_id
+from .entity import SettingEntity, WallboxEntity
 
 
 async def async_setup_entry(hass, entry, add):
@@ -22,24 +21,6 @@ async def async_setup_entry(hass, entry, add):
         "async_charge_action",
     )
     state = entry.runtime_data.state
-    # Retire only this integration's exact legacy button, not other devices/entities.
-    registry = er.async_get(hass)
-    legacy = registry.async_get_entity_id(
-        "button",
-        "wallbox_manager",
-        unique_id(
-            entry.entry_id, "station", (state.binding[0], None, None), "wake_up_vehicle"
-        ),
-    )
-    if legacy and registry.async_get(legacy).config_entry_id == entry.entry_id:
-        registry.async_remove(legacy)
-    obsolete = registry.async_get_entity_id(
-        "button",
-        "wallbox_manager",
-        unique_id(entry.entry_id, "control", state.binding, "grid_set"),
-    )
-    if obsolete and registry.async_get(obsolete).config_entry_id == entry.entry_id:
-        registry.async_remove(obsolete)
     add(
         [
             TakeControl(

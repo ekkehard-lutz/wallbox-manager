@@ -1,12 +1,8 @@
-**Implemented feature-branch supersession (24 October 2026):** [charge-release.md](charge-release.md) and [implementation report](../coordinated-control-redesign.md) govern manager release, unified NETZ actions, authority-independent hardware enable, and removal of WBM automatic wake-up control. Conflicting older clauses below are historical. PV regulation algorithms remain deferred.
-
-**24 October 2026 clarification:** Stationary also owns *configuration* of automatic vehicle wake-up (local startup INI, no WBM OCPP setting). WBM manages its own independent `charge_release` user intent. Hardware `ChargingEnabled` is authority-independent; `ControlAuthority` governs offered current/phase. See [current target](charge-release.md); this clarification supersedes the older AutoWakeUpEnabled exception in WBM-ARCH-02.
-
 # Architectural responsibility and last-value-held observations [APPROVED]
 
 **Decision:** Explicit user approval, 18 October 2026, “Architectural
 Responsibility Boundary and No-Expiry Observations”. Independently approved,
-overarching normative architecture for passive v0.4 and future WBM work.
+overarching normative architecture for all v0.4 profiles and OCPP control.
 This does **not** approve the broader [PV V3 draft](pv-regulation.md).
 
 The station is solely responsible for physical and electrical safety. WBM may
@@ -16,7 +12,7 @@ reject or safely handle unacceptable requests. WBM cannot certify hardware safet
 | Stable ID | Approved requirement |
 | --- | --- |
 | WBM-ARCH-01 | The station owns all hardware protection, physical current/phase limits, electrical fault handling, charging interlocks, CP operation and safe phase switching, including meter checks, relay sequencing and safe restoration. WBM does not duplicate these protections. |
-| WBM-ARCH-02 | WBM owns profiles, desired charging points, optimization, diagnostics and truthful user presentation. AUTO-WAKE-01–10 assign automatic vehicle wake-up detection/delay/execution to Stationary; WBM supplies only the enable switch. |
+| WBM-ARCH-02 | WBM owns profiles, desired charging points, optimization, diagnostics and truthful user presentation. Stationary owns automatic vehicle wake-up configuration and execution under the 24 October decision and WBM-RELEASE-14. WBM owns independent manager release. |
 | WBM-ARCH-03 | Every WBM charging command is a proposal to the station, not an independently safety-certified instruction. Incomplete or old observations may yield suboptimal proposals; station enforcement remains mandatory. |
 | WBM-ARCH-04 | Station rejection, delay or adjustment is normal. WBM handles outcomes, retains requested/applied distinctions and must not claim success, invent a response or replay obsolete intent. |
 | WBM-ARCH-05 | All ordinary measurements and reported states are last-value-held within their observation generation, without TTL or age-based expiry. This includes voltage, current, power, energy, phases, permission, authority, connector/charging status and ordinary HA/forecast inputs. |
@@ -37,7 +33,7 @@ all unrelated economic/profile/authority rules remain in effect.
 
 | Prior provision | Binding replacement |
 | --- | --- |
-| V04-08 accurate public acquisition metadata; beta.3 permission-specific timestamps/TTL | WBM-ARCH-05/06/12: accurate internal metadata, no public per-read acquisition timestamps, inert compatibility deadlines (`None`). |
+| V04-08 accurate public acquisition metadata; beta.3 permission-specific timestamps/TTL | WBM-ARCH-05/06/12: accurate internal metadata, no public per-read acquisition timestamps or compatibility deadline attributes. NETZ business schedule deadlines remain. |
 | V04-10 future manager physical evidence, phase/current safety gates | WBM-ARCH-01/09/11: station safety; WBM optimization and policy using held observations. |
 | PV-ARCH-04–09 references to live safety checks, fresh physical evidence and proof of executable points | WBM-ARCH-01/03/09/10: ordinary held observations, no per-request safety revalidation. Retain authority, intent, connection, transaction fencing, cadence and no reconnect command queue. |
 | PV-PLAN-04 900 s forecast freshness class, stricter live TTLs and expiry diagnostics; PV-QA-02 row 2 stale-forecast expectation | WBM-ARCH-05/06: no forecast or ordinary-input age expiration. Retain 300 s planning and local-day/forecast-domain semantics. |
@@ -49,25 +45,19 @@ all unrelated economic/profile/authority rules remain in effect.
 | PV-QA-01/02 freshness/safety assertions, including row 16 per-dispatch safety fences | WBM-ARCH-01/05/09–12: ages are diagnostic only; verify station outcome handling, coherent observations and WBM policy/lifecycle fencing, not WBM hardware protection. |
 | beta.3 PhaseRotation five-second proof; ChargingEnabled fifteen-second confirmation; separate display/proof interpretation | WBM-ARCH-05–09/12: no deadlines, one canonical value; retained two-report phase transition policy. Failed GetVariables is not an invalid property report. |
 
-Older `docs/architecture.md`, `docs/metering-runtime-state.md`,
-`docs/physical-status-resync.md`, phase-lockout and grid/PV design reports describe
-previous implementations. Their phase-age/permission proof, sample deadlines,
-CP freshness and manager safety requirements have no normative precedence over
-this decision. Their causal economic or transaction accounting descriptions must
-be reviewed separately when active regulation is implemented; no age-based
-observation expiry or redundant station safety enforcement may be reintroduced.
+Older implementation reports and designs are historical evidence. The
+[release specification](charge-release.md) governs the independent
+`ChargingEnabled` and manager release controls. The former WBM wake-up enable
+exception in WBM-ARCH-02 was superseded on 24 October. The [current baseline](v0.4-current-requirements.md)
+identifies the detailed contracts and acceptance evidence for active NETZ and PV.
 
 ## Scope and accepted limitations
 
-Change-oriented reports are assumed to announce real changes reliably. Silence
-can leave an observation old indefinitely; this is accepted. Connection health
-does not prove physical currentness. New connection/boot generations still need
-supported observations individually; full station bootstrap reporting remains an
-unverified interface gap. No station modification or deployment is authorized.
-Passive v0.4 still sends no physical control. Future active control must resolve
-supported command/outcome interfaces, optimization response causality and economic
-policy without rebuilding station protection in WBM.
-
+Silence can leave a value old indefinitely. Connection health does not
+establish physical currentness. Each supported field needs its own observation
+in a new connection/boot generation. Full station bootstrap reporting remains
+an interface acceptance gap. Scope, intent, authority, transaction and economic
+eligibility still govern the implemented active profiles.
 
 ## 27 October 2026 target publication application
 
@@ -76,3 +66,29 @@ canonical planning target: one scoped HA sensor, no volatile telemetry attribute
 no unchanged-cycle writes, no extra target calculation, acquisition or timer.
 OCPP generation broadcasts do not republish an unchanged HA-only target. This
 observability extension does not alter the architecture responsibility boundary.
+
+## Approved OCPP LAN trust boundary
+
+**Operator decision, 7 November 2026.** Wallbox Manager runs on an
+operator-controlled, trusted private LAN used by trusted devices and family
+members. Remote administrative and charging-control access is permitted only
+through an authenticated VPN that provides access to that LAN. Direct public
+Internet exposure of the OCPP listener is outside the supported deployment model.
+
+Within this boundary, the OCPP listener may use unencrypted WebSockets
+(`ws://`) without client certificates or application-level authentication.
+Binding to `0.0.0.0:9000` is permitted. The station ID is used only for routing
+and provides no peer authentication. The operator accepts that a compromised
+device with access to the trusted LAN could observe or disclose communication,
+impersonate a station, replace or disrupt an existing connection, or submit
+manipulated protocol observations or responses.
+
+The operator must verify during commissioning that the configured listener
+is reachable only from the intended trusted LAN or through the authenticated
+VPN and is not directly published to the public Internet. This decision
+defines the supported deployment model. The network check is operator-controlled.
+
+This decision supplements WBM-ARCH-01–12. The approved deployment requires
+no additional WBM TLS, certificate management, authentication layer, IP allowlist,
+network watchdog or hardware safety mechanism. Stationary retains exclusive
+physical and electrical safety responsibility.

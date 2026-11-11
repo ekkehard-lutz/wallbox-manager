@@ -9,7 +9,7 @@ commit. The candidate is uncommitted and unstaged, for external code review.
 ## Scope and evidence
 
 This change corrects only F1 and F2 from
-[`pv7-beta14-investigation.md`](pv7-beta14-investigation.md), sections 6.2 and 7.
+the historical local `pv7-beta14-investigation.md` (sections 6.2 and 7, outside the tracked repository).
 The complete investigation, consolidated Lastenheft/decision history and the
 feedback-stability, economic-relaunch and grid-import-policy reports were read.
 The V3 requirements remain a draft; no open policy question is resolved here.

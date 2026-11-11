@@ -2,25 +2,11 @@
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import entity_registry as er
 
-from .entity import WallboxEntity, unique_id
+from .entity import WallboxEntity
 
 
 async def async_setup_entry(hass, entry, add):
-    registry = er.async_get(hass)
-    legacy = registry.async_get_entity_id(
-        "switch",
-        "wallbox_manager",
-        unique_id(
-            entry.entry_id,
-            "station",
-            (entry.runtime_data.state.binding[0], None, None),
-            "auto_wakeup_enabled",
-        ),
-    )
-    if legacy and registry.async_get(legacy).config_entry_id == entry.entry_id:
-        registry.async_remove(legacy)
     add(
         [
             Permission(
@@ -48,7 +34,6 @@ class Permission(WallboxEntity, SwitchEntity):
         return {
             **super().extra_state_attributes,
             "state_represents": self.state_represents,
-            "enabled_valid_until": None,
             **self.entry.runtime_data.server.control.attributes(self.command),
         }
 

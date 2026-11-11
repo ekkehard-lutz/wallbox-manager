@@ -3,10 +3,11 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import eventually
+from conftest import entities, eventually
 from ocpp.exceptions import InternalError, OCPPError
 from ocpp.routing import after, on
 from ocpp.v21 import ChargePoint, call, call_result
@@ -179,6 +180,13 @@ async def test_real_boot_readback_push_reconnect_and_no_control(ha):
         await boot(station)
         await eventually(lambda: listener.initialization["status"] == "missing")
         assert state.identity["serial_number"] == "serial-1"
+        discovery = next(e for e in entities(ha, entry) if e.role == "discovery")
+        assert discovery.native_value == "verified"
+        assert set(listener.initialization) == {"status", "missing"}
+        assert (
+            discovery.extra_state_attributes["initialization"]
+            == listener.initialization
+        )
         assert (
             state.value(("station", ("Wallbox01", None, None), "control_authority"))
             == "local"
@@ -290,6 +298,82 @@ async def test_real_boot_readback_push_reconnect_and_no_control(ha):
         assert station.operations.count("GetBaseReport") == 1
 
 
+async def test_transaction_events_require_registration_on_each_connection(ha):
+    entry = await ha.install()
+    runtime = entry.runtime_data
+    state = runtime.state
+
+    async def transaction(station, kind, seq, *, tx="live", wh=100000, at=None):
+        timestamp = (at or datetime.now(UTC)).isoformat()
+        response = await station.call(
+            call.TransactionEvent(
+                event_type=kind,
+                timestamp=timestamp,
+                trigger_reason={
+                    "Started": "CablePluggedIn",
+                    "Updated": "TxResumed",
+                    "Ended": "EVDeparted",
+                }[kind],
+                seq_no=seq,
+                transaction_info={"transaction_id": tx, "charging_state": "Charging"},
+                evse={"id": 1, "connector_id": 1},
+                meter_value=[
+                    {
+                        "timestamp": timestamp,
+                        "sampled_value": [
+                            {"value": wh, "unit_of_measure": {"unit": "Wh"}},
+                            {
+                                "measurand": "Power.Active.Import",
+                                "value": 1400,
+                                "unit_of_measure": {"unit": "W"},
+                            },
+                        ],
+                    }
+                ],
+            ),
+            suppress=False,
+        )
+        assert isinstance(response, call_result.TransactionEvent)
+
+    async with peer(entry) as station:
+        for seq, kind in enumerate(("Started", "Updated", "Ended")):
+            await transaction(station, kind, seq, tx="unregistered")
+            assert state.session is None and not state.closed_transactions
+            assert not state.observations
+        await boot(station)
+        await transaction(station, "Started", 0)
+        assert state.session["start_meter"] == 100
+        identity = state.session["session_id"]
+        first_generation = state.generation
+    await eventually(lambda: not state.connected)
+
+    async with peer(entry) as station:
+        before = deepcopy(state.session)
+        await transaction(station, "Updated", 1, wh=500000)
+        await transaction(station, "Updated", 1, tx="replacement")
+        await transaction(station, "Ended", 2, wh=600000)
+        assert state.session == before
+        assert not state.closed_transactions and runtime.grid.transaction() is None
+        assert not state.current(state.registered_generation)
+        assert state.value(("transaction", state.binding, "power")) is None
+        assert (await station.call(call.Heartbeat())).current_time
+
+        await boot(station)
+        assert state.current(state.registered_generation)
+        assert state.generation != first_generation
+        await transaction(
+            station, "Updated", 1, at=state.epoch - timedelta(milliseconds=1)
+        )
+        assert state.session == before
+        await transaction(station, "Updated", 1, wh=100125)
+        assert state.session["session_id"] == identity
+        assert state.session["energy"] == pytest.approx(0.125)
+        await transaction(station, "Ended", 2, wh=100250)
+        assert state.session["energy"] == pytest.approx(0.250)
+        assert state.closed_transactions == {"live"}
+        assert set(station.operations) <= READ_ONLY
+
+
 async def test_unsupported_inventory_missing_fields_and_wrong_station(ha):
     entry = await ha.install()
     async with peer(entry, unsupported=True) as station:
@@ -332,9 +416,13 @@ async def test_duplicate_boot_replaces_bootstrap_and_connector_isolation(ha):
         )
         assert old_task.done()
         assert entry.runtime_data.state.generation[1] == previous[1] + 1
-        assert (
-            sum(not t.done() for t in adapter.tasks) == 1
-        )  # one permission poll, no second heartbeat
+        # Bootstrap read consumers can still be settling. Only the new
+        # permission poll may remain after they drain.
+        await eventually(
+            lambda: (
+                {task for task in adapter.tasks if not task.done()} == {adapter.poll}
+            )
+        )
         with pytest.raises(OCPPError):
             await station.call(
                 call.StatusNotification(

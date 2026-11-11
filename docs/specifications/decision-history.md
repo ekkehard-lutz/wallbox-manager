@@ -508,3 +508,38 @@ No HACS installation, deployment, live HA restart/reload, live configuration,
 Stationary/Fronius operation or physical charging test is authorized. See
 [release notes](../v0.4/release-notes-beta.21.md) and
 [release validation](../v0.4/release-validation-beta.21.md).
+
+## Later v0.4 decisions and publication evidence
+
+The earlier chronology remains provenance. The following references preserve
+the subsequent sequence. The current contracts live in the linked specifications.
+
+| Decision | Effect and source |
+| --- | --- |
+| 24 October coordinated control and nominal NETZ | Separate manager release, authority-independent hardware permission and Stationary-only automatic wake-up configuration. Replace SET with Start/Apply/Stop. Use nominal phase-series navigation and absolute timing. [Release](charge-release.md) · [NETZ](grid-profile.md) · [Timing](operational-display-and-timing.md) |
+| 31 October safe actions and presentation | Explicit direction fencing, preparatory release, durable PV Start acknowledgement, synchronization, NETZ reserve preview and directional source power. [Action decisions](charge-release.md#approved-correction--safe-explicit-actions-and-preparatory-release-31-october-2026) · [Display decisions](lovelace-home-battery-display.md) |
+| 7 November NETZ lifecycle and LAN | Hardware permission gate and safe Stop, one-shot timing/editor corrections, diagnostics, action colors and supported private LAN/authenticated VPN. [Release](charge-release.md#approved-hardware-readiness-amendment--7-november-2026) · [Timing](operational-display-and-timing.md#approved-one-shot-timing-and-editor-amendment--7-november-2026) · [LAN](architecture-responsibility.md#approved-ocpp-lan-trust-boundary) |
+| 7 November PV continuation | Keep an eligible confirmed offer during recognized atomic phase rejection, allow same-phase adjustment and required Stop, and retry on an eligible regular tick. [PV-LOCK](pv-operating-point-response.md#approved-pv-phase-lockout-continuation--7-november-2026) · [PV-DIAG](pv-decision-diagnostics.md#approved-pv-operating-point-execution-trace--7-november-2026) |
+| Beta.22 publication | Separately reviewed NETZ and PV histories were integrated for prerelease. [Release notes](../v0.4/release-notes-beta.22.md) · [Validation](../v0.4/release-validation-beta.22.md) |
+| 9 November fault and economic scope | Supersede stale positive intent on the scoped Faulted transition. Give a valid new transaction a fresh economic budget without requiring prior Ended, while preserving same-ID history and conservative recovery. [PV-ARCH-07](pv-regulation.md#pv-arch-07--immediate-safety-and-asynchronous-ocpp-execution-approved) · [PV-ECO-07](pv-regulation.md#approved-pv-transaction-rollover--9-november-2026) |
+
+The [index at the pre-consolidation commit](https://github.com/ekkehard-lutz/wallbox-manager/blob/c14f671263c3399d7e5e65147b1137ce0f78f490/docs/specifications/README.md)
+retains the earlier dated publication and implementation-scope notices.
+
+## 11 November 2026 — Session journal recovery and PV policy dispositions [APPROVED]
+
+For private household use, preserve damaged session journals and continue
+startup after verified recovery. Keep trustworthy schema-2 fields and all known
+closed transaction IDs without pruning. The operator accepts reduced replay
+protection and informational session-statistics accuracy after data loss, as
+well as the existing delay before session writes. Current-generation
+registration is required before transaction attribution. The approval
+preserves manager release OFF after reload and the station's responsibility
+for physical safety.
+
+PV-TUNE-09 approves the existing threshold-edit behavior, including retained Wh
+and pending or latched STOP. PV-TUNE-10 approves keeping harmless retired
+configuration keys inert. The overall PV Regulation V3 status remains DRAFT.
+See the [current baseline](v0.4-current-requirements.md), the
+[approved tuning clauses](pv-operating-point-response.md), and the
+[implementation review](../v0.4/session-recovery-registration-review.md).

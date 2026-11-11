@@ -1,9 +1,10 @@
 # WBM: session-energy presentation, active messages and live NETZ timing
 
-**APPROVED REQUIREMENTS — specifications only, 24 October 2026.**
-Baseline WBM `develop` `b46832404a478c1f2588822b70acaf7af46a080e` / v0.4.0-beta.14.
-Requirement IDs: **WBM-DISP-01–03, WBM-MSG-01–07, WBM-TIME-01–24**.
-Implementation, commit of production code, merge, release, deployment and hardware operations require separately authorized stages.
+**APPROVED** under the 24 October 2026 display/timing decision and the
+later safe-action, status and one-shot amendments below. Requirement IDs
+WBM-DISP-01–03, WBM-MSG-01–07 and WBM-TIME-01–24 retain their original scope
+except where explicitly superseded. The [current baseline](v0.4-current-requirements.md)
+separates implementation from physical acceptance.
 
 ## Energy display
 
@@ -31,7 +32,7 @@ An operator-confirmed Start creates a **business schedule** with absolute wall-c
 - **WBM-TIME-04:** Before planned start show the approved full Ladedauer if supplied. At planned start begin counting down Ladedauer independent of car/actual charging/lockouts. Display `00:00` in the last 1–59 s and `--:--` after expiry. Unset duration shows `--:--`.
 - **WBM-TIME-05:** Positive offered current is permitted only at/after planned start and with current valid Remote/transaction/hardware eligibility. If connection comes late it receives only the **remaining** time; the time window is never prolonged because it was physically unable to charge.
 - **WBM-TIME-06:** On duration expiry retire schedule, set manager release OFF, cancel all stale positive intents and retry timers, and command 0 A only if legitimately authorized. Do not change hardware ChargingEnabled, invent unplug/session Ended, or revive charging after reconnect.
-- **WBM-TIME-07:** Backend enforces absolute deadlines even without a card, without vehicle, or during OCPP disconnection. Store/reconcile absolute deadlines appropriately on reload; do not silently restore previous charge release or replay stale positive requests.
+- **WBM-TIME-07:** Backend enforces absolute deadlines even without a card, without vehicle, or during OCPP disconnection. Reload retires the live schedule and release. Retain approved settings for the next explicit Start.
 - **WBM-TIME-08:** Duration `00:00` is explicit zero (immediate end at planned start), unlike unset (no duration limit). Unset delay or zero delay means immediate planned start. Do not turn absence of a car into a reason to refuse creation of a valid schedule.
 
 ### Effect of approved changes on an active schedule
@@ -83,7 +84,8 @@ editing intent, never to observation validity, OCPP authority or electrical safe
 
 Use deterministic fake wall-clock and monotonic editor clocks; test unplugged/start-without-vehicle, cable attach during delay, lockouts and missed power window, offline/reconnect, HA reload, delay/duration zero/unset, extend/shorten/remove duration, apply while charging, expiry during editing, multiple cards/direct text edits, lost/replaced revisions, persistent write failures, warning prioritization/clearance, one-decimal session energy and no increased measurement Recorder rate. Preserve OCPP authority, Stationary safety, manager release OFF, phase switching, battery reserve and PV semantics.
 
-**Documentation phase only. No source implementation, merge, release, deployment or service restart here.**
+Use simulated timing and OCPP tests for software acceptance. Physical timing
+and vehicle response remain separate.
 
 
 ## Safe action API clarification — 31 October 2026

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 
 import pytest
-from conftest import eventually
+from conftest import entities, eventually
 from ocpp.routing import on
 from ocpp.v21 import call, call_result
 from test_active_control import Controllable, ready
@@ -54,11 +54,10 @@ def test_generic_three_modes_disabled_modes_and_stable_overlap():
     assert ranges(caps={1: 0, 3: 0}).resolve(0).amps == 0
 
 
-def test_quantization_legacy_migration_and_unequal_voltage():
+def test_quantization_normalizes_stored_caps_and_uses_nominal_voltage():
     e = ranges(caps={1: "19/3", 3: 100})
     assert e.ranges[1][3] == 6
     assert e.ranges[3][3] == 27
-    assert e.migration[1] == {"stored": "19/3", "effective": 6}
     assert ranges(caps={1: 5}).ranges.keys() == {3}
     for direction, expected in [("down", 8), ("nearest", 9), ("up", 9)]:
         assert ranges(modes=(1,)).resolve(2000, direction).amps == expected
@@ -210,6 +209,17 @@ async def test_complete_profile_confirmation_no_telemetry_repeat_and_set(ha):
         assert profile["stack_level"] == 0
         assert grid.confirmed.amps == 16 and grid.confirmed.phases == 3
         assert grid.attributes()["applied_offered_power_w"] == 11040
+        attrs = next(
+            e for e in entities(ha, entry) if e.role == "soll_power"
+        ).extra_state_attributes
+        assert (
+            not {"profile_status", "control_status", "profile_control_ready"}
+            & attrs.keys()
+        )
+        assert attrs["command_status"] == "confirmed"
+        assert attrs["command_reason"] is None
+        assert attrs["execution_ready"] is True
+        assert attrs["execution_blocked_reason"] is None
         for i in range(4):
             await station.call(
                 call.MeterValues(
@@ -570,6 +580,7 @@ async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
 class ReviewedLockoutStation(TemporaryPhaseLockoutStation):
     interim_result = "Accepted"
     interim_reason = None
+    retry_reason = None
     fail_interim_read = False
     reenable = False
 
@@ -577,6 +588,10 @@ class ReviewedLockoutStation(TemporaryPhaseLockoutStation):
     def profile(self, evse_id, charging_profile):
         period = charging_profile["charging_schedule"][0]["charging_schedule_period"][0]
         mode = period.get("number_phases", self.phases)
+        if self.locked and mode != self.phases and self.retry_reason:
+            self.profile_result = "Rejected"
+            self.profile_info = {"reason_code": self.retry_reason}
+            return GridStation.profile(self, evse_id, charging_profile)
         if self.locked and mode == self.phases:
             self.profile_result = self.interim_result
             self.profile_info = self.interim_reason
@@ -670,10 +685,10 @@ async def test_failed_interim_confirmation_preserves_recognized_retry(ha, monkey
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         original = entry.runtime_data.grid.read_point
 
-        async def read(*args):
+        async def read(*args, **kwargs):
             if station.fail_interim_read and station.locked and station.amps == 0:
                 raise TimeoutError
-            return await original(*args)
+            return await original(*args, **kwargs)
 
         monkeypatch.setattr(entry.runtime_data.grid, "read_point", read)
         station.fail_interim_read = True
@@ -849,11 +864,11 @@ async def test_superseded_interim_cannot_dispatch_after_new_intent(ha, monkeypat
         original = grid.dispatch_point
         waiting, release = asyncio.Event(), asyncio.Event()
 
-        async def dispatch(point, *args):
+        async def dispatch(point, *args, **kwargs):
             if point.amps == 0:
                 waiting.set()
                 await release.wait()
-            return await original(point, *args)
+            return await original(point, *args, **kwargs)
 
         monkeypatch.setattr(grid, "dispatch_point", dispatch)
         station.locked = True
@@ -959,34 +974,45 @@ async def test_uncertain_interim_hides_actual_until_supported_confirmation(ha):
         assert len(station.profiles) == count
 
 
-async def test_atomic_interim_rejection_preserves_confirmed_actual(ha):
+@pytest.mark.parametrize("reason,atomic", [("Busy", False), ("ReenableLockout", True)])
+async def test_interim_rejection_preserves_confirmed_actual_only_if_atomic(
+    ha, reason, atomic
+):
     entry = await ha.install()
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         station.interim_result = "Rejected"
-        station.interim_reason = {"reason_code": "Busy"}
+        station.interim_reason = {"reason_code": reason}
         grid, clock = await pending_interim(entry, station)
-        assert grid.reason == "Busy" and grid.timer is None
-        assert not grid.point_uncertain
-        assert grid.attributes()["applied_current_a"] == 16
-        assert grid.attributes()["applied_phase_count"] == 3
+        assert grid.reason == reason
+        assert grid.retry_at == (60 if atomic else None)
+        assert bool(grid.point_uncertain) is not atomic
+        assert grid.confirmed.amps == 16 and grid.confirmed.phases == 3
+        assert grid.attributes()["applied_current_a"] == (16 if atomic else None)
+        assert grid.attributes()["applied_phase_count"] == (3 if atomic else None)
         count = len(station.profiles)
-        await clock.advance(600)
+        await clock.advance(59 if atomic else 600)
         assert len(station.profiles) == count
 
 
-async def test_rejected_retry_cannot_clear_prior_accepted_uncertainty(ha):
+@pytest.mark.parametrize("reason,atomic", [("Busy", False), ("ReenableLockout", True)])
+async def test_rejected_retry_cannot_clear_prior_accepted_uncertainty(
+    ha, reason, atomic
+):
     entry = await ha.install()
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         station.fail_interim_read = True
         grid, clock = await pending_interim(entry, station)
         uncertainty = grid.point_uncertain
         assert uncertainty
-        station.interim_result = "Rejected"
-        station.interim_reason = {"reason_code": "Busy"}
+        station.retry_reason = reason
+        count = len(station.profiles)
         await clock.advance(6)
         await eventually(lambda: grid.task.done())
-        assert grid.reason == "Busy" and grid.timer is None
-        assert grid.point_uncertain is uncertainty
+        assert len(station.profiles) == count + 1  # No second interim write.
+        assert grid.reason == reason
+        assert grid.retry_at == (60 if atomic else None)
+        assert grid.point_uncertain
+        assert (grid.point_uncertain is uncertainty) is atomic
         assert grid.confirmed.amps == 16
         assert grid.attributes()["applied_current_a"] is None
         assert grid.attributes()["applied_phase_count"] is None
@@ -1107,6 +1133,7 @@ async def test_overlapping_atomic_rejections_restore_prior_actual(ha, monkeypatc
         monkeypatch.setattr(adapter, "request", request)
         count = len(station.profiles)
         station.profile_result = "Rejected"
+        station.profile_info = {"reason_code": "ReenableLockout"}
         await entry.runtime_data.settings.set("soll_power", 5)
         await entry.runtime_data.settings._approve_release()
         await asyncio.wait_for(waiting[0].wait(), 5)
@@ -1123,4 +1150,5 @@ async def test_overlapping_atomic_rejections_restore_prior_actual(ha, monkeypatc
         assert not grid.point_uncertain
         assert grid.attributes()["applied_current_a"] == 16
         assert grid.attributes()["applied_phase_count"] == 3
-        assert grid.timer is None and len(station.profiles) == count + 2
+        assert grid.timer is not None and grid.retry_at == 60
+        assert len(station.profiles) == count + 2

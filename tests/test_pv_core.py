@@ -337,13 +337,19 @@ def test_budget_entire_power_threshold_strict_reset_and_no_backfill():
 
 
 def test_budget_scope_recovery_and_edit_does_not_erase_stop():
-    b = Budget(scope=["tx"], wh=51)
+    scope = ["Wallbox01", "1", "1", "remote"]
+    b = Budget(scope=[*scope, "tx"], wh=51)
     assert b.exhaust(50) and b.exhaust(100)
     restored = Budget.restore(b.saved())
     assert restored.wh == 51 and restored.stopped and restored.previous is None
-    assert not restored.bind(["different-tx"])
-    assert restored.bind(["new-tx"], ended=True)
-    assert restored.wh == 0 and not restored.stopped
+    assert restored.bind([*scope, "tx"]) and restored.wh == 51 and restored.stopped
+    assert not restored.bind(["other", *scope[1:], "different-tx"])
+    restored.sample(0, 0, 1380, active=False)
+    restored.sample(16, 0, 1380, active=False)
+    assert restored.reset and restored.previous is not None and restored.low_since == 0
+    assert restored.bind([*scope, "new-tx"])
+    assert restored.saved() == Budget(scope=[*scope, "new-tx"]).saved()
+    assert restored.previous is None and restored.low_since is None
     assert Budget.restore({"corrupt": True}).stopped
 
 
@@ -437,75 +443,3 @@ def test_planning_300_second_cadence_and_midnight_daily_reset():
         == 80
     )
     assert p.phase == "BEFORE_SURPLUS"
-
-
-def legacy_economics():
-    return dict(
-        version=1,
-        records=[
-            dict(
-                identity=dict(
-                    entry_id="entry",
-                    station="Wallbox01",
-                    evse="1",
-                    connector="1",
-                    transaction="tx",
-                    station_identity=dict(
-                        vendor="Test", model="Passive", serial="serial-1", firmware=None
-                    ),
-                ),
-                policy=dict(
-                    version=2, scope="pv_charging", reset_seconds=15, reset_strict=True
-                ),
-                state=dict(
-                    version=2,
-                    energy_ws=dict(numerator=183600, denominator=1),
-                    paused=True,
-                    restart_required=True,
-                    off_pending=False,
-                    off_in_flight=False,
-                ),
-            )
-        ],
-    )
-
-
-def test_beta18_journals_preserve_wh_stop_identity_and_finished_day():
-    import json
-
-    from custom_components.wallbox_manager.pv_migration import legacy_record
-
-    binding = ("Wallbox01", "1", "1")
-    days = dict(
-        version=2,
-        days={json.dumps(list(binding)): dict(date="2026-10-25", state="FINISHED")},
-    )
-    record = legacy_record(legacy_economics(), days, "entry", binding)
-    b = Budget.restore(record["economics"])
-    assert b.wh == 51 and b.stopped and b.previous is None and not b.reset
-    assert b.scope == [*binding, "remote", "tx"]
-    assert record["station_identity"]["serial_number"] == "serial-1"
-    assert Planner.restore(record["day"]).phase == "FINISHED"
-
-
-@pytest.mark.parametrize(
-    "invalid", ["version", "identity", "energy", "flags", "hardware"]
-)
-def test_invalid_beta18_history_inhibits_automatic_positive(invalid):
-    from custom_components.wallbox_manager.pv_migration import legacy_record
-
-    old = legacy_economics()
-    item = old["records"][0]
-    if invalid == "version":
-        old["version"] = 99
-    elif invalid == "identity":
-        item["identity"]["entry_id"] = "other"
-    elif invalid == "energy":
-        item["state"]["energy_ws"]["denominator"] = 0
-    elif invalid == "hardware":
-        item["identity"]["station_identity"] = {}
-    else:
-        item["state"]["restart_required"] = None
-    record = legacy_record(old, None, "entry", ("Wallbox01", "1", "1"))
-    b = Budget.restore(record["economics"])
-    assert b.stopped and not b.bind(["Wallbox01", "1", "1", "remote", "tx"])

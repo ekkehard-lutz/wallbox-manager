@@ -15,21 +15,12 @@ from websockets.exceptions import ConnectionClosed
 
 from . import session
 from .config_flow import diagnostic_level
+from .const import CAPABILITIES
 from .control import DISPATCH, ROLES, Control, Refused
 from .control import endpoint as control_endpoint
 from .meter import CHARGING, CONNECTOR, reported_time, samples
 
 _LOGGER = logging.getLogger(__name__)
-CAPABILITIES = {
-    "SupportedPhaseModes": "supported_phases",
-    "MinimumCurrent": "minimum_current",
-    "CurrentStep": "current_step",
-    "PhaseSwitchingSupported": "phase_switching",
-    "MaximumCurrent": "maximum_current",
-    "MaximumAsymmetryCurrent": "maximum_asymmetry_current",
-    "ZeroCurrentSupported": "zero_current",
-    "ChargingEnableDisableSupported": "enable_disable",
-}
 READ_ONLY = {"GetBaseReport", "GetVariables", "GetCompositeSchedule"}
 
 
@@ -93,7 +84,6 @@ class Listener:
         return {
             "status": status,
             "missing": sorted(missing),
-            "push_only": True,
         }
 
     async def start(self):
@@ -160,10 +150,12 @@ class Listener:
         self.stopping = True
         if self.server:
             self.server.close()
-            if self.adapter:
-                await self.adapter.close()
-            await self.server.wait_closed()
-            self.server = None
+            try:
+                if self.adapter:
+                    await self.adapter.close()
+            finally:
+                await self.server.wait_closed()
+                self.server = None
 
 
 class Adapter(ChargePoint):
@@ -235,10 +227,13 @@ class Adapter(ChargePoint):
             return
         self.listener.control.invalidate()
         self.closed = True
-        await self._connection.close()
-        for task in tuple(self.tasks):
-            task.cancel()
-        await asyncio.gather(*tuple(self.tasks), return_exceptions=True)
+        try:
+            await self._connection.close()
+        finally:
+            tasks = tuple(self.tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def live(self, generation):
         return (
@@ -269,6 +264,13 @@ class Adapter(ChargePoint):
                 value=self.state.value(key),
             )
             if key[2] == "connector_state":
+                if (
+                    source == "ocpp2.1:StatusNotification"
+                    and key[1] == self.state.binding
+                    and self.state.value(key) == "faulted"
+                    and self.listener.grid is not None
+                ):
+                    self.listener.grid.connector_faulted()
                 self.state.publish(("station", (key[1][0], None, None), "discovery"))
         if accepted and key[2] in (
             "control_authority",
@@ -406,6 +408,12 @@ class Adapter(ChargePoint):
         id_token=None,
         **kwargs,
     ):
+        response = call_result.TransactionEvent(
+            id_token_info={"status": "Unknown"} if id_token else None
+        )
+        if self.state.registered_generation != self.generation:
+            return response
+
         known = self.state.session
         missing = self.listener.initialization["missing"]
         external_id = transaction_info["transaction_id"]
@@ -421,9 +429,7 @@ class Adapter(ChargePoint):
         elif known and known["external_transaction_id"] == external_id:
             scope = tuple(known["scope"])
         else:
-            return call_result.TransactionEvent(
-                id_token_info={"status": "Unknown"} if id_token else None
-            )
+            return response
         at = reported_time(timestamp, datetime.now(UTC))
         if (
             at
@@ -462,9 +468,7 @@ class Adapter(ChargePoint):
                 and missing != self.listener.initialization["missing"]
             ):
                 self.state.publish(("station", (scope[0], None, None), "discovery"))
-        return call_result.TransactionEvent(
-            id_token_info={"status": "Unknown"} if id_token else None
-        )
+        return response
 
     @on("NotifyReport")
     def notify_report(

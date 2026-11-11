@@ -8,7 +8,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.event import async_track_time_interval
 
-from .entity import WallboxEntity
+from .const import CAPABILITIES, DOMAIN
+from .entity import WallboxEntity, scoped_identity
 from .session import KEYS, view
 
 STATES = {
@@ -43,8 +44,6 @@ DIAGNOSTICS = (
 
 
 async def async_setup_entry(hass, entry, add):
-    import json
-
     state = entry.runtime_data.state
     seen = set()
 
@@ -69,14 +68,17 @@ async def async_setup_entry(hass, entry, add):
     for registered in er.async_entries_for_config_entry(
         er.async_get(hass), entry.entry_id
     ):
-        for family in ("observation", "capability", "session"):
-            prefix = f"{entry.entry_id}:{family}:"
+        if registered.platform != DOMAIN or registered.domain != "sensor":
+            continue
+        if key := scoped_identity(entry.entry_id, registered.unique_id):
+            family, _, role = key
             if (
-                registered.unique_id.startswith(prefix)
-                and registered.domain == "sensor"
+                family == "observation"
+                or family == "capability"
+                and role in CAPABILITIES.values()
+                or family == "session"
             ):
-                parts = json.loads(registered.unique_id[len(prefix) :])
-                add_key((family, tuple(parts[:3]), parts[3]))
+                add_key(key)
     # Fixed single-connector session identity exists even before the first transaction.
     scopes = set()
     if state.session:
@@ -98,7 +100,7 @@ class Reading(WallboxEntity, SensorEntity):
         if role in STATES or role in ("control_authority", "discovery"):
             self._attr_device_class = "enum"
             self._attr_options = (
-                ["unknown", "advertised", "verified", "unsupported", "degraded"]
+                ["unknown", "verified", "unsupported", "degraded"]
                 if role == "discovery"
                 else STATES.get(role, ["unknown", "local", "remote"])
             )
@@ -158,7 +160,7 @@ class Reading(WallboxEntity, SensorEntity):
         ):
             return True
         if self.role == "physical_phases":
-            return self.observed.last_observed_value(self.key) is not None
+            return self.observed.value(self.key) is not None
         return super().available
 
     @property
@@ -177,7 +179,7 @@ class Reading(WallboxEntity, SensorEntity):
                 case "protocol_version":
                     return "2.1" if state.connected else None
         if self.role == "physical_phases":
-            return state.last_observed_value(self.key)
+            return state.value(self.key)
         return state.value(self.key)
 
     @property
@@ -217,7 +219,6 @@ class Reading(WallboxEntity, SensorEntity):
                 external_transaction_id=session["external_transaction_id"],
                 session_active=view(self.observed, datetime.now(UTC))["active"],
                 start_known=session["started_at"] is not None,
-                valid_until=None,
             )
             if self.role == "power":
                 attrs["power_availability_reason"] = (
@@ -248,9 +249,7 @@ class Reading(WallboxEntity, SensorEntity):
                     else None,
                 )
             if self.role == "duration":
-                attrs.update(
-                    started_at=session["started_at"], duration_valid_until=None
-                )
+                attrs["started_at"] = session["started_at"]
         if self.role == "physical_phases":
             attrs["state_represents"] = "last_known_observation"
         if self.role == "discovery":

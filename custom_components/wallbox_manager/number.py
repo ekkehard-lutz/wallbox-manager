@@ -8,7 +8,6 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import SettingEntity
 from .grid_point import capabilities, envelope, rounded_kw
@@ -50,7 +49,7 @@ async def async_setup_entry(hass, entry, add):
     )
 
 
-class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
+class SettingNumber(SettingEntity, NumberEntity):
     _attr_mode = NumberMode.BOX
 
     def __init__(self, entry, role):
@@ -132,12 +131,6 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
     def extra_state_attributes(self):
         attrs = super().extra_state_attributes
         if self.role.startswith("allowed_current_"):
-            try:
-                attrs["legacy_limit_migration"] = envelope(
-                    self.observed, self.settings
-                ).migration.get(int(self.role[-2]))
-            except ValueError, TypeError:
-                attrs["legacy_limit_migration"] = None
             attrs["exact_current_limit_a"] = (
                 str(self.settings.get(self.role))
                 if self.native_value is not None
@@ -175,39 +168,6 @@ class SettingNumber(SettingEntity, NumberEntity, RestoreEntity):
                     self.async_on_remove(
                         self.observed.watch(("capability", scope, role), self.changed)
                     )
-        if self.role in (
-            "desired_charging_power",
-            "allowed_current_1p",
-            "allowed_current_2p",
-            "allowed_current_3p",
-        ):
-            previous = await self.async_get_last_state()
-            if (
-                previous
-                and previous.state not in ("unknown", "unavailable")
-                and NUMBERS[self.role][0]
-                not in self.settings.profiles.get(self.settings.key, {})
-            ):
-                try:
-                    if self.role.startswith("allowed_current_"):
-                        self.settings.values[NUMBERS[self.role][0]] = (
-                            previous.attributes.get("exact_current_limit_a")
-                            or previous.state
-                        )
-                        return
-                    value = self.settings.validate(
-                        self.role,
-                        previous.attributes.get("exact_current_limit_a")
-                        or previous.state,
-                    )
-                    self.settings.values[NUMBERS[self.role][0]] = (
-                        str(Fraction(previous.attributes["exact_current_limit_a"]))
-                        if self.role.startswith("allowed_current_")
-                        and previous.attributes.get("exact_current_limit_a")
-                        else value
-                    )
-                except ValueError, TypeError:
-                    pass
 
     async def async_set_native_value(self, value):
         await self.settings.set(self.role, value)

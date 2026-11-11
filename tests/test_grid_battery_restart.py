@@ -185,6 +185,9 @@ async def test_restart_keeps_journal_during_incomplete_or_paused_session(
             await transaction(
                 station, "Updated", charging="SuspendedEV", power=0, sequence=2
             )
+            # The vehicle is paused, but this peer still offered 16 A at boot.
+            # Release-OFF reconciliation and reserve retention are independent.
+            await entry.runtime_data.grid.task
         elif evidence == "unknown":
             # Explicit unknown is neither physical absence nor an Ended event.
             state.observe(
@@ -201,7 +204,11 @@ async def test_restart_keeps_journal_during_incomplete_or_paused_session(
         assert reserve.recovering
         assert writes == [40]
         assert await reserve.store.async_load() == reserve.record
-        assert not station.profiles and not station.writes
+        assert not station.writes
+        if evidence == "pause":
+            assert len(station.profiles) == 1 and station.amps == 0
+        else:
+            assert not station.profiles
 
 
 async def test_restart_end_releases_external_reserve_without_restoring(

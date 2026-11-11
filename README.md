@@ -1,218 +1,148 @@
-# Wallbox Manager — OCPP control, NETZ and PV Regulation V3
+# Wallbox Manager
 
-Home Assistant integration domain: `wallbox_manager`.
+Wallbox Manager is a Home Assistant integration (`wallbox_manager`) for
+operator-controlled EV charging and household PV optimization. It provides
+fixed-power NETZ charging, three PV profiles, station and session telemetry,
+and an entry-scoped Lovelace card.
 
-**v0.4.0-beta.22** combines the reviewed NETZ timing and readiness changes
-with PV phase-lockout continuation. Start and Apply require observed hardware
-permission, and an active manager release remains revocable while hardware is
-disabled. NETZ timing is one-shot. Time edits start from the visible countdown,
-and Start, Stop and Apply use green, red and blue. NETZ lifecycle diagnostics
-record schedule and execution transitions.
+This source tree targets **v0.4.0-beta.23**. Once the GitHub prerelease
+is published, HACS users can select that version. The release notes include
+installation checks and rollback guidance.
+[GitHub prerelease](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0-beta.23) ·
+[Release notes](docs/v0.4/release-notes-beta.23.md) ·
+[Release validation](docs/v0.4/release-validation-beta.23.md)
 
-After a recognized atomic PV phase-switch rejection, Wallbox Manager retains
-a valid independently confirmed offer without sending a fallback profile.
-Same-phase current changes and mandatory stops remain available during the
-wait. A later eligible PV tick makes a fresh phase decision. Level 2 logs
-separate the regulator proposal, submitted command, acknowledgement, confirmed
-offer and physical phase. See the [beta.22 release notes](docs/v0.4/release-notes-beta.22.md)
-and [combined validation](docs/v0.4/release-validation-beta.22.md).
+## Stationary and OCPP
 
-The **v0.4.0-beta.21 prerelease** introduced the independently reviewed safe
-charging actions, state publication, battery reserve preview and status display.
-The card sends explicit Start/Stop/Apply intent through
-`wallbox_manager.charge_action`, with backend profile/runtime/revision fencing.
-Repeated stale Start cannot become Stop. Preparatory PV Start can authorize
-charging before a vehicle connects and acknowledges accepted durable release,
-without requiring an immediate electrical point or positive current. Release
-changes and canonical PV targets are published promptly even under SoC STOP.
+Wallbox Stationary owns electrical protection, CP, interlocks, physical
+limits and phase switching. Wallbox Manager owns optimization, operator
+intent and OCPP proposals. An accepted proposal, the station's confirmed
+offer and measured charging are separate observations.
 
-The card's **Wallbox Status** section contains rearranged upper status columns
-and lower **Home battery** / directional-power blocks. NETZ shows planned reserve
-before charging, with observed reserve separately labeled. PV shows storage
-charge/discharge power; NETZ shows grid import/export power. Charge/export uses
-semantic green, discharge/import semantic red, and invalid/ambiguous/zero pairs
-show neutral `—`. Power uses **kW with exactly two locale-aware decimals**;
-battery percentages retain one decimal. German/English accessibility and responsive
-layout are included. There is no new power sensor, polling or periodic Recorder
-churn, and no change to FAST/BALANCE, target mathematics or economic STOP.
+The integration serves the Stationary device model over **OCPP 2.1**
+(`ocpp2.1` over WebSocket). It receives supported observations and transaction
+events, discovers capabilities, reads supported state and submits scoped
+control requests. A station must support the relevant interface to execute
+commands. Ordinary observations are held within their applicable generation.
+A new connection or boot requires its own evidence.
 
-The existing `button.charge_action` identity remains. Generic `button.press`
-retains legacy state-dependent toggle semantics; automations requiring direction
-safety must use the explicit service with current context. See the
-[beta.21 release notes](docs/v0.4/release-notes-beta.21.md),
-[release validation](docs/v0.4/release-validation-beta.21.md),
-[safe-action/preview report](docs/charge-action-state-reserve-preview-review.md) and
-[PV Start/status-power follow-up](docs/charge-action-status-power-followup-review.md).
+Use an operator-controlled, trusted private LAN and an authenticated VPN into
+that LAN for remote access. Within that boundary the listener supports plain
+`ws://`, including the default bind `0.0.0.0:9000`. A station ID is a routing
+identifier. During commissioning, verify access from the intended LAN/VPN
+and confirm the listener is outside direct public Internet reach.
+[Approved network boundary](docs/specifications/architecture-responsibility.md#approved-ocpp-lan-trust-boundary)
 
-The [beta.20 notes](docs/v0.4/release-notes-beta.20.md) retain the native
-**PV Target SoC / PV Ziel-SoC** sensor and compact pause-diagnostic history.
-The sensor's identity, full-precision target, passive planning and exact-change
-publication remain unchanged in beta.21. Existing compact PV diagnostics retain
-their scope and cadence without a second stream.
+## Installation and configuration
 
-The [beta.19 notes](docs/v0.4/release-notes-beta.19.md) retain the original compact
-cycle samples and Home Battery caption change; the
-[beta.18 notes](docs/v0.4/release-notes-beta.18.md) document five-power decision
-context. Their [earlier feature report](docs/pv-cycle-diagnostics-card-cleanup.md)
-and immutable release descriptions remain historical.
+For the published package, use the
+[beta.23 HACS installation and rollback instructions](docs/v0.4/release-notes-beta.23.md#hacs-installation-and-rollback).
+In Home Assistant, add Wallbox Manager under **Settings → Devices & services**.
+Set the listener address and port and the explicit station ID, EVSE and connector.
+Each wallbox/connector entry has an independent listener and settings.
+Use distinct ports. Configure the matching Stationary client URL as
+`ws://HA-address:port/station-id`, for example `ws://192.168.1.20:9000/Wallbox01`
+when the listener and station use those values.
 
-The [beta.17 release notes](docs/v0.4/release-notes-beta.17.md) describe the
-shared PV runtime, seven tuning parameters and original V3 migration. All seven
-parameters and defaults are unchanged in beta.21; no data/schema migration is
-added. The [implementation report](docs/pv-v3-implementation.md) retains V3 source
-evidence and regression validation. Physical FAST optimization remains open until
-the operator captures the new five-value hardware log; no live setting is changed.
+Use **Configure** on the integration to map HA source entities and set
+regulation and diagnostics. Battery-free PV_SURPLUS needs grid import/export
+mappings and OCPP EV power. Battery profiles also use mapped reserve, SoC and,
+for BALANCE, paired charge/discharge power. PV_OPTIMUM needs capacity and
+remaining-day forecast energy. Configure PV production and total household
+load where the profile uses surplus evidence or the FAST restart branch.
+NETZ power selection is independent of these sources. A writable reserve and
+actual battery SoC enable its optional temporary reserve policy.
 
-The [beta.16 notes](docs/v0.4/release-notes-beta.16.md) retain the home-battery
-status and simplified PV card history. The [beta.15 notes](docs/v0.4/release-notes-beta.15.md)
-cover live NETZ schedules and the coordinated Stationary hardware-disable/CP
-correction; the [beta.14 notes](docs/v0.4/release-notes-beta.14.md) explain nominal
-NETZ power planning. The existing Stationary implementation identified in beta.15
-remains the interface baseline; **no Stationary update is part of beta.21**.
-Stationary retains physical and electrical safety ownership. The old Stationary
-capability inventory cannot satisfy current execution requirements.
-The [beta.6 notes](docs/v0.4/release-notes-beta.6.md) retain Idle/session migration
-history. Immutable
-[`v0.3.2-beta.18`](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.3.2-beta.18)
-remains a historical source reference; it is not a guaranteed package-only rollback
-from V3 storage. Back up HA configuration and storage before upgrading.
+## Charging profiles
 
-Each config entry has exactly one explicitly bound station/EVSE/connector and
-one listener port. Multiple wallboxes require separate independent entries and
-nonconflicting ports. Configure the station's existing OCPP client URL as
-`ws://HA-address:port/station-id` in a separately authorized installation step.
-There is no active-wallbox selector or wallbox subentry workflow.
+| Profile | Behavior |
+| --- | --- |
+| **NETZ** | Fixed nominal point using 230 V per phase, station capabilities, per-mode current caps and the selected power approximation. A 0 A cap disables that phase mode. Power and optional delay/duration are drafts until approved or equivalent under the backend rule. Start creates an absolute schedule, Apply commits changes and Stop retires release. A disconnect does not extend the schedule. |
+| **PV_SURPLUS** | Uses measured surplus without a home battery, or a configured valid battery SoC target with a battery. |
+| **PV_OPTIMUM** | Plans a battery target from remaining-day PV energy, capacity, reserve and expected household energy. |
+| **PV_MAXIMUM** | Uses the lowest valid target allowed by the battery reserve and hysteresis. |
 
-The integration receives measurements and reported status, performs supported
-read-only discovery/readbacks, and retains cumulative imported energy/statistics
-identities. Ordinary measurements remain valid until explicit invalidation or a
-connection/boot generation change. Silent, unchanged values do not expire.
+Battery profiles share SoC hysteresis, FAST/BALANCE regulation, technical
+operating points and EV response timing. Planning can continue while release
+is off. PV Start authorizes an eligible future proposal and a computed zero
+pauses while preserving release. A configurable economic import budget
+defaults to 50 Wh. This is an approximate private optimization trigger.
+Valid same-ID reconnects retain the budget; a valid new transaction starts
+with fresh budget on its first eligible cycle.
 
-Profile, Number, Select and Text entities persist per-connector configuration.
-The manager-owned **charge release / Ladefreigabe** starts OFF and resets on every
-actual profile change, reload or confirmed Remote-to-Local authority loss.
-An active NETZ business schedule continues across transport disconnection; its
-deadlines remain enforced, and reload never restores its previous release. The card has one charging
-action: **Start charging**, **Apply charging parameters** for meaningful pending NETZ
-drafts, or **Stop charging**. Applying consumes the first press; stopping takes the
-next press. Start atomically approves power/timing and creates an absolute business
-schedule even without an EV. Delay and duration run from the planned start,
-independently of actual power or connection. Apply changes timing on the current
-schedule: duration retains planned start; a changed delay establishes a new epoch
-and pauses authorized charging to 0 A. Duration expiry turns manager release OFF.
-Stop requests **0 A** where Remote authority and a transaction permit it. After
-reload, a reconnect while release is OFF, or explicit takeover, release OFF also
-reconciles a confirmed
-retained positive offer to 0 A; confirmed zero is not resent. A positive
-slider value resolving to zero cannot start. The selector's positive technical
-range is calculated from current station diagnostics and enabled phase caps.
+## Authority and charging actions
 
-NETZ power planning uses fixed 230 V per phase. The editor displays one decimal
-kW and its +/- controls traverse
-each enabled phase mode's legal current series to its capped endpoint before
-changing phases. Actual measured power may differ from this nominal request.
-Missing/legacy-zero drafts initialize to the positive technical minimum after
-capability discovery, without starting charging. Reserve and approximation remain
-configurable through their HA entities; their card editors are removed. See
-[nominal steps, migration and validation](docs/grid-nominal-power-steps.md).
+- **Take Control** explicitly requests Remote/OCPP current and phase authority.
+  Profile changes, hardware enable and reconnect do not acquire it.
+- **Wallbox enabled** on the integration/device page controls Stationary
+  hardware permission under either authority. The switch shows observed
+  hardware state. Enabling in Local can activate the station's own target.
+- **Charge release** authorizes the selected WBM profile. Start and Apply
+  require observed hardware permission. Stop can revoke an active release
+  even if permission becomes disabled or unknown. With eligible Remote
+  control, release OFF uses a zero-current proposal and reconciles confirmed
+  retained positive offers. Profile change, confirmed authority loss and reload
+  retire release. Stationary owns automatic wake-up through its local startup
+  configuration.
+- For automations, the explicit `wallbox_manager.charge_action` service takes
+  an action and the button's current profile, revision and runtime incarnation.
+  Generic `button.press` uses the current backend action, which can be Start,
+  Apply or Stop.
 
-The independent hardware **Wallbox enabled / Wallbox aktiviert** switch remains on
-the integration/device page and works under Local or Remote authority, without
-Take Control or changing manager release. Its Actual state always comes from the
-station; enabling hardware under Local can activate the station's retained target.
-Only explicit Take Control acquires Remote current/phase authority. WBM cannot stop
-locally controlled charging using manager release.
+## Lovelace and Home Assistant entities
 
-Automatic vehicle wake-up is configured only in Stationary's startup INI;
-WBM neither exposes a switch nor uses AutoWakeUpEnabled. The old wake-up switch
-and standalone NETZ SET registry identities are retired with exact ownership checks.
-PV V3 shares SoC hysteresis, FAST/BALANCE control, phase-aware technical steps,
-configurable timing and economic import pauses. BALANCE uses the mapped Fronius
-charge/discharge channels without additional measurement smoothing. The canonical
-target and PV_OPTIMUM daily planner continue on the existing single scheduler while
-release is OFF, independently of OCPP availability. Planning grants no charging
-permission and sends no operating-point commands. See the
-[implementation and verification report](docs/pv-v3-implementation.md),
-[approved requirements](docs/specifications/charge-release.md) and
-[implementation, migration, validation and operational procedure](docs/coordinated-control-redesign.md).
+The card resource is `/wallbox_manager/wallbox-manager-card.js`.
 
 ```yaml
 type: custom:wallbox-manager-card
-# Optional with one WBM entry; required with multiple entries:
+# Optional for a single entry. Bind explicitly with multiple entries.
 entry_id: YOUR_EXISTING_CONFIG_ENTRY_ID
 ```
 
-The two time fields show live countdowns and switch to drafts as one editing area.
-Active editors renew a backend lease without Recorder or storage churn. If the
-browser disappears, its 60-second lease expires and starts the same 15-second
-window. Refocus after a lost lease to claim fresh ownership.
-After editing ends, unapplied time changes expire after 15 seconds while the old
-schedule is active. An independent power draft survives. If duration ends first,
-release goes OFF and the entered time drafts remain for a new explicit Start.
-The Messages field shows the newest currently active warning/error; resolved
-conditions disappear, and ordinary waiting or command history stays in diagnostics.
-Session energy uses one locale decimal, actual power two; measurement precision
-and energy accounting are unchanged. See the [implementation and migration report](docs/live-netz-timing-and-status.md).
+An `entity` belonging to the intended entry can also bind the card. The card
+shows phase/current offer and request, charging status, active warnings,
+NETZ timing, planned reserve or PV target and directional grid or battery
+power. The NETZ editors share a lease and a 15-second Apply window after editing.
+The profile controls and available actions reflect backend state.
 
-The read-only **Hausspeicher / Home battery** block compares actual mapped
-battery SoC with the current profile reference. All battery percentages use exactly
-one HA-language decimal (German `69,3 % → 40,0 %`, English `69.3 % → 40.0 %`).
-NETZ shows the planned effective reserve, including before charging; its tooltip
-separately identifies the observed writable reserve. Preview never writes Fronius
-or takes ownership. PV_SURPLUS shows its configured target only while valid against
-the actual reserve and hysteresis; invalid or unavailable values show `—`.
-PV_OPTIMUM and PV_MAXIMUM display their canonical effective backend targets once
-calculated, including while release is OFF, and `—` while unavailable. The five PV
-tuning editors are removed from the card; their HA
-Number entities, services and saved settings remain available. See the
-[specification](docs/specifications/lovelace-home-battery-display.md) and
-[implementation report](docs/lovelace-home-battery-implementation.md).
+The integration/device page provides configuration Numbers, Selects, timing
+Texts, action Buttons, permission Switch, measurements, station diagnostics
+and session entities. The **PV Target SoC** sensor exposes the canonical
+planning target. OptionsFlow and the nine optional regulation Numbers share
+the same configuration. The [current requirements baseline](docs/specifications/v0.4-current-requirements.md)
+contains the complete inventory and defaults.
 
-The resource remains `/wallbox_manager/wallbox-manager-card.js`. A previously
-configured single-instance card can continue with only its existing type. With
-multiple entries, a configured `entity` belonging to the intended entry can
-also provide the binding. No global first-wallbox fallback exists.
+## Diagnostics and persistence
 
-Read the [compatibility inventory](docs/v0.4/compatibility-inventory.md),
-[architecture/migration report](docs/v0.4/passive-rebuild-report.md) and
-[approved milestone requirements](docs/specifications/passive-v0.4.md). The
-consolidated [V3 specification](docs/specifications/pv-regulation.md) remains
-DRAFT overall; its explicitly approved decisions and supersessions govern the
-implemented V3 runtime.
-Other historical implementation reports describe the tagged v0.3 code, not
-this new runtime.
+Choose diagnostic level 0–3 in OptionsFlow. Level 2 includes contextual NETZ
+events and PV decisions. The integration publishes meaningful entity changes
+and separates logs from HA Recorder state. [Diagnostics guide](docs/diagnostic-logging.md)
 
-Development checks:
+Per-entry HA storage retains profile settings and NETZ approvals, battery
+reserve ownership, current PV budget/planning history and schema-2 session
+history. Reload retires live release and reconnects with new observations.
+Current binding/registry conflicts require operator correction. Historical PV
+and session journals are outside the supported import path.
+[Current persistence contract](docs/specifications/v0.4-current-requirements.md#persistence-and-restart)
 
-```
-.venv/bin/pytest -q -s
-.venv/bin/ruff check .
-.venv/bin/ruff format --check .
+## Development and acceptance
+
+Use Python 3.14 with `requirements-dev.txt` installed and Node.js 24 as in
+[CI](.github/workflows/tests.yml). The browser fixture needs Chrome.
+
+```sh
+python -m pytest -q
+ruff check .
+ruff format --check .
 node --check custom_components/wallbox_manager/www/wallbox-manager-card.js
 node tests/test_wallbox_card.cjs
 node tests/test_wallbox_card_layout.cjs
 git diff --check
 ```
 
-Live HA CPU acceptance (target <=0.1 percentage points average increase) requires
-separately authorized, longer alternating real measurements. No unit-test or
-call-count result establishes that target. The station does not yet guarantee a
-complete immediate initial telemetry snapshot; missing fields remain explicit.
-For separately authorized installation and testing, select
-**v0.4.0-beta.22** in HACS. Keep manager release OFF, take a full pre-upgrade HA
-backup, verify installed manifest **0.4.0-beta.22** after the operator-managed
-restart. Check that each browser loads the current frontend resource rather than
-an older cached card; any cache refresh is a separate operator action. Follow the
-[beta.22 upgrade and rollback notes](docs/v0.4/release-notes-beta.22.md#hacs-upgrade-and-rollback).
-The existing release reset turns manager charging release OFF after integration
-reload/restart; the operator must explicitly authorize charging again if required.
-A package-only downgrade to beta.16 cannot restore removed delay settings or
-carry back V3 economic STOP history. Publication does not install anything or
-establish physical acceptance. NETZ retains event-driven fixed-point execution;
-PV uses one clocked regulator behind the same explicit Start/Stop release.
-See the [NETZ validation boundary](docs/grid-fixed-profile-implementation.md).
-Automatic wake-up requires the matching Stationary implementation and explicit local startup configuration. Simulated sleeping-vehicle tests are the acceptance
-basis; physical CP restoration and hardware integration testing remain separate. If an accepted takeover is
-unconfirmed, another explicit Take Control action reads authority again without repeating the write.
-
-See [passive Recorder efficiency, availability and configuration](docs/v0.4/recorder-availability-report.md) for timestamp compatibility changes, diagnostics and measured before/after counts.
+The suite includes simulated OCPP and local HA tests. The coordinated
+Stationary fixture can use a separate source checkout via `WB_SOURCE_ROOT`.
+Real hardware, source timing and sustained HA/Recorder acceptance are tracked
+separately. [Requirements index](docs/specifications/README.md) ·
+[Development evidence and open acceptance](docs/v0.4/requirements-consolidation-review.md) ·
+[Historical v0.4 notes and reports](docs/v0.4/)

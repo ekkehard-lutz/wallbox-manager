@@ -9,12 +9,12 @@ import pytest
 from conftest import config, entities, eventually
 from ocpp.v21 import call
 from test_active_control import event
-from test_grid_profile import GridStation, start_grid
+from test_grid_profile import DelayedGridStation, GridStation, start_grid
 from test_protocol import peer
 
 from custom_components.wallbox_manager import async_setup_entry, async_unload_entry
 from custom_components.wallbox_manager.pv import reading
-from custom_components.wallbox_manager.settings import NUMBERS, OBSOLETE_PV
+from custom_components.wallbox_manager.settings import NUMBERS
 
 
 def sources(ha, *, battery=True):
@@ -324,6 +324,52 @@ async def test_runtime_setting_changes_no_second_tick_budget_edit_and_cycle_vali
                 await s.set(key, 0)
 
 
+async def test_budget_raise_while_economic_stop_ack_is_pending_survives_reload(ha):
+    entry = await install(ha)
+    async with peer(entry, station_type=DelayedGridStation) as station:
+        grid, pv = await release(entry, station)
+        settings = entry.runtime_data.settings
+        await tick(pv)
+        assert station.amps > 0
+        pv.budget.wh = 20
+        count = len(station.profiles)
+        key = "pv_grid_import_budget_wh"
+        await settings.set(key, 75)
+        assert pv.budget.wh == 20 and not pv.budget.stopped
+        await settings.set(key, 10)
+        assert len(station.profiles) == count and not pv.budget.stopped
+
+        station.delay = True
+        stop = asyncio.create_task(tick(pv))
+        try:
+            await asyncio.wait_for(station.waiting.wait(), 2)
+            assert station.amps == 0 and pv.budget.stopped
+            assert grid.requested.amps == 0
+            pending = grid.task
+            saved = pv.budget.saved()
+            assert saved["wh"] == 20
+            assert len(station.profiles) == count + 1
+
+            await settings.set(key, 100)
+            assert grid.task is pending and not pending.done()
+            assert grid.requested.amps == 0 and pv.budget.saved() == saved
+            assert len(station.profiles) == count + 1
+        finally:
+            station.profile_release.set()
+            await stop
+
+        await settings.set(key, 150)
+        assert grid.confirmed.amps == 0 and pv.budget.saved() == saved
+        assert len(station.profiles) == count + 1
+
+    await async_unload_entry(ha, entry)
+    await ha.install(entry)
+    restored = entry.runtime_data
+    assert restored.settings.get(key) == 150
+    assert restored.settings.get("charge_release") is False
+    assert restored.pv.budget.saved() == saved
+
+
 async def test_obsolete_keys_entities_and_option_fields_are_removed_only(ha):
     entry = config()
     ha.config_entries._entries[entry.entry_id] = entry
@@ -331,18 +377,41 @@ async def test_obsolete_keys_entities_and_option_fields_are_removed_only(ha):
         entry, options=dict(pv_start_delay=77, pv_stop_delay=99)
     )
     await ha.install(entry)
-    assert all(key not in entry.options for key in OBSOLETE_PV)
-    assert all(e.role not in OBSOLETE_PV for e in entities(ha, entry))
-    assert not set(OBSOLETE_PV) & NUMBERS.keys()
-    for name in ("strings.json", "translations/en.json", "translations/de.json"):
+    obsolete_pv = {"pv_start_delay", "pv_stop_delay"}
+    assert entry.options == {"pv_start_delay": 77, "pv_stop_delay": 99}
+    assert all(entry.runtime_data.settings.get(key) is None for key in obsolete_pv)
+    assert all(e.role not in obsolete_pv for e in entities(ha, entry))
+    assert not obsolete_pv & NUMBERS.keys()
 
-        def load_text(name=name):
-            with open("custom_components/wallbox_manager/" + name) as handle:
-                return json.dumps(json.load(handle))
+    def load_locale(name):
+        with open("custom_components/wallbox_manager/" + name) as handle:
+            return json.load(handle)
 
-        text = await ha.async_add_executor_job(load_text)
-        assert all(key not in text for key in OBSOLETE_PV)
+    def shape(value):
+        return (
+            {key: shape(child) for key, child in value.items()}
+            if isinstance(value, dict)
+            else type(value)
+        )
+
+    source, en, de = [
+        await ha.async_add_executor_job(load_locale, name)
+        for name in ("strings.json", "translations/en.json", "translations/de.json")
+    ]
+    assert source == en
+    assert shape(en) == shape(de)
+    for locale in (source, en, de):
+        text = json.dumps(locale)
+        assert all(key not in text for key in obsolete_pv)
         assert "storage_charge_power" in text
+        assert (
+            not {"desired_charging_power", "optimum_max_discharge_w"}
+            & locale["entity"]["number"].keys()
+        )
+        assert "pv_approximation" not in locale["entity"]["select"]
+        assert "advertised" not in locale["entity"]["sensor"]["discovery"]["state"]
+        regulation = locale["options"]["step"]["init"]["sections"]["regulation"]["data"]
+        assert "power_smoothing_window" not in regulation
 
 
 @pytest.mark.parametrize(
@@ -557,6 +626,8 @@ async def test_one_clock_only_and_inactive_has_no_periodic_regulation(ha):
         assert len([h for h in clock.calls if not h.cancelled]) == 1
         assert station.amps == 6
         await g.stop_release()
+        await g.task
+        assert station.amps == 0
         count = len(station.profiles)
         await clock.advance(500)
         await pv.task
