@@ -408,6 +408,12 @@ class Adapter(ChargePoint):
         id_token=None,
         **kwargs,
     ):
+        response = call_result.TransactionEvent(
+            id_token_info={"status": "Unknown"} if id_token else None
+        )
+        if self.state.registered_generation != self.generation:
+            return response
+
         known = self.state.session
         missing = self.listener.initialization["missing"]
         external_id = transaction_info["transaction_id"]
@@ -423,9 +429,7 @@ class Adapter(ChargePoint):
         elif known and known["external_transaction_id"] == external_id:
             scope = tuple(known["scope"])
         else:
-            return call_result.TransactionEvent(
-                id_token_info={"status": "Unknown"} if id_token else None
-            )
+            return response
         at = reported_time(timestamp, datetime.now(UTC))
         if (
             at
@@ -464,9 +468,7 @@ class Adapter(ChargePoint):
                 and missing != self.listener.initialization["missing"]
             ):
                 self.state.publish(("station", (scope[0], None, None), "discovery"))
-        return call_result.TransactionEvent(
-            id_token_info={"status": "Unknown"} if id_token else None
-        )
+        return response
 
     @on("NotifyReport")
     def notify_report(

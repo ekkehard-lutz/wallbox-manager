@@ -264,6 +264,7 @@ async def test_changed_transaction_energy_needs_no_periodic_refresh(ha):
     entry = await ha.install()
     state = entry.runtime_data.state
     generation = state.reset(connected=True)
+    state.registered_generation = generation
     adapter = Adapter(Mock(), entry.runtime_data.server, generation)
 
     def transaction(kind, sequence, energy=None, reason="MeterValuePeriodic"):
@@ -324,6 +325,7 @@ async def test_changed_transaction_energy_needs_no_periodic_refresh(ha):
     # Reconnect/TxResumed retains the same session and its energy baseline.
     previous_generation = generation
     generation = state.reset(connected=True)
+    state.registered_generation = generation
     adapter.generation = generation
     transaction("Updated", 4, reason="TxResumed")
     assert state.session["session_id"] == identity
@@ -387,6 +389,7 @@ async def test_transaction_energy_cannot_replace_a_lifetime_session_stream(ha):
     entry = await ha.install()
     state = entry.runtime_data.state
     generation = state.reset(connected=True)
+    state.registered_generation = generation
     adapter = Adapter(Mock(), entry.runtime_data.server, generation)
     session.event(
         state, generation, state.binding, "real", "Started", datetime.now(UTC), 0
