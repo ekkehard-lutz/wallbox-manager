@@ -1,11 +1,20 @@
 """Minimal observed transaction lifecycle; no policy or economic accounting."""
 
+import logging
 import math
+import os
+import stat
 from datetime import UTC, datetime, timedelta
+from json import JSONDecodeError
+from pathlib import Path
 from uuid import uuid4
 
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.storage import Store
+from homeassistant.util.json import json_loads
+
+_LOGGER = logging.getLogger(__name__)
+_MISSING = object()
 
 BOUNDARY_AGE = timedelta(seconds=15)
 
@@ -104,6 +113,7 @@ def event(state, generation, scope, external_id, kind, at, sequence):
     session = state.session
     if session.get("generation") != list(generation):
         session.pop("energy_link_generation", None)
+        session.pop("energy_generation", None)
     session.update(
         updated_at=at.isoformat(), sequence=sequence, generation=list(generation)
     )
@@ -277,22 +287,234 @@ def linked_energy(state, stream, value, at):
     return session.get("energy_link_generation") == list(state.generation)
 
 
+class DamagedJournal(ValueError):
+    """A readable file that cannot be used as a current Store document."""
+
+
+def read_snapshot(store):
+    # Store.async_load can conflate missing and invalid data, quarantine bad
+    # JSON, or rewrite a mismatched minor version before payload validation.
+    path = Path(store.path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return _MISSING
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("Session journal is not a regular file")
+    try:
+        wrapper = json_loads(path.read_bytes())
+    except JSONDecodeError:
+        raise DamagedJournal("invalid JSON") from None
+    if (
+        not isinstance(wrapper, dict)
+        or type(wrapper.get("version")) is not int
+        or wrapper["version"] != store.version
+        or type(wrapper.get("minor_version", 1)) is not int
+        or wrapper.get("key") != store.key
+        or not isinstance(wrapper.get("data"), dict)
+    ):
+        raise DamagedJournal("invalid Home Assistant Store document")
+    return wrapper["data"]
+
+
+def archive_snapshot(path, missing):
+    try:
+        archives = sorted(
+            (
+                file
+                for file in path.parent.iterdir()
+                if file.name.startswith(f"{path.name}.corrupt.")
+                and file.is_file(follow_symlinks=False)
+            ),
+            reverse=True,
+        )
+    except FileNotFoundError:
+        if missing:
+            return None
+        raise
+    if missing:
+        return next(iter(archives), None)
+
+    # Keep the live name until Store atomically replaces it. Reuse the archive
+    # of the same inode after a failed or interrupted normalization.
+    for archive in archives:
+        if path.samefile(archive):
+            return archive
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    archive = path.with_name(f"{path.name}.corrupt.{stamp}.{uuid4().hex}")
+    os.link(path, archive, follow_symlinks=False)
+    return archive
+
+
+def transaction_id(value):
+    return isinstance(value, str) and 0 < len(value) <= 36 and bool(value.strip())
+
+
+def journal_time(value):
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.utcoffset() is not None:
+            return parsed
+    return None
+
+
+def recover_session(record, state):
+    """Return a usable historical record and independently confirmed closure."""
+    if not isinstance(record, dict):
+        return None, None
+    scope = record.get("scope")
+    external_id = record.get("external_transaction_id")
+    updated = journal_time(record.get("updated_at"))
+    started = journal_time(record.get("started_at"))
+    ended = journal_time(record.get("ended_at"))
+    if (
+        not isinstance(scope, list)
+        or len(scope) != 3
+        or tuple(scope[:2]) != state.binding[:2]
+        or not state.accepts(scope)
+        or not transaction_id(external_id)
+        or updated is None
+        or (
+            record.get("started_at") is not None
+            and (started is None or started > updated)
+        )
+        or "ended_at" not in record
+        or (record["ended_at"] is not None and ended != updated)
+    ):
+        return None, None
+
+    closed_id = external_id if ended is not None else None
+    identity, sequence = record.get("session_id"), record.get("sequence")
+    if (
+        not isinstance(identity, str)
+        or not identity.strip()
+        or type(sequence) is not int
+        or sequence < 0
+        or (ended is None and external_id in state.closed_transactions)
+    ):
+        return None, closed_id
+
+    restored = record.copy()
+    restored.setdefault("started_at", None)
+    for key in ("start_meter", "current_meter", "end_meter", "energy"):
+        value = record.get(key)
+        restored[key] = (
+            value
+            if type(value) in (int, float) and math.isfinite(value) and value >= 0
+            else None
+        )
+    if ended is None and restored["end_meter"] is not None:
+        return None, None
+    if type(restored.get("energy_invalid")) is not bool:
+        restored["energy_invalid"] = restored["start_meter"] is not None
+
+    for key in (
+        "start_meter_at",
+        "end_meter_at",
+        "observed_at",
+        "energy_at",
+        "energy_reported_at",
+        "energy_received_at",
+    ):
+        if key in restored and journal_time(restored[key]) is None:
+            restored.pop(key)
+    for role in ("power", "energy"):
+        key = f"{role}_channel"
+        if key in restored and restored[key] not in (
+            ["transaction", scope, role],
+            ["observation", [*scope[:2], None], role],
+        ):
+            restored.pop(key)
+    for key in ("energy_generation", "energy_link_generation"):
+        if key in restored:
+            value = restored[key]
+            if (
+                not isinstance(value, list)
+                or len(value) != 2
+                or any(type(part) is not int or part < 0 for part in value)
+            ):
+                restored.pop(key)
+    if "energy_source" in restored and not isinstance(restored["energy_source"], str):
+        restored.pop("energy_source")
+    return restored, closed_id
+
+
 async def load(hass, entry_id, state):
     store = Store(hass, 1, f"wallbox_manager.{entry_id}.passive_session")
-    saved = await store.async_load()
-    if saved is not None:
-        if (
-            not isinstance(saved, dict)
-            or type(saved.get("schema")) is not int
-            or saved["schema"] != 2
-        ):
-            raise ConfigEntryError(
-                "Unsupported passive session journal schema (expected 2)"
+    path = Path(store.path)
+    reasons = []
+    archived = None
+    action = "read"
+    try:
+        try:
+            saved = await hass.async_add_executor_job(read_snapshot, store)
+        except DamagedJournal as error:
+            reasons.append(str(error))
+            saved = None
+        if saved is _MISSING:
+            archived = await hass.async_add_executor_job(archive_snapshot, path, True)
+            if archived is not None:
+                reasons.append("current journal missing after quarantine")
+        elif saved is not None:
+            if type(saved.get("schema")) is not int or saved["schema"] != 2:
+                raise ConfigEntryError(
+                    "Unsupported passive session journal schema (expected 2)"
+                )
+            raw_ids = saved.get("closed_transactions")
+            if isinstance(raw_ids, list):
+                state.closed_transactions = {
+                    item for item in raw_ids if transaction_id(item)
+                }
+            if not isinstance(raw_ids, list) or any(
+                not transaction_id(item) for item in raw_ids
+            ):
+                reasons.append("missing or invalid closed transaction history")
+            record = saved.get("session")
+            state.session, closed_id = recover_session(record, state)
+            if closed_id is not None and closed_id not in state.closed_transactions:
+                state.closed_transactions.add(closed_id)
+                reasons.append("completed transaction missing from closed history")
+            if "session" not in saved or state.session != record:
+                reasons.append("incomplete or inconsistent session record")
+            if state.session is not None:
+                state.session["generation"] = None
+
+        if reasons:
+            if archived is None:
+                action = "archive"
+                archived = await hass.async_add_executor_job(
+                    archive_snapshot, path, False
+                )
+            action = "write and verify"
+            normalized = document(state)
+            await store.async_save(normalized)
+            # HA Store can log WriteError and return normally.
+            if await hass.async_add_executor_job(read_snapshot, store) != normalized:
+                raise OSError("Normalized journal could not be verified")
+            _LOGGER.warning(
+                "Recovered passive session journal for entry %s (%s). Original: %s. "
+                "Historical session statistics and closed-transaction replay "
+                "protection may be incomplete.",
+                entry_id,
+                ", ".join(reasons),
+                archived,
             )
-        state.session = saved["session"]
-        if state.session:
-            state.session["generation"] = None
-        state.closed_transactions = set(saved.get("closed_transactions", []))
+    except ConfigEntryError:
+        raise
+    except Exception as error:
+        _LOGGER.error(
+            "Cannot %s passive session journal for entry %s at %s (%s). "
+            "Recovery did not complete.",
+            action,
+            entry_id,
+            path,
+            type(error).__name__,
+        )
+        raise ConfigEntryError(f"Cannot {action} passive session journal") from None
+
     state.save_session = lambda: store.async_delay_save(lambda: document(state), 1)
     return store
 

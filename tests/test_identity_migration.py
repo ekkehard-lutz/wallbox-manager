@@ -239,6 +239,8 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
 async def test_missing_passive_session_leaves_historical_ledger_inert(ha, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
+    from custom_components.wallbox_manager import session
+
     entry = config()
     at = datetime.now(UTC) - timedelta(hours=2)
     record = {
@@ -264,12 +266,18 @@ async def test_missing_passive_session_leaves_historical_ledger_inert(ha, monkey
     await store.async_save(original)
     reads = []
     load = Store.async_load
+    read = session.read_snapshot
+
+    def record_read(store):
+        reads.append(store.key)
+        return read(store)
 
     async def record_load(store):
         reads.append(store.key)
         return await load(store)
 
     monkeypatch.setattr(Store, "async_load", record_load)
+    monkeypatch.setattr(session, "read_snapshot", record_read)
     await ha.install(entry)
     runtime = entry.runtime_data
     assert runtime.session_store.key in reads
