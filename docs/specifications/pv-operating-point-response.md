@@ -48,14 +48,24 @@ These are **integration configuration parameters**, not Lovelace-card controls. 
 
 **PV-TUNE-08 — Boundaries and persistence:** The integration must validate finite, nonnegative whole-cycle parameters, the nonnegative FAST household restart threshold in W and the strictly positive import-energy budget. Values must persist, remain independent from `regulation_interval` (which stays in **seconds**) and be visible/editable through normal HA integration configuration. Provide explicit appropriate upper bounds in the implementation design rather than accepting unbounded values or guessing that zero means disabled for the Wh budget. Changing a setting must **not** trigger a second regulator or a fresh PV control cycle; the next ordinary tick uses effective settings. Use the same shared settings for all battery PV profiles.
 
-**PV-TUNE-09 — Economic budget edits in active scope:** Historical accumulated Wh and economic STOP provenance survive integration reload and configuration changes; a threshold edit is **not** an accounting reset, transaction change or permission to restart. **IMPLEMENTED behavior, policy review OPEN:** lowering the budget below already accumulated eligible Wh triggers economic STOP on the next permitted ordinary cycle; increasing it does not cancel an already-issued STOP or clear restart inhibition. Persist the setting and keep accounting in actual Wh rather than a percentage of budget. Test active edits, restart, lower/raise and late ACKs.
+**PV-TUNE-09 — Economic budget edits in active scope [APPROVED, 11 November
+2026]:** Persist the threshold in Wh and retain accumulated Wh when the operator
+raises or lowers it. A lower limit can trigger economic STOP on the next
+eligible ordinary tick. A higher limit leaves pending STOP intent and latched
+STOP intact. A budget edit grants no charge release and schedules no extra
+regulation cycle. Existing reset qualification and restart evidence remain
+mandatory. Reload and valid same-ID recovery retain the existing economic
+scope and history. A valid new transaction gets a fresh budget under the
+approved rollover rule.
 
-**PV-TUNE-10 — Retired second-based delays:** `pv_start_delay` and
-`pv_stop_delay` have no current control, configuration or entity surface.
-The approved cycle-based settings use separate identities. Historical registry
-records can remain. The original removal clause included stored keys, while
-the implementation preserves inert keys. Physical deletion scope is OPEN.
-Historical seconds are outside the current cycle-setting import contract.
+**PV-TUNE-10 — Retired settings [APPROVED, 11 November 2026]:**
+Harmless retired keys may remain in stored configuration. In particular,
+`pv_start_delay` and `pv_stop_delay` have no current control, configuration or
+entity surface. Current scoped settings retain their own identities and
+precedence. Retired values are inert and excluded from runtime decisions.
+Preserve the existing scoped Store format without automatic deletion or
+migration. This approval supersedes earlier physical deletion clauses for
+retired keys. Historical registry rows can remain unavailable.
 
 ### FAST ±100 W grid deadband [APPROVED configurable default]
 

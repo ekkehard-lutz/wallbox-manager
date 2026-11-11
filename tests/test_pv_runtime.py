@@ -9,7 +9,7 @@ import pytest
 from conftest import config, entities, eventually
 from ocpp.v21 import call
 from test_active_control import event
-from test_grid_profile import GridStation, start_grid
+from test_grid_profile import DelayedGridStation, GridStation, start_grid
 from test_protocol import peer
 
 from custom_components.wallbox_manager import async_setup_entry, async_unload_entry
@@ -322,6 +322,52 @@ async def test_runtime_setting_changes_no_second_tick_budget_edit_and_cycle_vali
         for key in ("pv_grid_import_budget_wh", "pv_ev_uptake_threshold_pct"):
             with pytest.raises(ValueError):
                 await s.set(key, 0)
+
+
+async def test_budget_raise_while_economic_stop_ack_is_pending_survives_reload(ha):
+    entry = await install(ha)
+    async with peer(entry, station_type=DelayedGridStation) as station:
+        grid, pv = await release(entry, station)
+        settings = entry.runtime_data.settings
+        await tick(pv)
+        assert station.amps > 0
+        pv.budget.wh = 20
+        count = len(station.profiles)
+        key = "pv_grid_import_budget_wh"
+        await settings.set(key, 75)
+        assert pv.budget.wh == 20 and not pv.budget.stopped
+        await settings.set(key, 10)
+        assert len(station.profiles) == count and not pv.budget.stopped
+
+        station.delay = True
+        stop = asyncio.create_task(tick(pv))
+        try:
+            await asyncio.wait_for(station.waiting.wait(), 2)
+            assert station.amps == 0 and pv.budget.stopped
+            assert grid.requested.amps == 0
+            pending = grid.task
+            saved = pv.budget.saved()
+            assert saved["wh"] == 20
+            assert len(station.profiles) == count + 1
+
+            await settings.set(key, 100)
+            assert grid.task is pending and not pending.done()
+            assert grid.requested.amps == 0 and pv.budget.saved() == saved
+            assert len(station.profiles) == count + 1
+        finally:
+            station.profile_release.set()
+            await stop
+
+        await settings.set(key, 150)
+        assert grid.confirmed.amps == 0 and pv.budget.saved() == saved
+        assert len(station.profiles) == count + 1
+
+    await async_unload_entry(ha, entry)
+    await ha.install(entry)
+    restored = entry.runtime_data
+    assert restored.settings.get(key) == 150
+    assert restored.settings.get("charge_release") is False
+    assert restored.pv.budget.saved() == saved
 
 
 async def test_obsolete_keys_entities_and_option_fields_are_removed_only(ha):
