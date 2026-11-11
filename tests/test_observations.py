@@ -770,6 +770,7 @@ async def test_session_and_ordinary_power_share_normalization_and_safety_is_unch
     entry = await ha.install()
     state = entry.runtime_data.state
     generation = state.reset(connected=True)
+    state.registered_generation = generation
     adapter = Adapter(Mock(), entry.runtime_data.server, generation)
     at = datetime.now(UTC).isoformat()
     sample = {

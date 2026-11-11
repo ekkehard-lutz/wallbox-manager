@@ -16,6 +16,7 @@ from custom_components.wallbox_manager.store import State
 def setup():
     state = State(("Wallbox01", "1", "1"))
     generation = state.reset(connected=True)
+    state.registered_generation = generation
     state.epoch -= timedelta(seconds=60)
     listener = Listener(state, "127.0.0.1", 0)
     adapter = Adapter(Mock(), listener, generation)
@@ -236,7 +237,7 @@ def test_arbitrary_energy_channels_are_not_linked(proof):
     supported(state)
     start = datetime.now(UTC) - timedelta(seconds=20)
     if proof == "no_identity":
-        state.registered_generation = None
+        state.identity.clear()
     elif proof == "other_model":
         state.identity["model"] = "another"
     adapter.meters(1, energy(start, 200000 if proof == "different_value" else 100000))
@@ -280,7 +281,7 @@ async def test_completed_session_survives_reload_and_new_state_from_disk(ha):
 
     entry = await ha.install()
     state = entry.runtime_data.state
-    state.reset(connected=True)
+    state.registered_generation = state.reset(connected=True)
     state.epoch -= timedelta(seconds=60)
     adapter = Adapter(Mock(), entry.runtime_data.server, state.generation)
     start = datetime.now(UTC) - timedelta(seconds=20)
