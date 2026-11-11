@@ -525,3 +525,21 @@ the subsequent sequence. The current contracts live in the linked specifications
 
 The [index at the pre-consolidation commit](https://github.com/ekkehard-lutz/wallbox-manager/blob/c14f671263c3399d7e5e65147b1137ce0f78f490/docs/specifications/README.md)
 retains the earlier dated publication and implementation-scope notices.
+
+## 11 November 2026 — Session journal recovery and PV policy dispositions [APPROVED]
+
+For private household use, preserve damaged session journals and continue
+startup after verified recovery. Keep trustworthy schema-2 fields and all known
+closed transaction IDs without pruning. The operator accepts reduced replay
+protection and informational session-statistics accuracy after data loss, as
+well as the existing delay before session writes. Current-generation
+registration is required before transaction attribution. The approval
+preserves manager release OFF after reload and the station's responsibility
+for physical safety.
+
+PV-TUNE-09 approves the existing threshold-edit behavior, including retained Wh
+and pending or latched STOP. PV-TUNE-10 approves keeping harmless retired
+configuration keys inert. The overall PV Regulation V3 status remains DRAFT.
+See the [current baseline](v0.4-current-requirements.md), the
+[approved tuning clauses](pv-operating-point-response.md), and the
+[implementation review](../v0.4/session-recovery-registration-review.md).
