@@ -75,7 +75,7 @@ not an asserted execution time.
 | FA-13 · Remote → Local → Remote authority | With no EV plugged in, NETZ release was armed under Remote (card `Ladung beenden`). The operator selected local `PV Überschuss` in Stationary; the wallbox UI showed the local mode and 0 A, WBM displayed `Steuerung übernehmen` and `Ladung starten` (release retired). The operator then explicitly retook Remote; Stationary showed Remote/0 A, while WBM still showed `Ladung starten` rather than restarting the previous release. | **PASS** for intentional authority loss, retirement and explicit takeover without automatic charging. Contributes to PA-03 and PA-04. Hardware permission changes were not tested. |
 | FA-14 · Stationary service restart during charging | Operator invoked `sudo systemctl restart wallbox` while the EV was actively charging with NETZ requested 6.9 kW/3 phases/10 A (about 6.4 kW observed). Charging continued physically, but WBM showed `— → 3-phasig 10A`, meaning requested point known and current-generation applied point not confirmed. Changing requested power **once** to 7.6 kW and pressing Apply restored the confirmed display; a **second** Apply returned the request to 6.9 kW. Reserve diagnostics showed confirmed 30%-then-7% changes during the continued charge. See F02. | **PARTIAL** physical continuation after Stationary restart; **FAIL/OPEN** autonomous point reconciliation and reserve retention under this condition. Contributes to PA-02/04/13 and F02. |
 
-| FA-15 · Hardware permission under Remote and Local | With no EV plugged in, the operator toggled HA `Wallbox enabled` OFF/ON while Stationary was in Remote. Stationary showed `Inaktiv`/`Aktiv`, the HA switch reflected OFF/ON, and WBM disabled/re-enabled `Ladung starten` without an authority change. After changing Stationary to a local PV profile, toggling hardware OFF/ON again made Stationary `Inaktiv`/`Aktiv`, while WBM continued showing `Steuerung übernehmen` and never auto-acquired Remote. One later WBM screenshot no longer displayed the Take Control button, but the last Stationary screenshot still showed a local PV profile; a confirmed final Remote authority transition is therefore **not established by this sequence**. **Additional observation outside the requested switch test:** with Local still shown, WBM displayed an enabled green `Ladung starten`, then a red `Ladung beenden` (manager release ON) while the vehicle remained absent; that release remained ON following explicit Remote takeover. The screenshots do not show whether the operator deliberately pressed Start between these views. | **PASS** for hardware permission switching independent of Remote/Local and for start-action disablement while hardware is OFF. **OPEN operator clarification** for the Local preparatory Start/release-ON transition; do not classify this as a defect until the operator action and intended semantics are established. Contributes to PA-03/04. |
+| FA-15 · Hardware permission and Local NETZ Start | With no EV plugged in, the operator toggled HA `Wallbox enabled` OFF/ON while Stationary was in Remote. Stationary showed `Inaktiv`/`Aktiv`, HA reflected OFF/ON and WBM disabled/re-enabled `Ladung starten` without an authority change. Under a Stationary Local PV profile, toggling hardware OFF/ON again showed `Inaktiv`/`Aktiv`, while WBM displayed `Steuerung übernehmen` and did not auto-acquire Remote. **The operator confirms explicitly pressing `Ladung starten` while Authority was Local**: WBM accepted it and showed red `Ladung beenden` (manager release ON), although no EV was plugged in and no physical charging began. A later WBM screenshot still showed release ON, but no post-takeover physical charge was tested. | **PASS** for hardware permission toggling independently of Local/Remote and for Start disabled while hardware OFF. **FAIL** for NETZ Start allowed while Local (F03). Contributes to PA-03/04. |
 
 The operator **intentionally** lowered the WBM NETZ discharge reserve from 30%
 to 10% **after** the initial restart screenshots. Later card display
@@ -88,6 +88,7 @@ that the mapped Fronius minimum reserve was set to 10%.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | [F01](#f01--lovelace-session-duration) | 12 November 2026 | Lovelace session display | Display elapsed duration in hours and minutes consistent with the bound HA session. | Card showed `0:00` for a session lasting approximately 1 h 46 min 32 s. | [Operator log](#12-november-2026) and [beta.23 source inspection](#f01--lovelace-session-duration). | P2 · UI presentation | **OPEN** | Likely mismatch between the HA state unit and the frontend's seconds assumption. The live unit is unconfirmed. | Inspect the live `unit_of_measurement` together with the numeric state and compare the card output with elapsed time. | beta.24 candidate |
 | [F02](#f02--stationary-reconnect-operating-point-and-battery-reserve) | 14 November 2026 | OCPP reconnect / NETZ battery reserve | A continuing authorized NETZ charge reconciles its current-generation applied point and retains an appropriate owned temporary reserve until charge ends or another legitimate retirement event. | After Stationary restart physical charging continued (~6.4 kW); applied point became unknown (`— → 3-phasig 10A`) until the **first** manual Apply at 7.6 kW. WBM also confirmed repeated writes of the reserve from 30% back to original 7% while charging was reported. | [FA-14](#14-november-2026--stationary-restart-and-authority-tests), [diagnostic timeline](#f02--stationary-reconnect-operating-point-and-battery-reserve). | P2 · functional energy management (raise if impact warrants) | **OPEN** | F02a: missing/unconfirmed OCPP TxProfile readback after generation change with no automatic command replay. F02b: NETZ reserve eligibility depends on confirmed point and current-generation state, causing a possible premature restoration. Neither causal mechanism has yet been reproduced in an isolated test. | Reproduce with synthetic Stationary reconnect and persisted same-ID charging; trace confirmed point, transaction, current/phase evidence, reserve ownership/restore trigger. Verify actual Fronius reserve, not only card preview. Investigate both restore events separately. | beta.24 candidate |
+| [F03](#f03--netz-start-allowed-under-local-authority) | 14 November 2026 | NETZ action/authority gate | With ControlAuthority Local, permit draft edits but disable/reject manager `Ladung starten`, keeping `charge_release=false` and without automatic Remote takeover. | Operator intentionally pressed enabled NETZ Start under Local and WBM switched to `Ladung beenden` (release ON), with no vehicle or physical charge. | [FA-15](#14-november-2026--stationary-restart-and-authority-tests), WBM-RELEASE-04 and WBM-NETZ-ACTION-12. | P2 · authority workflow | **OPEN** | The NETZ branch of `Grid.action_state()` checks hardware and draft validity but not observed Remote authority. Backend release approval also needs atomic authority validation. | Reproduce Local Start on card, direct service and legacy action, including authority-loss races; reject without persisting release or approving drafts. | beta.24 candidate |
 
 ### F01 — Lovelace session duration
 
@@ -163,6 +164,42 @@ and existing authority/transaction fencing; do not add speculative polling,
 an independent electrical safety manager or unsafe optimistic confirmation.
 Fixes must not cause repeated unwanted positive commands or overwrite
 external reserve edits.
+
+### F03 — NETZ Start allowed under Local authority
+
+**Confirmed field evidence:** In FA-15 the operator deliberately clicked
+enabled green `Ladung starten` while Stationary's authority was Local.
+WBM displayed red `Ladung beenden`, signifying new manager release ON.
+No vehicle was attached and no current flowed. Charging after a later
+Remote takeover was **not tested** and must not be claimed as fact.
+
+**Expected:** Local means Stationary owns current and phase. NETZ draft
+power and timing remain editable, but `Ladung starten` is disabled with
+an intelligible authority/`control_unavailable` reason. Any backend/direct
+service or compatibility action must likewise reject a Local Start without
+approving the draft, writing positive current or persisting release ON.
+After an explicit Remote takeover, WBM remains OFF until a new deliberate
+Start. Remote NETZ pre-arming without a vehicle remains permitted.
+
+**Existing behavior to preserve:** FA-13 verifies Remote → Local
+retires an existing release. Hardware `ChargingEnabled` can be toggled
+under either Local or Remote (FA-15). Explicit Stop remains available
+even if permission or authority is lost. Local parameter editing stays
+available; PV preparation semantics must not be unintentionally changed.
+
+**Source assessment:** WBM-RELEASE-04 and WBM-NETZ-ACTION-12 already
+require a blocked Local Start/no unauthorized positive intent.
+In beta.23 `Grid.action_state()` checks hardware enabled and valid
+NETZ point but does not reject known Local in its NETZ branch. The
+backend's authority check and persistence race still require a
+reproducible isolated review; do not mistake UI-only disablement for a fix.
+
+**Regression:** Validate Local Start disabled, all service/legacy paths
+blocked, no release persistence and no late positive command during
+concurrent authority loss. After explicit Remote takeover Start becomes
+available without automatically releasing. Confirm ordinary Remote
+pre-armed NETZ Start without a vehicle, authority-loss release retirement,
+independent hardware switch and safe Stop with hardware disabled.
 
 ## Feature requests — approved operator intent, not implemented
 
@@ -244,8 +281,8 @@ in the evidence column. The coverage status reflects field evidence only.
 | --- | --- | --- | --- | --- | --- |
 | PA-01 | HACS setup, binding and reload | Field: FA-01/02 verify installed version and successful reload after registry cleanup. Automated: setup and reload regressions. | **PARTIAL** | Verify preserved current entry/entity identities and settings, clean teardown, one listener and release OFF after a controlled reload. | |
 | PA-02 | OCPP bootstrap, reconnect and telemetry | Field: FA-03 verifies initial boot, and FA-14 confirms charging continues through a Stationary service restart but the current-generation applied offer is initially unknown. Automated: generation fencing and missing-baseline tests. | **PARTIAL** | Trace OCPP point readback/reconciliation after reboot, including unchanged reports, inventory, generation, authoritative current point and no command replay; investigate F02a. | F02a |
-| PA-03 | Authority and hardware permission | Field: FA-03 verifies explicit Local → Remote. FA-13 verifies deliberate Remote → Local release retirement. FA-15 shows `Wallbox enabled` OFF/ON from HA under both Remote and Local, Stationary `Inaktiv`/`Aktiv` observations, and WBM Start disabled when hardware OFF; no automatic Remote takeover. Automated: authority and permission tests. | **PARTIAL** | Check live OCPP ACK/Actual outcomes, independent external station-side permission changes and fault/reconnect conditions. Clarify the FA-15 Local-mode WBM Start/release-ON transition before classifying any discrepancy. | FA-15 observation (unclassified) |
-| PA-04 | NETZ Start, Apply and Stop | Field: FA-04–06 ordinary 1p/3p Start/Apply/Stop, FA-08 pre-armed Start before plug-in, FA-09 replug, FA-13 Stop-on-authority-loss, FA-14 manual Apply after reconnect. Automated: action/approval and gating regressions. | **PARTIAL** | Verify draft isolation, Stop with pending edits, offline/permission-disabled/faulted outcomes and unattended post-reconnect point reconciliation (F02a). | F02a |
+| PA-03 | Authority and hardware permission | Field: FA-03 confirms explicit Local → Remote; FA-13 confirms Remote → Local release retirement. FA-15 verifies independent hardware permission switching under both authorities but also demonstrates NETZ Start under Local (F03). Automated: authority/permission tests. | **FAIL** for Local NETZ Start gating; other observed authority/hardware switching PASS. | Resolve F03 across UI/backend; separately verify direct station-side permission changes, actual ACK/readback, fault and reconnect. | F03 |
+| PA-04 | NETZ Start, Apply and Stop | Field: FA-04–06 regular 1p/3p Start/Apply/Stop, FA-08–09 Remote pre-armed Start and replug, FA-13 authority-loss retirement, FA-14 Apply after reconnect, FA-15 unauthorized Local Start (F03). Automated: action/approval and gating tests. | **FAIL** for Local Start; normal start/apply/stop cases PASS. | Fix F03 without removing Remote pre-arm, test draft isolation, Stop with pending edits, offline/permission-disabled/faulted cases and F02a readback. | F02a, F03 |
 | PA-05 | NETZ timing and reconnect | Field: FA-10 without EV verifies 2-minute delay/3-minute duration and power-only Apply without deadline shift. FA-11 verifies plug-in during delay, real charging, live duration extension, timed Stop. FA-12 verifies editor rollback and independent power drafts. Automated fake-clock/OCPP tests. | **PARTIAL** | Test same-ID reconciliation within/after scheduled window under OCPP outage and phase/re-enable lockouts. Future FR-01 alters HA-restart continuity and is not a beta.23 PASS. | FR-01 (future requirement) |
 | PA-06 | NETZ steps, caps and lockouts | Field: FA-04/05 verify the 1-to-3-phase change. Automated: step, cap and lockout tests. | **PARTIAL** | Check nominal steps and 0 A phase-mode cap. Observe supported phase-switch and re-enable lockout timing, including reject/wait, retry and confirmed offer. | |
 | PA-07 | Session lifecycle and attribution | Field: FA-04–06 charging/end, FA-08–09 replug with release retained, FA-11 real charging with timer, F01 wrong duration display. Automated journal and replay regressions. | **PARTIAL** | Verify same-ID transaction continuity and authentic Ended across reconnect, pause, HA restart recovery, full provenance/time and distinct transaction scope; retest F01 UI. | F01 |
@@ -261,6 +298,20 @@ in the evidence column. The coverage status reflects field evidence only.
 | PA-17 | HA CPU and Recorder | Automated: partial publication-counter coverage. | **OPEN** | Compare sustained enabled/disabled CPU and actual Recorder writes with normal filters during steady and reconnect traffic. Verify V04-12's passive average CPU increase limit of 0.1 percentage points and sparse writes for identical observations. | |
 
 ## Beta.24 regression checklist
+
+- [ ] F03 Local-Start rejection. With Stationary confirmed Local and
+  ChargingEnabled ON, NETZ draft remains editable but `Ladung starten`
+  is disabled, and direct explicit/legacy button actions reject instead
+  of granting release or saving approval.
+- [ ] F03 authority race. Local transition before/during durable Start
+  approval never leaves release ON or permits an eventual positive command;
+  retiring an existing Remote release remains functional.
+- [ ] F03 Remote recovery. An explicit Remote takeover leaves WBM
+  release OFF until a new Start; then a Remote pre-armed Start without a
+  vehicle still works. Keep independent ChargingEnabled under Local/Remote,
+  and ensure Stop is possible despite Local or disabled hardware.
+- [ ] F03 field retest. Record observed Stationary authority, HA button,
+  failed/successful action, persisted release and no unrequested charge.
 
 - [ ] F02a reconnect baseline. Reproduce a Stationary service restart
   during a known same-ID active NETZ charge. Capture verified OCPP generation,
@@ -308,12 +359,13 @@ tested build, Stationary version, entry scope, reproduction steps, expected and
 observed results, and any supporting screenshots, HA states or scoped logs.
 Record the result at the time of observation and preserve original FAIL and OPEN
 entries when updating the current status. Allocate new finding IDs sequentially
-from F03.
+from F04.
 
 | Finding | Original observation | Corrective commit/release | Retest date | Retest result | Final status |
 | --- | --- | --- | --- | --- | --- |
 | F01 | [12 November 2026](#12-november-2026) | Pending | Pending | Pending | Pending · currently OPEN |
 | F02 | [14 November 2026](#14-november-2026--stationary-restart-and-authority-tests) | Pending | Pending | Pending | Pending · currently OPEN |
+| F03 | [14 November 2026](#14-november-2026--stationary-restart-and-authority-tests) | Pending | Pending | Pending | Pending · currently OPEN |
 
 ## Source cross-checks
 
