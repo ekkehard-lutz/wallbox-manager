@@ -78,6 +78,77 @@ If the live attributes confirm the mismatch, normalize the displayed value
 using the actual HA state unit before formatting hours and minutes. Keep OCPP
 session accounting and the stored session schema outside the proposed fix.
 
+## Feature requests — approved operator intent, not implemented
+
+### FR-01 — Resume an approved NETZ charge and its absolute schedule after HA restart
+
+**Decision date:** 14 November 2026. **Status:** APPROVED for future
+implementation; **not implemented in beta.23**. Group implementation and
+regression review with the collected beta.23 findings before the next beta,
+rather than changing production code during acceptance.
+
+**Current beta.23 behavior:** HA reload retires the manager charge release and
+active NETZ schedule (WBM-TIME-07, WBM-TIME-25 and WBM-RELEASE-01).
+The operator requests a policy change, not a fix for a beta.23 regression.
+
+**Desired behavior:**
+
+- A previously explicit and durably approved NETZ Start survives a Home
+  Assistant restart, including approved power, delay, optional duration and
+  original absolute planned start/end timestamps. Restart is not a new Start
+  and must not extend or reset the schedule.
+- If the end deadline is still in the future, restore the remaining window.
+  After valid registration, current-generation transaction/station evidence,
+  Remote authority and hardware permission, reconcile the actual offer and
+  continue the approved request. No unconditional command replay or automatic
+  Remote takeover.
+- If the deadline elapsed during the outage, retire schedule and manager
+  release when WBM resumes. Request or confirm 0 A when registered connection,
+  valid transaction and authority permit. Never restore a positive proposal
+  after an expired deadline.
+- If the run had no duration limit, retain the prior explicit release until
+  user Stop or another genuine retirement condition. Never invent a new Start.
+- **Pragmatic private-use policy:** A precise deadline stop is not guaranteed
+  while HA/WBM or the OCPP link is unavailable. It is acceptable that charging
+  continues temporarily under Stationary until WBM can reconnect and enforce
+  the overdue Stop. No extra Stationary-side timer or duplicated scheduler.
+- Physical/manual intervention remains possible: unplugging interrupts
+  charging; station-side Stop, disabling hardware permission or returning
+  authority to Local must not be overridden by WBM. WBM may only learn the
+  changed physical state after the connection is restored. Unplugging alone
+  need not cancel an otherwise active WBM business window: as already
+  observed, replugging within the valid window may resume the charge.
+  Determine exactly how Stationary expresses an explicit station-side Stop
+  so reconnection respects the intervention.
+- Treat ambiguous, damaged or unapproved persisted intent conservatively:
+  it must never restore positive release. Keep operator Stop precedence,
+  generation fencing, session scope, truthful readback and battery reserve
+  recovery/ownership.
+- Do not promise physically uninterrupted charging across a normal HA
+  restart without first examining WBM shutdown behavior and Stationary's
+  OCPP disconnect handling.
+
+**Future validation:**
+
+1. Restart during NETZ charge with finite deadline: resume only if eligible,
+   preserve original end time.
+2. Restart during start delay, including no plugged vehicle: preserve start
+   and end timestamps and original delay deadline.
+3. Restart with end time missed: retire release and reconcile 0 A when
+   connection/authority return, recording outage and stop times.
+4. Restart during unlimited NETZ release: restore approved intent, not a new
+   approval.
+5. Explicit Stop before restart: never resurrect the retired intent.
+6. Reconnect under Local, hardware-disabled, unplugged, changed transaction
+   or explicit station-side stop: never issue unauthorized positive commands.
+7. Verify persistence failures, battery reserve, UI and the actual Stationary
+   disconnection policy.
+
+**Normative follow-up:** Revise WBM-TIME-07/25, WBM-RELEASE-01/04/08 and
+related recovery/teardown requirements during implementation review.
+Until then the beta.23 release-OFF-on-reload behavior remains the current
+implementation baseline.
+
 ## Physical acceptance coverage
 
 The automated entries summarize existing release and audit evidence
@@ -89,7 +160,7 @@ in the evidence column. The coverage status reflects field evidence only.
 | PA-02 | OCPP bootstrap, reconnect and telemetry | Field: FA-03 verifies initial connection, BootNotification and arrival of readings. Automated: generation fencing and missing-baseline tests. | **PARTIAL** | Capture inventory and scoped Actual readbacks across reconnect. Verify per-field initialization, unavailable fields and unchanged observations without redundant updates. | |
 | PA-03 | Authority and hardware permission | Field: FA-03 verifies Local to Remote via explicit Take Control and observed enabled permission. Automated: authority and permission tests, including the Stationary source fixture. | **PARTIAL** | Change hardware permission externally under Local and Remote. Compare acknowledgements, Actual readback, release and Stationary state. Verify return to Local and release retirement. | |
 | PA-04 | NETZ Start, Apply and Stop | Field: FA-04/05/06 verify ordinary actions. Automated: action, approval and hardware gating regressions. | **PARTIAL** | Check draft isolation and Stop with pending edits, including offline, faulted and permission-disabled cases. Verify release retires without approving drafts or issuing a positive proposal. | |
-| PA-05 | NETZ timing and reconnect | Field: FA-04 used immediate Start with no duration limit. Automated: fake clock and OCPP resume tests. | **OPEN** | Exercise nonzero delay and finite duration, editing within the lease, same-ID reconciliation in-window, expiry across reconnect and explicit second Start. Record absolute deadlines. | |
+| PA-05 | NETZ timing and reconnect | Field: FA-04 used immediate Start with no duration limit. Automated: fake clock and OCPP resume tests. | **OPEN** | Exercise nonzero delay and finite duration, editing within the lease, same-ID reconciliation in-window, expiry across reconnect and explicit second Start. Record absolute deadlines. Future requirement FR-01 changes HA-restart behavior and is not a beta.23 PASS. | FR-01 (future requirement) |
 | PA-06 | NETZ steps, caps and lockouts | Field: FA-04/05 verify the 1-to-3-phase change. Automated: step, cap and lockout tests. | **PARTIAL** | Check nominal steps and 0 A phase-mode cap. Observe supported phase-switch and re-enable lockout timing, including reject/wait, retry and confirmed offer. | |
 | PA-07 | Session lifecycle and attribution | Field: FA-04–06 and F01 record charge, unplug and HA session readings. Automated: boundaries, replay and journal recovery regressions. | **PARTIAL** | Verify pause, same-ID continuity across reconnect, recovery across HA restart and authentic Ended. Capture scoped transaction evidence, registered generation and boundary provenance. | F01 (display) |
 | PA-08 | Battery-free PV_SURPLUS | Automated: battery-free policy and release regressions. | **OPEN** | Start without a battery mapping or forecast. Vary net export, capture grid and EV power, and verify controlled steps and zero pause with release retained. | |
