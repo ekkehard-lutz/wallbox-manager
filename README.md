@@ -5,12 +5,12 @@ operator-controlled EV charging and household PV optimization. It provides
 fixed-power NETZ charging, three PV profiles, station and session telemetry,
 and an entry-scoped Lovelace card.
 
-This source tree targets **v0.4.0-beta.23**. Once the GitHub prerelease
+This source tree targets **v0.4.0-beta.24**. Once the GitHub prerelease
 is published, HACS users can select that version. The release notes include
 installation checks and rollback guidance.
-[GitHub prerelease](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0-beta.23) ·
-[Release notes](docs/v0.4/release-notes-beta.23.md) ·
-[Release validation](docs/v0.4/release-validation-beta.23.md)
+[GitHub prerelease](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0-beta.24) ·
+[Release notes](docs/v0.4/release-notes-beta.24.md) ·
+[Release validation](docs/v0.4/release-validation-beta.24.md)
 
 ## Stationary and OCPP
 
@@ -36,7 +36,7 @@ and confirm the listener is outside direct public Internet reach.
 ## Installation and configuration
 
 For the published package, use the
-[beta.23 HACS installation and rollback instructions](docs/v0.4/release-notes-beta.23.md#hacs-installation-and-rollback).
+[beta.24 HACS installation and rollback instructions](docs/v0.4/release-notes-beta.24.md#hacs-installation-and-rollback).
 In Home Assistant, add Wallbox Manager under **Settings → Devices & services**.
 Set the listener address and port and the explicit station ID, EVSE and connector.
 Each wallbox/connector entry has an independent listener and settings.

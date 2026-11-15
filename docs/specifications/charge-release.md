@@ -51,7 +51,7 @@ See the [correction evidence](../release-off-recovery-correction.md).
 
 ### Nominal planning amendment
 
-[WBM-GRID-31–40](grid-profile.md#amendment--nominal-netz-steps-and-navigation-24-october-2026)
+[WBM-GRID-31–40](grid-profile.md#nominal-netz-steps-and-navigation)
 now governs NETZ bounds, rounded 0.1-kW offers, technical navigation, initialization
 and phase-hint equivalence, superseding the voltage-basis portions of
 WBM-NETZ-ACTION-07–10. The selected phase hint belongs to the same durable draft/
