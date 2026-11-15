@@ -34,27 +34,18 @@ async def saved_entry(ha, values=None):
     "kw,mode,amps",
     [(1.4, 1, 6), (1.6, 1, 7), (4.6, 1, 20), (4.1, 3, 6), (4.8, 3, 7), (18.6, 3, 27)],
 )
-@pytest.mark.parametrize("direction", ["down", "up", "nearest"])
-def test_rounded_technical_points_are_exact_in_user_domain(kw, mode, amps, direction):
-    point = ranges(modes=(mode,)).resolve(Fraction(str(kw)) * 1000, direction)
+def test_rounded_technical_points_are_exact_in_user_domain(kw, mode, amps):
+    point = ranges(modes=(mode,)).resolve(Fraction(str(kw)) * 1000)
     assert (point.phases, point.amps) == (mode, amps)
     assert point.watts == mode * 230 * amps
     assert point.selection() == {"power_kw": kw, "power_phases": mode}
 
 
 @pytest.mark.parametrize(
-    "kw,direction,amps",
-    [
-        (1.5, "down", 6),
-        (1.5, "up", 7),
-        (1.5, "nearest", 7),
-        (1.7, "down", 7),
-        (1.7, "up", 8),
-        (1.7, "nearest", 8),
-    ],
+    "kw,amps", [(1.499, 6), (1.5, 7), (1.501, 7), (1.699, 7), (1.7, 8), (1.701, 8)]
 )
-def test_direct_entries_compare_adjacent_rounded_offers(kw, direction, amps):
-    assert ranges(modes=(1,)).resolve(Fraction(str(kw)) * 1000, direction).amps == amps
+def test_direct_entries_compare_adjacent_rounded_offers(kw, amps):
+    assert ranges(modes=(1,)).resolve(Fraction(str(kw)) * 1000).amps == amps
 
 
 @pytest.mark.parametrize(
@@ -86,15 +77,13 @@ def test_monotonic_phase_boundaries_and_distinct_equal_power_identities():
     assert e.navigate(4100, 3, -1).selection() == {"power_kw": 3.9, "power_phases": 1}
     for phase, amps in ((1, 18), (3, 6)):
         assert (
-            e.resolve(
-                4100, "down", ongoing=3 - phase if phase == 1 else 1, selected=phase
-            ).amps
+            e.resolve(4100, ongoing=3 - phase if phase == 1 else 1, selected=phase).amps
             == amps
         )
-        assert e.resolve(4100, "down", selected=phase).phases == phase
-    assert e.resolve(4100, "down", ongoing=3).phases == 3
-    assert e.resolve(4100, "down", ongoing=1).phases == 1
-    assert e.resolve(4800, "down", selected=2).phases == 3  # unsupported hint ignored
+        assert e.resolve(4100, selected=phase).phases == phase
+    assert e.resolve(4100, ongoing=3).phases == 3
+    assert e.resolve(4100, ongoing=1).phases == 1
+    assert e.resolve(4800, selected=2).phases == 3  # unsupported hint ignored
     for invalid_hint in (True, False, "1", 0, 4):
         assert e.resolve(4100, ongoing=3, selected=invalid_hint).phases == 3
 
@@ -301,7 +290,7 @@ async def test_ha_relative_service_roundtrip_phase_identity_and_stale_revisions(
             {"entity_id": power.entity_id, "value": 4.15},
             blocking=True,
         )
-        assert power.native_value == settings.get("soll_power") == 4.2
+        assert power.native_value == 4.2 and settings.get("soll_power") == 4.15
         assert not station.profiles and not station.writes
 
 
@@ -325,15 +314,14 @@ async def test_phase_only_draft_is_meaningful_and_survives_reload(ha):
 
 
 @pytest.mark.parametrize(
-    "direction,initial_kw,initial_phase,initial_amps,step,target_kw,target_phase,target_amps",
+    "initial_kw,initial_phase,initial_amps,step,target_kw,target_phase,target_amps",
     [
-        ("down", 4.1, 3, 6, -1, 3.9, 1, 17),
-        ("up", 4.6, 1, 20, 1, 4.8, 3, 7),
+        (4.1, 3, 6, -1, 3.9, 1, 17),
+        (4.6, 1, 20, 1, 4.8, 3, 7),
     ],
 )
-async def test_explicit_technical_phase_transition_pauses_for_both_lockouts(
+async def test_explicit_technical_phase_transition_retries_after_lockout(
     ha,
-    direction,
     initial_kw,
     initial_phase,
     initial_amps,
@@ -344,7 +332,7 @@ async def test_explicit_technical_phase_transition_pauses_for_both_lockouts(
 ):
     entry = await saved_entry(
         ha,
-        {"power_kw": initial_kw, "power_phases": initial_phase, "direction": direction},
+        {"power_kw": initial_kw, "power_phases": initial_phase},
     )
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         station.phases = initial_phase
@@ -366,19 +354,14 @@ async def test_explicit_technical_phase_transition_pauses_for_both_lockouts(
         )
         assert len(station.profiles) == count  # draft-only
         await grid.action()
-        assert station.amps == 0 and grid.requested.amps == target_amps
+        assert station.amps == initial_amps and grid.requested.amps == target_amps
         assert grid.requested.phases == target_phase
         assert grid.confirmed.phases == initial_phase and grid.retry_at == 6
         assert settings.get("charge_release") is True
-        assert station.profiles[-1][1]["charging_schedule"][0][
-            "charging_schedule_period"
-        ] == [{"start_period": 0, "limit": 0}]
-        station.locked, station.reenable = False, True
+        station.locked = False
         await clock.advance(6)
         await eventually(lambda: grid.task.done())
-        assert grid.reason == "ReenableLockout" and grid.retry_at == 14
-        station.reenable = False
-        await clock.advance(14)
+        assert grid.status == "confirmed"  # Phase unlock retries the approved identity.
         await eventually(lambda: grid.status == "confirmed")
         assert (station.phases, station.amps) == (target_phase, target_amps)
         count = len(station.profiles)

@@ -16,6 +16,7 @@ class GridBattery:
         self.task = None
         self.preview = None
         self.dirty = self.closed = False
+        self.had_release = grid.settings.get("charge_release")
         self.removers = []
         self.input_remove = lambda: None
 
@@ -75,7 +76,7 @@ class GridBattery:
             self.grid.state.publish(("battery", self.grid.state.binding, "preview"))
 
     def changed(self):
-        if self.closed:
+        if self.closed or self.grid.closed:
             return
         self.publish_preview()
         self.dirty = True
@@ -105,16 +106,16 @@ class GridBattery:
             authority = state.value(self.grid.listener.control.key("ControlAuthority"))
             permission = state.value(self.grid.listener.control.key("ChargingEnabled"))
             power = view(state, datetime.now(UTC))["power"]
-            point = self.grid.confirmed
+            released = self.grid.settings.get("charge_release")
+            netz = self.grid.settings.get("charging_profile") == "NETZ"
+            point = None if self.grid.point_uncertain else self.grid.current_point()
+            owner = self.reserve.record is not None
             charging = (
                 self.grid.eligible()
-                and (self.grid.settings.get("charge_release") or self.reserve.record)
-                and self.grid.settings.get("charging_profile") == "NETZ"
+                and (released or (self.reserve.recovering and owner))
+                and netz
                 and permission is True
-                and point
-                and point.amps > 0
-                and getattr(self.grid, "point_generation", None) == state.generation
-                and self.grid.confirmed_transaction == self.grid.transaction()
+                and (point.amps > 0 if point else owner)
                 and state.charging_value(state.binding) == "charging"
                 and power is not None
                 and power > 0
@@ -132,18 +133,49 @@ class GridBattery:
                     and session["ended_at"] is not None
                 )
             )
-            # Startup ambiguity holds the journal; it grants no new write authority.
+            retired = self.had_release and not released
+            self.had_release = released
+            ending = (
+                session_over or authority == "local" or permission is False or not netz
+            )
             if self.reserve.recovering:
-                if (
-                    charging
-                    or session_over
-                    or authority == "local"
-                    or permission is False
-                    or self.grid.settings.get("charging_profile") != "NETZ"
-                ):
+                # A historical owner is retained until there is live evidence
+                # to adopt it or a definite reason to restore it.
+                if charging or ending or retired:
                     self.reserve.resume()
                 else:
                     continue
+            if (
+                owner
+                and released
+                and not ending
+                and self.grid.phase()[0] == "active"
+                and not charging
+                and (
+                    not self.grid.eligible()
+                    or permission is None
+                    or state.charging_value(state.binding) is None
+                    or power is None
+                )
+            ):
+                # A lifecycle reset clears observations together. Wait for
+                # their new generation before modifying the owned reserve.
+                continue
+            if owner and not charging:
+                self.grid.diagnostic(
+                    "reserve_restoration",
+                    "session_over"
+                    if session_over
+                    else "authority_lost"
+                    if authority == "local"
+                    else "hardware_disabled"
+                    if permission is False
+                    else "profile_changed"
+                    if not netz
+                    else "release_retired"
+                    if not released
+                    else "charge_paused",
+                )
             await self.reserve.update(
                 self.grid.settings.get("min_soc") if charging else None
             )

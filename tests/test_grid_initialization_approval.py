@@ -205,20 +205,16 @@ async def test_timing_edits_and_delayed_callbacks_cannot_adopt_initialized_power
     count = len(station.profiles)
     await settings.set("grid_duration", "00:05")
     await settings.set("grid_duration", "")
-    await settings.set("power_approximation", "down")
+    await settings.approve_equivalent_grid()
     await grid.task
     await settings.approve_equivalent_grid()
     assert settings.values["grid_power_initialized"] is True
     assert settings.values["grid_approved"] == approved
     assert settings.approval_attributes()["grid_set_required"]
     assert grid.action_state()["charge_action"] == "apply"
-    # DOWN recalculates the old approved 1.4 kW to zero below the new
-    # minimum; the initialized 1.6-kW draft must not enter that decision.
-    assert grid.confirmed.amps == 0
-    assert len(station.profiles) == count + 1
-    assert station.profiles[-1][1]["charging_schedule"][0][
-        "charging_schedule_period"
-    ] == [{"start_period": 0, "limit": 0}]
+    # Nearest holds the existing 7 A offer without adopting the initialized draft.
+    assert grid.confirmed.amps == 7
+    assert len(station.profiles) == count
 
 
 @pytest.mark.parametrize("recovery", ["reload", "reconnect"])

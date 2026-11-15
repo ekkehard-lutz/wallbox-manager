@@ -57,7 +57,7 @@ actual battery SoC enable its optional temporary reserve policy.
 
 | Profile | Behavior |
 | --- | --- |
-| **NETZ** | Fixed nominal point using 230 V per phase, station capabilities, per-mode current caps and the selected power approximation. A 0 A cap disables that phase mode. Power and optional delay/duration are drafts until approved or equivalent under the backend rule. Start creates an absolute schedule, Apply commits changes and Stop retires release. A disconnect does not extend the schedule. |
+| **NETZ** | Fixed nominal point using 230 V per phase, station capabilities, per-mode current caps and fixed nearest selection. The currently confirmed phase is kept within its legal range. A 0 A cap disables that phase mode. Power and optional delay/duration are drafts until approved or equivalent under the backend rule. Start creates an absolute schedule, Apply commits changes and Stop retires release. A disconnect or HA restart does not extend the approved schedule. |
 | **PV_SURPLUS** | Uses measured surplus without a home battery, or a configured valid battery SoC target with a battery. |
 | **PV_OPTIMUM** | Plans a battery target from remaining-day PV energy, capacity, reserve and expected household energy. |
 | **PV_MAXIMUM** | Uses the lowest valid target allowed by the battery reserve and hysteresis. |

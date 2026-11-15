@@ -1,4 +1,4 @@
-"""Persistent profile and approximation preferences for guarded NETZ execution."""
+"""Persistent charging profile for guarded execution."""
 
 from fractions import Fraction
 
