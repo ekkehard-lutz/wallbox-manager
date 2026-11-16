@@ -6,9 +6,10 @@
 
 **Scope of this record:** First, tests **without a vehicle connected**; subsequently, **BYD Seal U connected** and actual NETZ charging tested on 16 November. The operator supplied Lovelace, HA action, Fronius and restart/terminal screenshots and follow-up observations in the acceptance conversation. Screenshots were not committed as independent trace artifacts.
 
-**Tested build:** v0.4.0-beta.24 at `6a4f033ceada732646fd58a6158f904f353f1632`; the v0.4.0 release carries the same runtime.
+The tested build was v0.4.0-beta.24 at `6a4f033ceada732646fd58a6158f904f353f1632`.
+The v0.4.0 release carries the same runtime.
 
-**Prerelease evidence:** [Candidate validation and retest specification](https://github.com/ekkehard-lutz/wallbox-manager/blob/6a4f033ceada732646fd58a6158f904f353f1632/docs/v0.4/release-validation-beta.24.md) and [implementation handoff](https://github.com/ekkehard-lutz/wallbox-manager/blob/6a4f033ceada732646fd58a6158f904f353f1632/docs/v0.4/beta.24-candidate.md).
+The prerelease record includes the [candidate validation and retest specification](https://github.com/ekkehard-lutz/wallbox-manager/blob/6a4f033ceada732646fd58a6158f904f353f1632/docs/v0.4/release-validation-beta.24.md) and [implementation handoff](https://github.com/ekkehard-lutz/wallbox-manager/blob/6a4f033ceada732646fd58a6158f904f353f1632/docs/v0.4/beta.24-candidate.md).
 
 These observations apply to the installed beta.24 build and the tested paths only. They do not imply a raw OCPP-command verification, precise continuous hardware trace, or verification of untested service/race paths.
 
