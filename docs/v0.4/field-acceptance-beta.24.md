@@ -1,13 +1,13 @@
 # Wallbox Manager v0.4.0-beta.24 — Field acceptance
 
-**Test date:** 15 November 2026 (operator field report, local time Europe/Vienna)  
+**Test dates:** 15–16 November 2026 (operator field reports, local time Europe/Vienna)  
 **Software:** Wallbox Manager `0.4.0-beta.24`, installed from HACS; Home Assistant Core `2026.10.3`, HAOS `18.4`.  
-**Scope of this record:** Tests performed **without a vehicle connected**. No real charging current was produced. The operator supplied Lovelace, HA action and restart/terminal screenshots in the acceptance conversation. Screenshots are not committed as independent trace artifacts.  
+**Scope of this record:** First, tests **without a vehicle connected**; subsequently, **BYD Seal U connected** and actual NETZ charging tested on 16 November. The operator supplied Lovelace, HA action, Fronius and restart/terminal screenshots and follow-up observations in the acceptance conversation. Screenshots were not committed as independent trace artifacts.  
 **Release:** [v0.4.0-beta.24](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0-beta.24) (release commit `6a4f033ceada732646fd58a6158f904f353f1632`).  
 **Previous findings:** [beta.23 operator field acceptance](https://github.com/ekkehard-lutz/wallbox-manager/blob/a4d5d9cc19a833c8246d4921caab6b8da1a544f0/docs/v0.4/field-acceptance-beta.23.md).  
 **Candidate/retest specification:** [beta.24 validation](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.4.0-beta.24/docs/v0.4/release-validation-beta.24.md) and [implementation handoff](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.4.0-beta.24/docs/v0.4/beta.24-candidate.md).
 
-These observations apply to the installed beta.24 build and the tested paths only. They do not imply a full physical acceptance, raw OCPP-command verification, or verification of untested service/race paths.
+These observations apply to the installed beta.24 build and the tested paths only. They do not imply a raw OCPP-command verification, precise continuous hardware trace, or verification of untested service/race paths.
 
 ## Status definitions
 
@@ -36,21 +36,53 @@ These observations apply to the installed beta.24 build and the tested paths onl
 
 - Both station current limits were already **1p = 16 A, 3p = 16 A** and were not changed for this acceptance. Using nominal 230 V, 1p legal steps are 6–16 A (1.38–3.68 kW) and 3p legal steps are 6–16 A (4.14–11.04 kW). These ranges **do not overlap**; phase retention inside an overlap cannot be tested under this configuration. Observed card values are shown rounded to one decimal place.
 - The operator-tested F03 gate covers the card, legacy button, draft changes and explicit takeover. It **does not** cover every explicit service request, backend race or station-side assertion.
-- The FR-01 tests confirm UI persistence, original timing and visible release retirement without an EV. They **do not** establish positive OCPP proposal, confirmed Stationary offer, same-transaction recovery, physical charging continuation, or station-side Stop while HA is offline.
-- The card's retained last-session duration `3:57` does **not** validate F01. The previous beta.23 defect affected the duration of an actual session; capture sensor value, `unit_of_measurement`, elapsed wall-clock time, and card display during/after the next actual charge.
+- The FR-01 tests in this *no-vehicle section* confirm UI persistence, original timing and visible release retirement without an EV. Separate vehicle-connected follow-up tests appear below; neither set includes a raw OCPP trace.
+- The card's retained last-session duration `3:57` does **not** validate F01. The previous beta.23 defect affected the duration of an actual session; physical session display was subsequently tested below, but HA sensor state and `unit_of_measurement` were not independently captured.
 - NETZ battery SoC preview `29.8% → 30.0%` is **not** the Fronius reserve register value; no physical reserve ownership/restore behavior was accepted in this run.
 - Existing PV control was **not retested**, by explicit operator decision, because the PV regulation code was not changed by beta.24 and earlier practical battery-backed PV charging had been tested. This is an accepted reuse of prior evidence, **not** new beta.24 regression evidence.
 
-## Pending acceptance with a vehicle connected
+## Physical field acceptance — BYD Seal U connected (16 November 2026)
 
-| ID | Physical check | Status |
+The following results were witnessed by the operator in the live system. Screenshots establish the displayed status at the captured points; continuity between screenshots, exact lockout timing, and absence of low-level command replay were **not independently recorded**. In particular, the reported station-side Stop while HA was offline is an operator confirmation without a raw Stationary trace.
+
+| ID | Physical procedure and observed evidence | Result |
 | --- | --- | --- |
-| F01 | Compare live and ended session duration against elapsed time and HA sensor state/unit. | **OPEN** |
-| F02a | During authorized NETZ charging, restart Stationary. Confirm same-generation actual composite/phase operating-point readback recovers autonomously without manual Apply or unwanted repeat positive proposals. Compare physical current and power. | **OPEN** |
-| F02b | Record **actual** Fronius reserve before charging; verify temporary NETZ reserve activation, uninterrupted retention through Stationary restart/reconnect, restoration after genuine Stop, and precedence of an externally changed reserve. Earlier exact restore triggers remain unproven. | **OPEN** |
-| FR-01 | Verify actual charging continuation through HA Core restart for active, delayed, unlimited and expired schedules as applicable, including confirmed station offer/transaction evidence; check station-side Stop during HA downtime prevents stale positive replay. | **OPEN** |
-| FR-02 | Verify fixed nearest under active charging, current/phase feedback and phase transition at 1p/16 A ↔ 3p/6 A. No phase-overlap scenario exists with these two 16 A caps. | **OPEN** |
-| F03 | Optionally exercise explicit `charge_action` backend service and authority-loss race separately from proven UI/legacy path. | **OPEN** |
-| PV regression | Not rerun for beta.24 by operator decision; earlier operator-confirmed PV battery control tests are retained as prior evidence. | **OUT OF SCOPE** |
+| P01 · Initial charge | NETZ request **6.9 kW**, connector occupied; Stationary reported **3-phase / 10 A**, EV power approximately **6.42–6.45 kW**, release active and EV charging. Card's session energy increased normally. The BYD integration showed an unrelated "Stromwarnung: Problem", which the operator identified as an integration issue, not a vehicle electrical warning. | **PASS** for actual 3p/10 A NETZ operation. |
+| F01 · Session duration | Car was already connected for approximately 1.5 h; card showed connected-session duration progressing **1:21 → 1:22 → 1:25** and later **1:59** after manual charging Stop. During subsequent connected sessions the timer continued **2:08 → 2:24** and energy accumulated. | **PASS** for operator-observed displayed duration during/after charging; exact HA sensor unit/metadata was **not** independently compared. Duration measures the connected session, not merely the period of positive EV power. |
+| F02b · Reserve activation | Fronius minimum reserve was **20%** before charging; NETZ reserve setting **40%**, battery SOC **33.7%**. While positive EV charging was observed, actual Fronius minimum-reserve HA control read **33%**. The reserve calculation was capped by current SOC and the entity's integer-step quantization, matching the card preview. | **PASS** for actual temporary reserve acquisition, **20% → 33%**. |
+| F02a · Stationary service restart | During actual NETZ charging at 3p/10 A, operator executed `sudo systemctl restart wallbox`. Card briefly reported an OCPP disconnection; charging and the **3p/10 A** operating point returned automatically, approximately **6.37 kW** observed. No manual Apply was needed. | **PASS** for automatic service-restart recovery at the observed point. |
+| F02a · Raspberry Pi reboot | Operator rebooted Stationary host while charging. On reconnect the card briefly showed an unconfirmed point (`— → 3-phase 10 A`) and later confirmed **3-phase / 10 A** without manual action. This was explicitly rechecked in an additional Pi reboot after an initial observation had been made too soon; recovery occurred within approximately one minute according to operator estimate. | **PASS** for autonomous readback/reconfirmation; precise latency and low-level messages were not measured. |
+| F02a · EVSE + Raspberry Pi power cycle | Operator powered both the EVSE controller and Pi down and back up via supply isolation. At startup the EVSE boot setting briefly allowed approximately **11 kW** (3p/16 A); the manager subsequently restored the approved **3p/10 A / 6.9 kW nominal** operating point automatically. | **PASS** for eventual recovery; **important caveat:** boot-amps startup temporarily exceeds the approved manager setpoint. This is a distinct station configuration/operational safety consideration, not proof that the requested limit was continuously met. |
+| F02b · Reserve retention and manual Stop | During/after the Stationary restarts the actual Fronius control still showed **33%** at observed checkpoints. Upon operator pressing `Ladung beenden`, EV power became **0.00 kW**, Stationary showed **3p/0 A**, release OFF, and Fronius minimum reserve returned to its original **20%**. Session ended with **4.0 kWh** and **1:59** duration in the card. | **PASS** for observed reserve retention at checkpoints and exact original-value restoration. A short unobserved transient cannot be excluded. |
+| FR-02 · Physical fixed nominal steps | While charging, changing request **6.9 → 4.1 → 3.7 → 4.8 kW** produced observed **3p/10 A (~6.39 kW)**, **3p/6 A (~4.01 kW)**, **1p/16 A (~3.53 kW)**, and **3p/7 A (~5.30 kW)** respectively. `Ladeparameter übernehmen` was used for the edit actions. | **PASS** for the observed electrical points and both phase directions. The actual EV-power measurement is not asserted to equal nominal requested kW. |
+| FR-02 · Stationary lockouts | An immediate reenable after Stop returned `ReenableLockout`; phase changes showed temporary phase-switch lockout. The operator observed that both requested starts and return phase switching were automatically continued after the stationary lockout, without resubmitting the command. | **PASS** for observed bounded automatic continuation after lockout; exact lockout periods not recorded. |
+| FR-01e · Unlimited NETZ across HA Core restart | During physical NETZ charging at **3p/7 A** and requested **4.8 kW**, operator restarted HA Core. UI recovered release ON, no duration cap, **3p/7 A**, EV power **5.35 → 5.31 kW**, session energy **4.7 → 4.8 kWh**, session duration **2:16 → 2:18**. No manual restart of charging needed. | **PASS** for visible active charging and retained session after HA restart; a strictly uninterrupted current trace was not captured. |
+| FR-01f · Timed NETZ across HA Core restart | Operator set an actual charging window to **5 minutes** at requested **4.8 kW (3p/7 A)** and restarted HA Core while active. Card showed remaining run time **00:04** before and **00:02** after restart; EV charging recovered at about **5.33 kW**. Operator confirmed that the charge ended **exactly 5 minutes** after original approval. Actual Fronius reserve was reported restored after expiry. | **PASS** for operator-confirmed original deadline, active charging recovery and reserve restoration. |
+| FR-01g · Station-side Stop while HA offline | Operator confirmed execution of the final scenario: HA Core stopped during approved NETZ charging, charging stopped directly at Stationary, HA restarted, and charging **did not restart automatically**. The operator also confirmed original Fronius reserve restoration. | **PASS (operator-reported)** for the visible no-restart behavior and reserve restoration; independent Stationary/OCPP command trace not captured. |
 
-**Pre-vehicle boundary:** The most recent documented NETZ state after FR-01d is release **OFF**, connector `Free`, EV power `0.00 kW`. Confirm station authority, hardware permission and the actual Fronius reserve before starting a physical test. Stationary retains responsibility for electrical protection, hardware current caps, interlocks and phase switching.
+### Operational notes and remaining limitations
+
+- **16 A on both 1p and 3p** remained the fixed station-side cap; no overlap exists to test phase preference in shared legal ranges. Stationary owns phase-switch timing and electrical interlocks.
+- The brief **~11 kW boot-amps** behavior during complete EVSE/Pi power cycling is important even though WBM reconverged. Evaluate the station's independent start-on-power behavior against the site's intended fail-safe policy; do not reinterpret recovery as a continuous power limit.
+- Physical EV power at 3p/7 A was observed around **5.3 kW** versus **4.8 kW nominal**. This is an observation only; no phase-voltage/current meter comparison was performed. Avoid claiming verified power accuracy.
+- Fronius reserve at **33%** was directly observed during charge; the initial **20%** was directly observed after stopping. The later reserve preview of **36%** during tests was not separately confirmed by a Fronius slider screenshot; operator confirmed restoration after FR-01f and FR-01g.
+- **External modification of the shared Fronius reserve while a WBM override is owned** (external precedence / compare-before-restore) remains **OPEN**. The historical exact F02 trigger cases and RR-01 journal limitation were not additionally traced.
+- F03 Local UI and legacy button rejection were tested before physical charging, but the standalone `wallbox_manager.charge_action` service and authority-change races remain **OPEN**.
+- Delayed NETZ schedules, unlimited approvals, expiry while HA was offline and absolute timings were tested **without** a car; timed and unlimited active charging were then tested **with** a car. This distinction matters for any exhaustive certification claim.
+- PV regulation was **not retested**, by explicit operator decision because it was not changed in beta.24. This is a scope decision rather than fresh regression evidence.
+- No raw OCPP trace, live transaction id comparison, exact low-level repeat-write audit, independently checked session sensor unit, or continuous current/voltage time series was collected.
+
+## Acceptance summary
+
+| Feature | Field outcome |
+| --- | --- |
+| T00 HACS / Core bootstrap | **PASS** |
+| F01 duration display | **PASS** for displayed connected-session time; unit/metadata not independently inspected |
+| F02a operating point recovery | **PASS** in service restart, Pi reboot (repeated), and EVSE+Pi power cycle, with temporary boot-amps caveat |
+| F02b Fronius reserve | **PASS** on observed activation, retention checkpoints and restoration after manual/automatic/station-side Stops; external precedence **OPEN** |
+| F03 Authority Local | **PASS** for UI, legacy button and explicit takeover; standalone service/races **OPEN** |
+| FR-01 scheduling / HA recovery | **PASS** for the tested no-EV and with-EV scenarios, including station-side Stop during downtime (operator reported) |
+| FR-02 fixed nearest and phase switching | **PASS** for 16 A caps, fixed nominal steps, removed Select, actual 3p↔1p and automatic lockout continuation |
+| PV regression | **OUT OF SCOPE** by operator choice |
+
+**Last known field state:** The operator reported successful completion of FR-01g and correct Fronius reserve restoration, with no unintended charging restart. The accepted build remains the published `v0.4.0-beta.24` prerelease; this document-only update does not change the tagged release code.
