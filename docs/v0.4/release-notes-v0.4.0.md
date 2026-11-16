@@ -65,7 +65,7 @@ session duration (F01), operating-point recovery after Stationary restarts
 Local authority UI and legacy button restriction (F03), Home Assistant
 restart and NETZ scheduling (FR-01), and fixed steps, physical phase
 switching and lockout continuation (FR-02).
-[Beta.24 field acceptance](field-acceptance-beta.24.md)
+[Beta.24 field acceptance](field-acceptance.md)
 
 During a complete EVSE and Raspberry Pi power cycle, the EVSE boot current
 temporarily allowed approximately 11 kW before WBM restored the approved
@@ -75,11 +75,11 @@ rejection in Local or concurrent authority races. The 16 A caps yield
 non-overlapping legal ranges. The operator reused prior PV evidence because
 beta.24 left PV regulation unchanged. Evidence includes operator observations
 and snapshots, with no complete raw OCPP command trace.
-[Field observations and limitations](field-acceptance-beta.24.md#operational-notes-and-remaining-limitations)
+[Field observations and limitations](field-acceptance.md#operational-notes-and-remaining-limitations)
 
 For an installation with unresolved journal loss or damage, review RR-01
 before upgrading. Incomplete session history can limit replay protection.
-[Readiness audit](release-readiness-audit.md#16-prioritized-findings-and-operator-decisions)
+[Session journal recovery policy](../specifications/v0.4-current-requirements.md#persistence-and-restart)
 
 ## HACS installation and rollback
 
@@ -97,6 +97,7 @@ before upgrading. Incomplete session history can limit replay protection.
    are available. The obsolete NETZ approximation Select has been retired.
    Check observed authority and manager release before an operator-authorized
    charging session.
-4. To roll back, select the recorded previous version in HACS and restart
-   Home Assistant Core. Restore the complete pre-upgrade backup if prior
-   storage or registry state is needed.
+4. To roll back, restore the complete pre-upgrade backup. If HACS still
+   offers the previous version, it can reinstall the package followed by a
+   Home Assistant Core restart. Use the backup to recover prior storage and
+   registry state.

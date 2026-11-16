@@ -203,7 +203,7 @@ Let `S = T-H`, `L = T-H/2`, `M = T+H/2`, `U = T+H`:
 
 **Important:** Hysteresis can deliberately produce a trajectory around `T-H/2` and `T+H/2` rather than exact SoC lock at T. The SoC deadband and discrete EV bias are for BALANCE regulation only, not an extra STOP state. When T moves dynamically due to a Solcast update, recompute `S,L,M,U` from that new canonical T on the next eligible regulation tick; if `SoC < S`, trigger the mandatory SoC STOP even if the battery itself has not discharged since the previous tick.
 
-The former approved matrix (with STOP at `SoC <= L` and STOP→BALANCE when `SoC >= M` plus PV-surplus evidence) remains recorded in [v0.3.2 policy history](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.18/docs/pv-soc-policy.md). Those two threshold differences are deliberately superseded here; other surrounding eligibility and ownership rules are retained.
+The former approved matrix (with STOP at `SoC <= L` and STOP→BALANCE when `SoC >= M` plus PV-surplus evidence) remains recorded in [v0.3.2 policy history](https://github.com/ekkehard-lutz/wallbox-manager/blob/87963014c9af73416c438807f523a3da2a98bd22/docs/pv-soc-policy.md). Those two threshold differences are deliberately superseded here; other surrounding eligibility and ownership rules are retained.
 
 ### PV-SOC-03 – Target by profile [APPROVED]
 
@@ -536,7 +536,7 @@ Without an active transaction, periodic `StatusNotification` can refresh connect
 
 **At the inspected station revision — explicit request-driven snapshot:** The inspected source still exposes no complete manager-requested vehicle/charging/CP snapshot through its Device Model; `TriggerMessage` remains unsupported. Station-initiated periodic reports are distinct from manager-initiated readback. Heartbeat, MeterValues, `GetVariables(ChargingEnabled)` and phase readback are not substitutes for physical presence/charging-state evidence. `GetCompositeSchedule` describes the supported operating point only where an active transaction makes it valid; do not assume availability without one. Full no-transaction charging snapshots and explicit CP-observability provenance remain OPEN interface questions where existing reports are insufficient.
 
-**Unverified on hardware — deployment and acceptance:** This source inspection does not establish the installed revision of the physical wallbox, receipt of periodic reports from it, or successful physical-state reconstruction. **New interface gap (PV-OCPP-06):** WBM must coordinate initial readback/reporting after every accepted OCPP connection. The inspected station resends connector status after registration, but its metering loop initially sleeps until the first configured interval and station-side physical refresh can be suppressed by CP/other gates. A guaranteed complete immediate initial snapshot is not yet demonstrated; it requires separate station-side implementation or a supported trigger/readback where available. Those remain subject to real OCPP/hardware verification. Until valid evidence arrives, retain unknown/awaiting-observation or last-known-but-unverified presentation; do not claim live Available/Idle recovery. The [earlier physical-status investigation](../physical-status-resync.md) remains historical evidence for its explicitly inspected older revision; its proposed periodic reporting is now implemented in the later source above, while its request-driven alternative remains unsupported. No new station-side protocol requirement or accepted charging behavior is introduced by this clarification.
+**Unverified on hardware — deployment and acceptance:** This source inspection does not establish the installed revision of the physical wallbox, receipt of periodic reports from it, or successful physical-state reconstruction. **New interface gap (PV-OCPP-06):** WBM must coordinate initial readback/reporting after every accepted OCPP connection. The inspected station resends connector status after registration, but its metering loop initially sleeps until the first configured interval and station-side physical refresh can be suppressed by CP/other gates. A guaranteed complete immediate initial snapshot is not yet demonstrated; it requires separate station-side implementation or a supported trigger/readback where available. Those remain subject to real OCPP/hardware verification. Until valid evidence arrives, retain unknown/awaiting-observation or last-known-but-unverified presentation; do not claim live Available/Idle recovery. The [earlier physical-status investigation](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/physical-status-resync.md) remains historical evidence for its explicitly inspected older revision; its proposed periodic reporting is now implemented in the later source above, while its request-driven alternative remains unsupported. No new station-side protocol requirement or accepted charging behavior is introduced by this clarification.
 
 #### 6.4.9 Dashboard presentation and physical evidence
 
@@ -829,7 +829,7 @@ the economic sections. Earlier preparation-before-permission proposals and
 station implementation observations are historical. Q1–Q3 and the later
 WBM-ARCH and WBM-RELEASE decisions govern the surviving contract. Outstanding
 questions and field evidence are tracked in the
-[consolidation review](../v0.4/requirements-consolidation-review.md).
+[consolidation review](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/requirements-consolidation-review.md).
 
 ## 12. Development and test procedure (explicitly agreed in the earlier discussion)
 
@@ -858,13 +858,13 @@ questions and field evidence are tracked in the
 
 ### Normative or technical repository sources (tag `v0.3.2-beta.13`)
 
-- [`docs/pv-grid-import-policy-design.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.13/docs/pv-grid-import-policy-design.md) – latest economic decision, energy accounting, restart, persistence, tests.
-- [`docs/pv-soc-policy.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.13/docs/pv-soc-policy.md) – shared SoC thresholds and transition matrix.
-- [`docs/pv-optimum-design.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.13/docs/pv-optimum-design.md) – daily forecast, state phases and historical FAST evolution.
-- [`docs/phase-lockout-continuation-report.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.13/docs/phase-lockout-continuation-report.md) – phase restriction, minimum and stabilization.
-- [`docs/beta12-implementation-report.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.13/docs/beta12-implementation-report.md) – confirmed/changed D1–D4 and status priority.
-- [`docs/beta9-implementation-report.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.13/docs/beta9-implementation-report.md) – physical measurement generations, actuator response and conservative budget (partly superseded later).
-- [`README.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.3.2-beta.13/README.md) – integration settings (check older statements against later decisions).
+- [`docs/pv-grid-import-policy-design.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/aaef76d41295cf0b0255933f72b6d65448f6864a/docs/pv-grid-import-policy-design.md) – latest economic decision, energy accounting, restart, persistence, tests.
+- [`docs/pv-soc-policy.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/aaef76d41295cf0b0255933f72b6d65448f6864a/docs/pv-soc-policy.md) – shared SoC thresholds and transition matrix.
+- [`docs/pv-optimum-design.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/aaef76d41295cf0b0255933f72b6d65448f6864a/docs/pv-optimum-design.md) – daily forecast, state phases and historical FAST evolution.
+- [`docs/phase-lockout-continuation-report.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/aaef76d41295cf0b0255933f72b6d65448f6864a/docs/phase-lockout-continuation-report.md) – phase restriction, minimum and stabilization.
+- [`docs/beta12-implementation-report.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/aaef76d41295cf0b0255933f72b6d65448f6864a/docs/beta12-implementation-report.md) – confirmed/changed D1–D4 and status priority.
+- [`docs/beta9-implementation-report.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/aaef76d41295cf0b0255933f72b6d65448f6864a/docs/beta9-implementation-report.md) – physical measurement generations, actuator response and conservative budget (partly superseded later).
+- [`README.md`](https://github.com/ekkehard-lutz/wallbox-manager/blob/aaef76d41295cf0b0255933f72b6d65448f6864a/README.md) – integration settings (check older statements against later decisions).
 
 ### Later individually approved decision
 

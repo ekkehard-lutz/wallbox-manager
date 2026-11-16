@@ -1,11 +1,14 @@
-# Wallbox Manager v0.4.0-beta.24 — Field acceptance
+# Wallbox Manager v0.4.0 field acceptance evidence
 
-**Test dates:** 15–16 November 2026 (operator field reports, local time Europe/Vienna)  
-**Software:** Wallbox Manager `0.4.0-beta.24`, installed from HACS; Home Assistant Core `2026.10.3`, HAOS `18.4`.  
-**Scope of this record:** First, tests **without a vehicle connected**; subsequently, **BYD Seal U connected** and actual NETZ charging tested on 16 November. The operator supplied Lovelace, HA action, Fronius and restart/terminal screenshots and follow-up observations in the acceptance conversation. Screenshots were not committed as independent trace artifacts.  
-**Release:** [v0.4.0-beta.24](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0-beta.24) (release commit `6a4f033ceada732646fd58a6158f904f353f1632`).  
-**Previous findings:** [beta.23 operator field acceptance](https://github.com/ekkehard-lutz/wallbox-manager/blob/a4d5d9cc19a833c8246d4921caab6b8da1a544f0/docs/v0.4/field-acceptance-beta.23.md).  
-**Candidate/retest specification:** [beta.24 validation](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.4.0-beta.24/docs/v0.4/release-validation-beta.24.md) and [implementation handoff](https://github.com/ekkehard-lutz/wallbox-manager/blob/v0.4.0-beta.24/docs/v0.4/beta.24-candidate.md).
+**Test dates:** 15–16 November 2026 (operator field reports, local time Europe/Vienna)
+
+**Software:** Wallbox Manager `0.4.0-beta.24`, installed from HACS; Home Assistant Core `2026.10.3`, HAOS `18.4`.
+
+**Scope of this record:** First, tests **without a vehicle connected**; subsequently, **BYD Seal U connected** and actual NETZ charging tested on 16 November. The operator supplied Lovelace, HA action, Fronius and restart/terminal screenshots and follow-up observations in the acceptance conversation. Screenshots were not committed as independent trace artifacts.
+
+**Tested build:** v0.4.0-beta.24 at `6a4f033ceada732646fd58a6158f904f353f1632`; the v0.4.0 release carries the same runtime.
+
+**Prerelease evidence:** [Candidate validation and retest specification](https://github.com/ekkehard-lutz/wallbox-manager/blob/6a4f033ceada732646fd58a6158f904f353f1632/docs/v0.4/release-validation-beta.24.md) and [implementation handoff](https://github.com/ekkehard-lutz/wallbox-manager/blob/6a4f033ceada732646fd58a6158f904f353f1632/docs/v0.4/beta.24-candidate.md).
 
 These observations apply to the installed beta.24 build and the tested paths only. They do not imply a raw OCPP-command verification, precise continuous hardware trace, or verification of untested service/race paths.
 
@@ -85,4 +88,22 @@ The following results were witnessed by the operator in the live system. Screens
 | FR-02 fixed nearest and phase switching | **PASS** for 16 A caps, fixed nominal steps, removed Select, actual 3p↔1p and automatic lockout continuation |
 | PV regression | **OUT OF SCOPE** by operator choice |
 
-**Last known field state:** The operator reported successful completion of FR-01g and correct Fronius reserve restoration, with no unintended charging restart. The accepted build remains the published `v0.4.0-beta.24` prerelease; this document-only update does not change the tagged release code.
+**Last known field state:** The operator reported successful completion of FR-01g and correct Fronius reserve restoration, with no unintended charging restart. The accepted build remains the `v0.4.0-beta.24` build tested in this report; this document-only update does not change the tagged release code.
+
+## Prior PV and mobile evidence reused for the stable baseline
+
+The 15 November 2026 operator report confirmed ordinary battery-equipped PV
+charging had been repeatedly analyzed, optimized and used successfully
+(FA-24). The operator elected to reuse this evidence. Individual dates and
+a new FAST/BALANCE transition trace were unavailable. The evidence leaves
+battery-free operation, precise economic STOP/restart thresholds,
+transaction rollover, reconnect races and formal performance open for
+targeted field investigation.
+
+With the EV unplugged and manager release off, screenshots showed 44.5%
+battery SoC and targets of 95% for PV_SURPLUS, 95% for PV_OPTIMUM on a
+low-remaining-PV day, and 32% for PV_MAXIMUM (FA-23). Raw forecast and
+reserve/hysteresis inputs were unavailable. The operator also confirmed
+regular iPhone NETZ operation, with screenshot evidence of the layout and
+reported successful power and timing edits (FA-21 and FA-22). These
+observations concern the beta.23 installation used for that evidence.

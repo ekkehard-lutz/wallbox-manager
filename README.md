@@ -9,7 +9,8 @@ and an entry-scoped Lovelace card.
 instructions below.
 [GitHub release](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0) ·
 [Release notes](docs/v0.4/release-notes-v0.4.0.md) ·
-[Release validation](docs/v0.4/release-validation-v0.4.0.md)
+[Release validation](docs/v0.4/release-validation-v0.4.0.md) ·
+[Documentation](docs/README.md)
 
 ## Stationary and OCPP
 
@@ -90,7 +91,8 @@ with fresh budget on its first eligible cycle.
 
 ## Lovelace and Home Assistant entities
 
-The card resource is `/wallbox_manager/wallbox-manager-card.js`.
+The card resource is `/wallbox_manager/wallbox-manager-card.js`. See
+[resource registration and YAML mode](docs/frontend-registration.md).
 
 ```yaml
 type: custom:wallbox-manager-card
@@ -143,8 +145,6 @@ git diff --check
 
 The suite includes simulated OCPP and local HA tests. The coordinated
 Stationary fixture can use a separate source checkout via `WB_SOURCE_ROOT`.
-The [beta.24 field report](docs/v0.4/field-acceptance-beta.24.md) records the
-physical acceptance inherited by v0.4.0. Source timing and sustained
-HA/Recorder acceptance are tracked separately. [Requirements index](docs/specifications/README.md) ·
-[Development evidence and open acceptance](docs/v0.4/requirements-consolidation-review.md) ·
-[Historical v0.4 notes and reports](docs/v0.4/)
+The [field acceptance record](docs/v0.4/field-acceptance.md) documents the
+physical evidence for v0.4.0. See [development and release procedures](docs/development.md)
+and the [requirements index](docs/specifications/README.md).

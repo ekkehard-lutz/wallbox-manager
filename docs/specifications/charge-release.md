@@ -47,7 +47,7 @@ This is not authorization to replay the saved positive target. Confirmed zero
 requires no additional write. Local authority or a missing transaction forbids
 current/phase dispatch; unknown readback remains unconfirmed rather than implying
 zero or authorizing blind replay. Use existing readback and reconciliation events.
-See the [correction evidence](../release-off-recovery-correction.md).
+See the [correction evidence](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/release-off-recovery-correction.md).
 
 ### Nominal planning amendment
 

@@ -3,7 +3,7 @@
 This operator-authorized observability amendment complements
 [PV-SOC-01–03](pv-regulation.md#2-shared-battery-soc-state-machine),
 [WBM-ARCH-12](architecture-responsibility.md) and the
-[Recorder publication contract](../v0.4/recorder-availability-report.md).
+[Recorder publication contract](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/recorder-availability-report.md).
 It does not change target planning, charging policy or execution.
 
 | ID | Approved contract |
