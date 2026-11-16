@@ -599,6 +599,29 @@ for(const language of ['en','de']) for(const [value,expected] of [[0,'0.0'],[1.2
     assert.equal(get('live-power').textContent,language==='de'?'1,50 kW':'1.50 kW');
   });
 }
+test('session duration uses the HA state unit during and after charging',()=>{
+  const data=states();
+  const {card:c,get}=card(data);
+  const duration=data['E.session_duration'];
+  duration.attributes.unit_of_measurement='s';
+  data['E.charging_state'].state='charging';
+  duration.state='6392.678181';
+  c.hass=c._hass;
+  assert.equal(get('duration').textContent,'1:46');
+  data['E.charging_state'].state='idle';
+  for (const [unit,value] of [['h','1.77574393916667'],['min','106.54463635'],['ms','6392000']]) {
+    duration.attributes.unit_of_measurement=unit; duration.state=value;
+    c.hass=c._hass;
+    assert.equal(get('duration').textContent,'1:46');
+  }
+  for (const value of ['unavailable','unknown','bogus','-1','']) {
+    duration.state=value; c.hass=c._hass;
+    assert.equal(get('duration').textContent,'—');
+  }
+  duration.state='42'; duration.attributes.unit_of_measurement='unsupported'; c.hass=c._hass;
+  assert.equal(get('duration').textContent,'—');
+});
+
 test('canonical countdown uses absolute deadlines, floors minutes, and generates no HA calls',()=>{
   const data=states(),clock=uiClock();
   Object.assign(data['E.charge_action'].attributes,{charge_release:true,charge_action:'stop'});

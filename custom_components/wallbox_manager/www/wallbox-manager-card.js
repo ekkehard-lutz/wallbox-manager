@@ -23,6 +23,10 @@ function parseInput(value, language) {
   return /^\d+(?:\.\d+)?$/.test(normalized) ? Number(normalized) : NaN;
 }
 function available(state) { return state && !["unknown", "unavailable", ""].includes(state.state); }
+const SECONDS_PER_DURATION_UNIT = new Map([
+  ["µs", 1e-6], ["μs", 1e-6], ["ms", 1e-3], ["s", 1], ["min", 60],
+  ["h", 3600], ["d", 86400], ["w", 604800]
+]);
 function durationAvailable(state) { return state && typeof state.state === "string" && (state.state === "" || /^[0-9]{2,}:[0-5][0-9]$/.test(state.state)); }
 function numberRole(id) { return id === "power" ? "soll_power" : id; }
 class WallboxManagerCard extends HTMLElement {
@@ -627,7 +631,13 @@ class WallboxManagerCard extends HTMLElement {
       if (connected && available(s)) {
         if (id === "connection") text = connectorLabels[s.state] || s.state;
         else if (id === "charging") text = chargingLabels[s.state] || s.state;
-        else if (id === "duration") { const minutes=Math.floor(Number(s.state)/60); text=`${Math.floor(minutes/60)}:${String(minutes%60).padStart(2,"0")}`; }
+        else if (id === "duration") {
+          const seconds = Number(s.state) * SECONDS_PER_DURATION_UNIT.get(s.attributes.unit_of_measurement);
+          if (s.state.trim() && Number.isFinite(seconds) && seconds >= 0) {
+            const minutes = Math.floor(seconds / 60);
+            text = `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
+          }
+        }
         else text = `${this.format(id === "live-power" ? Number(s.state)/1000 : Number(s.state), id === "live-power" ? 2 : 1)} ${id === "live-power" ? "kW" : "kWh"}`;
       }
       get(id).textContent = text; get(`${id}-label`).textContent = labels[id === "live-power" ? "power" : id];

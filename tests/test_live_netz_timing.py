@@ -46,6 +46,15 @@ async def test_start_without_vehicle_enforces_planned_deadlines(
             )
             assert not station.profiles and not station.writes
             return
+        if authority == "Local":
+            assert (
+                grid.action_state()["charge_action_blocked_reason"]
+                == "control_unavailable"
+            )
+            with pytest.raises(ValueError, match="control_unavailable"):
+                await grid.action()
+            assert not settings.get("charge_release") and not station.writes
+            return
         assert grid.action_state()["charge_action_ready"]
         await grid.action()
         request = deepcopy(settings.values["grid_request"])
@@ -169,6 +178,7 @@ async def test_immediate_zero_duration_is_distinct_from_unset(
 ):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
+        station.values["ControlAuthority"] = "OCPP"
         await ready(entry, station)
         grid, settings, _ = clock_grid(entry)
         await settings.initialize_power()

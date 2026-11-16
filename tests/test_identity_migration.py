@@ -184,7 +184,7 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
     settings = entry.runtime_data.settings
     assert settings.get("charging_profile") == "PV_OPTIMUM"
     assert settings.get("soll_power") == 7.2
-    assert settings.get("power_approximation") == "nearest"
+    assert settings.get("power_approximation") is None
     assert (
         not {"target_w", "approximation", "optimum_max_discharge_w"}
         & settings.values.keys()
@@ -202,13 +202,12 @@ async def test_settings_keep_legacy_storage_and_have_no_physical_actions(ha):
     await settings.set("soll_power", 6.8)
     await settings.set("charging_profile", "NETZ")
     await settings.set("grid_duration", "12:34")
-    await settings.set("power_approximation", "up")
     restored = Settings(
         ha, entry, entry.runtime_data.state.binding, store, await store.async_load()
     )
     assert restored.get("grid_duration") == 45240
     assert restored.get("soll_power") == 6.8
-    assert restored.get("power_approximation") == "up"
+    assert restored.get("power_approximation") is None
     assert (await store.async_load())[key]["foreign"] == "preserve"
     assert (await store.async_load())[key]["legacy_soc_targets"] == {"x": 3}
     for role, value in (
@@ -330,7 +329,8 @@ async def test_stored_fractional_cap_keeps_exact_value_and_current_normalization
         state.observe(generation, ("capability", scope, role), value, "inventory")
     await ha.async_block_till_done()
     assert settings.get("allowed_current_1p") == "19/3"
-    assert settings.get("power_approximation") == "up"
+    assert settings.get("power_approximation") is None
+    assert "direction" not in settings.profiles[settings.key]
     current = next(e for e in entities(ha, entry) if e.role == "allowed_current_1p")
     assert current.extra_state_attributes["exact_current_limit_a"] == "19/3"
     assert current.native_value == 6
@@ -440,7 +440,7 @@ async def test_retired_profile_fields_are_inert_without_cleanup_writes(ha, monke
 
 
 @pytest.mark.parametrize("stored", [False, True])
-async def test_scoped_caps_and_direction_override_restored_entity_states(ha, stored):
+async def test_scoped_caps_survive_and_retired_select_is_removed(ha, stored):
     entry = config()
     scope = ("Wallbox01", "1", "1")
     ha.config_entries._entries[entry.entry_id] = entry
@@ -495,8 +495,15 @@ async def test_scoped_caps_and_direction_override_restored_entity_states(ha, sto
                 else settings.get(role) is None
             )
             assert registered[role].native_value == effective
-        assert registered["power_approximation"].current_option == (
-            "down" if stored else "nearest"
+        assert "power_approximation" not in registered
+        assert (
+            er.async_get(ha).async_get_entity_id(
+                "select",
+                "wallbox_manager",
+                unique_id(entry.entry_id, "control", scope, "power_approximation"),
+            )
+            is None
         )
+        assert "direction" not in settings.profiles[settings.key]
         await async_unload_entry(ha, entry)
         del entry.runtime_data

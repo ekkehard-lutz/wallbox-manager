@@ -14,7 +14,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .config_flow import diagnostic_level
 from .control import DISPATCH, Refused
-from .grid_point import NOMINAL_VOLTAGE, Point, envelope, number, rounded_kw
+from .grid_point import NOMINAL_VOLTAGE, Point, envelope, number
 
 _LOGGER = logging.getLogger(__name__)
 ATOMIC_PROFILE_REJECTIONS = ("PhaseSwitchLockout", "ReenableLockout")
@@ -54,6 +54,8 @@ class Grid:
         self.logged_deferral = None
         self.allow_issue = False
         self.known_transaction = None
+        self.recovering = settings.get("charge_release") is True
+        self.recovery_available_generation = None
         self.started_window = None
         self.last_authority = None
         self.signature = None
@@ -73,6 +75,13 @@ class Grid:
         self.outcome_epoch = None
         self.removers = []
         self.removers.append(self.state.watch(self.state.messages.key, self.publish))
+        for role in ("connector_state", "charging_state"):
+            self.removers.append(
+                self.state.watch(
+                    ("observation", self.state.binding, role),
+                    self.recovery_evidence_changed,
+                )
+            )
         station, evse, _ = self.state.binding
         self.station_scope = (station, None, None)
         for family, scope, roles in (
@@ -100,6 +109,8 @@ class Grid:
                         (family, scope, role),
                         self.phase_changed
                         if role == "physical_phases"
+                        else self.discovery_changed
+                        if role == "discovery"
                         else self.permission_changed
                         if role == "charging_enabled"
                         else self.changed,
@@ -107,7 +118,6 @@ class Grid:
                 )
         for role in (
             "charging_profile",
-            "power_approximation",
             "allowed_current_1p",
             "allowed_current_2p",
             "allowed_current_3p",
@@ -219,6 +229,8 @@ class Grid:
             self.diagnostic("permission_changed")
         # Permission changes supersede in-flight approvals even if permission
         # is restored before the storage operation finishes.
+        if enabled is False and self.recovering:
+            self.recovery_retired("hardware_disabled")
         if enabled is not True:
             if not self.state.current(self.permission_generation):
                 self.allow_issue = False
@@ -238,6 +250,16 @@ class Grid:
             self.schedule()
             self.allow_issue = True
             self.launch()
+        self.observe_recovery_availability()
+        if (
+            not known_generation
+            and enabled is True
+            and self.settings.get("charge_release")
+            and self.settings.get("charging_profile") == "NETZ"
+        ):
+            self.invalidate()
+            self.schedule()
+            self.launch()
         self.signature = self.fingerprint()
         self.publish()
 
@@ -253,6 +275,9 @@ class Grid:
                 self.diagnostic("timing_retired", "profile_changed", request=request)
 
     def release_changed(self):
+        if not self.settings.get("charge_release"):
+            self.recovering = False
+            self.recovery_available_generation = None
         self.pv_phase_deadline = None
         self.action_generation += 1
         self.allow_issue = self.eligible()
@@ -271,7 +296,7 @@ class Grid:
         enabled = self.hardware_enabled() is True
         action = (
             "apply"
-            if released and grid and pending and enabled
+            if released and grid and pending and enabled and self.manager_ready()
             else "stop"
             if released
             else "start"
@@ -280,7 +305,7 @@ class Grid:
         if action != "stop":
             if not enabled:
                 reason = "hardware_disabled"
-            elif not grid and not self.manager_ready():
+            elif not self.manager_ready():
                 reason = "control_unavailable"
             elif grid:
                 try:
@@ -310,11 +335,10 @@ class Grid:
 
     def draft_point(self, values=None):
         values = self.settings.values if values is None else values
-        held = self.current_point()
+        held = None if self.point_uncertain else self.current_point()
         return envelope(self.state, self.settings).resolve(
-            number(rounded_kw(values["power_kw"])) * 1000,
-            self.settings.get("power_approximation"),
-            held.phases if held and held.amps > 0 else None,
+            number(values["power_kw"]) * 1000,
+            ongoing=held.phases if held and held.amps > 0 else None,
             selected=values.get("power_phases"),
         )
 
@@ -333,7 +357,6 @@ class Grid:
             tuple(
                 self.settings.get(role)
                 for role in (
-                    "power_approximation",
                     "allowed_current_1p",
                     "allowed_current_2p",
                     "allowed_current_3p",
@@ -430,6 +453,7 @@ class Grid:
                     and action_generation == self.action_generation
                     and not self.closed
                     and self.hardware_enabled() is True
+                    and self.manager_ready()
                     and self.settings.get("charging_profile") == "NETZ"
                     and (
                         not self.settings.get("charge_release")
@@ -489,6 +513,7 @@ class Grid:
                     ):
                         self.retry(max(0, retry_deadline - self.wall_time()))
                 raise
+            self.recovering = False
             if starting:
                 self.edited("charge_release")
             else:
@@ -525,6 +550,8 @@ class Grid:
             raise ValueError(self.reason or self.status)
 
     def retire_release(self, reason):
+        self.recovering = False
+        self.recovery_available_generation = None
         request = self.settings.get("grid_request")
         if request:
             self.diagnostic(reason, request=request)
@@ -549,28 +576,27 @@ class Grid:
     def equivalent(self, values):
         """Compare approved desired points, never the temporary physical offer."""
         desired = self.requested
+        held = self.current_point()
         if (
             self.closed
             or not desired
-            or not self.current_point()
+            or not self.manager_ready()
+            or not held
             or self.point_uncertain
             or (self.task and not self.task.done())
         ):
             return False
         try:
             ranges = envelope(self.state, self.settings)
-            ongoing = desired.phases if desired.amps > 0 else None
-            direction = self.settings.get("power_approximation")
+            ongoing = held.phases if held.amps > 0 else None
             approved = ranges.resolve(
-                number(rounded_kw(self.settings.approved("soll_power"))) * 1000,
-                direction,
-                ongoing,
+                number(self.settings.approved("soll_power")) * 1000,
+                ongoing=ongoing,
                 selected=self.settings.approved("power_phases"),
             )
             draft = ranges.resolve(
-                number(rounded_kw(values["power_kw"])) * 1000,
-                direction,
-                ongoing,
+                number(values["power_kw"]) * 1000,
+                ongoing=ongoing,
                 selected=values.get("power_phases"),
             )
             return (
@@ -648,9 +674,47 @@ class Grid:
             **(self.pv.attributes() if self.pv else {}),
         }
 
+    def recovery_retired(self, reason):
+        if self.closed:
+            return
+        self.retire_release(reason)
+        self.release_changed()
+        self.settings.hass.async_create_task(self.settings.persist_retirement())
+
+    def discovery_changed(self):
+        self.changed()
+        self.recovery_evidence_changed()
+
+    def recovery_evidence(self):
+        return (
+            self.state.value(("station", self.station_scope, "discovery")),
+            self.state.value(("station", self.station_scope, "physical_phases")),
+            self.state.charging_value(self.state.binding),
+        )
+
+    def observe_recovery_availability(self):
+        if (
+            self.recovering
+            and self.manager_ready()
+            and self.hardware_enabled() is True
+            and self.state.value(("observation", self.state.binding, "connector_state"))
+            == "available"
+        ):
+            self.recovery_available_generation = self.state.generation
+
+    def recovery_evidence_changed(self):
+        self.observe_recovery_availability()
+        if (
+            self.settings.get("charging_profile") == "NETZ"
+            and self.status == "unconfirmed"
+            and self.reason == "readback_unknown"
+        ):
+            self.launch()
+
     def phase_changed(self):
         self.publish()
         self.reevaluate_pending()
+        self.recovery_evidence_changed()
         if self.status == "accepted_unconfirmed" and self.eligible():
             self.launch(confirm_only=True)
 
@@ -668,7 +732,6 @@ class Grid:
             for role in (
                 "soll_power",
                 "charging_profile",
-                "power_approximation",
                 "charge_action",
                 "grid_start_delay",
                 "grid_duration",
@@ -838,18 +901,27 @@ class Grid:
             self.allow_issue = False
         authority = self.state.value(self.listener.control.key("ControlAuthority"))
         authority_lost = self.last_authority == "remote" and authority == "local"
+        if authority_lost:
+            self.action_generation += 1
         if authority in ("remote", "local"):
             self.last_authority = authority
-        if self.settings.get("charge_release") and authority_lost:
+        if self.settings.get("charge_release") and (
+            authority_lost or (self.recovering and authority == "local")
+        ):
             self.retire_release("authority_lost")
             if not self.closed:
                 self.settings.hass.async_create_task(self.settings.persist_retirement())
             signature = self.fingerprint()
         transaction = self.transaction()
-        if transaction and transaction != self.known_transaction:
+        if (
+            transaction
+            and transaction != self.known_transaction
+            and not self.recovering
+        ):
             self.allow_issue = bool(self.settings.get("charge_release"))
             self.known_transaction = transaction
         self.signature = signature
+        self.observe_recovery_availability()
         self.invalidate()
         self.schedule()
         if not self.eligible():
@@ -917,6 +989,11 @@ class Grid:
         epoch = self.task_epoch = self.epoch
         self.task_zero = False
         business_phase = self.phase()[0]
+        evidence = (
+            self.recovery_evidence()
+            if self.settings.get("charging_profile") == "NETZ"
+            else None
+        )
         self.task = adapter.spawn(
             self.reconcile(
                 epoch,
@@ -935,7 +1012,15 @@ class Grid:
             if (
                 self.task is task
                 and self.valid(epoch, adapter, self.transaction(), zero=self.task_zero)
-                and self.phase()[0] != business_phase
+                and (
+                    self.phase()[0] != business_phase
+                    or (
+                        evidence is not None
+                        and self.status == "unconfirmed"
+                        and self.reason == "readback_unknown"
+                        and self.recovery_evidence() != evidence
+                    )
+                )
             ):
                 self.launch()
             elif not self.fault_superseded(epoch):
@@ -1095,15 +1180,31 @@ class Grid:
             return None
         period = periods[0]
         amps, phases = period.get("limit"), period.get("number_phases")
-        physical = self.state.value(("station", self.station_scope, "physical_phases"))
+        phase_key = ("station", self.station_scope, "physical_phases")
         if (
             type(amps) not in (int, float)
             or int(amps) != amps
             or amps < 0
             or type(phases) is not int
-            or physical != phases
             or phases not in (1, 2, 3)
             or period.get("start_period") != 0
+        ):
+            return None
+        if (
+            self.state.value(phase_key) != phases
+            and self.settings.get("charging_profile") == "NETZ"
+        ):
+            # Bootstrap may have raced station readiness. Use the same scoped
+            # Actual read as after Apply, never old-generation phase evidence.
+            try:
+                await self.read_phases(
+                    adapter, lambda: self.valid(epoch, adapter, transaction, zero=zero)
+                )
+            except TimeoutError, OSError, OCPPError, ConnectionClosed:
+                return None
+        if (
+            not self.valid(epoch, adapter, transaction, zero=zero)
+            or self.state.value(phase_key) != phases
         ):
             return None
         # Readback is an actual offer, including a mode disabled by the user.
@@ -1114,6 +1215,22 @@ class Grid:
         self.point_uncertain = False
         self.publish()
         return point
+
+    async def read_phases(self, adapter, current):
+        await adapter.read(
+            adapter.generation,
+            {
+                "component": {
+                    "name": "Connector",
+                    "evse": {
+                        "id": int(self.state.binding[1]),
+                        "connector_id": int(self.state.binding[2]),
+                    },
+                },
+                "variable": {"name": "PhaseRotation"},
+            },
+            current=current,
+        )
 
     async def dispatch_point(
         self, point, epoch, adapter, transaction, *, proposal=None, zero=False
@@ -1266,14 +1383,15 @@ class Grid:
 
         try:
             phase, _ = self.phase()
-            netz_execution = (
+            netz_active = (
                 phase == "active"
                 and self.settings.get("charge_release")
                 and self.settings.get("charging_profile") == "NETZ"
-                and self.hardware_enabled() is True
             )
+            permission = self.hardware_enabled()
+            netz_execution = netz_active and permission is True
             watts = (
-                number(rounded_kw(self.settings.approved("soll_power"))) * 1000
+                number(self.settings.approved("soll_power")) * 1000
                 if netz_execution
                 else 0
             )
@@ -1288,6 +1406,16 @@ class Grid:
             if phase == "expired" and self.settings.get("charge_release"):
                 await self.stop_release(reason="duration_expired")
                 return
+            # Initial/reconnect read reconciles Stationary's independent recovery.
+            observed = await self.read_point(adapter, epoch, transaction, zero=zero)
+            if not current():
+                return
+            if netz_active and permission is None:
+                # A reconnect clears permission before its new Actual arrives.
+                # A missing observation must not convert the live run to zero.
+                self.status, self.reason = "waiting", "hardware_unavailable"
+                self.publish()
+                return
             try:
                 ranges = envelope(self.state, self.settings)
             except ValueError, TypeError, OverflowError:
@@ -1296,15 +1424,29 @@ class Grid:
                 # An authority/transaction-scoped zero pause does not need
                 # positive-current capability diagnostics or a phase selection.
                 ranges = None
-            # Initial/reconnect read reconciles Stationary's independent recovery.
-            observed = await self.read_point(adapter, epoch, transaction, zero=zero)
-            if not current():
-                return
             held = observed or self.current_point()
             # A delayed business start can mature during an outage. Its first
             # decision is independent of recovery of a previously issued point.
             window = self.delayed_window() if netz_execution else None
-            first_start = window is not None and window != self.started_window
+            first_start = (
+                not self.recovering
+                and window is not None
+                and window != self.started_window
+            )
+            recovery_authorized = False
+            if self.recovering and observed and netz_execution:
+                same_transaction = transaction == self.known_transaction
+                pending_delay = (
+                    same_transaction
+                    and window is not None
+                    and self.settings.get("grid_started_window") != list(window)
+                )
+                recovery_authorized = (
+                    same_transaction
+                    if observed.amps > 0
+                    else pending_delay
+                    or self.recovery_available_generation == self.state.generation
+                )
             if held is None and not self.allow_issue and not first_start:
                 self.status, self.reason = (
                     "accepted_unconfirmed"
@@ -1318,13 +1460,20 @@ class Grid:
                     self.diagnostic("readback_deferred", "readback_unknown")
                 self.publish()
                 return
-            ongoing = held.phases if held and held.amps > 0 else None
+            ongoing = (
+                held.phases
+                if held and held.amps > 0 and not self.point_uncertain
+                else None
+            )
             desired = (
                 ranges.resolve(
                     watts,
-                    self.settings.get("power_approximation"),
-                    ongoing,
-                    selected=self.settings.approved("power_phases"),
+                    ongoing=ongoing,
+                    selected=(
+                        self.settings.approved("power_phases")
+                        if ongoing is None or self.allow_issue or first_start
+                        else None
+                    ),
                 )
                 if ranges
                 else Point(0, None, 0)
@@ -1361,7 +1510,40 @@ class Grid:
                     and (desired.phases is None or p.phases == desired.phases)
                 )
 
-            if matches(observed) or (matches(held) and not self.point_uncertain):
+            matched = matches(observed) or (matches(held) and not self.point_uncertain)
+            if (
+                window is not None
+                and desired.amps > 0
+                and not confirm_only
+                and (
+                    recovery_authorized
+                    or not self.recovering
+                    and (matched or self.allow_issue or first_start)
+                )
+                and self.settings.get("grid_started_window") != list(window)
+            ):
+                async with self.settings.lock:
+
+                    def start_current():
+                        return (
+                            current()
+                            and self.settings.get("charge_release")
+                            and self.hardware_enabled() is True
+                            and self.phase()[0] == "active"
+                        )
+
+                    if not start_current():
+                        return
+                    await self.settings._save(
+                        {**self.settings.values, "grid_started_window": list(window)},
+                        current=start_current,
+                    )
+            if recovery_authorized and not confirm_only:
+                self.recovering = False
+                self.recovery_available_generation = None
+                self.known_transaction = transaction
+                self.allow_issue = True
+            if matched:
                 if window is not None and desired.amps > 0:
                     self.started_window = window
                 self.cancel_retry()
@@ -1371,6 +1553,26 @@ class Grid:
                     pv.execution_event("confirmed", epoch, ack[3], desired, ack=desired)
             elif confirm_only:
                 return
+            elif (
+                pv is None
+                and desired.amps > 0
+                and (
+                    self.recovering
+                    or (
+                        not self.allow_issue
+                        and not first_start
+                        and (held is None or held.amps == 0)
+                    )
+                )
+            ):
+                self.status, self.reason = (
+                    "unconfirmed",
+                    (
+                        "readback_unknown"
+                        if observed is None
+                        else "recovery_offer_differs"
+                    ),
+                )
             else:
                 self.status, self.reason = "pending", None
                 self.publish()
@@ -1465,7 +1667,6 @@ class Grid:
                                 ranges.interim(
                                     watts,
                                     held.phases,
-                                    self.settings.get("power_approximation"),
                                 )
                                 if ranges and held.phases in ranges.ranges
                                 else Point(0, None, 0)
@@ -1532,20 +1733,7 @@ class Grid:
                     pv.execution_event(
                         "accepted", epoch, proposal, desired, ack=desired
                     )
-                await adapter.read(
-                    adapter.generation,
-                    {
-                        "component": {
-                            "name": "Connector",
-                            "evse": {
-                                "id": int(self.state.binding[1]),
-                                "connector_id": int(self.state.binding[2]),
-                            },
-                        },
-                        "variable": {"name": "PhaseRotation"},
-                    },
-                    current=current,
-                )
+                await self.read_phases(adapter, current)
                 if not current():
                     return
                 applied = await self.read_point(adapter, epoch, transaction, zero=zero)
@@ -1619,8 +1807,11 @@ class Grid:
                     else None,
                 )
 
-    async def close(self):
-        self.closed = self.settings.closed = True
+    async def close(self, *, retire=False):
+        self.closed = True
+        retire = retire and self.settings.get("charge_release")
+        if retire:
+            self.retire_release("integration_unloaded")
         self.invalidate()
         if self.action_task and not self.action_task.done():
             self.action_task.cancel()
@@ -1631,6 +1822,11 @@ class Grid:
             await asyncio.gather(*self.deadline_tasks, return_exceptions=True)
         # Explicit service writes also use this lock. Let their lifecycle
         # revalidation and any corrective write finish before runtime replacement.
-        async with self.settings.lock:
-            for remove in self.removers:
-                remove()
+        try:
+            if retire:
+                await self.settings.persist_retirement()
+        finally:
+            self.settings.closed = True
+            async with self.settings.lock:
+                for remove in self.removers:
+                    remove()

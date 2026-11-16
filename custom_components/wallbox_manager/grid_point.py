@@ -89,9 +89,9 @@ class Envelope:
             max(r[2] for r in self.ranges.values()) / 1000,
         )
 
-    def resolve(self, watts, direction="nearest", ongoing=None, selected=None):
+    def resolve(self, watts, *, ongoing=None, selected=None):
         watts = number(watts)
-        if watts < 0 or direction not in ("down", "nearest", "up"):
+        if watts < 0:
             raise ValueError("Unsupported power request")
         if watts == 0:
             return Point(0, None, Fraction(0))
@@ -115,42 +115,30 @@ class Envelope:
                 if watts <= (self.ranges[low][2] + self.ranges[high][1]) / 2:
                     mode = low
                     break
-        return self.on_phase(watts, mode, direction)
+        return self.on_phase(watts, mode)
 
     def on_phase(self, watts, mode, direction="nearest"):
-        """Approximate explicitly enumerated rounded offers, including zero."""
+        """Resolve a fixed phase, including the PV cap-reduction floor."""
         watts = number(watts)
-        if watts < 0 or direction not in ("down", "nearest", "up"):
+        if watts < 0 or direction not in ("down", "nearest"):
             raise ValueError("Unsupported power request")
         if mode not in self.ranges:
             raise ValueError("Phase mode disabled or unsupported")
         points = [Point(0, None, Fraction(0)), *self.points(mode)]
-        if watts == 0:
-            return points[0]
         if direction == "down":
             return max(
-                (p for p in points if p.display_watts <= watts),
-                key=lambda p: p.display_watts,
+                (point for point in points if point.display_watts <= watts),
+                key=lambda point: point.display_watts,
             )
-        if direction == "up":
-            return next((p for p in points[1:] if p.display_watts >= watts), points[-1])
         return min(
             points, key=lambda p: (abs(p.display_watts - watts), -p.display_watts)
         )
 
-    def interim(self, watts, mode, direction):
-        """An interim positive clamp cannot violate the requested direction."""
+    def interim(self, watts, mode):
+        """Choose a legal nearest offer on the confirmed phase during lockout."""
         if mode not in self.ranges:
             return Point(0, None, 0)
-        point = self.on_phase(watts, mode, direction)
-        if (
-            direction == "up"
-            and point.display_watts < watts
-            or direction == "down"
-            and point.display_watts > watts
-        ):
-            return Point(0, None, 0)
-        return point
+        return self.on_phase(watts, mode)
 
     def regulation_target(self, watts, current):
         """Nominal phase-first counterpart of NETZ navigation, with a positive floor.
@@ -186,7 +174,7 @@ class Envelope:
                 return same[-1]
         # Initial selection uses the existing eligible-mode policy; positive minima
         # are explicit here instead of relying on NETZ's zero/nearest midpoint.
-        selected = self.resolve(watts, "up" if watts < floor.watts else "nearest")
+        selected = self.resolve(watts)
         if selected.amps == 0:
             return floor
         return selected
