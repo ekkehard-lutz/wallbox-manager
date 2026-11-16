@@ -28,7 +28,7 @@ Historical WBM `v0.3.2-beta.18` at
 `87963014c9af73416c438807f523a3da2a98bd22` provides a reference for absolute
 deadlines in `custom_components/wallbox_manager/grid_timing.py` and session
 journal persistence in `custom_components/wallbox_manager/session_storage.py`.
-[Beta.24 source handoff](beta.24-candidate.md#source-checks) ·
+[Accepted source cross-check](https://github.com/ekkehard-lutz/wallbox-manager/blob/6a4f033ceada732646fd58a6158f904f353f1632/docs/v0.4/beta.24-candidate.md#source-checks) ·
 [Pinned openWB source](https://github.com/openWB/core/blob/849340ec8d91f4e7cca08a7664cf9ec0187fb496/packages/control/chargepoint/chargepoint.py#L154-L188)
 
 ## Automated validation
@@ -50,8 +50,7 @@ mocked Wallbox Stationary fixture pinned to
 optional Stationary checkout. The release's GitHub verification records the
 exact main commit and Actions runs, annotated tag, tree, and source archive
 verification.
-[GitHub release](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0) ·
-[Historical beta.24 validation](release-validation-beta.24.md)
+[GitHub release](https://github.com/ekkehard-lutz/wallbox-manager/releases/tag/v0.4.0)
 
 ## Physical acceptance
 
@@ -62,5 +61,5 @@ for F01, F02a, F02b, F03, FR-01 and FR-02 results and the remaining
 boundaries, including the brief EVSE boot current during a full power cycle.
 Stable release validation used the automated suite and inherited field
 evidence.
-[Field acceptance report](field-acceptance-beta.24.md) ·
+[Field acceptance report](field-acceptance.md) ·
 [Release notes and installation](release-notes-v0.4.0.md#hacs-installation-and-rollback)
