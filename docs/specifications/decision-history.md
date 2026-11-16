@@ -324,7 +324,7 @@ All target-critical October decisions are now consolidated in [pv-regulation.md]
 ## 25 October 2026 — Shared PV V3 published in beta.17 [IMPLEMENTED]
 
 The separately authorized implementation and publication produced
-[v0.4.0-beta.17](../v0.4/release-notes-beta.17.md). The approved shared SoC
+[v0.4.0-beta.17](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-notes-beta.17.md). The approved shared SoC
 matrix, FAST grid exploration/correction, BALANCE signed-storage response,
 phase-first point selection, economic Wh STOP/restart and release-independent
 PV target/day planning are implemented. Beta.17 introduced **seven** new tuning
@@ -372,7 +372,7 @@ The missing concurrent context leaves open whether the battery responds more
 slowly than the EV, discharge is physically limited, PV production changes,
 household demand changes, or asynchronous Fronius/OCPP observations create an
 apparent imbalance. Preserve the manufacturer/source/inference distinctions in
-[the analysis](../pv-fast-power-diagnostics.md), including inspected openWB
+[the analysis](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/pv-fast-power-diagnostics.md), including inspected openWB
 revision `809ac7425348dc4a0a2e080e742dfcd2f3cfc992`.
 
 The existing shared `pv_decrease_delay_cycles` may be tested at **2** in a
@@ -439,7 +439,7 @@ settings; the default remains 0 and no live configuration is changed here.
 Future FAST optimization and physical FAST/BALANCE acceptance remain open.
 Installation, HA/Stationary restart, browser-cache intervention, authority/release
 changes, charging commands and inverter/battery actions remain excluded. See
-[release notes](../v0.4/release-notes-beta.19.md) for the separately authorized
+[release notes](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-notes-beta.19.md) for the separately authorized
 installation boundary and frontend-cache check.
 
 
@@ -485,8 +485,8 @@ Existing manager charging release resets OFF on integration reload/restart;
 operator reauthorization after separately managed installation remains necessary.
 No deployment, HACS action, HA restart, live setting/authority/release change,
 Stationary/Fronius operation or hardware test is authorized. See
-[release notes](../v0.4/release-notes-beta.20.md) and
-[validation](../v0.4/release-validation-beta.20.md).
+[release notes](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-notes-beta.20.md) and
+[validation](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-validation-beta.20.md).
 
 
 ## 31 October 2026 — Beta.21 publication authorization [RELEASE SCOPE]
@@ -506,8 +506,8 @@ manager release still resets OFF on integration reload; separately controlled
 installation requires explicit user reauthorization if charging is desired.
 No HACS installation, deployment, live HA restart/reload, live configuration,
 Stationary/Fronius operation or physical charging test is authorized. See
-[release notes](../v0.4/release-notes-beta.21.md) and
-[release validation](../v0.4/release-validation-beta.21.md).
+[release notes](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-notes-beta.21.md) and
+[release validation](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-validation-beta.21.md).
 
 ## Later v0.4 decisions and publication evidence
 
@@ -520,7 +520,7 @@ the subsequent sequence. The current contracts live in the linked specifications
 | 31 October safe actions and presentation | Explicit direction fencing, preparatory release, durable PV Start acknowledgement, synchronization, NETZ reserve preview and directional source power. [Action decisions](charge-release.md#approved-correction--safe-explicit-actions-and-preparatory-release-31-october-2026) · [Display decisions](lovelace-home-battery-display.md) |
 | 7 November NETZ lifecycle and LAN | Hardware permission gate and safe Stop, one-shot timing/editor corrections, diagnostics, action colors and supported private LAN/authenticated VPN. [Release](charge-release.md#approved-hardware-readiness-amendment--7-november-2026) · [Timing](operational-display-and-timing.md#approved-one-shot-timing-and-editor-amendment--7-november-2026) · [LAN](architecture-responsibility.md#approved-ocpp-lan-trust-boundary) |
 | 7 November PV continuation | Keep an eligible confirmed offer during recognized atomic phase rejection, allow same-phase adjustment and required Stop, and retry on an eligible regular tick. [PV-LOCK](pv-operating-point-response.md#approved-pv-phase-lockout-continuation--7-november-2026) · [PV-DIAG](pv-decision-diagnostics.md#approved-pv-operating-point-execution-trace--7-november-2026) |
-| Beta.22 publication | Separately reviewed NETZ and PV histories were integrated for prerelease. [Release notes](../v0.4/release-notes-beta.22.md) · [Validation](../v0.4/release-validation-beta.22.md) |
+| Beta.22 publication | Separately reviewed NETZ and PV histories were integrated for prerelease. [Release notes](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-notes-beta.22.md) · [Validation](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/release-validation-beta.22.md) |
 | 9 November fault and economic scope | Supersede stale positive intent on the scoped Faulted transition. Give a valid new transaction a fresh economic budget without requiring prior Ended, while preserving same-ID history and conservative recovery. [PV-ARCH-07](pv-regulation.md#pv-arch-07--immediate-safety-and-asynchronous-ocpp-execution-approved) · [PV-ECO-07](pv-regulation.md#approved-pv-transaction-rollover--9-november-2026) |
 
 The [index at the pre-consolidation commit](https://github.com/ekkehard-lutz/wallbox-manager/blob/c14f671263c3399d7e5e65147b1137ce0f78f490/docs/specifications/README.md)
@@ -542,4 +542,4 @@ and pending or latched STOP. PV-TUNE-10 approves keeping harmless retired
 configuration keys inert. The overall PV Regulation V3 status remains DRAFT.
 See the [current baseline](v0.4-current-requirements.md), the
 [approved tuning clauses](pv-operating-point-response.md), and the
-[implementation review](../v0.4/session-recovery-registration-review.md).
+[implementation review](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/v0.4/session-recovery-registration-review.md).

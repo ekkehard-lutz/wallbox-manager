@@ -28,8 +28,7 @@ API for storage-mode reconciliation.
 
 Entry unload retains the shared HTTP route and listener because other entries or
 dashboards may use them. Reload reconciles the existing collection and recalculates
-the digest; a full restart loads the persisted row and reuses its ID. The
-historical beta.1 in-memory sentinel is outside the current setup path.
+the digest; a full restart loads the persisted row and reuses its ID.
 
 ## YAML and non-mutable resource collections
 
@@ -50,14 +49,6 @@ an update. The integration does not rewrite YAML or automatically maintain that
 suffix. Storage resource mode is recommended for automatic digest management.
 
 ## Regression and browser caveats
-
-**HISTORICAL investigation.** Commit `4b25359` made the extra frontend module API authoritative and removed
-matching Lovelace rows. On the reproduced HA 2026.8 installation the backend and
-static route worked, but the card failed; manually restoring a module resource
-made it usable. This fix restores the resource collection as the sole loader.
-The precise cause of the reported uncaught browser exception is not established
-without its stack trace; successful backend setup or an HTTP 200 alone does not
-prove JavaScript execution.
 
 An integration reload cannot undefine a custom element already loaded in a browser document.
 A page opened before late registration may also need a full reload. Existing

@@ -43,7 +43,7 @@ blocked actions, failure/pending display and independently observed permission; 
 
 Automated acceptance does not establish physical switching success, station
 firmware deployment, full bootstrap push coverage or live HA CPU acceptance.
-Follow the separate [source assessment and hardware procedure](../active-ocpp-control-assessment.md).
+Follow the separate [source assessment and hardware procedure](https://github.com/ekkehard-lutz/wallbox-manager/blob/56883b1974c7a2606bf74f0567d413b678eb7024/docs/active-ocpp-control-assessment.md).
 
 ## Approved PV phase-lockout interpretation — 7 November 2026
 
