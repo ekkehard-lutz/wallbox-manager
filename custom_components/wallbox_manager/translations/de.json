@@ -234,14 +234,6 @@
       }
     },
     "select": {
-      "power_approximation": {
-        "name": "{scope} Leistungsannäherung",
-        "state": {
-          "down": "Nicht überschreiten",
-          "nearest": "Nächstgelegene Leistung",
-          "up": "Nicht unterschreiten"
-        }
-      },
       "charging_profile": {
         "name": "Ladeprofil {scope}",
         "state": {

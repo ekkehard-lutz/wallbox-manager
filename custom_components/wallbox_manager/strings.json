@@ -234,14 +234,6 @@
       }
     },
     "select": {
-      "power_approximation": {
-        "name": "{scope} Power approximation",
-        "state": {
-          "down": "Do not exceed",
-          "nearest": "Nearest power",
-          "up": "Do not fall below"
-        }
-      },
       "charging_profile": {
         "name": "Charging profile {scope}",
         "state": {

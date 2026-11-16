@@ -5,13 +5,15 @@ from dataclasses import dataclass, field
 from importlib import import_module
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import CoreState
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
 from .binding import validate_binding
-from .const import DEFAULT_HOST, DEFAULT_PORT, ENTRY_VERSION, PLATFORMS
-from .entity import device_info
+from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN, ENTRY_VERSION, PLATFORMS
+from .entity import device_info, unique_id
 from .session import document
 from .settings import REGULATION, Settings
 from .store import State
@@ -28,9 +30,9 @@ class EntryRuntime:
     pv: object
     _shutdown: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
 
-    async def close(self):
+    async def close(self, *, retire=False):
         if self._shutdown is None:
-            self._shutdown = asyncio.create_task(self._close())
+            self._shutdown = asyncio.create_task(self._close(retire))
         try:
             await asyncio.shield(self._shutdown)
         except asyncio.CancelledError as cancelled:
@@ -42,11 +44,11 @@ class EntryRuntime:
                 raise cancelled from error
             raise
 
-    async def _close(self):
+    async def _close(self, retire):
         errors = []
         # Fence dispatch and release the socket before the final journal save.
         for close in (
-            self.grid.close,
+            (lambda: self.grid.close(retire=True)) if retire else self.grid.close,
             self.battery.close,
             self.server.stop,
             self.pv.close,
@@ -127,6 +129,15 @@ async def async_setup_entry(hass, entry):
         forwarding = True
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         await async_setup_assets(hass)
+        grid.schedule()
+        registry = er.async_get(hass)
+        retired = registry.async_get_entity_id(
+            "select",
+            DOMAIN,
+            unique_id(entry.entry_id, "control", binding, "power_approximation"),
+        )
+        if retired and registry.async_get(retired).config_entry_id == entry.entry_id:
+            registry.async_remove(retired)
     except BaseException as setup_error:
         try:
             try:
@@ -162,7 +173,7 @@ async def async_setup_entry(hass, entry):
 async def async_unload_entry(hass, entry):
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    await entry.runtime_data.close()
+    await entry.runtime_data.close(retire=hass.state is not CoreState.stopping)
     return True
 
 

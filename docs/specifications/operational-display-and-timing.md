@@ -32,7 +32,13 @@ An operator-confirmed Start creates a **business schedule** with absolute wall-c
 - **WBM-TIME-04:** Before planned start show the approved full Ladedauer if supplied. At planned start begin counting down Ladedauer independent of car/actual charging/lockouts. Display `00:00` in the last 1–59 s and `--:--` after expiry. Unset duration shows `--:--`.
 - **WBM-TIME-05:** Positive offered current is permitted only at/after planned start and with current valid Remote/transaction/hardware eligibility. If connection comes late it receives only the **remaining** time; the time window is never prolonged because it was physically unable to charge.
 - **WBM-TIME-06:** On duration expiry retire schedule, set manager release OFF, cancel all stale positive intents and retry timers, and command 0 A only if legitimately authorized. Do not change hardware ChargingEnabled, invent unplug/session Ended, or revive charging after reconnect.
-- **WBM-TIME-07:** Backend enforces absolute deadlines even without a card, without vehicle, or during OCPP disconnection. Reload retires the live schedule and release. Retain approved settings for the next explicit Start.
+- **WBM-TIME-07:** Backend enforces absolute deadlines without a card, while HA
+  runs. Integration reload retires the live schedule. HA restart preserves a
+  durably approved NETZ schedule with its absolute start and optional end.
+  Expiry during an outage retires release on return and reconciles an
+  observed positive offer to 0 A when authorized. Stationary can continue
+  charging while HA is unavailable. WBM uses its existing deadline and
+  reconciliation paths after restart.
 - **WBM-TIME-08:** Duration `00:00` is explicit zero (immediate end at planned start), unlike unset (no duration limit). Unset delay or zero delay means immediate planned start. Do not turn absence of a car into a reason to refuse creation of a valid schedule.
 
 ### Effect of approved changes on an active schedule
@@ -109,10 +115,11 @@ durable release rather than an immediate electrical result (WBM-ACTION-SAFE-09).
 ## Approved one-shot timing and editor amendment — 7 November 2026
 
 - **WBM-TIME-25:** Start assigns timing to one run. Any release retirement,
-  including expiry, Stop, profile change, authority loss and reload, clears
+  including expiry, Stop, profile change, authority loss and integration reload, clears
   the consumed timing from the approved and matching draft fields. Independently
   edited fields survive as drafts. An unset next Start is immediate and
-  unlimited. Explicit zero duration keeps the WBM-TIME-08 semantics.
+  unlimited. Explicit zero duration keeps the WBM-TIME-08 semantics. HA restart
+  follows WBM-TIME-07 and does not create a new run.
 - **WBM-TIME-26:** Keep absolute business deadlines separate from drafts.
   Retire release and consumed timing as one revision-fenced store update.
   A failed or stale storage operation cannot rearm a retired schedule.

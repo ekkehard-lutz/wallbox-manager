@@ -74,25 +74,45 @@ async def test_profile_switch_resets_release_but_same_selection_does_not(ha):
         assert settings.get("charge_release") is False
 
 
-async def test_positive_slider_point_can_quantize_to_zero_and_cannot_start(ha):
+async def test_netz_local_drafts_and_both_start_paths(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
-        await ready(entry, station)
-        # Establish transaction then stop. A gap between eligible phase ranges
-        # makes a positive 2.8 kW resolve to 0 A on the selected 3p DOWN mode.
-        # Use the common helper on a fresh connection below instead.
-    async with peer(entry, station_type=GridStation) as station:
-        grid = await start_grid(entry, station)
-        await grid.action()
-        settings = entry.runtime_data.settings
-        await settings.set("allowed_current_1p", 6)
-        await settings.set("power_approximation", "down")
-        await settings.set("soll_power", 2.8)
-        assert grid.draft_point().amps == 0
-        assert grid.action_state()["charge_action_ready"] is False
-        with pytest.raises(HomeAssistantError, match="no_positive_current"):
+        control = await ready(entry, station)
+        grid, settings = entry.runtime_data.grid, entry.runtime_data.settings
+        await settings.set("soll_power", 3)
+        await settings.set("grid_start_delay", "00:02")
+        approved = dict(settings.values["grid_approved"])
+        assert (
+            grid.action_state()["charge_action_blocked_reason"] == "control_unavailable"
+        )
+        with pytest.raises(HomeAssistantError, match="control_unavailable"):
             await action_button(ha, entry).async_press()
-        assert settings.get("charge_release") is False
+        with pytest.raises(HomeAssistantError, match="control_unavailable"):
+            await ha.services.async_call(
+                "wallbox_manager",
+                "charge_action",
+                {
+                    "entity_id": action_button(ha, entry).entity_id,
+                    "action": "start",
+                    "profile": "NETZ",
+                    "revision": grid.action_revision(),
+                    "incarnation": grid.state.runtime_id,
+                },
+                blocking=True,
+            )
+        assert settings.values["grid_approved"] == approved
+        assert not settings.get("charge_release") and not station.writes
+        assert not (await settings.store.async_load())[settings.key].get(
+            "charge_release"
+        )
+        await control.request("ControlAuthority", "OCPP")
+        assert grid.action_state()["charge_action_ready"]
+        assert not settings.get("charge_release")
+        await grid.explicit_action(
+            "start", "NETZ", grid.action_revision(), grid.state.runtime_id
+        )
+        assert settings.get("charge_release") and grid.phase()[0] == "waiting"
+        assert not station.profiles
 
 
 async def test_local_loss_blocks_release_without_unauthorized_zero_or_takeover(ha):
@@ -106,8 +126,8 @@ async def test_local_loss_blocks_release_without_unauthorized_zero_or_takeover(h
         await grid.stop_release()
         assert len(station.profiles) == count
         assert (
-            grid.action_state()["charge_action_ready"] is True
-        )  # Business Start remains available.
+            grid.action_state()["charge_action_blocked_reason"] == "control_unavailable"
+        )
         assert station.amps > 0  # Never claim local charging stopped.
         assert [w["variable"]["name"] for w in station.writes] == ["ControlAuthority"]
 
@@ -255,20 +275,17 @@ async def test_authority_loss_during_durable_start_cannot_publish_positive_inten
         assert len(station.profiles) == count
 
 
-async def test_apply_can_pause_at_zero_without_withdrawing_release(ha):
+async def test_capability_change_can_pause_at_zero_without_withdrawing_release(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         settings = entry.runtime_data.settings
-        await settings.set("allowed_current_1p", 6)
-        await settings.set("power_approximation", "down")
-        await settings.set("soll_power", 2.8)
-        assert grid.action_state()["charge_action"] == "apply"
-        assert grid.action_state()["charge_action_ready"] is True
+        await settings.set("soll_power", 1.4)
         await grid.action()
-        assert station.amps == 0 and settings.get("charge_release") is True
-        assert grid.action_state()["charge_action"] == "stop"
-        await grid.action()
+        await settings.set("allowed_current_1p", 0)
+        await eventually(lambda: grid.task.done() and station.amps == 0)
+        assert settings.get("charge_release") is True
+        await grid.stop_release()
         assert settings.get("charge_release") is False
 
 
