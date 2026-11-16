@@ -117,19 +117,17 @@ async def test_reverted_timing_releases_equivalent_numeric_edit(ha):
         assert len(station.profiles) == count
 
 
-async def test_approximation_uses_approved_power_and_reserve_is_immediate(ha):
+async def test_nearest_uses_approved_power_and_reserve_is_immediate(ha):
     entry = await legacy_install(ha)
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
         settings = entry.runtime_data.settings
-        await settings.set("power_approximation", "down")
         await settings.set("soll_power", 1.5)
         await settings._approve_release()
         await eventually(lambda: grid.status == "confirmed")
-        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert grid.requested.amps == 7 and grid.requested.phases == 1
         await settings.set("soll_power", 3)
-        await settings.set("power_approximation", "up")
         await eventually(lambda: grid.status == "confirmed")
         assert grid.requested.amps == 7 and settings.approved("soll_power") == 1.5
         assert settings.get("soll_power") == 3
@@ -161,7 +159,12 @@ async def test_set_is_durable_without_execution_eligibility(ha, mode):
         await settings.set("grid_duration", "00:00")
         button = by_role(ha, entry, "charge_action")
         assert button.available
-        if mode in ("offline", "permission_off"):
+        if mode == "local":
+            with pytest.raises(HomeAssistantError, match="control_unavailable"):
+                await button.async_press()
+            assert settings.approved("soll_power") == 11
+            assert settings.approval_attributes()["grid_set_required"]
+        elif mode in ("offline", "permission_off"):
             with pytest.raises(HomeAssistantError, match="hardware_disabled"):
                 await button.async_press()
             assert settings.approved("soll_power") == 11
@@ -373,12 +376,12 @@ async def test_set_visibility_uses_approved_desired_during_lockout(ha):
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         grid, clock = await pending_interim(entry, station)
         settings = entry.runtime_data.settings
-        assert grid.confirmed.amps == 0 and grid.requested.amps == 6
+        assert grid.confirmed.amps == 0 and grid.requested.amps == 7
         assert not settings.approval_attributes()["grid_set_required"]
         deadline = grid.retry_deadline
         count = len(station.profiles)
-        await settings.set("soll_power", 1.4)
-        assert settings.approved("soll_power") == 1.4
+        await settings.set("soll_power", 1.6)
+        assert settings.approved("soll_power") == 1.6
         assert not settings.approval_attributes()["grid_set_required"]
         assert len(station.profiles) == count and grid.retry_deadline == deadline
         station.locked = False
@@ -386,11 +389,11 @@ async def test_set_visibility_uses_approved_desired_during_lockout(ha):
         await clock.advance(6)
         await eventually(lambda: grid.reason == "ReenableLockout")
         assert not settings.approval_attributes()["grid_set_required"]
-        assert grid.requested.amps == 6 and grid.confirmed.amps == 0
+        assert grid.requested.amps == 7 and grid.confirmed.amps == 0
         station.reenable = False
         await clock.advance(14)
         await eventually(lambda: grid.status == "confirmed")
-        assert grid.confirmed.amps == 6 and grid.confirmed.phases == 1
+        assert grid.confirmed.amps == 7 and grid.confirmed.phases == 1
 
 
 async def test_missing_confirmation_cannot_autoapprove_numeric_draft(ha):
@@ -400,7 +403,7 @@ async def test_missing_confirmation_cannot_autoapprove_numeric_draft(ha):
         grid, _ = await pending_interim(entry, station)
         settings = entry.runtime_data.settings
         assert grid.point_uncertain
-        await settings.set("soll_power", 1.4)
+        await settings.set("soll_power", 1.6)
         assert settings.approved("soll_power") == 1.5
         assert settings.approval_attributes()["grid_set_required"]
 

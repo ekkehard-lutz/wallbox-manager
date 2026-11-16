@@ -444,5 +444,6 @@ async def test_reenable_during_active_window_uses_original_end(ha):
         assert station.amps == 6 and settings.get("grid_request") == original
         await clock.advance(100)
         await ha.async_block_till_done()
+        await grid.task  # OCPP reconciliation runs on the adapter's task set.
         assert not settings.get("charge_release")
         assert station.amps == 0

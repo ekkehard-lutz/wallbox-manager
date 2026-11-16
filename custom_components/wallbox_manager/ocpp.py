@@ -438,6 +438,19 @@ class Adapter(ChargePoint):
                 self.state, self.generation, scope, external_id, event_type, at, seq_no
             )
         ):
+            grid = self.listener.grid
+            if (
+                grid
+                and scope == self.state.binding
+                and event_type == "Ended"
+                and (
+                    trigger_reason in ("RemoteStop", "StopAuthorized")
+                    or transaction_info.get("stopped_reason") in ("Local", "Remote")
+                )
+                and grid.settings.get("charging_profile") == "NETZ"
+                and grid.settings.get("charge_release")
+            ):
+                grid.recovery_retired("station_stop")
             if "charging_state" in transaction_info:
                 self.observe(
                     self.generation,

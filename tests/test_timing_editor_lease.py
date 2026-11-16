@@ -36,18 +36,20 @@ async def test_focused_lease_can_renew_indefinitely_without_writes_or_publicatio
         async def forbidden(_):
             pytest.fail("Renewal must not persist")
 
-        monkeypatch.setattr(settings, "persist", forbidden)
-        for _ in range(15):
-            await clock.advance(20)
-            await ha.async_block_till_done()
-            await settings.edit_timing("grid_duration", "renew", "card-a", revision)
-        assert settings.values == before and publications == []
-        assert all(ha.states.get(key) is value for key, value in public.items())
-        assert settings.values["grid_request"] == request
-        assert (
-            len(station.profiles) == point_writes and station.operations == operations
-        )
-        assert settings.values["grid_timing_edit"]["active"]
+        with monkeypatch.context() as patch:
+            patch.setattr(settings, "persist", forbidden)
+            for _ in range(15):
+                await clock.advance(20)
+                await ha.async_block_till_done()
+                await settings.edit_timing("grid_duration", "renew", "card-a", revision)
+            assert settings.values == before and publications == []
+            assert all(ha.states.get(key) is value for key, value in public.items())
+            assert settings.values["grid_request"] == request
+            assert (
+                len(station.profiles) == point_writes
+                and station.operations == operations
+            )
+            assert settings.values["grid_timing_edit"]["active"]
         remove()
 
 
@@ -309,13 +311,14 @@ async def test_abandoned_focus_without_pending_time_edits_needs_no_rollback_save
         async def forbidden(_):
             pytest.fail("No changed time draft needs a durable rollback")
 
-        monkeypatch.setattr(settings, "persist", forbidden)
-        await clock.advance(60)
-        await ha.async_block_till_done()
-        assert settings.values["grid_timing_edit"] is None
-        assert settings.values["grid_approved"] == approved
-        assert settings.values["grid_draft_revision"] == revision
-        assert grid.action_state()["charge_action"] == "stop"
+        with monkeypatch.context() as patch:
+            patch.setattr(settings, "persist", forbidden)
+            await clock.advance(60)
+            await ha.async_block_till_done()
+            assert settings.values["grid_timing_edit"] is None
+            assert settings.values["grid_approved"] == approved
+            assert settings.values["grid_draft_revision"] == revision
+            assert grid.action_state()["charge_action"] == "stop"
 
 
 async def test_delayed_draft_write_cannot_extend_lease_at_storage_completion(

@@ -61,7 +61,6 @@ NUMBERS = {
 }
 SELECTS = {
     "charging_profile": ("profile", ["NETZ", "PV_SURPLUS", "PV_OPTIMUM", "PV_MAXIMUM"]),
-    "power_approximation": ("direction", ["up", "down", "nearest"]),
 }
 EDITOR_LEASE_SECONDS = 60
 TIMES = ("grid_start_delay", "grid_duration")
@@ -75,6 +74,7 @@ GRID_STATE_FIELDS = (
     "grid_timing_revision",
     "grid_delay_edited",
     "grid_duration_target",
+    "grid_started_window",
 )
 
 
@@ -112,7 +112,6 @@ class Settings:
         saved = profiles.get(self.key, {})
         self.values = {spec[0]: spec[1] for spec in NUMBERS.values()}
         self.values.update({spec[0]: spec[1][0] for spec in SELECTS.values()})
-        self.values["direction"] = "nearest"
         self.values.update(dict.fromkeys(TIMES))
         self.values["power_phases"] = None
         # Unknown profile fields stay on disk but do not become runtime settings.
@@ -125,23 +124,35 @@ class Settings:
         for key in REGULATION:
             if key in entry.options:
                 self.values[key] = entry.options[key]
-        # Runtime reload never resumes a previously granted release.
-        if (
-            saved.get("grid_request")
-            or saved.get("charge_release")
-            or (
-                "grid_duration_target" not in saved
-                and saved.get("grid_approved", {}).get("revision", 0) > 0
-            )
-        ):
-            self.retired_values(self.values)
+        self.values.setdefault("grid_draft_revision", 0)
+        approved = self.values.get("grid_approved")
+        if not self.valid_approval(approved):
+            self.values["grid_approved"] = {**self.grid_draft(), "revision": 0}
         self.values.update(
-            charge_release=False,
-            grid_request=None,
             grid_timing_edit=None,
             grid_duration_target=None,
             grid_delay_edited=False,
         )
+        if self.valid_recovery(saved):
+            self.values.update(
+                charge_release=True,
+                grid_request=saved["grid_request"],
+                grid_recoverable=True,
+            )
+        else:
+            if self.valid_approval(approved) and (
+                saved.get("grid_request")
+                or saved.get("charge_release")
+                or "grid_duration_target" not in saved
+                and approved["revision"] > 0
+            ):
+                self.retired_values(self.values)
+            self.values.update(
+                charge_release=False,
+                grid_request=None,
+                grid_recoverable=False,
+                grid_started_window=None,
+            )
         self.release_fence = 0
         self.closed = False
         self.values.setdefault("grid_timing_revision", 0)
@@ -150,23 +161,92 @@ class Settings:
         self.state = None
         self.listeners = {}
         self.lock = asyncio.Lock()
-        self.values.setdefault("grid_draft_revision", 0)
-        self.values.setdefault("grid_approved", {**self.grid_draft(), "revision": 0})
         self.grid_equivalent = lambda values: False
         self.grid_point = self.resolve_draft
         self.approval_error = None
 
+    @staticmethod
+    def valid_approval(approved):
+        return (
+            isinstance(approved, dict)
+            and "power_kw" in approved
+            and type(approved.get("revision")) is int
+            and approved["revision"] >= 0
+            and all(
+                approved.get(key) is None
+                or type(approved[key]) is int
+                and approved[key] >= 0
+                for key in TIMES
+            )
+        )
+
+    def valid_recovery(self, saved):
+        approved, request = saved.get("grid_approved"), saved.get("grid_request")
+        if (
+            saved.get("grid_recoverable") is not True
+            or saved.get("charge_release") is not True
+            or saved.get("profile") != "NETZ"
+            or not self.valid_approval(approved)
+            or not isinstance(request, dict)
+        ):
+            return False
+        attempted = saved.get("grid_started_window")
+        power = approved.get("power_kw")
+        hint = approved.get("power_phases")
+        revision = request.get("revision")
+        epoch, start, end = (
+            request.get(key) for key in ("epoch_at", "start_at", "end_at")
+        )
+
+        def timestamp(value):
+            # Unix timestamps must be finite and indexable by the scheduler.
+            return type(value) in (int, float) and 0 <= value < 253402300800
+
+        return (
+            type(power) in (float, int)
+            and 0 < power <= NUMBERS["soll_power"][3]
+            and (hint is None or type(hint) is int and hint in (1, 2, 3))
+            and type(revision) is int
+            and 0 < revision <= approved["revision"]
+            and timestamp(epoch)
+            and timestamp(start)
+            and start == epoch + (approved.get("grid_start_delay") or 0)
+            and (
+                attempted is None
+                or isinstance(attempted, list)
+                and len(attempted) == 2
+                and all(timestamp(value) for value in attempted)
+                and attempted[0] <= attempted[1]
+            )
+            and "end_at" in request
+            and (
+                end is None
+                and approved.get("grid_duration") is None
+                or timestamp(end)
+                and end >= start
+                and approved.get("grid_duration") is not None
+            )
+        )
+
     async def initialize_grid(self):
         """Initialize durable approval and persist any release retirement."""
         saved = self.profiles.get(self.key, {})
-        if "grid_approved" in saved and any(
-            saved.get(key) != self.values[key]
-            for key in (
-                "charge_release",
-                "grid_request",
-                "grid_timing_edit",
-                "grid_approved",
-                *TIMES,
+        if (
+            "direction" in saved
+            or ("grid_approved" not in saved and saved.get("charge_release"))
+            or (
+                "grid_approved" in saved
+                and any(
+                    saved.get(key) != self.values[key]
+                    for key in (
+                        "charge_release",
+                        "grid_recoverable",
+                        "grid_request",
+                        "grid_timing_edit",
+                        "grid_approved",
+                        *TIMES,
+                    )
+                )
             )
         ):
             await self._save(dict(self.values))
@@ -218,6 +298,8 @@ class Settings:
             values["grid_draft_revision"] = values.get("grid_draft_revision", 0) + 1
         values.update(
             charge_release=False,
+            grid_recoverable=False,
+            grid_started_window=None,
             grid_request=None,
             grid_timing_edit=None,
             grid_duration_target=None,
@@ -337,6 +419,7 @@ class Settings:
                 equivalent = not power_changed or self.grid_equivalent(updated)
                 self.approve_values(updated)
                 updated["charge_release"] = start or self.get("charge_release")
+                updated["grid_recoverable"] = updated["charge_release"]
                 if start:
                     updated["grid_request"] = self.schedule_values(updated, accepted_at)
                 elif updated["charge_release"] and self.pending_timing(previous):
@@ -383,7 +466,9 @@ class Settings:
                     and request["end_at"] <= accepted_at
                 ):
                     self.retired_values(updated)
-                await self._save(updated, current=current, expire_at=clock)
+                await self._save(
+                    updated, current=current, expire_at=clock, stage_release=True
+                )
                 if accepted:
                     accepted(request, self.get("charge_release"))
             except (ValueError, TypeError, OSError) as exc:
@@ -430,8 +515,6 @@ class Settings:
             if role == "soll_power":
                 from .grid_point import envelope, rounded_kw
 
-                value = rounded_kw(value)
-
                 try:
                     bounds = envelope(self.state, self).power_bounds()
                 except ValueError, TypeError, AttributeError:
@@ -441,7 +524,9 @@ class Settings:
                     known = False
                 else:
                     known = True
-                if known and (bounds is None or not bounds[0] <= value <= bounds[1]):
+                if known and (
+                    bounds is None or not bounds[0] <= rounded_kw(value) <= bounds[1]
+                ):
                     raise ValueError("Power outside positive technical range")
             if role == "soll_soc_speicher" and not value.is_integer():
                 raise ValueError("Target SoC must be a whole percent")
@@ -756,11 +841,10 @@ class Settings:
             self.notify("grid_timing_edit")
 
     def resolve_draft(self, values):
-        from .grid_point import envelope, number, rounded_kw
+        from .grid_point import envelope, number
 
         return envelope(self.state, self).resolve(
-            number(rounded_kw(values["power_kw"])) * 1000,
-            self.get("power_approximation"),
+            number(values["power_kw"]) * 1000,
             selected=values.get("power_phases"),
         )
 
@@ -881,7 +965,9 @@ class Settings:
 
         await self.hass.async_add_executor_job(verify)
 
-    async def _save(self, updated, *, current=None, expire_at=None):
+    async def _save(
+        self, updated, *, current=None, expire_at=None, stage_release=False
+    ):
         # Keep the candidate private until verification and lifecycle revalidation.
         if self.closed:
             raise ValueError("Superseded settings runtime")
@@ -895,6 +981,7 @@ class Settings:
         else:
             lease = None
         superseded = cancelled = False
+        staging = stage_release and updated.get("grid_recoverable") is True
         while True:
             profiles = {
                 **self.profiles,
@@ -903,6 +990,15 @@ class Settings:
                     **{k: v for k, v in updated.items() if k not in REGULATION},
                 },
             }
+            profiles[self.key].pop("direction", None)
+            if staging:
+                # Keep the previous approved settings while a replacement is
+                # in flight. An interrupted approval carries no restart grant.
+                profiles[self.key] = {
+                    **self.profiles.get(self.key, {}),
+                    "grid_recoverable": False,
+                }
+                profiles[self.key].pop("direction", None)
             write = asyncio.create_task(self.persist(profiles))
             interrupted = False
             try:
@@ -942,8 +1038,9 @@ class Settings:
             ):
                 self.retired_values(updated)
                 lease = None
-            else:
+            elif not staging:
                 break
+            staging = False
             fence = self.release_fence
         self.profiles, self.values = profiles, updated
         self.timing_lease = lease

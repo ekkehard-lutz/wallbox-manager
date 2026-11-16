@@ -48,7 +48,7 @@ def test_generic_three_modes_disabled_modes_and_stable_overlap():
     assert e.resolve(4200, ongoing=1).phases == 1
     assert e.resolve(4000, ongoing=3).phases == 1
     assert ranges(caps={1: 0}).resolve(1000).amps == 0
-    assert ranges(caps={1: 0}).resolve(1000, "up").phases == 3
+    assert ranges(caps={1: 0}).resolve(4100).phases == 3
     with pytest.raises(ValueError, match="disabled"):
         ranges(caps={1: 0, 3: 0}).resolve(1000)
     assert ranges(caps={1: 0, 3: 0}).resolve(0).amps == 0
@@ -59,8 +59,7 @@ def test_quantization_normalizes_stored_caps_and_uses_nominal_voltage():
     assert e.ranges[1][3] == 6
     assert e.ranges[3][3] == 27
     assert ranges(caps={1: 5}).ranges.keys() == {3}
-    for direction, expected in [("down", 8), ("nearest", 9), ("up", 9)]:
-        assert ranges(modes=(1,)).resolve(2000, direction).amps == expected
+    assert ranges(modes=(1,)).resolve(2000).amps == 9
     e = Envelope(6, 27, 20, 1, (1, 3), {})
     assert e.ranges[3][1] == 4100
     assert ranges(step=2).resolve(11000).amps % 2 == 0
@@ -456,59 +455,31 @@ def test_disjoint_and_non_monotonic_boundaries_are_deterministic():
 
 
 @pytest.mark.parametrize(
-    "direction,watts,amps",
-    [
-        ("down", 0, 0),
-        ("down", 100, 0),
-        ("down", 1399, 0),
-        ("down", 1400, 6),
-        ("down", 1500, 6),
-        ("down", 1599, 6),
-        ("down", 1600, 7),
-        ("up", 0, 0),
-        ("up", 100, 6),
-        ("up", 1380, 6),
-        ("up", 1400, 6),
-        ("up", 1600, 7),
-        ("nearest", 0, 0),
-        ("nearest", 699, 0),
-        ("nearest", 700, 6),
-        ("nearest", 1499, 6),
-        ("nearest", 1500, 7),
-        ("nearest", 1500, 7),
-    ],
+    "watts,amps",
+    [(0, 0), (699, 0), (700, 6), (701, 6), (1499, 6), (1500, 7), (1501, 7)],
 )
-def test_grid_zero_is_a_real_approximation_candidate(direction, watts, amps):
+def test_grid_zero_is_a_real_nearest_candidate(watts, amps):
     e = ranges(modes=(1,), caps={1: 20})
-    point = e.resolve(watts, direction)
+    point = e.resolve(watts)
     assert point.amps == amps
     assert point.phases == (1 if amps else None)
     assert point.watts == amps * 230
 
 
-def test_phase_lockout_interim_point_uses_same_directional_approximation():
+def test_phase_lockout_interim_point_uses_same_nearest_policy():
     e = ranges()
-    assert e.resolve(1500, "down", ongoing=3).phases == 1
-    zero = e.on_phase(1500, 3, "down")
-    assert zero.amps == 0 and zero.phases is None
-    final = e.resolve(1500, "down")
-    assert final.phases == 1 and final.amps == 6
-
-    interim = e.on_phase(1500, 3, "up")
-    assert interim.phases == 3 and interim.amps == 6
-    final = e.resolve(1500, "up")
-    assert final.phases == 1 and final.amps == 7
-
-    # A mode disabled by configuration does not become an eligible fallback.
-    assert 3 not in ranges(caps={3: 0}).ranges
+    assert e.resolve(1500, ongoing=3).phases == 1
+    assert e.interim(1500, 3).amps == 0
+    assert e.resolve(1500).amps == 7
+    assert e.interim(2200, 3).amps == 6
+    assert ranges(caps={3: 0}).interim(2200, 3).amps == 0
 
 
-async def test_grid_down_below_minimum_sends_zero_offer(ha):
+async def test_grid_editor_enforces_positive_range_and_stop_offers_zero(ha):
     entry = await ha.install()
     async with peer(entry, station_type=GridStation) as station:
         grid = await start_grid(entry, station)
         await eventually(lambda: grid.status == "confirmed")
-        await entry.runtime_data.settings.set("power_approximation", "down")
         with pytest.raises(ValueError, match="positive technical range"):
             await entry.runtime_data.settings.set("soll_power", 0.1)
         await grid.stop_release()
@@ -538,11 +509,11 @@ class TemporaryPhaseLockoutStation(GridStation):
 
 
 @pytest.mark.parametrize(
-    "direction,requested,interim_amps,final_amps",
-    [("down", 1.5, 0, 6), ("up", 1.5, 6, 7)],
+    "requested,interim_amps,final_amps",
+    [(1.5, 0, 7), (2.2, 6, 10)],
 )
 async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
-    ha, direction, requested, interim_amps, final_amps
+    ha, requested, interim_amps, final_amps
 ):
     entry = await ha.install()
     async with peer(entry, station_type=TemporaryPhaseLockoutStation) as station:
@@ -550,7 +521,6 @@ async def test_lockout_applies_interim_on_current_phases_and_retries_desired(
         await eventually(lambda: grid.status == "confirmed")
         assert station.phases == 3
         station.locked = True
-        await entry.runtime_data.settings.set("power_approximation", direction)
         await entry.runtime_data.settings.set("soll_power", requested)
         await entry.runtime_data.settings._approve_release()
         await eventually(lambda: grid.timer is not None and grid.retry_at == 6)
@@ -609,13 +579,12 @@ class ReviewedLockoutStation(TemporaryPhaseLockoutStation):
         return super().profile(evse_id, charging_profile)
 
 
-async def pending_interim(entry, station, direction="down", power=1.5):
+async def pending_interim(entry, station, power=1.5):
     grid = await start_grid(entry, station)
     await eventually(lambda: grid.status == "confirmed")
     clock = FakeClock()
     grid.wall_time, grid.call_later = lambda: clock.now, clock.later
     station.locked = True
-    await entry.runtime_data.settings.set("power_approximation", direction)
     await eventually(lambda: grid.task.done())
     await entry.runtime_data.settings.set("soll_power", power)
     await entry.runtime_data.settings._approve_release()
@@ -628,7 +597,7 @@ async def test_interim_acknowledgement_and_retry_diagnostics(ha):
     entry = await ha.install()
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
         grid, clock = await pending_interim(entry, station)
-        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert grid.requested.amps == 7 and grid.requested.phases == 1
         assert grid.confirmed.amps == 0 and grid.confirmed.phases == 3
         assert grid.acknowledged.amps == 0
         count = len(station.profiles)
@@ -641,23 +610,23 @@ async def test_interim_acknowledgement_and_retry_diagnostics(ha):
         await clock.advance(6)
         await eventually(lambda: grid.retry_at == 14)
         assert grid.reason == "ReenableLockout"
-        assert grid.requested.amps == 6 and grid.confirmed.amps == 0
+        assert grid.requested.amps == 7 and grid.confirmed.amps == 0
         station.reenable = False
         await clock.advance(13)
         assert grid.confirmed.amps == 0
         await clock.advance(1)
         await eventually(lambda: grid.status == "confirmed")
         assert grid.retry_at is None and grid.timer is None
-        assert grid.confirmed.phases == 1 and grid.confirmed.amps == 6
+        assert grid.confirmed.phases == 1 and grid.confirmed.amps == 7
         count = len(station.profiles)
         await clock.advance(600)
         assert len(station.profiles) == count
 
 
-@pytest.mark.parametrize("direction,power", [("down", 1.5), ("up", 1.5)])
+@pytest.mark.parametrize("power", [1.5, 2.2])
 @pytest.mark.parametrize("reason,delay", [("Busy", None), ("ReenableLockout", 14)])
 async def test_interim_rejection_is_truthful_and_only_lockouts_retry(
-    ha, direction, power, reason, delay
+    ha, power, reason, delay
 ):
     entry = await ha.install()
     async with peer(entry, station_type=ReviewedLockoutStation) as station:
@@ -666,7 +635,7 @@ async def test_interim_rejection_is_truthful_and_only_lockouts_retry(
             "reason_code": reason,
             "additional_info": "remainingSeconds=9",
         }
-        grid, clock = await pending_interim(entry, station, direction, power)
+        grid, clock = await pending_interim(entry, station, power)
         assert grid.reason == reason
         assert grid.retry_at == delay
         assert grid.confirmed.phases == 3 and grid.confirmed.amps == 16
@@ -723,9 +692,8 @@ async def test_cancelled_retry_callback_cannot_escape_new_set_revision(ha):
 
 @pytest.mark.parametrize("mode", [1, 2, 3])
 @pytest.mark.parametrize("minimum,step,cap", [(6, 1, 11), (7, 2, 14)])
-@pytest.mark.parametrize("direction", ["down", "up", "nearest"])
 def test_quantization_against_exhaustive_executable_candidates(
-    mode, minimum, step, cap, direction
+    mode, minimum, step, cap
 ):
     e = ranges(minimum=minimum, step=step, modes=(mode,), caps={mode: cap})
     currents = [0, *range(minimum, cap + 1, step)]
@@ -741,13 +709,8 @@ def test_quantization_against_exhaustive_executable_candidates(
                 ]
             )
     for watts in probes:
-        if direction == "down":
-            expected = max((p for p in offers if p[0] <= watts), default=offers[0])
-        elif direction == "up":
-            expected = min((p for p in offers if p[0] >= watts), default=offers[-1])
-        else:
-            expected = min(offers, key=lambda p: (abs(p[0] - watts), -p[0]))
-        point = e.resolve(watts, direction)
+        expected = min(offers, key=lambda p: (abs(p[0] - watts), -p[0]))
+        point = e.resolve(watts)
         assert (point.display_watts, point.amps) == expected
         assert point.watts == point.amps * mode * 230
 
@@ -872,7 +835,6 @@ async def test_superseded_interim_cannot_dispatch_after_new_intent(ha, monkeypat
 
         monkeypatch.setattr(grid, "dispatch_point", dispatch)
         station.locked = True
-        await entry.runtime_data.settings.set("power_approximation", "down")
         await eventually(lambda: grid.task.done())
         await entry.runtime_data.settings.set("soll_power", 1.5)
         await entry.runtime_data.settings._approve_release()
@@ -889,7 +851,7 @@ async def test_superseded_interim_cannot_dispatch_after_new_intent(ha, monkeypat
             for p in station.profiles
         ]
         assert all(period["limit"] > 0 for period in periods)
-        assert grid.requested.amps == 8 and grid.confirmed.amps == 8
+        assert grid.requested.amps == 9 and grid.confirmed.amps == 9
 
 
 class DelayedGridStation(GridStation):
@@ -956,7 +918,7 @@ async def test_uncertain_interim_hides_actual_until_supported_confirmation(ha):
         assert grid.attributes()["applied_current_a"] is None
         assert grid.attributes()["applied_phase_count"] is None
         assert grid.attributes()["applied_offered_power_w"] is None
-        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert grid.requested.amps == 7 and grid.requested.phases == 1
         assert grid.acknowledged.amps == 0
         timer, count = grid.timer, len(station.profiles)
         station.readback = True
@@ -967,7 +929,7 @@ async def test_uncertain_interim_hides_actual_until_supported_confirmation(ha):
         assert grid.attributes()["applied_phase_count"] == 3
         assert not grid.point_uncertain
         assert grid.status == "phase_lockout_pending"
-        assert grid.requested.amps == 6 and grid.requested.phases == 1
+        assert grid.requested.amps == 7 and grid.requested.phases == 1
         assert grid.timer is timer and grid.retry_at == 6
         assert len(station.profiles) == count
         await clock.advance(5)
